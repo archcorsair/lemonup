@@ -1,0 +1,35 @@
+{
+	"destDir": "NOT_CONFIGURED",
+	"userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+	"repositories": [
+		{
+			"name": "Details",
+			"type": "github",
+			"gitRemote": "https://github.com/Tercioo/Details-Damage-Meter",
+			"branch": "master",
+			"folders": ["Details"]
+		},
+		{
+			"name": "DBM",
+			"type": "github",
+			"gitRemote": "https://github.com/DeadlyBossMods/DeadlyBossMods",
+			"branch": "master",
+			"folders": ["DBM-Core"],
+			"installedVersion": "c2ba65febbac0d7d546ecc5426f6a93661a38cfa"
+		},
+		{
+			"name": "ElvUI",
+			"type": "tukui",
+			"downloadUrl": "https://api.tukui.org/v1/download/dev/elvui/main",
+			"gitRemote": "https://github.com/tukui-org/ElvUI",
+			"folders": ["ElvUI", "ElvUI_Libraries", "ElvUI_Options"]
+		},
+		{
+			"name": "ElvUI_FCT",
+			"type": "github",
+			"gitRemote": "https://github.com/kodewdle/ElvUI_FCT",
+			"branch": "main",
+			"folders": ["ElvUI_FCT"]
+		}
+	]
+}
