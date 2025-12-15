@@ -10,11 +10,9 @@ import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
 import { UpdateScreen } from "./screens/UpdateScreen";
 
-// Create a client
 const queryClient = new QueryClient({
 	defaultOptions: {
 		queries: {
-			// Cache for 1 minute by default (replacing our manual cache)
 			staleTime: 60 * 1000,
 			gcTime: 5 * 60 * 1000,
 		},
@@ -55,29 +53,20 @@ const AppContent: React.FC<AppProps> = ({
 	const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
 	const [config, setConfig] = useState<Config | null>(null);
 
-	// Initialize Managers
 	useEffect(() => {
-		// Only initialize once
 		if (configManager) return;
 
 		let manager: ConfigManager;
 		if (testMode) {
-			// ... (keep test mode logic same as before but inside effect)
 			const fs = require("node:fs");
 			const path = require("node:path");
 			const os = require("node:os");
 
-			// 1. Setup Temp Dir
 			const tempConfigDir = path.join(os.tmpdir(), "lemonup-test-config");
-			// Don't wipe on start to allow persistence testing
-			// if (fs.existsSync(tempConfigDir)) {
-			// 	fs.rmSync(tempConfigDir, { recursive: true, force: true });
-			// }
 			fs.mkdirSync(tempConfigDir, { recursive: true });
 
 			const configFile = path.join(tempConfigDir, "config.json");
 
-			// 2. Read Config Source (Only if not already present)
 			if (!fs.existsSync(configFile)) {
 				let realConfig: Config | null = null;
 				const sampleConfigPath = path.join(process.cwd(), "sample_config.json");
@@ -92,20 +81,17 @@ const AppContent: React.FC<AppProps> = ({
 				}
 
 				if (!realConfig) {
-					// Fallback to reading system config
 					const realManager = new ConfigManager();
 					if (realManager.hasConfigFile) {
 						realConfig = realManager.get();
 					}
 				}
 
-				// 3. Write to temp config
 				if (realConfig) {
 					fs.writeFileSync(configFile, JSON.stringify(realConfig));
 				}
 			}
 
-			// 4. Return new Manager pointing to temp dir
 			manager = new ConfigManager({
 				cwd: tempConfigDir,
 				overrides: {
@@ -123,15 +109,13 @@ const AppContent: React.FC<AppProps> = ({
 
 		setConfigManager(manager);
 		setAddonManager(new AddonManager(manager));
-		// Set config immediately if available
 		if (manager.hasConfigFile) {
 			setConfig(manager.get());
 		}
 	}, [testMode, configManager]);
 
-	// Load Config
 	useEffect(() => {
-		if (!configManager || config) return; // ConfigManager not ready or config already loaded
+		if (!configManager || config) return;
 
 		if (!configManager.hasConfigFile) {
 			setShowWizard(true);
@@ -142,14 +126,6 @@ const AppContent: React.FC<AppProps> = ({
 		setConfig(cfg);
 
 		if (initialLoad) {
-			// On first load, jump to default option?
-			// User request: "I want Update Addons to be the default highlighted selection"
-			// Wait, the user said "prompted with options that they can navigate to".
-			// But they also said "Update Addons to be the default highlighted selection" on the menu.
-			// It doesn't say "Skip menu and go to default".
-			// So we should ALWAYS start at "menu", but the menu should highlight the default.
-			// My MainMenu implementation handles highlighting the default.
-			// So activeScreen should always start at "menu".
 			setActiveScreen("menu");
 			setInitialLoad(false);
 		}
@@ -157,14 +133,11 @@ const AppContent: React.FC<AppProps> = ({
 
 	const handleWizardComplete = () => {
 		setShowWizard(false);
-		// Trigger reload
 		if (configManager) {
 			const cfg = configManager.get();
 			setConfig(cfg);
 		}
 	};
-
-	// useInput hook removed as it was unused and empty
 
 	if (showWizard && configManager) {
 		return (
@@ -223,7 +196,6 @@ const AppContent: React.FC<AppProps> = ({
 					dryRun={dryRun}
 					testMode={testMode}
 					onBack={() => {
-						// Refresh config on return to ensure UI is up to date
 						setConfig(addonManager.getConfig());
 						setActiveScreen("menu");
 					}}
@@ -237,7 +209,6 @@ const AppContent: React.FC<AppProps> = ({
 					force={force}
 					dryRun={dryRun}
 					onBack={() => {
-						// Refresh config on return
 						setConfig(addonManager.getConfig());
 						setActiveScreen("menu");
 					}}

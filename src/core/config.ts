@@ -3,10 +3,20 @@ import os from "node:os";
 import path from "node:path";
 import Conf from "conf";
 import { z } from "zod";
+import { logger } from "./logger";
+
+// --- Constants ---
+
+export const REPO_TYPE = {
+	GITHUB: "github",
+	TUKUI: "tukui",
+} as const;
+
+export type RepoType = (typeof REPO_TYPE)[keyof typeof REPO_TYPE];
 
 // --- Zod Schemas ---
 
-export const RepositoryTypeSchema = z.enum(["github", "tukui"]);
+export const RepositoryTypeSchema = z.enum([REPO_TYPE.GITHUB, REPO_TYPE.TUKUI]);
 
 export const RepositorySchema = z.object({
 	name: z.string(),
@@ -34,6 +44,7 @@ export const ConfigSchema = z.object({
 	checkInterval: z.number().min(0).default(60000), // ms, 0 = always check (or manually?)
 	backupWTF: z.boolean().default(true),
 	backupRetention: z.number().min(1).default(5),
+	debug: z.boolean().default(false),
 });
 
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -70,6 +81,7 @@ export class ConfigManager {
 				checkInterval: { type: "number" },
 				backupWTF: { type: "boolean" },
 				backupRetention: { type: "number" },
+				debug: { type: "boolean" },
 			} as const,
 
 			cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -82,34 +94,22 @@ export class ConfigManager {
 		// Validate on read to ensure integrity
 		const result = ConfigSchema.safeParse(raw);
 		if (!result.success) {
-			// If schema is invalid (e.g. first run or corrupted), return defaults or empty structure
+			// If schema is invalid (first run or corrupted) return defaults or empty structure
 			return {
 				destDir: "NOT_CONFIGURED",
 				userAgent: "DEFAULT_UA",
 				repositories: [],
 			} as unknown as Config;
 		}
-		// Apply overrides
-		return { ...result.data, ...this.overrides };
+		const config = { ...result.data, ...this.overrides };
+		logger.setEnabled(config.debug || false);
+		return config;
 	}
 
 	public set<K extends keyof Config>(key: K, value: Config[K]) {
 		if (this.safeMode) {
-			// In safe mode, we can't update disk, but should we update memory?
-			// Conf doesn't have an easy "set memory only" public method that persists across 'get' calls effectively
-			// without mocking the store.
-			// Ideally we just update our overrides or local state?
-			// But for simplicity in this Test Mode: we just IGNORE writes or log them.
-			// Actually, if we ignore writes, the UI won't update "installedVersion".
-			// But since we use a TEMP cwd in our plan, we don't need safeMode to block disk writes!
-			// We WANT to write to the temp disk to verify the operation.
-			// So safeMode is legally "allow disk writes but maybe warn"?
-			// Or maybe safeMode is not needed if we trust the temp dir approach.
-			// Let's keep writing to disk (temp dir) as the primary strategy.
-			// But if we wanted to prevent 'real' config writes, we'd block here.
-			// For 'overrides', we might want to update them?
-			// Let's assume standard behavior: write to store.
-			// Overrides are "permanent/forced" values.
+			// TODO
+			return;
 		}
 		this.store.set(key, value);
 	}
@@ -123,6 +123,16 @@ export class ConfigManager {
 			const updatedRepo = { ...repos[index], ...updates } as Repository;
 			repos[index] = updatedRepo;
 			this.store.set("repositories", repos);
+			logger.log(
+				"Config",
+				`Updated ${repoName} to version ${updatedRepo.installedVersion}`,
+			);
+			console.log(
+				`[Config] Updated ${repoName} to version ${updatedRepo.installedVersion}`,
+			);
+		} else {
+			logger.error("Config", `Keep failed: Repo ${repoName} not found`);
+			console.warn(`[Config] Keep failed: Repo ${repoName} not found`);
 		}
 	}
 
@@ -138,7 +148,7 @@ export class ConfigManager {
 		const defaults: Config = {
 			destDir: "NOT_CONFIGURED",
 			userAgent:
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+				"Mozilla/5.0 (SMART-REFRIGERATOR; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/4.0 TV Safari/537.36",
 			repositories: [],
 			defaultMenuOption: "update",
 			maxConcurrent: 3,
@@ -146,6 +156,7 @@ export class ConfigManager {
 			checkInterval: 60000,
 			backupWTF: true,
 			backupRetention: 5,
+			debug: false,
 		};
 		this.store.set(defaults);
 	}

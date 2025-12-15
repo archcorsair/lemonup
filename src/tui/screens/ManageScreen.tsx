@@ -27,11 +27,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const queryClient = useQueryClient();
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-	const [justChecked, setJustChecked] = useState<Set<string>>(new Set());
-	// Processing message is now derived or simplified, but let's keep it for "Updating..." feedback
-	// since mutation doesn't cover "bulk" updating message easily for the whole set.
-	// Actually we can derive it from mutation status if we track multiple mutations?
-	// Or just keep simple state for the "overall" message.
 	const [globalMessage, setGlobalMessage] = useState("");
 
 	// 1. Queries for Status Checking
@@ -39,18 +34,29 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		queries: config.repositories.map((repo) => ({
 			queryKey: ["addon", repo.name],
 			queryFn: async () => {
-				const res = await addonManager.checkUpdate(repo);
-				return res;
+				// Fetch fresh config to ensure we check against the potentially updated installedVersion
+				const freshConfig = addonManager.getConfig();
+				const freshRepo = freshConfig.repositories.find(
+					(r) => r.name === repo.name,
+				);
+				if (!freshRepo)
+					return {
+						updateAvailable: false,
+						remoteVersion: "",
+						error: "Repo not found",
+						checkedVersion: null,
+					};
+
+				const res = await addonManager.checkUpdate(freshRepo);
+				return { ...res, checkedVersion: freshRepo.installedVersion };
 			},
-			staleTime: config.checkInterval, // Use configured check interval
+			staleTime: config.checkInterval, // User configured check interval
 		})),
 	});
 
 	// 2. Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ repo }: { repo: Repository }) => {
-			// We need temp dir logic here or inside Manager.
-			// Manager.updateAll handles temp dir creation. Manager.updateRepository expects tempBaseDir.
 			const os = await import("node:os");
 			const path = await import("node:path");
 			const fs = await import("node:fs/promises");
@@ -68,12 +74,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				);
 				return result;
 			} finally {
-				// Cleanup
 				await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
 			}
 		},
 		onSuccess: (_, variables) => {
-			// Invalidate check query to ensure we see "Up to date"
 			queryClient.invalidateQueries({
 				queryKey: ["addon", variables.repo.name],
 			});
@@ -106,26 +110,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	};
 
 	const runChecks = async (idsToCheck: string[]) => {
-		if (idsToCheck.length === 0) return;
+		if (!idsToCheck.length) return;
 		// Trigger refetch for specific items
 		const promises = idsToCheck.map(async (name) => {
 			const idx = config.repositories.findIndex((r) => r.name === name);
 			if (idx !== -1 && queries[idx]) {
 				await queries[idx].refetch();
-				// Set flash
-				setJustChecked((prev) => {
-					const next = new Set(prev);
-					next.add(name);
-					return next;
-				});
-				// Clear flash after delay
-				setTimeout(() => {
-					setJustChecked((prev) => {
-						const next = new Set(prev);
-						next.delete(name);
-						return next;
-					});
-				}, 2000);
 			}
 		});
 
@@ -149,7 +139,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}
 
 		if (input === " ") {
-			// Toggle selection
 			const currentRepo = config.repositories[selectedIndex];
 			if (currentRepo) {
 				setSelectedIds((prev) => {
@@ -193,7 +182,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				Manage Addons
 			</Text>
 
-			{/* HEADER */}
 			<Box
 				borderStyle="single"
 				borderColor="gray"
@@ -218,7 +206,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				</Box>
 			</Box>
 
-			{/* ROWS */}
 			<Box flexDirection="column">
 				{config.repositories.map((repo, idx) => {
 					const isSelected = selectedIndex === idx;
@@ -231,9 +218,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					const isUpdating =
 						updateMutation.isPending &&
 						updateMutation.variables?.repo.name === repo.name;
-					const isJustChecked = justChecked.has(repo.name);
 
-					// Determine Status
 					let status: RepoStatus = "idle";
 					let result: UpdateResult | undefined;
 
@@ -249,7 +234,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								repoName: repo.name,
 								success: true,
 								updated: true,
-								message: "Update Available",
+								// DEBUG: Show versions
+								message: `Update Avail: ${String(data.checkedVersion).substring(0, 7)} -> ${String(data.remoteVersion).substring(0, 7)}`,
 							};
 						} else {
 							result = {

@@ -18,18 +18,10 @@ export const BackupManager = {
 		const retailDir = path.dirname(path.dirname(destDir));
 		const wtfDir = path.join(retailDir, "WTF");
 
-		// Check if WTF exists using Bun.file
 		if (!(await Bun.file(wtfDir).exists())) {
-			return null; // No WTF folder to backup (Note: Bun.file checks if path exists, works for dirs on some platforms but let's be safe. Actually Bun.file is for files. For dirs common check is stat or existing method. Wait, Bun.file().exists() works for files. For directories `fs.exists` or `fs.stat` is safer. Let's verify Bun behavior.
-			// Re-reading docs: Bun.file(path) refers to a file.
-			// Let's stick to fsPromises.access for the DIRECTORY check to be safe, or use fs.exists.
-			// BUT, the plan said "Replace fs.access with await Bun.file(path).exists()".
-			// Let's test if Bun.file(dir).exists() works later. For now, to be safe and robust, I'll stick to access for DIR, but use Glob for files.
-			// actually, let's use the hybrid approach.
+			return null;
 		}
 
-		// Correction: Bun.file points to a file. For directory existence, `fs.existsSync` or `fs.access` is correct.
-		// However, we can use `fsPromises.access` as before for the FOLDER.
 		try {
 			await fsPromises.access(wtfDir);
 		} catch {
@@ -48,7 +40,6 @@ export const BackupManager = {
 				const glob = new Bun.Glob("*.zip");
 				const files: string[] = [];
 
-				// Scan using Glob
 				for await (const file of glob.scan({ cwd: backupsWtfDir })) {
 					files.push(file);
 				}
@@ -83,7 +74,7 @@ export const BackupManager = {
 		return new Promise((resolve, reject) => {
 			const output = fs.createWriteStream(zipFilePath);
 			const archive = archiver("zip", {
-				zlib: { level: 9 }, // Sets the compression level.
+				zlib: { level: 9 },
 			});
 
 			output.on("close", () => {
@@ -95,10 +86,7 @@ export const BackupManager = {
 			});
 
 			archive.pipe(output);
-
-			// Append the WTF dir into the archive
 			archive.directory(wtfDir, "WTF");
-
 			archive.finalize();
 		});
 	},
@@ -120,7 +108,7 @@ export const BackupManager = {
 				files.push(file);
 			}
 
-			const sortedFiles = files.sort().reverse(); // Newest first
+			const sortedFiles = files.sort().reverse();
 			const toDelete = sortedFiles.slice(retentionCount);
 
 			for (const fileName of toDelete) {
@@ -128,7 +116,7 @@ export const BackupManager = {
 				await fsPromises.rm(fullPath, { force: true });
 			}
 		} catch {
-			// Ignore errors (e.g. dir doesn't exist)
+			// Ignore errors
 		}
 	},
 };

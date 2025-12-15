@@ -1,9 +1,15 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type Config, ConfigManager, type Repository } from "./config";
+import {
+	type Config,
+	ConfigManager,
+	REPO_TYPE,
+	type Repository,
+} from "./config";
 import * as Downloader from "./downloader";
 import * as GitClient from "./git";
+import { logger } from "./logger";
 
 export interface UpdateResult {
 	repoName: string;
@@ -60,10 +66,7 @@ export class AddonManager {
 		return results;
 	}
 
-	public async checkUpdate(
-		repo: Repository,
-		force = false, // Kept for compatibility but unused for caching now
-	): Promise<{
+	public async checkUpdate(repo: Repository): Promise<{
 		updateAvailable: boolean;
 		remoteVersion: string;
 		error?: string;
@@ -104,10 +107,14 @@ export class AddonManager {
 		onProgress?: (status: string) => void,
 	): Promise<UpdateResult> {
 		const { name } = repo;
+		logger.log(
+			"Manager",
+			`Starting updateRepository for ${name}. Force=${force}, DryRun=${dryRun}`,
+		);
 
 		// 1. Check Remote Version
 		onProgress?.("checking");
-		// Note: Both Github and TukUI (in this setup) use git ls-remote to check versions.
+		// NOTE: Both Github and TukUI use git ls-remote to check versions.
 		if (!repo.gitRemote) {
 			return {
 				repoName: name,
@@ -117,14 +124,7 @@ export class AddonManager {
 			};
 		}
 
-		// In dry-run, we still check the remote to see if an update IS available.
-		// Use a random delay if dryRun to simulate network if we wanted, but real network check is better.
-		// However, to make it "Simulated" for TUI testing without hitting API limits, maybe we should mock it?
-		// User asked: "Implement a dry-run (simulated run) to be able to test the TUI output."
-		// This suggests they want to see the UI animations. Real network calls are fast/slow varying.
-		// Let's do Real Check -> Dry Install.
-
-		const check = await this.checkUpdate(repo, force); // Pass force to bypass cache if force-updating
+		const check = await this.checkUpdate(repo);
 		if (check.error) {
 			return {
 				repoName: name,
@@ -150,7 +150,6 @@ export class AddonManager {
 		onProgress?.("downloading");
 
 		if (dryRun) {
-			// .. existing dry run logic ..
 			await new Promise((resolve) => setTimeout(resolve, 2000));
 			return {
 				repoName: name,
@@ -166,15 +165,16 @@ export class AddonManager {
 		await fs.rm(repoTempDir, { recursive: true, force: true });
 
 		try {
-			if (repo.type === "tukui") {
+			if (repo.type === REPO_TYPE.TUKUI) {
 				await this.installTukUI(repo, config, repoTempDir);
-			} else if (repo.type === "github") {
+			} else if (repo.type === REPO_TYPE.GITHUB) {
 				await this.installGithub(repo, config, repoTempDir);
 			} else {
 				throw new Error(`Unknown type: ${repo.type}`);
 			}
 
 			// 4. Update Config
+			logger.log("Manager", `Updating config for ${name} to ${remoteHash}`);
 			this.configManager.updateRepository(name, {
 				installedVersion: remoteHash,
 			});
@@ -184,7 +184,8 @@ export class AddonManager {
 				updated: true,
 				message: `Updated to ${remoteHash.substring(0, 7)}`,
 			};
-		} catch (err: any) {
+		} catch (err: unknown) {
+			logger.error("Manager", `Error updating ${name}`, err);
 			// If we catch here, we can return the nice UpdateResult with error
 			// preventing the caller from needing try/catch if we prefer.
 			// But `UpdateScreen` expects to handle bubbles OR result.success=false.
@@ -254,10 +255,11 @@ export class AddonManager {
 				const dest = path.join(destBase, folder);
 
 				// Ensure source exists
-				try {
-					await fs.access(source);
-				} catch {
-					console.error(`Source folder not found: ${source}`);
+				const sourceStat = await fs.stat(source).catch(() => null);
+				if (!sourceStat || !sourceStat.isDirectory()) {
+					console.error(
+						`Source folder not found or not a directory: ${source}`,
+					);
 					return false;
 				}
 

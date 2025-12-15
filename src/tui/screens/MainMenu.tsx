@@ -27,8 +27,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 		return idx !== -1 ? idx : 0;
 	});
 
-	// Local state to reflect instant changes to "default" without full app reload if config doesn't bubble up immediately
-	// Although App.tsx should handle config changes, let's rely on prop for display to be safe
 	const [defaultOption, setDefaultOption] = useState(config.defaultMenuOption);
 	const [feedbackMessage, setFeedbackMessage] = useState("");
 

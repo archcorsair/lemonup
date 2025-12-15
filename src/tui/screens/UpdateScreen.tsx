@@ -3,13 +3,7 @@ import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
 import type { Config } from "../../core/config";
-import { ConfigManager } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
-import {
-	clearTerminalProgress,
-	setTerminalProgress,
-	TerminalProgressState,
-} from "../../core/terminal";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
 
@@ -23,7 +17,7 @@ interface UpdateScreenProps {
 }
 
 export const UpdateScreen: React.FC<UpdateScreenProps> = ({
-	config: initialConfig, // Rename to initialConfig to imply we fetch fresh
+	config: initialConfig,
 	addonManager,
 	force = false,
 	dryRun = false,
@@ -31,10 +25,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	onBack,
 }) => {
 	const { exit } = useApp();
-	// Use local state for the list of repos so we can iterate on fresh data if needed,
-	// though for visualization we usually want 'initialConfig' list.
-	// But to avoid "Stale State re-download" issue, we should read fresh statuses.
-	// However, the LIST of repos rarely changes mid-run. The STATUS (version) does.
 	const [config] = useState(initialConfig);
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
@@ -43,7 +33,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	const [results, setResults] = useState<Record<string, UpdateResult>>({});
 	const [isDone, setIsDone] = useState(false);
 
-	// Initialize statuses
 	useEffect(() => {
 		const initialStatuses: Record<string, RepoStatus> = {};
 		for (const repo of config.repositories) {
@@ -52,14 +41,10 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		setRepoStatuses(initialStatuses);
 	}, [config]);
 
-	// ... [Terminal Progress code skipped, assuming unchanged lines 44-77] ...
-
-	// Track backup status
 	const [backupStatus, setBackupStatus] = useState<
 		"idle" | "running" | "success" | "error" | "skipped"
 	>("idle");
 
-	// Run Updates
 	useEffect(() => {
 		const runUpdates = async () => {
 			const tempDir = await import("node:os").then((os) =>
@@ -69,16 +54,12 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 				fs.mkdir(tempDir, { recursive: true }),
 			);
 
-			// Fetch FRESH config
 			const freshConfig = addonManager.getConfig();
 
-			// --- BACKUP STEP ---
 			if (freshConfig.backupWTF) {
 				setBackupStatus("running");
 				try {
 					const { BackupManager } = await import("../../core/backup");
-
-					// Test Mode: Ensure source WTF exists
 					if (testMode) {
 						const retailDir = await import("node:path").then((path) =>
 							path.dirname(path.dirname(freshConfig.destDir)),
@@ -91,7 +72,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 						);
 					}
 
-					// Backup with 15 min rate limit
 					const result = await BackupManager.backupWTF(freshConfig.destDir, 15);
 
 					if (result === "skipped-recent") {
@@ -103,7 +83,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 						);
 						setBackupStatus("success");
 					}
-				} catch (e) {
+				} catch {
 					setBackupStatus("error");
 				}
 			} else {
@@ -150,7 +130,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 
 			setIsDone(true);
 
-			// Cleanup
 			await import("node:fs/promises").then((fs) =>
 				fs.rm(tempDir, { recursive: true, force: true }),
 			);
@@ -161,9 +140,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 
 	useInput((input, key) => {
 		if (key.escape || (input === "q" && isDone)) {
-			// Allow back only if done?, or anytime?
-			// Let's allow anytime, but 'q' normally exits app.
-			// Let's match previous logic: q quits app, esc goes back.
 			if (key.escape) onBack();
 			else if (input === "q") exit();
 		}
@@ -171,7 +147,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 
 	return (
 		<Box flexDirection="column" gap={0}>
-			{/* Backup Status Banner */}
 			{backupStatus !== "skipped" && backupStatus !== "idle" && (
 				<Box
 					borderStyle="single"

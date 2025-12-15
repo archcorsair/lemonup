@@ -1,7 +1,8 @@
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import type { Repository } from "../../core/config";
+import { REPO_TYPE, type Repository } from "../../core/config";
+
 import type { UpdateResult } from "../../core/manager";
 
 export type RepoStatus = "idle" | "checking" | "downloading" | "done" | "error";
@@ -27,7 +28,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 	let statusText = <Text color="gray">Waiting</Text>;
 
 	const typeLabel =
-		repo.type === "tukui" ? (
+		repo.type === REPO_TYPE.TUKUI ? (
 			<Text color="magenta">[TukUI]</Text>
 		) : (
 			<Text color="blue">[Git]</Text>
@@ -41,8 +42,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 		case "checking":
 			icon = nerdFonts ? (
 				<Text color="yellow">
-					{/* @ts-expect-error: Spinner types mismatch */}
-					<Spinner type="dots" />
+					<SpinnerFixed type="dots" />
 				</Text>
 			) : (
 				<Text color="yellow">?</Text>
@@ -52,13 +52,12 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 		case "downloading":
 			icon = nerdFonts ? (
 				<Text color="cyan">
-					{/* @ts-expect-error: Spinner types mismatch */}
-					<Spinner type="dots" />
+					<SpinnerFixed type="dots" />
 				</Text>
 			) : (
 				<Text color="cyan">↓</Text>
 			);
-			if (repo.type === "tukui") {
+			if (repo.type === REPO_TYPE.TUKUI) {
 				statusText = <Text color="cyan">Downloading Zip...</Text>;
 			} else {
 				statusText = <Text color="cyan">Git Syncing...</Text>;
@@ -69,7 +68,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 				icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
 				statusText = <Text color="green">{result.message}</Text>;
 			} else {
-				icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
+				icon = <Text> </Text>;
 				statusText = <Text color="white">Up to date</Text>;
 			}
 			break;
@@ -81,7 +80,6 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 
 	return (
 		<Box paddingX={1}>
-			{/* SELECTION/POINTER */}
 			<Box width={4}>
 				<Text color="blue">{isSelected ? "> " : "  "}</Text>
 				<Text color={isChecked ? "green" : "gray"}>
@@ -89,27 +87,20 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 				</Text>
 			</Box>
 
-			{/* NAME */}
 			<Box width={20}>
-				<Text
-					color={isSelected ? "blue" : isChecked ? "green" : undefined}
-					bold={isSelected || isChecked}
-				>
+				<Text color={isSelected ? "blue" : isChecked ? "green" : undefined}>
 					{repo.name}
 				</Text>
 			</Box>
 
-			{/* SOURCE */}
 			<Box width={10}>{typeLabel}</Box>
 
-			{/* INSTALLED VERSION */}
 			<Box width={15}>
 				<Text color="gray">
 					{repo.installedVersion ? repo.installedVersion.substring(0, 7) : "-"}
 				</Text>
 			</Box>
 
-			{/* STATUS */}
 			<Box width={30}>
 				<Box gap={1}>
 					<Box width={3} justifyContent="center">
@@ -121,3 +112,8 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 		</Box>
 	);
 };
+
+// Workaround for React 19 + Ink type mismatch
+const SpinnerFixed = Spinner as unknown as React.FC<{
+	type?: string;
+}>;

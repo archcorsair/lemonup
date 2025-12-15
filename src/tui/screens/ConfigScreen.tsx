@@ -15,7 +15,8 @@ type Field =
 	| "nerdFonts"
 	| "checkInterval"
 	| "backupWTF"
-	| "backupRetention";
+	| "backupRetention"
+	| "debug";
 
 export const ConfigScreen: React.FC<ScreenProps> = ({
 	configManager,
@@ -27,11 +28,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	const [checkInterval, setCheckInterval] = useState(60); // Display in seconds
 	const [backupWTF, setBackupWTF] = useState(true);
 	const [backupRetention, setBackupRetention] = useState(5);
+	const [debug, setDebug] = useState(false);
 
 	const [activeField, setActiveField] = useState<Field>("maxConcurrent");
 	const [saved, setSaved] = useState(false);
 
-	// Helpers for dynamic interval steps
 	const getNextInterval = (current: number) => {
 		if (current < 60) return Math.min(60, current + 10);
 		if (current < 900) return Math.min(900, current + 60); // 1m steps up to 15m
@@ -60,33 +61,27 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		setCheckInterval(cfg.checkInterval / 1000); // Storage is ms, UI is seconds
 		setBackupWTF(cfg.backupWTF);
 		setBackupRetention(cfg.backupRetention);
+		setDebug(cfg.debug);
 	}, [configManager]);
 
 	useInput((input, key) => {
-		// Global Navigation
+		const fields: Field[] = [
+			"maxConcurrent",
+			"destDir",
+			"nerdFonts",
+			"checkInterval",
+			"backupWTF",
+			"backupRetention",
+			"debug",
+		];
+
 		if (key.upArrow) {
-			const fields: Field[] = [
-				"maxConcurrent",
-				"destDir",
-				"nerdFonts",
-				"checkInterval",
-				"backupWTF",
-				"backupRetention",
-			];
 			const idx = fields.indexOf(activeField);
 			const prev = fields[Math.max(0, idx - 1)];
 			if (prev) setActiveField(prev);
 			return;
 		}
 		if (key.downArrow || key.tab) {
-			const fields: Field[] = [
-				"maxConcurrent",
-				"destDir",
-				"nerdFonts",
-				"checkInterval",
-				"backupWTF",
-				"backupRetention",
-			];
 			const idx = fields.indexOf(activeField);
 			const next = fields[Math.min(fields.length - 1, idx + 1)];
 			if (next) setActiveField(next);
@@ -98,7 +93,6 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 			return;
 		}
 
-		// Field Specific Handling
 		if (activeField === "maxConcurrent") {
 			if (key.leftArrow || input === "h") {
 				const newVal = Math.max(1, maxConcurrent - 1);
@@ -185,6 +179,21 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				setTimeout(() => setSaved(false), 1000);
 			}
 		}
+
+		if (activeField === "debug") {
+			if (
+				key.leftArrow ||
+				key.rightArrow ||
+				input === "h" ||
+				input === "l" ||
+				input === " "
+			) {
+				setDebug(!debug);
+				configManager.set("debug", !debug);
+				setSaved(true);
+				setTimeout(() => setSaved(false), 1000);
+			}
+		}
 	});
 
 	const renderLabel = (field: Field, label: string) => (
@@ -239,6 +248,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 						{"<"} {backupRetention} {">"}
 					</Text>
 				)}
+				{field === "debug" && (
+					<Text color={debug ? "green" : "gray"}>
+						{debug ? "Enabled" : "Disabled"}
+					</Text>
+				)}
 			</Box>
 		</Box>
 	);
@@ -256,6 +270,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				{renderLabel("checkInterval", "Update Check Interval")}
 				{renderLabel("backupWTF", "Backup 'WTF' Folder")}
 				{renderLabel("backupRetention", "Backup Retention Count")}
+				{renderLabel("debug", "Enable Debug Logging")}
 
 				<Box marginLeft={2} height={1} marginTop={1}>
 					{saved && <Text color="green">Saved!</Text>}

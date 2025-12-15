@@ -1,10 +1,9 @@
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl-promise";
 
-/**
- * Downloads a file from a URL to a local destination using Bun's native fetch and write.
- */
 export async function download(
 	url: string,
 	destPath: string,
@@ -28,14 +27,11 @@ export async function download(
 	}
 }
 
-/**
- * Unzips a file to a destination directory using `yauzl-promise`.
- */
 export async function unzip(
 	zipPath: string,
 	destDir: string,
 ): Promise<boolean> {
-	let zipFile: any;
+	let zipFile: Awaited<ReturnType<typeof yauzl.open>> | undefined;
 	try {
 		zipFile = await yauzl.open(zipPath);
 		try {
@@ -51,12 +47,12 @@ export async function unzip(
 					const parentDir = path.dirname(entryPath);
 					await fsp.mkdir(parentDir, { recursive: true });
 
-					// Use Bun.write which consumes the readable stream directly
-					await Bun.write(entryPath, readStream);
+					const writeStream = fs.createWriteStream(entryPath);
+					await pipeline(readStream, writeStream);
 				}
 			}
 		} finally {
-			await zipFile.close();
+			await zipFile?.close();
 		}
 		return true;
 	} catch (error) {
