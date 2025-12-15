@@ -60,8 +60,14 @@ export async function clone(
 			stderr: "pipe",
 		});
 		const exitCode = await proc.exited;
-		return exitCode === 0;
-	} catch (_error) {
-		return false;
+		if (exitCode !== 0) {
+			const stderr = await new Response(proc.stderr).text();
+			throw new Error(`Git exited with code ${exitCode}: ${stderr.trim()}`);
+		}
+		return true;
+	} catch (error) {
+		throw new Error(
+			`Git clone execution failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }

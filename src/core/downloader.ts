@@ -1,3 +1,7 @@
+import fsp from "node:fs/promises";
+import path from "node:path";
+import yauzl from "yauzl-promise";
+
 /**
  * Downloads a file from a URL to a local destination using Bun's native fetch and write.
  */
@@ -25,26 +29,39 @@ export async function download(
 }
 
 /**
- * Unzips a file to a destination directory using the system `unzip` command.
- * Equivalent to: unzip -q -o <zipPath> -d <destDir>
+ * Unzips a file to a destination directory using `yauzl-promise`.
  */
 export async function unzip(
 	zipPath: string,
 	destDir: string,
 ): Promise<boolean> {
+	let zipFile: any;
 	try {
-		// Using Bun shell for easier command execution if available, or Bun.spawn
-		// Since we used spawn in GitClient, let's use Bun.spawn here too for consistency,
-		// or just Bun.spawnSync if we want to block (but async is better).
-		// Actually, for simple commands, `Bun.$` is nicer but let's stick to spawn for now or specific command.
+		zipFile = await yauzl.open(zipPath);
+		try {
+			for await (const entry of zipFile) {
+				const entryPath = path.join(destDir, entry.filename);
 
-		const proc = Bun.spawn(["unzip", "-q", "-o", zipPath, "-d", destDir], {
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		const exitCode = await proc.exited;
-		return exitCode === 0;
-	} catch (_error) {
-		return false;
+				if (entry.filename.endsWith("/")) {
+					// Directory
+					await fsp.mkdir(entryPath, { recursive: true });
+				} else {
+					// File
+					const readStream = await entry.openReadStream();
+					const parentDir = path.dirname(entryPath);
+					await fsp.mkdir(parentDir, { recursive: true });
+
+					// Use Bun.write which consumes the readable stream directly
+					await Bun.write(entryPath, readStream);
+				}
+			}
+		} finally {
+			await zipFile.close();
+		}
+		return true;
+	} catch (error) {
+		throw new Error(
+			`Unzip execution failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }

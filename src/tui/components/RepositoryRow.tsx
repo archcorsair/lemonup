@@ -10,12 +10,18 @@ interface RepositoryRowProps {
 	repo: Repository;
 	status: RepoStatus;
 	result?: UpdateResult;
+	nerdFonts?: boolean;
+	isSelected?: boolean;
+	isChecked?: boolean;
 }
 
 export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 	repo,
 	status,
 	result,
+	nerdFonts = true,
+	isSelected = false,
+	isChecked = false,
 }) => {
 	let icon = <Text color="gray">·</Text>;
 	let statusText = <Text color="gray">Waiting</Text>;
@@ -33,35 +39,24 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			statusText = <Text color="gray">Idle</Text>;
 			break;
 		case "checking":
-			icon = (
+			icon = nerdFonts ? (
 				<Text color="yellow">
+					{/* @ts-expect-error: Spinner types mismatch */}
 					<Spinner type="dots" />
 				</Text>
+			) : (
+				<Text color="yellow">?</Text>
 			);
 			statusText = <Text color="yellow">Checking...</Text>;
 			break;
 		case "downloading":
-			// In our current App loop, we might reuse 'downloading' or stick to 'checking',
-			// but assuming we expand updates to flip to this state or we treat "checking" as the active state.
-			// Let's effectively treat "checking" and "downloading" as "active".
-			// Since manager.ts does it all in one go, "checking" is the main state we see.
-			// Ideally we want to see "Processing..." but with specificity.
-
-			// Actually, App.tsx only sets "checking" or "done".
-			// I should probably update App.tsx to set "downloading" if I want to use it?
-			// Or just use "checking" here to indicate activity.
-			// But for now, let's assume we want to be explicit if we CAN see it.
-			// Let's just override "checking" text based on type if we are strictly checking?
-			// No, Checking is usually "Checking for updates".
-			// If we want to see "Downloading", manager needs to report it or we fake it.
-			// But user asked for "visual difference when pulling".
-			// Maybe I should change "Checking..." to "Processing..." and show the type?
-
-			// Better: Show the Type badge always. And if "checking", say what it DOES.
-			icon = (
+			icon = nerdFonts ? (
 				<Text color="cyan">
+					{/* @ts-expect-error: Spinner types mismatch */}
 					<Spinner type="dots" />
 				</Text>
+			) : (
+				<Text color="cyan">↓</Text>
 			);
 			if (repo.type === "tukui") {
 				statusText = <Text color="cyan">Downloading Zip...</Text>;
@@ -71,29 +66,58 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			break;
 		case "done":
 			if (result?.updated) {
-				icon = <Text color="green">✔</Text>;
+				icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
 				statusText = <Text color="green">{result.message}</Text>;
 			} else {
-				icon = <Text color="green">✔</Text>;
-				statusText = <Text color="gray">Up to date</Text>;
+				icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
+				statusText = <Text color="white">Up to date</Text>;
 			}
 			break;
 		case "error":
-			icon = <Text color="red">✘</Text>;
+			icon = <Text color="red">{nerdFonts ? "✘" : "X"}</Text>;
 			statusText = <Text color="red">{result?.error || "Error"}</Text>;
 			break;
 	}
 
 	return (
-		<Box gap={1}>
-			<Box width={3} justifyContent="center">
-				{icon}
+		<Box paddingX={1}>
+			{/* SELECTION/POINTER */}
+			<Box width={4}>
+				<Text color="blue">{isSelected ? "> " : "  "}</Text>
+				<Text color={isChecked ? "green" : "gray"}>
+					{isChecked ? (nerdFonts ? "●" : "*") : " "}
+				</Text>
 			</Box>
-			<Box width={8}>{typeLabel}</Box>
+
+			{/* NAME */}
+			<Box width={20}>
+				<Text
+					color={isSelected ? "blue" : isChecked ? "green" : undefined}
+					bold={isSelected || isChecked}
+				>
+					{repo.name}
+				</Text>
+			</Box>
+
+			{/* SOURCE */}
+			<Box width={10}>{typeLabel}</Box>
+
+			{/* INSTALLED VERSION */}
+			<Box width={15}>
+				<Text color="gray">
+					{repo.installedVersion ? repo.installedVersion.substring(0, 7) : "-"}
+				</Text>
+			</Box>
+
+			{/* STATUS */}
 			<Box width={30}>
-				<Text bold>{repo.name}</Text>
+				<Box gap={1}>
+					<Box width={3} justifyContent="center">
+						{icon}
+					</Box>
+					<Box flexGrow={1}>{statusText}</Box>
+				</Box>
 			</Box>
-			<Box flexGrow={1}>{statusText}</Box>
 		</Box>
 	);
 };

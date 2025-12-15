@@ -12,13 +12,22 @@ async function main() {
 		"--force": Boolean,
 		"-f": "--force",
 		"--dry-run": Boolean,
+		"--test": Boolean,
 	});
 
 	if (args["--cli"]) {
 		await runCLI();
 	} else {
 		// TUI Mode
-		render(<App force={args["--force"]} dryRun={args["--dry-run"]} />);
+		const { waitUntilExit } = render(
+			<App
+				force={args["--force"]}
+				dryRun={args["--dry-run"]}
+				testMode={args["--test"]}
+			/>,
+		);
+		await waitUntilExit();
+		process.exit(0);
 	}
 }
 

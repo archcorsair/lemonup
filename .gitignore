@@ -8,6 +8,7 @@ dist
 *.bun-build
 lemonup
 lemonup.exe
+test-output/
 
 # code coverage
 coverage
