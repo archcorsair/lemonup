@@ -13,19 +13,16 @@ export const BackupManager = {
 	async backupWTF(
 		destDir: string,
 		minIntervalMinutes = 0,
-	): Promise<string | null | "skipped-recent"> {
+	): Promise<string | "skipped-recent"> {
 		// destDir is Interface/AddOns. We need to go up to _retail_
 		const retailDir = path.dirname(path.dirname(destDir));
 		const wtfDir = path.join(retailDir, "WTF");
 
-		if (!(await Bun.file(wtfDir).exists())) {
-			return null;
-		}
-
+		// Check if WTF directory exists
 		try {
 			await fsPromises.access(wtfDir);
 		} catch {
-			return null;
+			throw new Error(`WTF folder missing at: ${wtfDir}`);
 		}
 
 		const backupsBaseDir = path.join(retailDir, "Backups");
@@ -50,7 +47,6 @@ export const BackupManager = {
 					// format: WTF-YYYY-MM-DDTHH-mm-ss-sssZ.zip
 					const latestPath = path.join(backupsWtfDir, latest);
 
-					// We can use Bun.file for the ZIP file stat
 					const file = Bun.file(latestPath);
 					const lastModified = file.lastModified; // Returns timestamp
 					const now = Date.now();
@@ -66,7 +62,6 @@ export const BackupManager = {
 			}
 		}
 
-		// Create Zip Backup
 		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const zipFileName = `WTF-${timestamp}.zip`;
 		const zipFilePath = path.join(backupsWtfDir, zipFileName);

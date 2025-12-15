@@ -1,13 +1,15 @@
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import pLimit from "p-limit";
 import type React from "react";
 import { useState } from "react";
+import { BackupManager } from "../../core/backup";
 import type { Config, Repository } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
+import { ShortcutsModal } from "../components/ShortcutsModal";
 
 interface ManageScreenProps {
 	config: Config;
@@ -24,6 +26,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	dryRun = false,
 	onBack,
 }) => {
+	const { exit } = useApp();
 	const queryClient = useQueryClient();
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -54,6 +57,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		})),
 	});
 
+	// Track granular progress for updates
+	const [updateProgress, setUpdateProgress] = useState<
+		Record<string, RepoStatus>
+	>({});
+
 	// 2. Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ repo }: { repo: Repository }) => {
@@ -71,10 +79,22 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					tempDir,
 					force,
 					dryRun,
+					(status) => {
+						setUpdateProgress((prev) => ({
+							...prev,
+							[repo.name]: status as RepoStatus,
+						}));
+					},
 				);
 				return result;
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+				// Clean up progress
+				setUpdateProgress((prev) => {
+					const next = { ...prev };
+					delete next[repo.name];
+					return next;
+				});
 			}
 		},
 		onSuccess: (_, variables) => {
@@ -111,21 +131,66 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 	const runChecks = async (idsToCheck: string[]) => {
 		if (!idsToCheck.length) return;
+
+		// Run with concurrency limit
+		const limit = pLimit(config.maxConcurrent);
+
 		// Trigger refetch for specific items
-		const promises = idsToCheck.map(async (name) => {
-			const idx = config.repositories.findIndex((r) => r.name === name);
-			if (idx !== -1 && queries[idx]) {
-				await queries[idx].refetch();
-			}
+		const promises = idsToCheck.map((name) => {
+			return limit(async () => {
+				const idx = config.repositories.findIndex((r) => r.name === name);
+				if (idx !== -1 && queries[idx]) {
+					await queries[idx].refetch();
+				}
+			});
 		});
 
 		await Promise.all(promises);
 	};
 
+	// Menu state
+	const [showMenu, setShowMenu] = useState(false);
+
 	useInput((input, key) => {
-		if (key.escape || input === "q") {
+		// Shortcuts for menu
+		const toggleMenu = () => setShowMenu((prev) => !prev);
+		const closeMenu = () => setShowMenu(false);
+
+		// If menu is open, capture keys
+		if (showMenu) {
+			if (key.escape || input === "m" || input === "q") {
+				if (key.escape) {
+					closeMenu();
+					return;
+				}
+				closeMenu();
+			}
+		}
+
+		if (key.escape) {
+			if (showMenu) {
+				setShowMenu(false);
+				return;
+			}
 			onBack();
 			return;
+		}
+
+		if (input === "m") {
+			toggleMenu();
+			return;
+		}
+
+		if (input === "q") {
+			exit();
+			return;
+		}
+
+		if (showMenu && ["k", "j", " ", "u", "c"].includes(input)) {
+			setShowMenu(false);
+		}
+		if (showMenu && (key.upArrow || key.downArrow)) {
+			setShowMenu(false);
 		}
 
 		if (key.upArrow || input === "k") {
@@ -174,10 +239,37 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				}
 			}
 		}
+
+		if (input === "b") {
+			const runBackup = async () => {
+				setGlobalMessage("Backing up WTF...");
+				try {
+					const result = await BackupManager.backupWTF(config.destDir);
+
+					if (result === null) {
+						setGlobalMessage("Backup Failed: WTF folder not found");
+					} else if (result === "skipped-recent") {
+						setGlobalMessage("Backup Skipped (Too Recent)");
+					} else {
+						// Result is the path to the zip file
+						await BackupManager.cleanupBackups(
+							config.destDir,
+							config.backupRetention,
+						);
+						setGlobalMessage("Backup Complete!");
+					}
+					setTimeout(() => setGlobalMessage(""), 3000);
+				} catch (error) {
+					setGlobalMessage(`Backup Failed: ${(error as Error).message}`);
+				}
+			};
+			runBackup();
+			if (showMenu) setShowMenu(false);
+		}
 	});
 
 	return (
-		<Box flexDirection="column" padding={1}>
+		<Box flexDirection="column" padding={1} height="100%" width="100%">
 			<Text color="magenta" bold>
 				Manage Addons
 			</Text>
@@ -222,8 +314,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					let status: RepoStatus = "idle";
 					let result: UpdateResult | undefined;
 
-					if (isUpdating) status = "downloading";
-					else if (isLoading || isFetching) status = "checking";
+					if (isUpdating) {
+						status = updateProgress[repo.name] || "checking";
+					} else if (isLoading || isFetching) status = "checking";
 					else if (error) status = "error";
 					else if (data) status = "done";
 
@@ -264,7 +357,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			<ControlBar
 				message={
 					globalMessage ? (
-						globalMessage.includes("Done") ? (
+						globalMessage.includes("Done") ||
+						globalMessage.includes("Complete") ? (
 							<Text color="green">✔ {globalMessage}</Text>
 						) : (
 							<Text color="yellow">
@@ -283,7 +377,20 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					{ key: "space", label: "select" },
 					{ key: "u", label: "update" },
 					{ key: "c", label: "check" },
-					{ key: "q", label: "back" },
+					{ key: "m", label: "menu" },
+				]}
+			/>
+
+			<ShortcutsModal
+				visible={showMenu}
+				shortcuts={[
+					{ key: "↑/↓", label: "Navigate" },
+					{ key: "Space", label: "Select/Deselect" },
+					{ key: "u", label: "Update Selected" },
+					{ key: "c", label: "Check Updates" },
+					{ key: "b", label: "Backup WTF" },
+					{ key: "q", label: "Quit Application" },
+					{ key: "Esc", label: "Go Back / Close" },
 				]}
 			/>
 		</Box>

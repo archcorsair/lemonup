@@ -69,7 +69,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 				statusText = <Text color="green">{result.message}</Text>;
 			} else {
 				icon = <Text> </Text>;
-				statusText = <Text color="white">Up to date</Text>;
+				statusText = <Text color="green">Up to date</Text>;
 			}
 			break;
 		case "error":

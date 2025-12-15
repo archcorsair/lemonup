@@ -11,20 +11,18 @@ export async function runCLI() {
 
 	const force = args["--force"] || false;
 
-	// TODO: We might want to pass a specific config path arg in the future
 	const configManager = new ConfigManager();
 	const manager = new AddonManager(configManager);
 
 	console.log("Starting Lemonup (CLI Mode)...");
 
-	// Check if config is likely valid (e.g. has repos)
 	const config = manager.getConfig();
 	if (!config.repositories.length) {
 		console.warn(
 			"No repositories found in config. Please verify configuration at:",
 			configManager.path,
 		);
-		// We don't exit here, just warn.
+		// Don't exit here, just warn.
 	}
 
 	try {
