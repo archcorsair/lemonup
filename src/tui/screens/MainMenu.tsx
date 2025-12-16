@@ -74,9 +74,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 						</Text>
 						{isDefault && (
 							<Box marginLeft={2}>
-								<Text backgroundColor="yellow" color="black">
-									{" Default "}
-								</Text>
+								<Text color="yellow">{" ●"}</Text>
 							</Box>
 						)}
 					</Box>
