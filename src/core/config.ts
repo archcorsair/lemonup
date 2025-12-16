@@ -99,6 +99,7 @@ export class ConfigManager {
 				destDir: "NOT_CONFIGURED",
 				userAgent: "DEFAULT_UA",
 				repositories: [],
+				...this.overrides,
 			} as unknown as Config;
 		}
 		const config = { ...result.data, ...this.overrides };
