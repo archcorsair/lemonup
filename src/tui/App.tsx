@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Box, Text } from "ink";
-import type React from "react";
-import { useEffect, useState } from "react";
+import Spinner from "ink-spinner";
+import React, { useEffect, useState, useReducer } from "react";
 import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 import { FirstRunWizard } from "./FirstRunWizard";
@@ -61,12 +61,17 @@ export const App: React.FC<AppProps> = ({
 	);
 };
 
+// Workaround for React 19 + Ink type mismatch
+const SpinnerFixed = Spinner as unknown as React.FC<{
+	type?: string;
+}>;
+
 const AppContent: React.FC<AppProps> = ({
 	force = false,
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [{ screen: activeScreen, isBusy }, dispatch] = React.useReducer(
+	const [{ screen: activeScreen, isBusy }, dispatch] = useReducer(
 		appReducer,
 		{
 			screen: "menu",
@@ -210,7 +215,7 @@ const AppContent: React.FC<AppProps> = ({
 				{isBusy && (
 					<Box marginLeft={2}>
 						<Text color="yellow">
-							<Spinner type="dots" /> Working...
+							<SpinnerFixed type="dots" /> Working...
 						</Text>
 					</Box>
 				)}

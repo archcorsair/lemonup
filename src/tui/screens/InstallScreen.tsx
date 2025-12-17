@@ -58,23 +58,11 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				}
 			} else if (type === "elvui") {
 				setStatus("Downloading ElvUI from TukUI...");
-				const tempDir =
-					addonManager.getConfig().destDir + "/../.lemonup-temp-elvui";
-
 				await addonManager.installTukUI(
 					"https://api.tukui.org/v1/download/dev/elvui/main",
-					config,
-					tempDir,
-					["ElvUI", "ElvUI_Options", "ElvUI_Libraries"],
+					"ElvUI",
+					["ElvUI_Options", "ElvUI_Libraries"],
 				);
-				setStatus("Registering...");
-				await addonManager.scanInstalledAddons(["ElvUI"]);
-
-				// Explicitly set type to TukUI and save URL
-				addonManager.updateAddonMetadata("ElvUI", {
-					type: "tukui",
-					url: "https://api.tukui.org/v1/download/dev/elvui/main",
-				});
 
 				setResultMessage("ElvUI Installed Successfully");
 				setResultStatus("success");

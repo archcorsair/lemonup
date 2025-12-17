@@ -9,6 +9,7 @@ import type { Config } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
+import { ShortcutsModal } from "../components/ShortcutsModal";
 import { useAddonManagerEvent } from "../hooks/useAddonManager";
 
 interface ManageScreenProps {

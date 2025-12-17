@@ -4,7 +4,14 @@ import type React from "react";
 import type { AddonRecord } from "../../core/db";
 import type { UpdateResult } from "../../core/manager";
 
-export type RepoStatus = "idle" | "checking" | "downloading" | "done" | "error";
+export type RepoStatus =
+	| "idle"
+	| "checking"
+	| "downloading"
+	| "extracting"
+	| "copying"
+	| "done"
+	| "error";
 
 interface RepositoryRowProps {
 	repo: AddonRecord;
@@ -75,6 +82,34 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 					</Text>
 				);
 			}
+			break;
+		case "extracting":
+			icon = nerdFonts ? (
+				<Text color="cyan">
+					<SpinnerFixed type="dots" />
+				</Text>
+			) : (
+				<Text color="cyan">E</Text>
+			);
+			statusText = (
+				<Text color="cyan" wrap="truncate-end">
+					Extracting...
+				</Text>
+			);
+			break;
+		case "copying":
+			icon = nerdFonts ? (
+				<Text color="cyan">
+					<SpinnerFixed type="dots" />
+				</Text>
+			) : (
+				<Text color="cyan">C</Text>
+			);
+			statusText = (
+				<Text color="cyan" wrap="truncate-end">
+					Copying...
+				</Text>
+			);
 			break;
 		case "done":
 			if (result?.updated) {

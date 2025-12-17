@@ -14,6 +14,9 @@ import {
 	type UpdateAddonResult,
 } from "./commands/UpdateAddonCommand";
 import {
+	InstallTukUICommand,
+} from "./commands/InstallTukUICommand";
+import {
 	InstallFromUrlCommand,
 	type InstallFromUrlResult,
 } from "./commands/InstallFromUrlCommand";
@@ -163,6 +166,21 @@ export class AddonManager extends EventEmitter {
 
 	public async installFromUrl(url: string): Promise<InstallFromUrlResult> {
 		const command = new InstallFromUrlCommand(this.dbManager, this.configManager, url);
+		return await this.executeCommand(command);
+	}
+
+	public async installTukUI(
+		url: string,
+		addonFolder: string,
+		subFolders: string[] = [],
+	): Promise<boolean> {
+		const command = new InstallTukUICommand(
+			this.dbManager,
+			this.configManager,
+			url,
+			addonFolder,
+			subFolders,
+		);
 		return await this.executeCommand(command);
 	}
 

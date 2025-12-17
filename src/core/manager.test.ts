@@ -2,12 +2,9 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigManager, REPO_TYPE } from "./config";
-import { AddonManager } from "./manager";
+import { ConfigManager } from "./config";
 
 // --- Mocks ---
-// We need to mock these BEFORE importing AddonManager or inside the test file before usage
-// But since we are in the same file, we can use mock.module
 const mockGetRemoteCommit = mock();
 const mockClone = mock();
 const mockDownload = mock();
@@ -16,12 +13,16 @@ const mockUnzip = mock();
 mock.module("./git", () => ({
 	getRemoteCommit: mockGetRemoteCommit,
 	clone: mockClone,
+	getCurrentCommit: mock(() => Promise.resolve("hash")),
 }));
 
 mock.module("./downloader", () => ({
 	download: mockDownload,
 	unzip: mockUnzip,
 }));
+
+// Import AddonManager dynamically
+const { AddonManager } = await import("./manager");
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-manager");
 const CONFIG_DIR = path.join(TMP_BASE, "config");
@@ -92,6 +93,14 @@ describe("AddonManager", () => {
 		};
 
 		mockGetRemoteCommit.mockResolvedValue("new-hash");
+		mockClone.mockImplementation(async (_url, _branch, dest) => {
+			// Fake the clone by creating the folder in dest
+			const folderPath = path.join(dest, "FolderA");
+			fs.mkdirSync(folderPath, { recursive: true });
+			await Bun.write(path.join(folderPath, "file.txt"), "content");
+			return true;
+		});
+
 		const result = await manager.updateAddon(
 			addon,
 			false,
