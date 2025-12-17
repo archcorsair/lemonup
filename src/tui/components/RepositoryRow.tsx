@@ -1,14 +1,13 @@
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import { REPO_TYPE, type Repository } from "../../core/config";
-
+import type { AddonRecord } from "../../core/db";
 import type { UpdateResult } from "../../core/manager";
 
 export type RepoStatus = "idle" | "checking" | "downloading" | "done" | "error";
 
 interface RepositoryRowProps {
-	repo: Repository;
+	repo: AddonRecord;
 	status: RepoStatus;
 	result?: UpdateResult;
 	nerdFonts?: boolean;
@@ -28,8 +27,10 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 	let statusText = <Text color="gray">Waiting</Text>;
 
 	const typeLabel =
-		repo.type === REPO_TYPE.TUKUI ? (
+		repo.type === "tukui" ? (
 			<Text color="magenta">[TukUI]</Text>
+		) : repo.type === "manual" ? (
+			<Text color="gray">[Man]</Text>
 		) : (
 			<Text color="blue">[Git]</Text>
 		);
@@ -47,7 +48,11 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			) : (
 				<Text color="yellow">?</Text>
 			);
-			statusText = <Text color="yellow">Checking...</Text>;
+			statusText = (
+				<Text color="yellow" wrap="truncate-end">
+					Checking...
+				</Text>
+			);
 			break;
 		case "downloading":
 			icon = nerdFonts ? (
@@ -57,24 +62,44 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			) : (
 				<Text color="cyan">↓</Text>
 			);
-			if (repo.type === REPO_TYPE.TUKUI) {
-				statusText = <Text color="cyan">Downloading Zip...</Text>;
+			if (repo.type === "tukui") {
+				statusText = (
+					<Text color="cyan" wrap="truncate-end">
+						Downloading Zip...
+					</Text>
+				);
 			} else {
-				statusText = <Text color="cyan">Git Syncing...</Text>;
+				statusText = (
+					<Text color="cyan" wrap="truncate-end">
+						Git Syncing...
+					</Text>
+				);
 			}
 			break;
 		case "done":
 			if (result?.updated) {
-				icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
-				statusText = <Text color="green">{result.message}</Text>;
+				icon = <Text color="yellow">{nerdFonts ? "📦" : "Upd"}</Text>;
+				statusText = (
+					<Text color="yellow" wrap="truncate-end">
+						{result.message}
+					</Text>
+				);
 			} else {
 				icon = <Text> </Text>;
-				statusText = <Text color="green">Up to date</Text>;
+				statusText = (
+					<Text color="green" wrap="truncate-end">
+						Up to date
+					</Text>
+				);
 			}
 			break;
 		case "error":
 			icon = <Text color="red">{nerdFonts ? "✘" : "X"}</Text>;
-			statusText = <Text color="red">{result?.error || "Error"}</Text>;
+			statusText = (
+				<Text color="red" wrap="truncate-end">
+					{result?.error || "Error"}
+				</Text>
+			);
 			break;
 	}
 
@@ -95,9 +120,13 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 
 			<Box width={10}>{typeLabel}</Box>
 
-			<Box width={15}>
-				<Text color="gray">
-					{repo.installedVersion ? repo.installedVersion.substring(0, 7) : "-"}
+			<Box width={25}>
+				<Text color="gray" wrap="truncate-end">
+					{repo.version
+						? repo.version.match(/^[a-f0-9]{40}$/i)
+							? repo.version.substring(0, 7)
+							: repo.version
+						: "-"}
 				</Text>
 			</Box>
 

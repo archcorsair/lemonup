@@ -55,6 +55,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 			);
 
 			const freshConfig = addonManager.getConfig();
+			const allAddons = addonManager.getAllAddons();
 
 			if (freshConfig.backupWTF) {
 				setBackupStatus("running");
@@ -90,41 +91,41 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 				setBackupStatus("skipped");
 			}
 
-			for (const repo of freshConfig.repositories) {
-				setRepoStatuses((prev) => ({ ...prev, [repo.name]: "checking" }));
+			for (const addon of allAddons) {
+				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
 
 				try {
-					const res = await addonManager.updateRepository(
-						repo,
+					const res = await addonManager.updateAddon(
+						addon,
 						freshConfig,
 						tempDir,
 						force,
 						dryRun,
-						(status) => {
+						(status: string) => {
 							setRepoStatuses((prev) => ({
 								...prev,
-								[repo.name]: status as RepoStatus,
+								[addon.folder]: status as RepoStatus,
 							}));
 						},
 					);
 
-					setResults((prev) => ({ ...prev, [repo.name]: res }));
+					setResults((prev) => ({ ...prev, [addon.folder]: res }));
 					setRepoStatuses((prev) => ({
 						...prev,
-						[repo.name]: res.success ? "done" : "error",
+						[addon.folder]: res.success ? "done" : "error",
 					}));
 				} catch (e: unknown) {
 					const errorMsg = e instanceof Error ? e.message : String(e);
 					setResults((prev) => ({
 						...prev,
-						[repo.name]: {
-							repoName: repo.name,
+						[addon.folder]: {
+							repoName: addon.name,
 							success: false,
 							updated: false,
 							error: errorMsg,
 						},
 					}));
-					setRepoStatuses((prev) => ({ ...prev, [repo.name]: "error" }));
+					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "error" }));
 				}
 			}
 
@@ -144,6 +145,12 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 			else if (input === "q") exit();
 		}
 	});
+
+	// We need to render based on database state, not config
+	// But State here is local. We should init state from allAddons?
+	// The effect runs on mount.
+	// Let's grab addons outside for rendering
+	const allAddons = addonManager.getAllAddons();
 
 	return (
 		<Box flexDirection="column" gap={0}>
@@ -171,12 +178,12 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 				</Box>
 			)}
 
-			{config.repositories.map((repo) => (
+			{allAddons.map((addon) => (
 				<RepositoryRow
-					key={repo.name}
-					repo={repo}
-					status={repoStatuses[repo.name] || "idle"}
-					result={results[repo.name]}
+					key={addon.folder}
+					repo={addon}
+					status={repoStatuses[addon.folder] || "idle"}
+					result={results[addon.folder]}
 					nerdFonts={config.nerdFonts}
 				/>
 			))}

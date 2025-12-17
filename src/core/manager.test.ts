@@ -55,37 +55,40 @@ describe("AddonManager", () => {
 
 	afterEach(() => {
 		mock.restore();
+		if (manager) manager.close();
+		// Give SQLite a moment (sometimes needed on windows)
+		// await new Promise(r => setTimeout(r, 10));
+		if (fs.existsSync(TMP_BASE)) {
+			try {
+				fs.rmSync(TMP_BASE, { recursive: true, force: true });
+			} catch (_) {}
+		}
 	});
 
 	test("checkUpdate should return true if versions differ", async () => {
-		const repo = {
+		const addon: any = {
 			name: "test-repo",
-			type: REPO_TYPE.GITHUB,
-			gitRemote: "http://git",
-			branch: "main",
-			folders: ["test"],
-			installedVersion: "old-hash",
-			downloadUrl: undefined,
+			type: "github",
+			url: "http://git",
+			version: "old-hash",
 		};
 
 		mockGetRemoteCommit.mockResolvedValue("new-hash");
 
-		const result = await manager.checkUpdate(repo);
+		const result = await manager.checkUpdate(addon);
 
 		expect(result.updateAvailable).toBe(true);
 		expect(result.remoteVersion).toBe("new-hash");
 		expect(mockGetRemoteCommit).toHaveBeenCalledWith("http://git", "main");
 	});
 
-	test("updateRepository (GitHub) should clone and install", async () => {
-		const repo = {
+	test("updateAddon (GitHub) should clone and install", async () => {
+		const addon: any = {
 			name: "gh-repo",
-			type: REPO_TYPE.GITHUB,
-			gitRemote: "http://git",
-			branch: "main",
-			folders: ["FolderA"],
-			installedVersion: "old-hash",
-			downloadUrl: undefined,
+			folder: "FolderA",
+			type: "github",
+			url: "http://git",
+			version: "old-hash",
 		};
 
 		mockGetRemoteCommit.mockResolvedValue("new-hash");
@@ -97,8 +100,8 @@ describe("AddonManager", () => {
 			return true;
 		});
 
-		const result = await manager.updateRepository(
-			repo,
+		const result = await manager.updateAddon(
+			addon,
 			configManager.get(),
 			TMP_BASE,
 			false,
@@ -111,60 +114,16 @@ describe("AddonManager", () => {
 		// Check if installed
 		const installedFile = path.join(DEST_DIR, "FolderA", "file.txt");
 		expect(await Bun.file(installedFile).exists()).toBe(true);
-
-		// Check config update
-		// Note: repo is not added to config in this test, so we don't check config update persistence here.
-		// Detailed config update logic is tested in "updateRepository (GitHub) with repo in config"
 	});
 
-	// Fix for the above observation:
-	test("updateRepository (GitHub) with repo in config", async () => {
-		const repo = {
-			name: "gh-repo-real",
-			type: REPO_TYPE.GITHUB,
-			gitRemote: "http://git",
-			branch: "main",
-			folders: ["FolderA"],
-			installedVersion: "old-hash",
-			downloadUrl: undefined,
-		};
-		configManager.set("repositories", [repo]);
-
-		mockGetRemoteCommit.mockResolvedValue("new-hash");
-		mockClone.mockImplementation(async (_url, _branch, dest) => {
-			const folderPath = path.join(dest, "FolderA");
-			fs.mkdirSync(folderPath, { recursive: true });
-			return true;
-		});
-
-		const result = await manager.updateRepository(
-			repo,
-			configManager.get(),
-			TMP_BASE,
-			false,
-		);
-
-		expect(result.success).toBe(true);
-
-		// Verify config updated
-		const conf = configManager.get();
-		const savedRepo = conf.repositories.find((r) => r.name === "gh-repo-real");
-		expect(savedRepo?.installedVersion).toBe("new-hash");
-	});
-
-	test("updateRepository (TukUI) should download and install", async () => {
-		const repo = {
+	test("updateAddon (TukUI) should download and install", async () => {
+		const addon: any = {
 			name: "tukui-repo",
-			type: REPO_TYPE.TUKUI,
-			gitRemote: "http://git-check", // used for version check
-			branch: "main",
-			folders: ["TukUI"],
-			installedVersion: "old-hash",
-			downloadUrl: "http://download",
+			folder: "TukUI",
+			type: "tukui",
+			url: "http://download",
+			version: "old-hash",
 		};
-		configManager.set("repositories", [repo]);
-
-		mockGetRemoteCommit.mockResolvedValue("new-hash");
 
 		mockDownload.mockResolvedValue(true);
 		mockUnzip.mockImplementation(async (_zipPath, dest) => {
@@ -174,8 +133,8 @@ describe("AddonManager", () => {
 			return true;
 		});
 
-		const result = await manager.updateRepository(
-			repo,
+		const result = await manager.updateAddon(
+			addon,
 			configManager.get(),
 			TMP_BASE,
 			false,
@@ -187,5 +146,21 @@ describe("AddonManager", () => {
 
 		const installedFolder = path.join(DEST_DIR, "TukUI");
 		expect(fs.existsSync(installedFolder)).toBe(true);
+	});
+
+	test("scanInstalledAddons should find and register specific addon", async () => {
+		// Create a fake addon on disk
+		const addonDir = path.join(DEST_DIR, "MyAddon");
+		fs.mkdirSync(addonDir, { recursive: true });
+		const tocContent = `
+## Title: My Addon
+## Version: 1.2.3
+## Author: Me
+## Interface: 110000
+`;
+		await Bun.write(path.join(addonDir, "MyAddon.toc"), tocContent);
+
+		const count = await manager.scanInstalledAddons();
+		expect(count).toBe(1);
 	});
 });

@@ -6,6 +6,7 @@ import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 import { FirstRunWizard } from "./FirstRunWizard";
 import { ConfigScreen } from "./screens/ConfigScreen";
+import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
 import { UpdateScreen } from "./screens/UpdateScreen";
@@ -25,7 +26,7 @@ interface AppProps {
 	testMode?: boolean;
 }
 
-type Screen = "menu" | "update" | "manage" | "config";
+type Screen = "menu" | "update" | "manage" | "config" | "install";
 
 export const App: React.FC<AppProps> = ({
 	force = false,
@@ -209,6 +210,18 @@ const AppContent: React.FC<AppProps> = ({
 					force={force}
 					dryRun={dryRun}
 					onBack={() => {
+						setConfig(addonManager.getConfig());
+						setActiveScreen("menu");
+					}}
+				/>
+			)}
+
+			{activeScreen === "install" && config && addonManager && (
+				<InstallScreen
+					config={config}
+					addonManager={addonManager}
+					onBack={() => {
+						// Rescan on back? Maybe not needed if install updates DB.
 						setConfig(addonManager.getConfig());
 						setActiveScreen("menu");
 					}}

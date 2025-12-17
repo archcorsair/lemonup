@@ -137,6 +137,15 @@ export class ConfigManager {
 		}
 	}
 
+	public removeRepository(repoName: string) {
+		const current = this.get();
+		const repos = current.repositories.filter((r) => r.name !== repoName);
+		if (repos.length !== current.repositories.length) {
+			this.store.set("repositories", repos);
+			logger.log("Config", `Removed repository: ${repoName}`);
+		}
+	}
+
 	public get path(): string {
 		return this.store.path;
 	}

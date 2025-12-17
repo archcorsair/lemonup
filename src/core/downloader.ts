@@ -3,12 +3,14 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl-promise";
+import { logger } from "./logger";
 
 export async function download(
 	url: string,
 	destPath: string,
 ): Promise<boolean> {
 	try {
+		logger.log("Downloader", `Downloading: ${url}`);
 		const response = await fetch(url, {
 			headers: {
 				"User-Agent":
@@ -17,12 +19,18 @@ export async function download(
 		});
 
 		if (!response.ok) {
+			logger.error(
+				"Downloader",
+				`Download failed. Status: ${response.status} ${response.statusText} for ${url}`,
+			);
 			return false;
 		}
 
 		await Bun.write(destPath, response);
+		logger.log("Downloader", "Download complete");
 		return true;
-	} catch (_error) {
+	} catch (error) {
+		logger.error("Downloader", `Download threw error for ${url}`, error);
 		return false;
 	}
 }
@@ -36,7 +44,24 @@ export async function unzip(
 		zipFile = await yauzl.open(zipPath);
 		try {
 			for await (const entry of zipFile) {
-				const entryPath = path.join(destDir, entry.filename);
+				// Validate entry path to prevent directory traversal
+				if (entry.filename.includes("..")) {
+					logger.error(
+						"Downloader",
+						`Skipping unsafe entry: ${entry.filename}`,
+					);
+					continue;
+				}
+
+				const entryPath = path.resolve(destDir, entry.filename);
+				// Ensure entryPath is within destDir
+				if (!entryPath.startsWith(destDir)) {
+					logger.error(
+						"Downloader",
+						`Skipping entry outside destDir: ${entry.filename}`,
+					);
+					continue;
+				}
 
 				if (entry.filename.endsWith("/")) {
 					// Directory
@@ -45,6 +70,8 @@ export async function unzip(
 					// File
 					const readStream = await entry.openReadStream();
 					const parentDir = path.dirname(entryPath);
+
+					// Ensure parent dir exists
 					await fsp.mkdir(parentDir, { recursive: true });
 
 					const writeStream = fs.createWriteStream(entryPath);

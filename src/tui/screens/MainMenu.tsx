@@ -12,6 +12,7 @@ interface MainMenuProps {
 
 const OPTIONS = [
 	{ id: "update", label: "Update All" },
+	{ id: "install", label: "Install Addon" },
 	{ id: "manage", label: "Manage Addons" },
 	{ id: "config", label: "Settings" },
 ] as const;
