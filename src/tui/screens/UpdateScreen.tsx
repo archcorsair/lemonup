@@ -1,11 +1,13 @@
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import type { Config } from "../../core/config";
-import type { AddonManager, UpdateResult } from "../../core/manager";
+import type { AddonManager } from "../../core/manager";
+import type { UpdateAddonResult } from "../../core/commands/UpdateAddonCommand";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
+import { useAddonManagerEvent } from "../hooks/useAddonManager";
 
 interface UpdateScreenProps {
 	config: Config;
@@ -17,45 +19,73 @@ interface UpdateScreenProps {
 }
 
 export const UpdateScreen: React.FC<UpdateScreenProps> = ({
-	config: initialConfig,
+	config,
 	addonManager,
 	force = false,
-	dryRun = false,
 	testMode = false,
 	onBack,
 }) => {
 	const { exit } = useApp();
-	const [config] = useState(initialConfig);
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
 		{},
 	);
-	const [results, setResults] = useState<Record<string, UpdateResult>>({});
+	const [results, setResults] = useState<Record<string, UpdateAddonResult>>({});
 	const [isDone, setIsDone] = useState(false);
-
-	useEffect(() => {
-		const initialStatuses: Record<string, RepoStatus> = {};
-		for (const repo of config.repositories) {
-			initialStatuses[repo.name] = "idle";
-		}
-		setRepoStatuses(initialStatuses);
-	}, [config]);
-
 	const [backupStatus, setBackupStatus] = useState<
 		"idle" | "running" | "success" | "error" | "skipped"
 	>("idle");
 
+	const allAddons = addonManager.getAllAddons();
+
+	// Event Handlers
+	useAddonManagerEvent(
+		addonManager,
+		"addon:update-check:start",
+		useCallback((name) => {
+			const addon = allAddons.find((a) => a.name === name);
+			if (addon) {
+				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
+			}
+		}, [allAddons]),
+	);
+
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:downloading",
+		useCallback((name) => {
+			const addon = allAddons.find((a) => a.name === name);
+			if (addon) {
+				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "downloading" }));
+			}
+		}, [allAddons]),
+	);
+
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:extracting",
+		useCallback((name) => {
+			const addon = allAddons.find((a) => a.name === name);
+			if (addon) {
+				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "extracting" }));
+			}
+		}, [allAddons]),
+	);
+
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:copying",
+		useCallback((name) => {
+			const addon = allAddons.find((a) => a.name === name);
+			if (addon) {
+				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "copying" }));
+			}
+		}, [allAddons]),
+	);
+
 	useEffect(() => {
 		const runUpdates = async () => {
-			const tempDir = await import("node:os").then((os) =>
-				import("node:path").then((path) => path.join(os.tmpdir(), "lemonup")),
-			);
-			await import("node:fs/promises").then((fs) =>
-				fs.mkdir(tempDir, { recursive: true }),
-			);
-
 			const freshConfig = addonManager.getConfig();
-			const allAddons = addonManager.getAllAddons();
 
 			if (freshConfig.backupWTF) {
 				setBackupStatus("running");
@@ -91,53 +121,27 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 				setBackupStatus("skipped");
 			}
 
-			for (const addon of allAddons) {
-				setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
+			const updateResults = await addonManager.updateAll(force);
 
-				try {
-					const res = await addonManager.updateAddon(
-						addon,
-						freshConfig,
-						tempDir,
-						force,
-						dryRun,
-						(status: string) => {
-							setRepoStatuses((prev) => ({
-								...prev,
-								[addon.folder]: status as RepoStatus,
-							}));
-						},
-					);
+			// Map results to folders for rendering
+			const resultsMap: Record<string, UpdateAddonResult> = {};
+			const statusMap: Record<string, RepoStatus> = {};
 
-					setResults((prev) => ({ ...prev, [addon.folder]: res }));
-					setRepoStatuses((prev) => ({
-						...prev,
-						[addon.folder]: res.success ? "done" : "error",
-					}));
-				} catch (e: unknown) {
-					const errorMsg = e instanceof Error ? e.message : String(e);
-					setResults((prev) => ({
-						...prev,
-						[addon.folder]: {
-							repoName: addon.name,
-							success: false,
-							updated: false,
-							error: errorMsg,
-						},
-					}));
-					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "error" }));
+			for (const res of updateResults) {
+				const addon = allAddons.find((a) => a.name === res.repoName);
+				if (addon) {
+					resultsMap[addon.folder] = res;
+					statusMap[addon.folder] = res.success ? "done" : "error";
 				}
 			}
 
+			setResults(resultsMap);
+			setRepoStatuses((prev) => ({ ...prev, ...statusMap }));
 			setIsDone(true);
-
-			await import("node:fs/promises").then((fs) =>
-				fs.rm(tempDir, { recursive: true, force: true }),
-			);
 		};
 
 		runUpdates();
-	}, [addonManager, force, dryRun, testMode]);
+	}, [addonManager, force, testMode, allAddons]);
 
 	useInput((input, key) => {
 		if (key.escape || (input === "q" && isDone)) {
@@ -145,12 +149,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 			else if (input === "q") exit();
 		}
 	});
-
-	// We need to render based on database state, not config
-	// But State here is local. We should init state from allAddons?
-	// The effect runs on mount.
-	// Let's grab addons outside for rendering
-	const allAddons = addonManager.getAllAddons();
 
 	return (
 		<Box flexDirection="column" gap={0}>

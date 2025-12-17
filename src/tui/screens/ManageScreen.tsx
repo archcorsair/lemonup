@@ -9,7 +9,7 @@ import type { Config } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
-import { ShortcutsModal } from "../components/ShortcutsModal";
+import { useAddonManagerEvent } from "../hooks/useAddonManager";
 
 interface ManageScreenProps {
 	config: Config;
@@ -65,6 +65,46 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		Record<string, RepoStatus>
 	>({});
 
+	useAddonManagerEvent(
+		addonManager,
+		"addon:update-check:start",
+		(name) => {
+			setUpdateProgress((prev) => ({ ...prev, [name]: "checking" }));
+		},
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:downloading",
+		(name) => {
+			setUpdateProgress((prev) => ({ ...prev, [name]: "downloading" }));
+		},
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:extracting",
+		(name) => {
+			setUpdateProgress((prev) => ({ ...prev, [name]: "extracting" }));
+		},
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:copying",
+		(name) => {
+			setUpdateProgress((prev) => ({ ...prev, [name]: "copying" }));
+		},
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:complete",
+		(name) => {
+			setUpdateProgress((prev) => {
+				const next = { ...prev };
+				delete next[name];
+				return next;
+			});
+		},
+	);
+
 	// 2. Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
@@ -81,16 +121,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			try {
 				const result = await addonManager.updateAddon(
 					addon,
-					addonManager.getConfig(),
-					tempDir,
 					force,
-					dryRun,
-					(status: string) => {
-						setUpdateProgress((prev) => ({
-							...prev,
-							[addon.name]: status as RepoStatus,
-						}));
-					},
 				);
 				return result;
 			} finally {

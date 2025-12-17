@@ -92,18 +92,8 @@ describe("AddonManager", () => {
 		};
 
 		mockGetRemoteCommit.mockResolvedValue("new-hash");
-		mockClone.mockImplementation(async (_url, _branch, dest) => {
-			// Fake the clone by creating the folder in dest
-			const folderPath = path.join(dest, "FolderA");
-			fs.mkdirSync(folderPath, { recursive: true });
-			await Bun.write(path.join(folderPath, "file.txt"), "content");
-			return true;
-		});
-
 		const result = await manager.updateAddon(
 			addon,
-			configManager.get(),
-			TMP_BASE,
 			false,
 		);
 
@@ -135,8 +125,6 @@ describe("AddonManager", () => {
 
 		const result = await manager.updateAddon(
 			addon,
-			configManager.get(),
-			TMP_BASE,
 			false,
 		);
 

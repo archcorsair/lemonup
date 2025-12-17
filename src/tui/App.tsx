@@ -28,6 +28,27 @@ interface AppProps {
 
 type Screen = "menu" | "update" | "manage" | "config" | "install";
 
+interface AppState {
+	screen: Screen;
+	isBusy: boolean;
+}
+
+type AppAction =
+	| { type: "NAVIGATE"; screen: Screen }
+	| { type: "SET_BUSY"; busy: boolean };
+
+function appReducer(state: AppState, action: AppAction): AppState {
+	switch (action.type) {
+		case "NAVIGATE":
+			if (state.isBusy) return state; // Prevent navigation while busy
+			return { ...state, screen: action.screen };
+		case "SET_BUSY":
+			return { ...state, isBusy: action.busy };
+		default:
+			return state;
+	}
+}
+
 export const App: React.FC<AppProps> = ({
 	force = false,
 	dryRun = false,
@@ -45,7 +66,14 @@ const AppContent: React.FC<AppProps> = ({
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [activeScreen, setActiveScreen] = useState<Screen>("menu");
+	const [{ screen: activeScreen, isBusy }, dispatch] = React.useReducer(
+		appReducer,
+		{
+			screen: "menu",
+			isBusy: false,
+		},
+	);
+
 	const [initialLoad, setInitialLoad] = useState(true);
 	const [showWizard, setShowWizard] = useState(false);
 	const [configManager, setConfigManager] = useState<ConfigManager | null>(
@@ -127,7 +155,7 @@ const AppContent: React.FC<AppProps> = ({
 		setConfig(cfg);
 
 		if (initialLoad) {
-			setActiveScreen("menu");
+			dispatch({ type: "NAVIGATE", screen: "menu" });
 			setInitialLoad(false);
 		}
 	}, [configManager, config, initialLoad]);
@@ -179,13 +207,22 @@ const AppContent: React.FC<AppProps> = ({
 						</Text>
 					</Box>
 				)}
+				{isBusy && (
+					<Box marginLeft={2}>
+						<Text color="yellow">
+							<Spinner type="dots" /> Working...
+						</Text>
+					</Box>
+				)}
 			</Box>
 
 			{activeScreen === "menu" && (
 				<MainMenu
 					config={config}
 					configManager={configManager}
-					onSelect={(option) => setActiveScreen(option as Screen)}
+					onSelect={(option) =>
+						dispatch({ type: "NAVIGATE", screen: option as Screen })
+					}
 				/>
 			)}
 
@@ -198,7 +235,7 @@ const AppContent: React.FC<AppProps> = ({
 					testMode={testMode}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						setActiveScreen("menu");
+						dispatch({ type: "NAVIGATE", screen: "menu" });
 					}}
 				/>
 			)}
@@ -211,7 +248,7 @@ const AppContent: React.FC<AppProps> = ({
 					dryRun={dryRun}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						setActiveScreen("menu");
+						dispatch({ type: "NAVIGATE", screen: "menu" });
 					}}
 				/>
 			)}
@@ -221,9 +258,8 @@ const AppContent: React.FC<AppProps> = ({
 					config={config}
 					addonManager={addonManager}
 					onBack={() => {
-						// Rescan on back? Maybe not needed if install updates DB.
 						setConfig(addonManager.getConfig());
-						setActiveScreen("menu");
+						dispatch({ type: "NAVIGATE", screen: "menu" });
 					}}
 				/>
 			)}
@@ -231,7 +267,7 @@ const AppContent: React.FC<AppProps> = ({
 			{activeScreen === "config" && configManager && (
 				<ConfigScreen
 					configManager={configManager}
-					onBack={() => setActiveScreen("menu")}
+					onBack={() => dispatch({ type: "NAVIGATE", screen: "menu" })}
 				/>
 			)}
 		</Box>
