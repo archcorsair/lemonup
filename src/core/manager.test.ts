@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigManager } from "./config";
+import type { AddonManager as AddonManagerType } from "./manager";
 
 // --- Mocks ---
 const mockGetRemoteCommit = mock();
@@ -30,7 +31,7 @@ const DEST_DIR = path.join(TMP_BASE, "AddOns");
 
 describe("AddonManager", () => {
 	let configManager: ConfigManager;
-	let manager: AddonManager;
+	let manager: AddonManagerType;
 
 	beforeEach(() => {
 		// Clear mocks

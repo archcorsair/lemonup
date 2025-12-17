@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
-import yauzl from "yauzl-promise";
+import AdmZip from "adm-zip";
 import { logger } from "./logger";
 
 export async function download(
@@ -39,48 +38,41 @@ export async function unzip(
 	zipPath: string,
 	destDir: string,
 ): Promise<boolean> {
-	let zipFile: Awaited<ReturnType<typeof yauzl.open>> | undefined;
 	try {
-		zipFile = await yauzl.open(zipPath);
-		try {
-			for await (const entry of zipFile) {
-				// Validate entry path to prevent directory traversal
-				if (entry.filename.includes("..")) {
-					logger.error(
-						"Downloader",
-						`Skipping unsafe entry: ${entry.filename}`,
-					);
-					continue;
-				}
+		// AdmZip is synchronous by default, which is fine for this use case
+		// and avoids the native binding complexity.
+		const zip = new AdmZip(zipPath);
+		const zipEntries = zip.getEntries();
 
-				const entryPath = path.resolve(destDir, entry.filename);
-				// Ensure entryPath is within destDir
-				if (!entryPath.startsWith(destDir)) {
-					logger.error(
-						"Downloader",
-						`Skipping entry outside destDir: ${entry.filename}`,
-					);
-					continue;
-				}
-
-				if (entry.filename.endsWith("/")) {
-					// Directory
-					await fsp.mkdir(entryPath, { recursive: true });
-				} else {
-					// File
-					const readStream = await entry.openReadStream();
-					const parentDir = path.dirname(entryPath);
-
-					// Ensure parent dir exists
-					await fsp.mkdir(parentDir, { recursive: true });
-
-					const writeStream = fs.createWriteStream(entryPath);
-					await pipeline(readStream, writeStream);
-				}
+		for (const entry of zipEntries) {
+			// Validate entry path to prevent directory traversal
+			if (entry.entryName.includes("..")) {
+				logger.error("Downloader", `Skipping unsafe entry: ${entry.entryName}`);
+				continue;
 			}
-		} finally {
-			await zipFile?.close();
+
+			const entryPath = path.resolve(destDir, entry.entryName);
+			// Ensure entryPath is within destDir
+			if (!entryPath.startsWith(destDir)) {
+				logger.error(
+					"Downloader",
+					`Skipping entry outside destDir: ${entry.entryName}`,
+				);
+				continue;
+			}
+
+			if (entry.isDirectory) {
+				await fsp.mkdir(entryPath, { recursive: true });
+			} else {
+				const parentDir = path.dirname(entryPath);
+				await fsp.mkdir(parentDir, { recursive: true });
+				
+				// AdmZip synchronous extraction
+				const data = entry.getData();
+				await Bun.write(entryPath, data);
+			}
 		}
+
 		return true;
 	} catch (error) {
 		throw new Error(
