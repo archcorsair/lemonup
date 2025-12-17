@@ -5,6 +5,7 @@ import type { ConfigManager } from "../config";
 import type { DatabaseManager } from "../db";
 import * as GitClient from "../git";
 import { logger } from "../logger";
+import { isPathConfigured } from "../paths";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
 
@@ -25,6 +26,15 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 
 	async execute(context: CommandContext): Promise<InstallFromUrlResult> {
 		const config = this.configManager.get();
+
+		if (!isPathConfigured(config.destDir)) {
+			return {
+				success: false,
+				installedAddons: [],
+				error: "WoW Addon directory is not configured. Please go to Settings.",
+			};
+		}
+
 		const tempDir = path.join(os.tmpdir(), "lemonup-install-" + Date.now());
 
 		try {

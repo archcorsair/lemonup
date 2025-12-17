@@ -4,6 +4,7 @@ import path from "node:path";
 import type { ConfigManager } from "../config";
 import type { DatabaseManager } from "../db";
 import * as Downloader from "../downloader";
+import { isPathConfigured } from "../paths";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
 
@@ -18,6 +19,11 @@ export class InstallTukUICommand implements Command<boolean> {
 
 	async execute(context: CommandContext): Promise<boolean> {
 		const config = this.configManager.get();
+
+		if (!isPathConfigured(config.destDir)) {
+			throw new Error("WoW Addon directory is not configured.");
+		}
+
 		const tempDir = path.join(os.tmpdir(), "lemonup-tukui-" + Date.now());
 		await fs.mkdir(tempDir, { recursive: true });
 

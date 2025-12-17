@@ -33,7 +33,8 @@ describe("ConfigManager", () => {
 		manager.createDefaultConfig();
 		const config = manager.get();
 
-		expect(config.destDir).toBe("NOT_CONFIGURED");
+		// getDefaultWoWPath returns a path on supported platforms
+		expect(config.destDir).not.toBe("NOT_CONFIGURED");
 		expect(config.checkInterval).toBe(60000);
 		expect(manager.hasConfigFile).toBe(true);
 	});
