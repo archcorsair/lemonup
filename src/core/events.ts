@@ -3,7 +3,11 @@ export type AddonManagerEvents = {
 	"scan:progress": [folder: string];
 	"scan:complete": [count: number];
 	"addon:update-check:start": [name: string];
-	"addon:update-check:complete": [name: string, updateAvailable: boolean, remoteVersion: string];
+	"addon:update-check:complete": [
+		name: string,
+		updateAvailable: boolean,
+		remoteVersion: string,
+	];
 	"addon:install:start": [name: string];
 	"addon:install:downloading": [name: string];
 	"addon:install:extracting": [name: string];
@@ -11,5 +15,5 @@ export type AddonManagerEvents = {
 	"addon:install:complete": [name: string];
 	"addon:remove:start": [name: string];
 	"addon:remove:complete": [name: string];
-	"error": [context: string, message: string];
+	error: [context: string, message: string];
 };

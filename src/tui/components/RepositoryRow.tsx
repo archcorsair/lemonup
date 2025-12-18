@@ -116,7 +116,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 				// Distinguish between "Update Available" (ManageScreen) and "Updated" (UpdateScreen)
 				// ManageScreen uses "Update: ..." message convention
 				const isUpdateAvailableMsg = result.message?.startsWith("Update:");
-				
+
 				if (isUpdateAvailableMsg) {
 					icon = <Text color="yellow">{nerdFonts ? "📦" : "!"}</Text>;
 					statusText = (
@@ -181,7 +181,8 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 					color={isSelected ? "blue" : isChecked ? "green" : undefined}
 					wrap="truncate-end"
 				>
-					{repo.name} {displayVersion ? <Text color="gray">({displayVersion})</Text> : null}
+					{repo.name}{" "}
+					{displayVersion ? <Text color="gray">({displayVersion})</Text> : null}
 				</Text>
 			</Box>
 

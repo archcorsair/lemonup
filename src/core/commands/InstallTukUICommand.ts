@@ -53,7 +53,9 @@ export class InstallTukUICommand implements Command<boolean> {
 				await fs.cp(source, dest, { recursive: true, force: true });
 			}
 
-			const scanCmd = new ScanCommand(this.dbManager, this.configManager, [this.addonFolder]);
+			const scanCmd = new ScanCommand(this.dbManager, this.configManager, [
+				this.addonFolder,
+			]);
 			await scanCmd.execute(context);
 
 			let gitHash: string | null = null;
@@ -64,7 +66,11 @@ export class InstallTukUICommand implements Command<boolean> {
 						"main",
 					);
 				} catch (e) {
-					logger.error("InstallTukUICommand", "Failed to get ElvUI git hash", e);
+					logger.error(
+						"InstallTukUICommand",
+						"Failed to get ElvUI git hash",
+						e,
+					);
 				}
 			}
 

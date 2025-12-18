@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
-import React, { useEffect, useState, useReducer } from "react";
+import type React from "react";
+import { useEffect, useReducer, useState } from "react";
 import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 import { FirstRunWizard } from "./FirstRunWizard";
@@ -75,13 +76,11 @@ const AppContent: React.FC<AppProps> = ({
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [{ screen: activeScreen, isBusy, lastMenuSelection }, dispatch] = useReducer(
-		appReducer,
-		{
+	const [{ screen: activeScreen, isBusy, lastMenuSelection }, dispatch] =
+		useReducer(appReducer, {
 			screen: "menu",
 			isBusy: false,
-		},
-	);
+		});
 
 	const [initialLoad, setInitialLoad] = useState(true);
 	const [showWizard, setShowWizard] = useState(false);

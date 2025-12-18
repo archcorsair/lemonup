@@ -31,50 +31,58 @@ export class DatabaseManager {
 	}
 
 	private init() {
-		// Basic migration: check if column exists, if not add it
-		const tableInfo = this.db.query("PRAGMA table_info(addons)").all() as any[];
-		const hasGitCommit = tableInfo.some((col) => col.name === "git_commit");
+		// Enable WAL mode for better concurrency
+		this.db.run("PRAGMA journal_mode = WAL;");
 
-		if (!hasGitCommit) {
-			try {
-				// If table exists but missing column, add it
-				// If table doesn't exist, create it with column
-				const tableExists =
-					(
-						this.db
-							.query(
-								"SELECT name FROM sqlite_master WHERE type='table' AND name='addons'",
-							)
-							.get() as any
-					)?.name === "addons";
+		// Check current schema version
+		const version = (this.db.query("PRAGMA user_version").get() as any)
+			.user_version;
 
-				if (tableExists) {
-					this.db.run("ALTER TABLE addons ADD COLUMN git_commit TEXT");
-				} else {
-					this.db.run(`
-						CREATE TABLE IF NOT EXISTS addons (
-							id INTEGER PRIMARY KEY AUTOINCREMENT,
-							name TEXT NOT NULL,
-							folder TEXT NOT NULL,
-							version TEXT,
-							git_commit TEXT,
-							author TEXT,
-							interface TEXT,
-							url TEXT,
-							type TEXT NOT NULL,
-							install_date TEXT NOT NULL,
-							last_updated TEXT NOT NULL
-						);
-					`);
-				}
-			} catch (e) {
-				logger.error("Database", "Failed to migrate/init DB", e);
-			}
+		logger.log("Database", `Current Schema Version: ${version}`);
+
+		if (version < 1) {
+			this.migrateToV1();
 		}
+	}
 
-		this.db.run(`
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_addons_folder ON addons(folder);
-		`);
+	private migrateToV1() {
+		logger.log("Database", "Migrating to Schema V1...");
+
+		this.db.transaction(() => {
+			this.db.run(`
+				CREATE TABLE IF NOT EXISTS addons (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL,
+					folder TEXT NOT NULL,
+					version TEXT,
+					git_commit TEXT,
+					author TEXT,
+					interface TEXT,
+					url TEXT,
+					type TEXT NOT NULL,
+					install_date TEXT NOT NULL,
+					last_updated TEXT NOT NULL
+				);
+			`);
+
+			// Ensure git_commit column exists if table was created in an older pre-versioned state
+			// (Handling the case where the table existed but without version tracking)
+			const tableInfo = this.db
+				.query("PRAGMA table_info(addons)")
+				.all() as any[];
+			const hasGitCommit = tableInfo.some((col) => col.name === "git_commit");
+			if (!hasGitCommit) {
+				this.db.run("ALTER TABLE addons ADD COLUMN git_commit TEXT");
+			}
+
+			this.db.run(`
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_addons_folder ON addons(folder);
+			`);
+
+			this.db.run("PRAGMA user_version = 1");
+		})();
+
+		logger.log("Database", "Migration to Schema V1 complete");
 	}
 
 	public getAll(): AddonRecord[] {

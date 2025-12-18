@@ -1,10 +1,14 @@
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
 import type { Config } from "../../core/config";
 import type { AddonManager } from "../../core/manager";
-import { getDefaultWoWPath, isPathConfigured, pathExists } from "../../core/paths";
+import {
+	getDefaultWoWPath,
+	isPathConfigured,
+	pathExists,
+} from "../../core/paths";
 import { ControlBar } from "../components/ControlBar";
 
 interface InstallScreenProps {
@@ -57,7 +61,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		setConfig(addonManager.getConfig());
 	}, [addonManager]);
 
-	const checkConfigAndInstall = (
+	const checkConfigAndInstall = async (
 		type: "github" | "elvui",
 		installUrl?: string,
 	) => {
@@ -81,7 +85,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			setDetectedPath(def);
 			setMode("config-auto-confirm");
 		} else {
-			handleInstall(type, installUrl);
+			await handleInstall(type, installUrl);
 		}
 	};
 
@@ -125,7 +129,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		setMode("result");
 	};
 
-	const savePathAndRetry = (pathStr: string) => {
+	const savePathAndRetry = async (pathStr: string) => {
 		try {
 			addonManager.setConfigValue("destDir", pathStr);
 			// Update local config
@@ -133,7 +137,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 			// Retry pending install
 			if (pendingInstall) {
-				handleInstall(pendingInstall.type, pendingInstall.url);
+				await handleInstall(pendingInstall.type, pendingInstall.url);
 			} else {
 				setMode("select");
 			}
@@ -144,7 +148,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		}
 	};
 
-	useInput((input, key) => {
+	useInput(async (input, key) => {
 		if (mode === "installing") return;
 
 		if (mode === "result") {
@@ -158,7 +162,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		if (mode === "config-auto-confirm") {
 			if (input.toLowerCase() === "y" || key.return) {
 				// User accepted auto-detected path
-				savePathAndRetry(detectedPath);
+				await savePathAndRetry(detectedPath);
 			} else if (input.toLowerCase() === "n" || key.escape) {
 				// User rejected, offer manual input
 				setMode("config-manual-input");
@@ -170,7 +174,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			if (input.toLowerCase() === "y") {
 				// Proceed with install
 				if (pendingInstall) {
-					handleInstall(pendingInstall.type, pendingInstall.url);
+					await handleInstall(pendingInstall.type, pendingInstall.url);
 				}
 			} else if (input.toLowerCase() === "n" || key.escape || key.return) {
 				if (pendingInstall?.type === "github") {
@@ -189,12 +193,12 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			if (key.return) {
 				if (manualPath.trim()) {
 					if (pathExists(manualPath.trim())) {
-						savePathAndRetry(manualPath.trim());
+						await savePathAndRetry(manualPath.trim());
 					} else {
 						// Optional: show error or confirm creation?
 						// For now, let's just accept it but warn?
 						// Or simpler: just save it. The install command checks again.
-						savePathAndRetry(manualPath.trim());
+						await savePathAndRetry(manualPath.trim());
 					}
 				}
 			} else if (key.escape) {
@@ -214,7 +218,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				if (action === "github") {
 					setMode("github-input");
 				} else if (action === "elvui") {
-					checkConfigAndInstall("elvui");
+					await checkConfigAndInstall("elvui");
 				}
 			} else if (key.escape || input === "q") {
 				onBack();
@@ -222,7 +226,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		} else if (mode === "github-input") {
 			if (key.return) {
 				if (url.trim()) {
-					checkConfigAndInstall("github", url);
+					await checkConfigAndInstall("github", url);
 				}
 			} else if (key.escape) {
 				setMode("select");
@@ -235,8 +239,15 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			<Text bold>Install Addon</Text>
 
 			{mode === "config-auto-confirm" && (
-				<Box flexDirection="column" borderColor="yellow" borderStyle="round" padding={1}>
-					<Text color="yellow" bold>WoW Addon Directory Not Configured</Text>
+				<Box
+					flexDirection="column"
+					borderColor="yellow"
+					borderStyle="round"
+					padding={1}
+				>
+					<Text color="yellow" bold>
+						WoW Addon Directory Not Configured
+					</Text>
 					<Text>I detected a default location:</Text>
 					<Text color="blue">{detectedPath}</Text>
 					<Box marginTop={1}>
@@ -246,8 +257,15 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			)}
 
 			{mode === "confirm-reinstall" && (
-				<Box flexDirection="column" borderColor="red" borderStyle="round" padding={1}>
-					<Text color="red" bold>Warning: Addon Already Installed</Text>
+				<Box
+					flexDirection="column"
+					borderColor="red"
+					borderStyle="round"
+					padding={1}
+				>
+					<Text color="red" bold>
+						Warning: Addon Already Installed
+					</Text>
 					<Text>It looks like this addon is already installed.</Text>
 					<Box marginTop={1}>
 						<Text>Do you want to reinstall and overwrite it? (y/N)</Text>
@@ -256,9 +274,18 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			)}
 
 			{mode === "config-manual-input" && (
-				<Box flexDirection="column" borderColor="cyan" borderStyle="round" padding={1}>
+				<Box
+					flexDirection="column"
+					borderColor="cyan"
+					borderStyle="round"
+					padding={1}
+				>
 					<Text bold>Enter WoW Addon Directory Path:</Text>
-					<TextInput value={manualPath} onChange={setManualPath} onSubmit={() => {}} />
+					<TextInput
+						value={manualPath}
+						onChange={setManualPath}
+						onSubmit={() => {}}
+					/>
 					<Box marginTop={1}>
 						<Text color="gray">Press Enter to save, Esc to cancel</Text>
 					</Box>

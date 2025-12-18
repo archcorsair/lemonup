@@ -1,21 +1,29 @@
-import { useEffect, useState } from "react";
-import type { AddonManager } from "../../core/manager";
+import { useEffect, useRef } from "react";
 import type { AddonManagerEvents } from "../../core/events";
+import type { AddonManager } from "../../core/manager";
 
 export function useAddonManagerEvent<E extends keyof AddonManagerEvents>(
 	manager: AddonManager | null,
 	event: E,
 	callback: (...args: AddonManagerEvents[E]) => void,
 ) {
+	const callbackRef = useRef(callback);
+
+	useEffect(() => {
+		callbackRef.current = callback;
+	}, [callback]);
+
 	useEffect(() => {
 		if (!manager) return;
 
-		// @ts-ignore - EventEmitter types can be tricky with custom maps
-		manager.on(event, callback);
+		const handler = (...args: AddonManagerEvents[E]) => {
+			callbackRef.current(...args);
+		};
+
+		manager.on(event, handler as any);
 
 		return () => {
-			// @ts-ignore
-			manager.off(event, callback);
+			manager.off(event, handler as any);
 		};
-	}, [manager, event, callback]);
+	}, [manager, event]);
 }

@@ -93,7 +93,8 @@ export class ScanCommand implements Command<number> {
 					isGit = false;
 				}
 
-				const finalVersion = version || (isGit && gitHash ? gitHash.substring(0, 7) : "Unknown");
+				const finalVersion =
+					version || (isGit && gitHash ? gitHash.substring(0, 7) : "Unknown");
 
 				const existing = this.dbManager.getByFolder(folderName);
 
@@ -110,7 +111,7 @@ export class ScanCommand implements Command<number> {
 						updates.version = finalVersion;
 						updated = true;
 					}
-					
+
 					if (gitHash && existing.git_commit !== gitHash) {
 						updates.git_commit = gitHash;
 						updated = true;

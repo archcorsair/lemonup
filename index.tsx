@@ -7,15 +7,18 @@ import { App } from "./src/tui/App";
 
 async function main() {
 	try {
-		const args = arg({
-			"--cli": Boolean,
-			"--force": Boolean,
-			"-f": "--force",
-			"--dry-run": Boolean,
-			"--test": Boolean,
-			"--help": Boolean,
-			"-h": "--help",
-		}, { permissive: true });
+		const args = arg(
+			{
+				"--cli": Boolean,
+				"--force": Boolean,
+				"-f": "--force",
+				"--dry-run": Boolean,
+				"--test": Boolean,
+				"--help": Boolean,
+				"-h": "--help",
+			},
+			{ permissive: true },
+		);
 
 		if (args["--help"]) {
 			console.log(`
@@ -37,7 +40,6 @@ Flags:
 		if (args["--cli"]) {
 			await runCLI();
 		} else {
-			// TUI Mode
 			const { waitUntilExit } = render(
 				<App
 					force={args["--force"]}
@@ -48,13 +50,19 @@ Flags:
 			await waitUntilExit();
 			process.exit(0);
 		}
-	} catch (err: any) {
-		if (err.code === "ARG_UNKNOWN_OPTION") {
+	} catch (err) {
+		if (err instanceof Error && (err as any).code === "ARG_UNKNOWN_OPTION") {
 			console.error(err.message);
 			console.error("Run 'lemonup --help' for usage.");
 			process.exit(1);
 		}
-		throw err;
+
+		if (err instanceof Error) {
+			console.error(err.message);
+		} else {
+			console.error(err);
+		}
+		process.exit(1);
 	}
 }
 

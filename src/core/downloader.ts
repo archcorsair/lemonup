@@ -38,20 +38,19 @@ export async function unzip(
 	destDir: string,
 ): Promise<boolean> {
 	try {
-		// AdmZip is synchronous by default, which is fine for this use case
-		// and avoids the native binding complexity.
 		const zip = new AdmZip(zipPath);
 		const zipEntries = zip.getEntries();
 
+		const resolvedDestDir = path.resolve(destDir);
+		const destDirWithSep = resolvedDestDir.endsWith(path.sep)
+			? resolvedDestDir
+			: resolvedDestDir + path.sep;
+
 		for (const entry of zipEntries) {
 			const entryName = entry.entryName;
+			const entryPath = path.resolve(resolvedDestDir, entryName);
 
-			// Normalize path and join with destDir
-			const entryPath = path.normalize(path.join(destDir, entryName));
-
-			// Robust path traversal check: ensure entryPath is still inside destDir
-			const relative = path.relative(destDir, entryPath);
-			if (relative.startsWith("..") || path.isAbsolute(relative)) {
+			if (!entryPath.startsWith(destDirWithSep)) {
 				logger.error("Downloader", `Skipping unsafe entry: ${entryName}`);
 				continue;
 			}
@@ -62,7 +61,6 @@ export async function unzip(
 				const parentDir = path.dirname(entryPath);
 				await fsp.mkdir(parentDir, { recursive: true });
 
-				// AdmZip synchronous extraction
 				const data = entry.getData();
 				await Bun.write(entryPath, data);
 			}

@@ -25,7 +25,17 @@ describe("paths", () => {
 
 	test("getDefaultWoWPath should return Wine path for Linux", () => {
 		spyOn(os, "platform").mockReturnValue("linux");
+
+		const fs = require("node:fs");
+		const originalExistsSync = fs.existsSync;
+		spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p === "string" && p.includes(".wine")) return true;
+			return false;
+		});
+
 		expect(getDefaultWoWPath()).toContain(".wine");
+
 		mock.restore();
+		fs.existsSync = originalExistsSync; // Restore manually just in case
 	});
 });

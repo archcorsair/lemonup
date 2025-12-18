@@ -136,10 +136,7 @@ describe("AddonManager", () => {
 			return true;
 		});
 
-		const result = await manager.updateAddon(
-			addon,
-			false,
-		);
+		const result = await manager.updateAddon(addon, false);
 
 		expect(result.success).toBe(true);
 		expect(result.updated).toBe(true);
@@ -167,10 +164,7 @@ describe("AddonManager", () => {
 			return true;
 		});
 
-		const result = await manager.updateAddon(
-			addon,
-			false,
-		);
+		const result = await manager.updateAddon(addon, false);
 
 		expect(result.success).toBe(true);
 		expect(mockDownload).toHaveBeenCalled();
@@ -200,18 +194,27 @@ describe("AddonManager", () => {
 		// 1. Setup - register an addon manually in DB (via scan)
 		const addonDir = path.join(DEST_DIR, "ExistingAddon");
 		fs.mkdirSync(addonDir, { recursive: true });
-		await Bun.write(path.join(addonDir, "ExistingAddon.toc"), "## Title: Existing");
-		
+		await Bun.write(
+			path.join(addonDir, "ExistingAddon.toc"),
+			"## Title: Existing",
+		);
+
 		await manager.scanInstalledAddons();
-		
+
 		// Update URL
-		manager.updateAddonMetadata("ExistingAddon", { url: "https://github.com/user/existing.git" });
+		manager.updateAddonMetadata("ExistingAddon", {
+			url: "https://github.com/user/existing.git",
+		});
 
 		// 2. Test
 		expect(manager.isAlreadyInstalled("ExistingAddon")).toBe(true);
 		expect(manager.isAlreadyInstalled("existingaddon")).toBe(true); // Case insensitive
-		expect(manager.isAlreadyInstalled("https://github.com/user/existing")).toBe(true); // Normalized URL
-		expect(manager.isAlreadyInstalled("https://github.com/user/existing.git/")).toBe(true); // Normalized URL
+		expect(manager.isAlreadyInstalled("https://github.com/user/existing")).toBe(
+			true,
+		); // Normalized URL
+		expect(
+			manager.isAlreadyInstalled("https://github.com/user/existing.git/"),
+		).toBe(true); // Normalized URL
 		expect(manager.isAlreadyInstalled("NonExistent")).toBe(false);
 	});
 });

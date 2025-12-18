@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import pLimit from "p-limit";
 import type React from "react";
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { BackupManager } from "../../core/backup";
 import type { Config } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
@@ -33,14 +33,13 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [globalMessage, setGlobalMessage] = useState("");
 
-	// Force re-render after DB changes
 	const [refreshKey, setRefreshKey] = useState(0);
 
-	// 1. Fetch Addons from DB
-	// Dependent on refreshKey to ensure re-fetch on update
-	const addons = addonManager.getAllAddons();
+	const addons = useMemo(
+		() => addonManager.getAllAddons(),
+		[addonManager, refreshKey],
+	);
 
-	// 1. Queries for Status Checking
 	const queries = useQueries({
 		queries: addons.map((addon) => ({
 			queryKey: ["addon", addon.folder],
@@ -57,11 +56,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				const res = await addonManager.checkUpdate(freshAddon);
 				return { ...res, checkedVersion: freshAddon.version };
 			},
-			staleTime: config.checkInterval, // User configured check interval
+			staleTime: config.checkInterval,
 		})),
 	});
 
-	// Track granular progress for updates
 	const [updateProgress, setUpdateProgress] = useState<
 		Record<string, RepoStatus>
 	>({});
@@ -69,41 +67,41 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	useAddonManagerEvent(
 		addonManager,
 		"addon:update-check:start",
-		(name) => {
+		useCallback((name) => {
 			setUpdateProgress((prev) => ({ ...prev, [name]: "checking" }));
-		},
+		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:downloading",
-		(name) => {
+		useCallback((name) => {
 			setUpdateProgress((prev) => ({ ...prev, [name]: "downloading" }));
-		},
+		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:extracting",
-		(name) => {
+		useCallback((name) => {
 			setUpdateProgress((prev) => ({ ...prev, [name]: "extracting" }));
-		},
+		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:copying",
-		(name) => {
+		useCallback((name) => {
 			setUpdateProgress((prev) => ({ ...prev, [name]: "copying" }));
-		},
+		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:complete",
-		(name) => {
+		useCallback((name) => {
 			setUpdateProgress((prev) => {
 				const next = { ...prev };
 				delete next[name];
 				return next;
 			});
-		},
+		}, []),
 	);
 
 	// 2. Mutation for Updating
@@ -120,10 +118,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			if (!addon) throw new Error("Addon not found");
 
 			try {
-				const result = await addonManager.updateAddon(
-					addon,
-					force,
-				);
+				const result = await addonManager.updateAddon(addon, force);
 				return result;
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});

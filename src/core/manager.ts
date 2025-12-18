@@ -2,26 +2,20 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
-	type Config,
-	ConfigManager,
-	type Repository,
-} from "./config";
-import { type AddonRecord, DatabaseManager } from "./db";
-import { ScanCommand } from "./commands/ScanCommand";
+	InstallFromUrlCommand,
+	type InstallFromUrlResult,
+} from "./commands/InstallFromUrlCommand";
+import { InstallTukUICommand } from "./commands/InstallTukUICommand";
 import { RemoveAddonCommand } from "./commands/RemoveAddonCommand";
+import { ScanCommand } from "./commands/ScanCommand";
+import type { Command, CommandContext } from "./commands/types";
 import {
 	UpdateAddonCommand,
 	type UpdateAddonResult,
 } from "./commands/UpdateAddonCommand";
-import {
-	InstallTukUICommand,
-} from "./commands/InstallTukUICommand";
-import {
-	InstallFromUrlCommand,
-	type InstallFromUrlResult,
-} from "./commands/InstallFromUrlCommand";
-import { type Command, type CommandContext } from "./commands/types";
-import { type AddonManagerEvents } from "./events";
+import { type Config, ConfigManager, type Repository } from "./config";
+import { type AddonRecord, DatabaseManager } from "./db";
+import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
 import { logger } from "./logger";
 
@@ -74,6 +68,11 @@ export class AddonManager extends EventEmitter {
 
 	private migrateConfig() {
 		const config = this.configManager.get();
+
+		if (config.migrated_to_db) {
+			return;
+		}
+
 		if (config.repositories && config.repositories.length > 0) {
 			logger.log(
 				"Manager",
@@ -100,6 +99,8 @@ export class AddonManager extends EventEmitter {
 				logger.log("Manager", `Migrated ${repo.name}`);
 			}
 		}
+
+		this.configManager.set("migrated_to_db", true);
 	}
 
 	public async updateAll(force = false): Promise<UpdateAddonResult[]> {
@@ -131,20 +132,28 @@ export class AddonManager extends EventEmitter {
 		error?: string;
 	}> {
 		if (!addon.url) {
-			return { updateAvailable: false, remoteVersion: "", error: "Missing URL" };
+			return {
+				updateAvailable: false,
+				remoteVersion: "",
+				error: "Missing URL",
+			};
 		}
 
 		if (addon.type === "github") {
 			const branch = "main";
 			const remoteHash = await GitClient.getRemoteCommit(addon.url, branch);
 			if (!remoteHash) {
-				return { updateAvailable: false, remoteVersion: "", error: "Failed to get remote hash" };
+				return {
+					updateAvailable: false,
+					remoteVersion: "",
+					error: "Failed to get remote hash",
+				};
 			}
-			
+
 			// Compare with stored git_commit if available, otherwise fallback to version (legacy behavior)
 			const localHash = addon.git_commit || addon.version;
 			const isUpdate = localHash !== remoteHash;
-			
+
 			return { updateAvailable: isUpdate, remoteVersion: remoteHash };
 		}
 
@@ -163,7 +172,10 @@ export class AddonManager extends EventEmitter {
 
 				if (remoteHash && localHash) {
 					// Check if remote full hash starts with local short hash
-					if (remoteHash.startsWith(localHash) || localHash.startsWith(remoteHash)) {
+					if (
+						remoteHash.startsWith(localHash) ||
+						localHash.startsWith(remoteHash)
+					) {
 						return {
 							updateAvailable: false,
 							remoteVersion: remoteHash,
@@ -177,7 +189,7 @@ export class AddonManager extends EventEmitter {
 
 				if (remoteHash) {
 					// If we have remote but no local hash, assume update needed
-					// UNLESS we just installed it? 
+					// UNLESS we just installed it?
 					// If git_commit is null, it means we scanned a manual install or TOC version with no hash.
 					// We can't verify.
 					return {
@@ -194,13 +206,25 @@ export class AddonManager extends EventEmitter {
 		return { updateAvailable: false, remoteVersion: "" };
 	}
 
-	public async updateAddon(addon: AddonRecord, force: boolean): Promise<UpdateAddonResult> {
-		const command = new UpdateAddonCommand(this.dbManager, this.configManager, addon, force);
+	public async updateAddon(
+		addon: AddonRecord,
+		force: boolean,
+	): Promise<UpdateAddonResult> {
+		const command = new UpdateAddonCommand(
+			this.dbManager,
+			this.configManager,
+			addon,
+			force,
+		);
 		return await this.executeCommand(command);
 	}
 
 	public async installFromUrl(url: string): Promise<InstallFromUrlResult> {
-		const command = new InstallFromUrlCommand(this.dbManager, this.configManager, url);
+		const command = new InstallFromUrlCommand(
+			this.dbManager,
+			this.configManager,
+			url,
+		);
 		return await this.executeCommand(command);
 	}
 
@@ -227,8 +251,14 @@ export class AddonManager extends EventEmitter {
 		return this.dbManager.getByFolder(folder);
 	}
 
-	public async scanInstalledAddons(specificFolders?: string[]): Promise<number> {
-		const command = new ScanCommand(this.dbManager, this.configManager, specificFolders);
+	public async scanInstalledAddons(
+		specificFolders?: string[],
+	): Promise<number> {
+		const command = new ScanCommand(
+			this.dbManager,
+			this.configManager,
+			specificFolders,
+		);
 		return await this.executeCommand(command);
 	}
 
@@ -236,42 +266,28 @@ export class AddonManager extends EventEmitter {
 		this.dbManager.updateAddon(folder, metadata);
 	}
 
-		public async removeAddon(folder: string): Promise<boolean> {
-
-			const command = new RemoveAddonCommand(this.dbManager, this.configManager, folder);
-
-			return await this.executeCommand(command);
-
-		}
-
-	
-
-		public isAlreadyInstalled(urlOrFolder: string): boolean {
-
-			const addons = this.dbManager.getAll();
-
-			const clean = (u: string) =>
-
-				u.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase();
-
-	
-
-			const target = clean(urlOrFolder);
-
-	
-
-			// Check by folder name or URL
-
-			return addons.some(
-
-				(a) =>
-
-					clean(a.folder) === target || (a.url && clean(a.url) === target),
-
-			);
-
-		}
-
+	public async removeAddon(folder: string): Promise<boolean> {
+		const command = new RemoveAddonCommand(
+			this.dbManager,
+			this.configManager,
+			folder,
+		);
+		return await this.executeCommand(command);
 	}
 
-	
+	public isAlreadyInstalled(urlOrFolder: string): boolean {
+		const addons = this.dbManager.getAll();
+		const clean = (u: string) =>
+			u
+				.replace(/\/$/, "")
+				.replace(/\.git$/, "")
+				.toLowerCase();
+
+		const target = clean(urlOrFolder);
+
+		// Check by folder name or URL
+		return addons.some(
+			(a) => clean(a.folder) === target || (a.url && clean(a.url) === target),
+		);
+	}
+}

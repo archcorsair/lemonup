@@ -1,7 +1,7 @@
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { UpdateAddonResult } from "../../core/commands/UpdateAddonCommand";
 import type { Config } from "../../core/config";
 import type { AddonManager } from "../../core/manager";
@@ -39,68 +39,39 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	const allAddons = useMemo(() => addonManager.getAllAddons(), [addonManager]);
 	const hasRun = useRef(false);
 
-	// Event Handlers
-	useAddonManagerEvent(
-		addonManager,
-		"addon:update-check:start",
-		useCallback(
-			(name) => {
-				const addon = allAddons.find((a) => a.name === name);
-				if (addon) {
-					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
-				}
-			},
-			[allAddons],
-		),
-	);
+	useAddonManagerEvent(addonManager, "addon:update-check:start", (name) => {
+		const addon = allAddons.find((a) => a.name === name);
+		if (addon) {
+			setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
+		}
+	});
 
-	useAddonManagerEvent(
-		addonManager,
-		"addon:install:downloading",
-		useCallback(
-			(name) => {
-				const addon = allAddons.find((a) => a.name === name);
-				if (addon) {
-					setRepoStatuses((prev) => ({
-						...prev,
-						[addon.folder]: "downloading",
-					}));
-				}
-			},
-			[allAddons],
-		),
-	);
+	useAddonManagerEvent(addonManager, "addon:install:downloading", (name) => {
+		const addon = allAddons.find((a) => a.name === name);
+		if (addon) {
+			setRepoStatuses((prev) => ({
+				...prev,
+				[addon.folder]: "downloading",
+			}));
+		}
+	});
 
-	useAddonManagerEvent(
-		addonManager,
-		"addon:install:extracting",
-		useCallback(
-			(name) => {
-				const addon = allAddons.find((a) => a.name === name);
-				if (addon) {
-					setRepoStatuses((prev) => ({
-						...prev,
-						[addon.folder]: "extracting",
-					}));
-				}
-			},
-			[allAddons],
-		),
-	);
+	useAddonManagerEvent(addonManager, "addon:install:extracting", (name) => {
+		const addon = allAddons.find((a) => a.name === name);
+		if (addon) {
+			setRepoStatuses((prev) => ({
+				...prev,
+				[addon.folder]: "extracting",
+			}));
+		}
+	});
 
-	useAddonManagerEvent(
-		addonManager,
-		"addon:install:copying",
-		useCallback(
-			(name) => {
-				const addon = allAddons.find((a) => a.name === name);
-				if (addon) {
-					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "copying" }));
-				}
-			},
-			[allAddons],
-		),
-	);
+	useAddonManagerEvent(addonManager, "addon:install:copying", (name) => {
+		const addon = allAddons.find((a) => a.name === name);
+		if (addon) {
+			setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "copying" }));
+		}
+	});
 
 	useEffect(() => {
 		if (hasRun.current) return;

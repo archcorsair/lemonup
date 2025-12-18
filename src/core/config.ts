@@ -46,6 +46,7 @@ export const ConfigSchema = z.object({
 	backupWTF: z.boolean().default(true),
 	backupRetention: z.number().min(1).default(5),
 	debug: z.boolean().default(false),
+	migrated_to_db: z.boolean().optional().default(false),
 });
 
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -83,6 +84,7 @@ export class ConfigManager {
 				backupWTF: { type: "boolean" },
 				backupRetention: { type: "number" },
 				debug: { type: "boolean" },
+				migrated_to_db: { type: "boolean" },
 			} as const,
 
 			cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -168,6 +170,7 @@ export class ConfigManager {
 			backupWTF: true,
 			backupRetention: 5,
 			debug: false,
+			migrated_to_db: false,
 		};
 		this.store.set(defaults);
 	}

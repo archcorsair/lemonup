@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +29,18 @@ describe("ConfigManager", () => {
 	});
 
 	test("should create default config", () => {
+		const fs = require("node:fs");
+		const originalExistsSync = fs.existsSync;
+		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p === "string" && p.includes(".wine")) return true;
+			// Default behavior for other paths (needed for ConfigManager internals)
+			if (p === TMP_DIR || (typeof p === "string" && p.startsWith(TMP_DIR)))
+				return originalExistsSync(p);
+			return false;
+		});
+		// Hack: Force os.platform to linux if not already, or ensure logical path
+		spyOn(os, "platform").mockReturnValue("linux");
+
 		const manager = new ConfigManager({ cwd: TMP_DIR });
 		manager.createDefaultConfig();
 		const config = manager.get();
@@ -37,6 +49,8 @@ describe("ConfigManager", () => {
 		expect(config.destDir).not.toBe("NOT_CONFIGURED");
 		expect(config.checkInterval).toBe(60000);
 		expect(manager.hasConfigFile).toBe(true);
+
+		spy.mockRestore();
 	});
 
 	test("should set and get values", () => {
