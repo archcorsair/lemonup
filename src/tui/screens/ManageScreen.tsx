@@ -380,20 +380,24 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				paddingX={1}
 				marginTop={1}
 				marginBottom={0}
+				width="100%"
 			>
-				<Box width={4}>
+				<Box width={4} flexShrink={0}>
 					<Text> </Text>
 				</Box>
-				<Box width={20}>
+				<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
 					<Text bold>Name</Text>
 				</Box>
-				<Box width={10}>
+				<Box flexGrow={1} flexShrink={1} minWidth={10} flexBasis="15%">
+					<Text bold>Author</Text>
+				</Box>
+				<Box width={8} flexShrink={0}>
 					<Text bold>Source</Text>
 				</Box>
-				<Box width={15}>
-					<Text bold>Installed</Text>
+				<Box width={12} flexShrink={0}>
+					<Text bold>Version</Text>
 				</Box>
-				<Box width={30}>
+				<Box flexGrow={1} flexShrink={1} minWidth={15} flexBasis="25%">
 					<Text bold>Status</Text>
 				</Box>
 			</Box>
