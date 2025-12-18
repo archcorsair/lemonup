@@ -1,7 +1,7 @@
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import type { Config } from "../../core/config";
 import type { AddonManager } from "../../core/manager";
 import type { UpdateAddonResult } from "../../core/commands/UpdateAddonCommand";
@@ -37,6 +37,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	>("idle");
 
 	const allAddons = addonManager.getAllAddons();
+	const hasRun = useRef(false);
 
 	// Event Handlers
 	useAddonManagerEvent(
@@ -84,6 +85,9 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	);
 
 	useEffect(() => {
+		if (hasRun.current) return;
+		hasRun.current = true;
+
 		const runUpdates = async () => {
 			const freshConfig = addonManager.getConfig();
 
@@ -141,7 +145,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		};
 
 		runUpdates();
-	}, [addonManager, force, testMode, allAddons]);
+	}, [addonManager, force, testMode]);
 
 	useInput((input, key) => {
 		if (key.escape || (input === "q" && isDone)) {
