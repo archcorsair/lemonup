@@ -1,28 +1,13 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigManager } from "./config";
 import type { AddonManager as AddonManagerType } from "./manager";
+import * as GitClient from "./git";
+import * as Downloader from "./downloader";
 
-// --- Mocks ---
-const mockGetRemoteCommit = mock();
-const mockClone = mock();
-const mockDownload = mock();
-const mockUnzip = mock();
-
-mock.module("./git", () => ({
-	getRemoteCommit: mockGetRemoteCommit,
-	clone: mockClone,
-	getCurrentCommit: mock(() => Promise.resolve("hash")),
-}));
-
-mock.module("./downloader", () => ({
-	download: mockDownload,
-	unzip: mockUnzip,
-}));
-
-// Import AddonManager dynamically
+// Import AddonManager
 const { AddonManager } = await import("./manager");
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-manager");
@@ -34,11 +19,13 @@ describe("AddonManager", () => {
 	let manager: AddonManagerType;
 
 	beforeEach(() => {
-		// Clear mocks
-		mockGetRemoteCommit.mockReset();
-		mockClone.mockReset();
-		mockDownload.mockReset();
-		mockUnzip.mockReset();
+		// Setup Spies
+		spyOn(GitClient, "getRemoteCommit").mockImplementation(() => Promise.resolve("hash"));
+		spyOn(GitClient, "clone").mockImplementation(() => Promise.resolve(true));
+		spyOn(GitClient, "getCurrentCommit").mockImplementation(() => Promise.resolve("hash"));
+		
+		spyOn(Downloader, "download").mockImplementation(() => Promise.resolve(true));
+		spyOn(Downloader, "unzip").mockImplementation(() => Promise.resolve(true));
 
 		// Setup FS
 		if (fs.existsSync(TMP_BASE)) {
@@ -58,8 +45,6 @@ describe("AddonManager", () => {
 	afterEach(() => {
 		mock.restore();
 		if (manager) manager.close();
-		// Give SQLite a moment (sometimes needed on windows)
-		// await new Promise(r => setTimeout(r, 10));
 		if (fs.existsSync(TMP_BASE)) {
 			try {
 				fs.rmSync(TMP_BASE, { recursive: true, force: true });
@@ -76,13 +61,13 @@ describe("AddonManager", () => {
 			git_commit: null,
 		};
 
-		mockGetRemoteCommit.mockResolvedValue("new-hash");
+		spyOn(GitClient, "getRemoteCommit").mockResolvedValue("new-hash");
 
 		const result = await manager.checkUpdate(addon);
 
 		expect(result.updateAvailable).toBe(true);
 		expect(result.remoteVersion).toBe("new-hash");
-		expect(mockGetRemoteCommit).toHaveBeenCalledWith("http://git", "main");
+		expect(GitClient.getRemoteCommit).toHaveBeenCalledWith("http://git", "main");
 	});
 
 	test("checkUpdate should use git_commit if available", async () => {
@@ -94,7 +79,7 @@ describe("AddonManager", () => {
 			git_commit: "old-hash",
 		};
 
-		mockGetRemoteCommit.mockResolvedValue("new-hash");
+		spyOn(GitClient, "getRemoteCommit").mockResolvedValue("new-hash");
 
 		const result = await manager.checkUpdate(addon);
 
@@ -111,7 +96,7 @@ describe("AddonManager", () => {
 			git_commit: "same-hash",
 		};
 
-		mockGetRemoteCommit.mockResolvedValue("same-hash");
+		spyOn(GitClient, "getRemoteCommit").mockResolvedValue("same-hash");
 
 		const result = await manager.checkUpdate(addon);
 
@@ -127,9 +112,8 @@ describe("AddonManager", () => {
 			version: "old-hash",
 		};
 
-		mockGetRemoteCommit.mockResolvedValue("new-hash");
-		mockClone.mockImplementation(async (_url, _branch, dest) => {
-			// Fake the clone by creating the folder in dest
+		spyOn(GitClient, "getRemoteCommit").mockResolvedValue("new-hash");
+		spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
 			const folderPath = path.join(dest, "FolderA");
 			fs.mkdirSync(folderPath, { recursive: true });
 			await Bun.write(path.join(folderPath, "file.txt"), "content");
@@ -140,9 +124,8 @@ describe("AddonManager", () => {
 
 		expect(result.success).toBe(true);
 		expect(result.updated).toBe(true);
-		expect(mockClone).toHaveBeenCalled();
+		expect(GitClient.clone).toHaveBeenCalled();
 
-		// Check if installed
 		const installedFile = path.join(DEST_DIR, "FolderA", "file.txt");
 		expect(await Bun.file(installedFile).exists()).toBe(true);
 	});
@@ -156,9 +139,8 @@ describe("AddonManager", () => {
 			version: "old-hash",
 		};
 
-		mockDownload.mockResolvedValue(true);
-		mockUnzip.mockImplementation(async (_zipPath, dest) => {
-			// Fake unzip
+		spyOn(Downloader, "download").mockResolvedValue(true);
+		spyOn(Downloader, "unzip").mockImplementation(async (_zipPath, dest) => {
 			const folderPath = path.join(dest, "TukUI");
 			fs.mkdirSync(folderPath, { recursive: true });
 			return true;
@@ -167,15 +149,14 @@ describe("AddonManager", () => {
 		const result = await manager.updateAddon(addon, false);
 
 		expect(result.success).toBe(true);
-		expect(mockDownload).toHaveBeenCalled();
-		expect(mockUnzip).toHaveBeenCalled();
+		expect(Downloader.download).toHaveBeenCalled();
+		expect(Downloader.unzip).toHaveBeenCalled();
 
 		const installedFolder = path.join(DEST_DIR, "TukUI");
 		expect(fs.existsSync(installedFolder)).toBe(true);
 	});
 
 	test("scanInstalledAddons should find and register specific addon", async () => {
-		// Create a fake addon on disk
 		const addonDir = path.join(DEST_DIR, "MyAddon");
 		fs.mkdirSync(addonDir, { recursive: true });
 		const tocContent = `
@@ -191,7 +172,6 @@ describe("AddonManager", () => {
 	});
 
 	test("isAlreadyInstalled should detect addon by folder or URL", async () => {
-		// 1. Setup - register an addon manually in DB (via scan)
 		const addonDir = path.join(DEST_DIR, "ExistingAddon");
 		fs.mkdirSync(addonDir, { recursive: true });
 		await Bun.write(
@@ -201,20 +181,18 @@ describe("AddonManager", () => {
 
 		await manager.scanInstalledAddons();
 
-		// Update URL
 		manager.updateAddonMetadata("ExistingAddon", {
 			url: "https://github.com/user/existing.git",
 		});
 
-		// 2. Test
 		expect(manager.isAlreadyInstalled("ExistingAddon")).toBe(true);
-		expect(manager.isAlreadyInstalled("existingaddon")).toBe(true); // Case insensitive
+		expect(manager.isAlreadyInstalled("existingaddon")).toBe(true);
 		expect(manager.isAlreadyInstalled("https://github.com/user/existing")).toBe(
 			true,
-		); // Normalized URL
+		);
 		expect(
 			manager.isAlreadyInstalled("https://github.com/user/existing.git/"),
-		).toBe(true); // Normalized URL
+		).toBe(true);
 		expect(manager.isAlreadyInstalled("NonExistent")).toBe(false);
 	});
 });

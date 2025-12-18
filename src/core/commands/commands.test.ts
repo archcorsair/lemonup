@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,23 +9,8 @@ import { InstallTukUICommand } from "./InstallTukUICommand";
 import { RemoveAddonCommand } from "./RemoveAddonCommand";
 import { ScanCommand } from "./ScanCommand";
 import { UpdateAddonCommand } from "./UpdateAddonCommand";
-
-// --- Mocks ---
-const mockGetRemoteCommit = mock();
-const mockClone = mock();
-const mockDownload = mock();
-const mockUnzip = mock();
-
-mock.module("../git", () => ({
-	getRemoteCommit: mockGetRemoteCommit,
-	clone: mockClone,
-	getCurrentCommit: mock(() => Promise.resolve("hash")),
-}));
-
-mock.module("../downloader", () => ({
-	download: mockDownload,
-	unzip: mockUnzip,
-}));
+import * as GitClient from "../git";
+import * as Downloader from "../downloader";
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-commands");
 const CONFIG_DIR = path.join(TMP_BASE, "config");
@@ -39,26 +24,25 @@ describe("Commands", () => {
 	};
 
 	beforeEach(() => {
-		// Clear mocks
-		mockGetRemoteCommit.mockReset();
-		mockClone.mockReset();
-		mockDownload.mockReset();
-		mockUnzip.mockReset();
+		spyOn(GitClient, "getRemoteCommit").mockImplementation(() => Promise.resolve("hash"));
+		spyOn(GitClient, "clone").mockImplementation(() => Promise.resolve(true));
+		spyOn(GitClient, "getCurrentCommit").mockImplementation(() => Promise.resolve("hash"));
+		
+		spyOn(Downloader, "download").mockImplementation(() => Promise.resolve(true));
+		spyOn(Downloader, "unzip").mockImplementation(() => Promise.resolve(true));
+
 		mockContext.emit.mockReset();
 
-		// Setup FS
 		if (fs.existsSync(TMP_BASE)) {
 			fs.rmSync(TMP_BASE, { recursive: true, force: true });
 		}
 		fs.mkdirSync(CONFIG_DIR, { recursive: true });
 		fs.mkdirSync(DEST_DIR, { recursive: true });
 
-		// Setup Config
 		configManager = new ConfigManager({ cwd: CONFIG_DIR });
 		configManager.createDefaultConfig();
 		configManager.set("destDir", DEST_DIR);
 
-		// Setup DB
 		dbManager = new DatabaseManager(CONFIG_DIR);
 	});
 
@@ -76,7 +60,7 @@ describe("Commands", () => {
 		test("should install from github url", async () => {
 			const url = "https://github.com/user/repo";
 
-			mockClone.mockImplementation(async (_url, _branch, dest) => {
+			spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
 				const folderPath = path.join(dest, "RepoAddon");
 				fs.mkdirSync(folderPath, { recursive: true });
 				await Bun.write(
@@ -91,7 +75,7 @@ describe("Commands", () => {
 
 			expect(result.success).toBe(true);
 			expect(result.installedAddons).toContain("RepoAddon");
-			expect(mockClone).toHaveBeenCalled();
+			expect(GitClient.clone).toHaveBeenCalled();
 			expect(mockContext.emit).toHaveBeenCalledWith(
 				"addon:install:complete",
 				url,
@@ -109,8 +93,8 @@ describe("Commands", () => {
 			const url = "http://elvui";
 			const folder = "ElvUI";
 
-			mockDownload.mockResolvedValue(true);
-			mockUnzip.mockImplementation(async (_zip, dest) => {
+			spyOn(Downloader, "download").mockResolvedValue(true);
+			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {
 				const folderPath = path.join(dest, "ElvUI");
 				fs.mkdirSync(folderPath, { recursive: true });
 				await Bun.write(
@@ -132,8 +116,8 @@ describe("Commands", () => {
 			const result = await command.execute(mockContext);
 
 			expect(result).toBe(true);
-			expect(mockDownload).toHaveBeenCalled();
-			expect(mockUnzip).toHaveBeenCalled();
+			expect(Downloader.download).toHaveBeenCalled();
+			expect(Downloader.unzip).toHaveBeenCalled();
 			expect(mockContext.emit).toHaveBeenCalledWith(
 				"addon:install:complete",
 				"ElvUI",
@@ -145,7 +129,6 @@ describe("Commands", () => {
 
 	describe("RemoveAddonCommand", () => {
 		test("should remove addon and folder", async () => {
-			// Setup
 			const folder = "ToBeRemoved";
 			const addonDir = path.join(DEST_DIR, folder);
 			fs.mkdirSync(addonDir, { recursive: true });
@@ -178,7 +161,6 @@ describe("Commands", () => {
 
 	describe("UpdateAddonCommand", () => {
 		test("should update github addon", async () => {
-			// Setup
 			const folder = "UpdateMe";
 			const addonDir = path.join(DEST_DIR, folder);
 			fs.mkdirSync(addonDir, { recursive: true });
@@ -195,9 +177,9 @@ describe("Commands", () => {
 
 			dbManager.addAddon({ ...addon, install_date: "", last_updated: "" });
 
-			const newHash = "a1b2c3d4e5f678901234567890abcdef12345678"; // 40 chars
-			mockGetRemoteCommit.mockResolvedValue(newHash);
-			mockClone.mockImplementation(async (_url, _branch, dest) => {
+			const newHash = "a1b2c3d4e5f678901234567890abcdef12345678";
+			spyOn(GitClient, "getRemoteCommit").mockResolvedValue(newHash);
+			spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
 				const folderPath = path.join(dest, folder);
 				fs.mkdirSync(folderPath, { recursive: true });
 				return true;
@@ -213,26 +195,20 @@ describe("Commands", () => {
 
 			expect(result.success).toBe(true);
 			expect(result.updated).toBe(true);
-			expect(mockClone).toHaveBeenCalled();
+			expect(GitClient.clone).toHaveBeenCalled();
 
 			const updated = dbManager.getByFolder(folder);
-			expect(updated?.git_commit).toBe(newHash); // from getCurrentCommit mock
+			expect(updated?.git_commit).toBe(newHash);
 		});
 	});
 
 	describe("ScanCommand", () => {
 		test("should scan existing addons", async () => {
-			// Setup: Create a fake addon in DEST_DIR
 			const folder = "ExistingAddon";
 			const addonDir = path.join(DEST_DIR, folder);
 			fs.mkdirSync(addonDir, { recursive: true });
 
-			// Create a .toc file
-			const tocContent = `
-## Title: Existing Addon
-## Version: 1.2.3
-## Author: Me
-`;
+			const tocContent = "## Title: Existing Addon\n## Version: 1.2.3\n## Author: Me\n";
 			await Bun.write(path.join(addonDir, `${folder}.toc`), tocContent);
 
 			const command = new ScanCommand(dbManager, configManager);
@@ -249,7 +225,7 @@ describe("Commands", () => {
 			expect(addon?.name).toBe("Existing Addon");
 			expect(addon?.version).toBe("1.2.3");
 			expect(addon?.author).toBe("Me");
-			expect(addon?.type).toBe("manual"); // Should be manual as no .git folder created
+			expect(addon?.type).toBe("manual");
 		});
 	});
 });
