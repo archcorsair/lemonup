@@ -399,65 +399,89 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			</Box>
 
 			<Box flexDirection="column">
-				{addons.map((addon, idx) => {
-					const isSelected = selectedIndex === idx;
-					const isChecked = selectedIds.has(addon.folder);
+				{addons.length === 0 ? (
+					<Box
+						flexDirection="column"
+						alignItems="center"
+						justifyContent="center"
+						paddingY={5}
+						width="100%"
+					>
+						<Text color="yellow" bold italic>
+							"Lok-tar ogar! ...Wait, where is everyone?"
+						</Text>
+						<Box marginTop={1}>
+							<Text color="gray">
+								Your inventory is empty. No addons found in your bags.
+							</Text>
+						</Box>
+						<Box marginTop={1}>
+							<Text color="cyan">
+								Visit the 'Install Addon' section to start your collection!
+							</Text>
+						</Box>
+					</Box>
+				) : (
+					addons.map((addon, idx) => {
+						const isSelected = selectedIndex === idx;
+						const isChecked = selectedIds.has(addon.folder);
 
-					const query = queries[idx];
-					if (!query) return null;
-					const { data, isLoading, isFetching, error } = query;
+						const query = queries[idx];
+						if (!query) return null;
+						const { data, isLoading, isFetching, error } = query;
 
-					const isUpdating =
-						updateMutation.isPending &&
-						updateMutation.variables?.folder === addon.folder;
+						const isUpdating =
+							updateMutation.isPending &&
+							updateMutation.variables?.folder === addon.folder;
 
-					let status: RepoStatus = "idle";
-					let result: UpdateResult | undefined;
+						let status: RepoStatus = "idle";
+						let result: UpdateResult | undefined;
 
-					if (isUpdating) {
-						status = updateProgress[addon.name] || "checking";
-					} else if (isLoading || isFetching) status = "checking";
-					else if (error) status = "error";
-					else if (data) status = "done";
+						if (isUpdating) {
+							status = updateProgress[addon.name] || "checking";
+						} else if (isLoading || isFetching) status = "checking";
+						else if (error) status = "error";
+						else if (data) status = "done";
 
-					// Mock result for "done" state based on query data
-					if (status === "done" && data) {
-						if (data.updateAvailable) {
-							const versionDisplay = data.remoteVersion
-								? data.remoteVersion.length > 10
-									? data.remoteVersion.substring(0, 7)
-									: data.remoteVersion
-								: "";
-							result = {
-								repoName: addon.name,
-								success: true,
-								updated: true,
-								message: versionDisplay
-									? `Update: ${versionDisplay}`
-									: "Update Available",
-							};
-						} else {
-							result = {
-								repoName: addon.name,
-								success: true,
-								updated: false,
-								message: "Up to date",
-							};
+						// Mock result for "done" state based on query data
+						if (status === "done" && data) {
+							if (data.updateAvailable) {
+								const versionDisplay = data.remoteVersion
+									? data.remoteVersion.length > 10
+										? data.remoteVersion.substring(0, 7)
+										: data.remoteVersion
+									: "";
+								result = {
+									repoName: addon.name,
+									success: true,
+									updated: true,
+									message: versionDisplay
+										? `Update: ${versionDisplay}`
+										: "Update Available",
+								};
+							} else {
+								result = {
+									repoName: addon.name,
+									success: true,
+									updated: false,
+									message: "Up to date",
+								};
+							}
 						}
-					}
 
-					return (
-						<RepositoryRow
-							key={addon.folder}
-							repo={addon}
-							status={status}
-							result={result}
-							nerdFonts={config.nerdFonts}
-							isSelected={isSelected}
-							isChecked={isChecked}
-						/>
-					);
-				})}
+						return (
+							<RepositoryRow
+								key={addon.folder}
+								repo={addon}
+								status={status}
+								result={result}
+								nerdFonts={config.nerdFonts}
+								isSelected={isSelected}
+								isChecked={isChecked}
+							/>
+						);
+					})
+				)}
 			</Box>
 
 			<ControlBar
