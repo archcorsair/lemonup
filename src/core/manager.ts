@@ -65,6 +65,10 @@ export class AddonManager extends EventEmitter {
 		return this.configManager.get();
 	}
 
+	public setConfigValue<K extends keyof Config>(key: K, value: Config[K]) {
+		this.configManager.set(key, value);
+	}
+
 	public close() {
 		this.dbManager.close();
 	}

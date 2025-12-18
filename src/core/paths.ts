@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 
 export function getDefaultWoWPath(): string {
 	const platform = os.platform();
@@ -29,4 +30,12 @@ export function getDefaultWoWPath(): string {
 
 export function isPathConfigured(pathStr: string): boolean {
     return pathStr !== "NOT_CONFIGURED" && pathStr.length > 0;
+}
+
+export function pathExists(p: string): boolean {
+	try {
+		return fs.existsSync(p);
+	} catch {
+		return false;
+	}
 }
