@@ -3241,3 +3241,6 @@
 [2025-12-18T00:46:07.651Z] [Downloader] Download complete
 [2025-12-18T00:50:35.157Z] [Downloader] Downloading: https://api.tukui.org/v1/download/dev/elvui/main
 [2025-12-18T00:50:35.371Z] [Downloader] Download complete
+[2025-12-18T01:10:35.111Z] [InstallFromUrlCommand] Installing from URL: https://github.com/kodewdle/ElvUI_FCT
+[2025-12-18T01:13:08.791Z] [Downloader] Downloading: https://api.tukui.org/v1/download/dev/elvui/main
+[2025-12-18T01:13:08.981Z] [Downloader] Download complete

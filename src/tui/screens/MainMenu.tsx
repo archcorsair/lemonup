@@ -7,6 +7,7 @@ import { ControlBar } from "../components/ControlBar";
 interface MainMenuProps {
 	config: Config;
 	configManager: ConfigManager;
+	initialSelection?: string;
 	onSelect: (option: string) => void;
 }
 
@@ -20,11 +21,13 @@ const OPTIONS = [
 export const MainMenu: React.FC<MainMenuProps> = ({
 	config,
 	configManager,
+	initialSelection,
 	onSelect,
 }) => {
 	const { exit } = useApp();
 	const [selectedIndex, setSelectedIndex] = useState(() => {
-		const idx = OPTIONS.findIndex((opt) => opt.id === config.defaultMenuOption);
+		const targetId = initialSelection || config.defaultMenuOption;
+		const idx = OPTIONS.findIndex((opt) => opt.id === targetId);
 		return idx !== -1 ? idx : 0;
 	});
 

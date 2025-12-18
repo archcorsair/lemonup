@@ -31,11 +31,13 @@ type Screen = "menu" | "update" | "manage" | "config" | "install";
 interface AppState {
 	screen: Screen;
 	isBusy: boolean;
+	lastMenuSelection?: string;
 }
 
 type AppAction =
 	| { type: "NAVIGATE"; screen: Screen }
-	| { type: "SET_BUSY"; busy: boolean };
+	| { type: "SET_BUSY"; busy: boolean }
+	| { type: "SET_MENU_SELECTION"; selection: string };
 
 function appReducer(state: AppState, action: AppAction): AppState {
 	switch (action.type) {
@@ -44,6 +46,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
 			return { ...state, screen: action.screen };
 		case "SET_BUSY":
 			return { ...state, isBusy: action.busy };
+		case "SET_MENU_SELECTION":
+			return { ...state, lastMenuSelection: action.selection };
 		default:
 			return state;
 	}
@@ -71,7 +75,7 @@ const AppContent: React.FC<AppProps> = ({
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [{ screen: activeScreen, isBusy }, dispatch] = useReducer(
+	const [{ screen: activeScreen, isBusy, lastMenuSelection }, dispatch] = useReducer(
 		appReducer,
 		{
 			screen: "menu",
@@ -225,9 +229,11 @@ const AppContent: React.FC<AppProps> = ({
 				<MainMenu
 					config={config}
 					configManager={configManager}
-					onSelect={(option) =>
-						dispatch({ type: "NAVIGATE", screen: option as Screen })
-					}
+					initialSelection={lastMenuSelection}
+					onSelect={(option) => {
+						dispatch({ type: "SET_MENU_SELECTION", selection: option });
+						dispatch({ type: "NAVIGATE", screen: option as Screen });
+					}}
 				/>
 			)}
 
