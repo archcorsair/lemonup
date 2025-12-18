@@ -90,6 +90,7 @@ export class AddonManager extends EventEmitter {
 					name: repo.name,
 					folder: folder,
 					version: repo.installedVersion,
+					git_commit: null, // Config migration doesn't have git history
 					author: null,
 					interface: null,
 					url: repo.gitRemote || repo.downloadUrl || null,
@@ -140,7 +141,12 @@ export class AddonManager extends EventEmitter {
 			if (!remoteHash) {
 				return { updateAvailable: false, remoteVersion: "", error: "Failed to get remote hash" };
 			}
-			return { updateAvailable: addon.version !== remoteHash, remoteVersion: remoteHash };
+			
+			// Compare with stored git_commit if available, otherwise fallback to version (legacy behavior)
+			const localHash = addon.git_commit || addon.version;
+			const isUpdate = localHash !== remoteHash;
+			
+			return { updateAvailable: isUpdate, remoteVersion: remoteHash };
 		}
 
 		if (addon.type === "tukui") {

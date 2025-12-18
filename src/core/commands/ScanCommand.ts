@@ -94,8 +94,8 @@ export class ScanCommand implements Command<number> {
 					isGit = false;
 				}
 
-				const finalVersion =
-					version || (isGit && gitHash ? gitHash : "Unknown");
+				// If TOC version is missing, use Git hash as fallback for display version
+				const finalVersion = version || (isGit && gitHash ? gitHash.substring(0, 7) : "Unknown");
 
 				const existing = this.dbManager.getByFolder(folderName);
 
@@ -112,6 +112,13 @@ export class ScanCommand implements Command<number> {
 						updates.version = finalVersion;
 						updated = true;
 					}
+					
+					// Update git commit hash if changed
+					if (gitHash && existing.git_commit !== gitHash) {
+						updates.git_commit = gitHash;
+						updated = true;
+					}
+
 					if (author && existing.author !== author) {
 						updates.author = author;
 						updated = true;
@@ -129,6 +136,7 @@ export class ScanCommand implements Command<number> {
 						name: cleanTitle,
 						folder: folderName,
 						version: finalVersion,
+						git_commit: gitHash,
 						author: author,
 						interface: gameInterface,
 						url: null,

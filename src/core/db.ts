@@ -8,6 +8,7 @@ export const AddonRecordSchema = z.object({
 	name: z.string(),
 	folder: z.string(),
 	version: z.string().nullable(),
+	git_commit: z.string().nullable().default(null),
 	author: z.string().nullable(),
 	interface: z.string().nullable(),
 	url: z.string().nullable(),
@@ -30,20 +31,46 @@ export class DatabaseManager {
 	}
 
 	private init() {
-		this.db.run(`
-			CREATE TABLE IF NOT EXISTS addons (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				name TEXT NOT NULL,
-				folder TEXT NOT NULL,
-				version TEXT,
-				author TEXT,
-				interface TEXT,
-				url TEXT,
-				type TEXT NOT NULL,
-				install_date TEXT NOT NULL,
-				last_updated TEXT NOT NULL
-			);
-		`);
+		// Basic migration: check if column exists, if not add it
+		const tableInfo = this.db.query("PRAGMA table_info(addons)").all() as any[];
+		const hasGitCommit = tableInfo.some((col) => col.name === "git_commit");
+
+		if (!hasGitCommit) {
+			try {
+				// If table exists but missing column, add it
+				// If table doesn't exist, create it with column
+				const tableExists =
+					(
+						this.db
+							.query(
+								"SELECT name FROM sqlite_master WHERE type='table' AND name='addons'",
+							)
+							.get() as any
+					)?.name === "addons";
+
+				if (tableExists) {
+					this.db.run("ALTER TABLE addons ADD COLUMN git_commit TEXT");
+				} else {
+					this.db.run(`
+						CREATE TABLE IF NOT EXISTS addons (
+							id INTEGER PRIMARY KEY AUTOINCREMENT,
+							name TEXT NOT NULL,
+							folder TEXT NOT NULL,
+							version TEXT,
+							git_commit TEXT,
+							author TEXT,
+							interface TEXT,
+							url TEXT,
+							type TEXT NOT NULL,
+							install_date TEXT NOT NULL,
+							last_updated TEXT NOT NULL
+						);
+					`);
+				}
+			} catch (e) {
+				logger.error("Database", "Failed to migrate/init DB", e);
+			}
+		}
 
 		this.db.run(`
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_addons_folder ON addons(folder);
@@ -65,14 +92,15 @@ export class DatabaseManager {
 	public addAddon(addon: AddonRecord): void {
 		const data = AddonRecordSchema.parse(addon);
 		const query = this.db.query(`
-			INSERT INTO addons (name, folder, version, author, interface, url, type, install_date, last_updated)
-			VALUES ($name, $folder, $version, $author, $interface, $url, $type, $install_date, $last_updated)
+			INSERT INTO addons (name, folder, version, git_commit, author, interface, url, type, install_date, last_updated)
+			VALUES ($name, $folder, $version, $git_commit, $author, $interface, $url, $type, $install_date, $last_updated)
 		`);
 
 		query.run({
 			$name: data.name,
 			$folder: data.folder,
 			$version: data.version,
+			$git_commit: data.git_commit,
 			$author: data.author,
 			$interface: data.interface,
 			$url: data.url,

@@ -29,12 +29,13 @@ describe("DatabaseManager", () => {
 
 	test("should add and get addon", () => {
 		const newAddon: AddonRecord = {
-			name: "Test Addon",
+			name: "TestAddon",
 			folder: "TestAddon",
 			version: "1.0.0",
-			author: "Tester",
+			git_commit: null,
+			author: "Author",
 			interface: "100000",
-			url: "http://github.com/test/test",
+			url: "https://github.com/test/test",
 			type: "github",
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
@@ -44,7 +45,7 @@ describe("DatabaseManager", () => {
 
 		const result = dbManager.getByFolder("TestAddon");
 		expect(result).not.toBeNull();
-		expect(result?.name).toBe("Test Addon");
+		expect(result?.name).toBe("TestAddon");
 		expect(result?.version).toBe("1.0.0");
 	});
 
@@ -53,6 +54,7 @@ describe("DatabaseManager", () => {
 			name: "Test Addon",
 			folder: "TestAddon",
 			version: "1.0.0",
+			git_commit: null,
 			author: "Tester",
 			interface: "100000",
 			url: null,
@@ -77,6 +79,7 @@ describe("DatabaseManager", () => {
 			name: "Test Addon",
 			folder: "TestAddon",
 			version: "1.0.0",
+			git_commit: null,
 			author: "Tester",
 			interface: "100000",
 			url: null,
@@ -97,6 +100,7 @@ describe("DatabaseManager", () => {
 			name: "Test Addon",
 			folder: "UniqueFolder",
 			version: "1.0",
+			git_commit: null,
 			author: "Me",
 			interface: "123",
 			url: null,

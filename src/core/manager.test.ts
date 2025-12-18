@@ -67,12 +67,13 @@ describe("AddonManager", () => {
 		}
 	});
 
-	test("checkUpdate should return true if versions differ", async () => {
+	test("checkUpdate should return true if versions differ (fallback)", async () => {
 		const addon: any = {
 			name: "test-repo",
 			type: "github",
 			url: "http://git",
 			version: "old-hash",
+			git_commit: null,
 		};
 
 		mockGetRemoteCommit.mockResolvedValue("new-hash");
@@ -82,6 +83,39 @@ describe("AddonManager", () => {
 		expect(result.updateAvailable).toBe(true);
 		expect(result.remoteVersion).toBe("new-hash");
 		expect(mockGetRemoteCommit).toHaveBeenCalledWith("http://git", "main");
+	});
+
+	test("checkUpdate should use git_commit if available", async () => {
+		const addon: any = {
+			name: "test-repo",
+			type: "github",
+			url: "http://git",
+			version: "v1.0.0",
+			git_commit: "old-hash",
+		};
+
+		mockGetRemoteCommit.mockResolvedValue("new-hash");
+
+		const result = await manager.checkUpdate(addon);
+
+		expect(result.updateAvailable).toBe(true);
+		expect(result.remoteVersion).toBe("new-hash");
+	});
+
+	test("checkUpdate should return false if git_commit matches remote", async () => {
+		const addon: any = {
+			name: "test-repo",
+			type: "github",
+			url: "http://git",
+			version: "v1.0.0",
+			git_commit: "same-hash",
+		};
+
+		mockGetRemoteCommit.mockResolvedValue("same-hash");
+
+		const result = await manager.checkUpdate(addon);
+
+		expect(result.updateAvailable).toBe(false);
 	});
 
 	test("updateAddon (GitHub) should clone and install", async () => {

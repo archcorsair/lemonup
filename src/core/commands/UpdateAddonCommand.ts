@@ -47,7 +47,9 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				if (!remoteHash) throw new Error("Failed to get remote hash");
 
 				remoteVersion = remoteHash;
-				updateAvailable = this.addon.version !== remoteHash;
+				// Compare with stored git_commit if available, otherwise fallback to version
+				const localHash = this.addon.git_commit || this.addon.version;
+				updateAvailable = localHash !== remoteHash;
 			} catch (err) {
 				return {
 					repoName: name,
@@ -113,7 +115,17 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 
 			// 5. Update DB
 			this.dbManager.updateAddon(folder, {
-				version: remoteVersion,
+				version: remoteVersion.substring(0, 7), // Update display version to short hash? Or keep old logic?
+				// Actually, we should probably keep TOC version if possible, but remoteVersion is the hash for git.
+				// If we update via git clone, the new files are there. ScanCommand would update the version next scan.
+				// But we want to be accurate now.
+				// Let's set git_commit to remoteVersion (hash).
+				// And version to... maybe just keep it or update it?
+				// If we don't scan, the version in DB is stale.
+				// Let's rely on a re-scan or just set hash.
+				// Ideally we should re-scan the addon folder to get the new TOC version.
+				// But for now, let's just set the commit.
+				git_commit: remoteVersion,
 				last_updated: new Date().toISOString(),
 			});
 

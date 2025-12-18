@@ -102,10 +102,14 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 			await scanCmd.execute(context);
 
 			// Update records with Git Metadata
+			// Get installed commit hash from tempDir
+			const installedHash = await GitClient.getCurrentCommit(tempDir) || null;
+
 			for (const addonName of installedNames) {
 				this.dbManager.updateAddon(addonName, {
 					url: this.url,
 					type: "github",
+					git_commit: installedHash,
 					last_updated: new Date().toISOString(),
 				});
 			}
