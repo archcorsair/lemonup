@@ -39,15 +39,15 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	const allAddons = useMemo(() => addonManager.getAllAddons(), [addonManager]);
 	const hasRun = useRef(false);
 
-	useAddonManagerEvent(addonManager, "addon:update-check:start", (name) => {
-		const addon = allAddons.find((a) => a.name === name);
+	useAddonManagerEvent(addonManager, "addon:update-check:start", (folder) => {
+		const addon = allAddons.find((a) => a.folder === folder);
 		if (addon) {
 			setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "checking" }));
 		}
 	});
 
-	useAddonManagerEvent(addonManager, "addon:install:downloading", (name) => {
-		const addon = allAddons.find((a) => a.name === name);
+	useAddonManagerEvent(addonManager, "addon:install:downloading", (folder) => {
+		const addon = allAddons.find((a) => a.folder === folder);
 		if (addon) {
 			setRepoStatuses((prev) => ({
 				...prev,
@@ -56,8 +56,8 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		}
 	});
 
-	useAddonManagerEvent(addonManager, "addon:install:extracting", (name) => {
-		const addon = allAddons.find((a) => a.name === name);
+	useAddonManagerEvent(addonManager, "addon:install:extracting", (folder) => {
+		const addon = allAddons.find((a) => a.folder === folder);
 		if (addon) {
 			setRepoStatuses((prev) => ({
 				...prev,
@@ -66,8 +66,8 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		}
 	});
 
-	useAddonManagerEvent(addonManager, "addon:install:copying", (name) => {
-		const addon = allAddons.find((a) => a.name === name);
+	useAddonManagerEvent(addonManager, "addon:install:copying", (folder) => {
+		const addon = allAddons.find((a) => a.folder === folder);
 		if (addon) {
 			setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "copying" }));
 		}

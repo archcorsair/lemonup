@@ -27,6 +27,21 @@ export interface UpdateResult {
 	error?: string;
 }
 
+export interface AddonManager {
+	on<K extends keyof AddonManagerEvents>(
+		event: K,
+		listener: (...args: AddonManagerEvents[K]) => void,
+	): this;
+	off<K extends keyof AddonManagerEvents>(
+		event: K,
+		listener: (...args: AddonManagerEvents[K]) => void,
+	): this;
+	emit<K extends keyof AddonManagerEvents>(
+		event: K,
+		...args: AddonManagerEvents[K]
+	): boolean;
+}
+
 export class AddonManager extends EventEmitter {
 	private configManager: ConfigManager;
 	private dbManager: DatabaseManager;
@@ -38,13 +53,6 @@ export class AddonManager extends EventEmitter {
 		this.dbManager = new DatabaseManager(configDir);
 
 		this.migrateConfig();
-	}
-
-	public override emit<K extends keyof AddonManagerEvents>(
-		event: K,
-		...args: AddonManagerEvents[K]
-	): boolean {
-		return super.emit(event, ...args);
 	}
 
 	private async executeCommand<T>(command: Command<T>): Promise<T> {
@@ -159,10 +167,8 @@ export class AddonManager extends EventEmitter {
 
 		if (addon.type === "tukui") {
 			if (addon.name === "ElvUI" || addon.folder === "ElvUI") {
-				// Try to extract git hash from TOC version (e.g. v13.08-1-g123abc)
 				const hashMatch = addon.version?.match(/-g([a-f0-9]+)/);
 				const localHashFromVer = hashMatch ? hashMatch[1] : null;
-				// Prefer stored git_commit
 				const localHash = addon.git_commit || localHashFromVer;
 
 				const remoteHash = await GitClient.getRemoteCommit(
@@ -171,7 +177,8 @@ export class AddonManager extends EventEmitter {
 				);
 
 				if (remoteHash && localHash) {
-					// Check if remote full hash starts with local short hash
+					// Check for hash equality, handling short vs full hash scenarios.
+					// We assume that if one hash is a prefix of the other, they refer to the same commit.
 					if (
 						remoteHash.startsWith(localHash) ||
 						localHash.startsWith(remoteHash)
@@ -188,10 +195,6 @@ export class AddonManager extends EventEmitter {
 				}
 
 				if (remoteHash) {
-					// If we have remote but no local hash, assume update needed
-					// UNLESS we just installed it?
-					// If git_commit is null, it means we scanned a manual install or TOC version with no hash.
-					// We can't verify.
 					return {
 						updateAvailable: true,
 						remoteVersion: remoteHash,
@@ -199,7 +202,6 @@ export class AddonManager extends EventEmitter {
 				}
 			}
 
-			// Fallback for other TukUI addons or if check fails
 			return { updateAvailable: true, remoteVersion: "latest" };
 		}
 

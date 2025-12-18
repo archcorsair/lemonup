@@ -67,38 +67,38 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	useAddonManagerEvent(
 		addonManager,
 		"addon:update-check:start",
-		useCallback((name) => {
-			setUpdateProgress((prev) => ({ ...prev, [name]: "checking" }));
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "checking" }));
 		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:downloading",
-		useCallback((name) => {
-			setUpdateProgress((prev) => ({ ...prev, [name]: "downloading" }));
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "downloading" }));
 		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:extracting",
-		useCallback((name) => {
-			setUpdateProgress((prev) => ({ ...prev, [name]: "extracting" }));
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "extracting" }));
 		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:copying",
-		useCallback((name) => {
-			setUpdateProgress((prev) => ({ ...prev, [name]: "copying" }));
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "copying" }));
 		}, []),
 	);
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:complete",
-		useCallback((name) => {
+		useCallback((folder) => {
 			setUpdateProgress((prev) => {
 				const next = { ...prev };
-				delete next[name];
+				delete next[folder];
 				return next;
 			});
 		}, []),
@@ -122,10 +122,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				return result;
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-				// Clean up progress
 				setUpdateProgress((prev) => {
 					const next = { ...prev };
-					delete next[addon.name];
+					delete next[addon.folder];
 					return next;
 				});
 			}
@@ -434,7 +433,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						let result: UpdateResult | undefined;
 
 						if (isUpdating) {
-							status = updateProgress[addon.name] || "checking";
+							status = updateProgress[addon.folder] || "checking";
 						} else if (isLoading || isFetching) status = "checking";
 						else if (error) status = "error";
 						else if (data) status = "done";

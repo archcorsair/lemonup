@@ -20,10 +20,10 @@ export function useAddonManagerEvent<E extends keyof AddonManagerEvents>(
 			callbackRef.current(...args);
 		};
 
-		manager.on(event, handler as any);
+		manager.on(event, handler);
 
 		return () => {
-			manager.off(event, handler as any);
+			manager.off(event, handler);
 		};
 	}, [manager, event]);
 }

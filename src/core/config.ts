@@ -22,10 +22,10 @@ export const RepositoryTypeSchema = z.enum([REPO_TYPE.GITHUB, REPO_TYPE.TUKUI]);
 export const RepositorySchema = z.object({
 	name: z.string(),
 	type: RepositoryTypeSchema,
-	downloadUrl: z.string().optional(), // Required for tukui
-	gitRemote: z.string().optional(), // Required for github
+	downloadUrl: z.string().optional(),
+	gitRemote: z.string().optional(),
 	branch: z.string().default("main"),
-	folders: z.array(z.string()), // The folder names inside Interface/Addons
+	folders: z.array(z.string()),
 	installedVersion: z.string().nullable().default(null),
 });
 
@@ -42,7 +42,7 @@ export const ConfigSchema = z.object({
 	defaultMenuOption: z.enum(["update", "manage", "config"]).default("update"),
 	maxConcurrent: z.number().min(1).max(10).default(3),
 	nerdFonts: z.boolean().default(true),
-	checkInterval: z.number().min(0).default(60000), // ms, 0 = always check (or manually?)
+	checkInterval: z.number().min(0).default(60000),
 	backupWTF: z.boolean().default(true),
 	backupRetention: z.number().min(1).default(5),
 	debug: z.boolean().default(false),
@@ -57,9 +57,9 @@ export type Config = z.infer<typeof ConfigSchema>;
 const PROJECT_NAME = "lemonup";
 
 interface ConfigManagerOptions {
-	cwd?: string; // Optional: Force a specific config directory (good for testing/dev)
-	overrides?: Partial<Config>; // Values to force on load
-	enableSafeMode?: boolean; // If true, disable saving to disk
+	cwd?: string;
+	overrides?: Partial<Config>;
+	enableSafeMode?: boolean;
 }
 
 export class ConfigManager {

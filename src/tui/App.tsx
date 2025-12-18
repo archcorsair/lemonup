@@ -43,7 +43,7 @@ type AppAction =
 function appReducer(state: AppState, action: AppAction): AppState {
 	switch (action.type) {
 		case "NAVIGATE":
-			if (state.isBusy) return state; // Prevent navigation while busy
+			if (state.isBusy) return state;
 			return { ...state, screen: action.screen };
 		case "SET_BUSY":
 			return { ...state, isBusy: action.busy };

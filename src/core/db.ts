@@ -31,10 +31,8 @@ export class DatabaseManager {
 	}
 
 	private init() {
-		// Enable WAL mode for better concurrency
 		this.db.run("PRAGMA journal_mode = WAL;");
 
-		// Check current schema version
 		const version = (this.db.query("PRAGMA user_version").get() as any)
 			.user_version;
 
@@ -65,8 +63,6 @@ export class DatabaseManager {
 				);
 			`);
 
-			// Ensure git_commit column exists if table was created in an older pre-versioned state
-			// (Handling the case where the table existed but without version tracking)
 			const tableInfo = this.db
 				.query("PRAGMA table_info(addons)")
 				.all() as any[];
@@ -125,8 +121,6 @@ export class DatabaseManager {
 			(k) => k !== "id" && k !== "folder",
 		) as (keyof AddonRecord)[];
 		if (keys.length === 0) return;
-
-		// console.log(`[DB] Updating ${folder}:`, validUpdates);
 
 		const setClause = keys.map((k) => `${k} = $${k}`).join(", ");
 		const query = this.db.query(

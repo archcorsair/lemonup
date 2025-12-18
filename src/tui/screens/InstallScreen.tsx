@@ -281,11 +281,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					padding={1}
 				>
 					<Text bold>Enter WoW Addon Directory Path:</Text>
-					<TextInput
-						value={manualPath}
-						onChange={setManualPath}
-						onSubmit={() => {}}
-					/>
+					<TextInput value={manualPath} onChange={setManualPath} />
 					<Box marginTop={1}>
 						<Text color="gray">Press Enter to save, Esc to cancel</Text>
 					</Box>
