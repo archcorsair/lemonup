@@ -59,16 +59,21 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		} else if (this.addon.type === "tukui") {
 			if (name === "ElvUI" || folder === "ElvUI") {
 				const hashMatch = this.addon.version?.match(/-g([a-f0-9]+)/);
-				const localHash = this.addon.git_commit || (hashMatch ? hashMatch[1] : null);
-				
+				const localHash =
+					this.addon.git_commit || (hashMatch ? hashMatch[1] : null);
+
 				const remoteHash = await GitClient.getRemoteCommit(
 					"https://github.com/tukui-org/ElvUI",
-					"main"
+					"main",
 				);
 
 				if (remoteHash) {
 					remoteVersion = remoteHash;
-					if (localHash && (remoteHash.startsWith(localHash) || localHash.startsWith(remoteHash))) {
+					if (
+						localHash &&
+						(remoteHash.startsWith(localHash) ||
+							localHash.startsWith(remoteHash))
+					) {
 						updateAvailable = false;
 					} else {
 						updateAvailable = true;
@@ -83,7 +88,12 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			}
 		}
 
-		context.emit("addon:update-check:complete", name, updateAvailable, remoteVersion);
+		context.emit(
+			"addon:update-check:complete",
+			name,
+			updateAvailable,
+			remoteVersion,
+		);
 
 		if (!this.force && !updateAvailable) {
 			return {
@@ -125,11 +135,15 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 					throw new Error("Git Clone failed");
 				}
 
-				await this.backupAndInstall(context, path.join(tempDir, folder), folder);
+				await this.backupAndInstall(
+					context,
+					path.join(tempDir, folder),
+					folder,
+				);
 			}
 
 			const isGitHash = remoteVersion.match(/^[a-f0-9]{40}$/);
-			
+
 			this.dbManager.updateAddon(folder, {
 				version: isGitHash ? remoteVersion.substring(0, 7) : remoteVersion,
 				git_commit: isGitHash ? remoteVersion : null,
@@ -172,15 +186,17 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			const backupPath = path.join(backupBase, `${folder}-${Date.now()}`);
 			await fs.cp(destPath, backupPath, { recursive: true });
 			this.backupPaths.set(folder, backupPath);
-		} catch {
-		}
+		} catch {}
 
 		context.emit("addon:install:copying", this.addon.name);
 		await fs.cp(sourcePath, destPath, { recursive: true, force: true });
 	}
 
-	async undo(context: CommandContext): Promise<void> {
-		logger.log("UpdateAddonCommand", `Rolling back update for ${this.addon.name}`);
+	async undo(_context: CommandContext): Promise<void> {
+		logger.log(
+			"UpdateAddonCommand",
+			`Rolling back update for ${this.addon.name}`,
+		);
 
 		const destDir = this.configManager.get().destDir;
 
@@ -190,7 +206,11 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				await fs.rm(destPath, { recursive: true, force: true });
 				await fs.cp(backupPath, destPath, { recursive: true });
 			} catch (err) {
-				logger.error("UpdateAddonCommand", `Failed to restore ${folder} during undo`, err);
+				logger.error(
+					"UpdateAddonCommand",
+					`Failed to restore ${folder} during undo`,
+					err,
+				);
 			}
 		}
 

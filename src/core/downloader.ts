@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import AdmZip from "adm-zip";
@@ -45,19 +44,15 @@ export async function unzip(
 		const zipEntries = zip.getEntries();
 
 		for (const entry of zipEntries) {
-			// Validate entry path to prevent directory traversal
-			if (entry.entryName.includes("..")) {
-				logger.error("Downloader", `Skipping unsafe entry: ${entry.entryName}`);
-				continue;
-			}
+			const entryName = entry.entryName;
 
-			const entryPath = path.resolve(destDir, entry.entryName);
-			// Ensure entryPath is within destDir
-			if (!entryPath.startsWith(destDir)) {
-				logger.error(
-					"Downloader",
-					`Skipping entry outside destDir: ${entry.entryName}`,
-				);
+			// Normalize path and join with destDir
+			const entryPath = path.normalize(path.join(destDir, entryName));
+
+			// Robust path traversal check: ensure entryPath is still inside destDir
+			const relative = path.relative(destDir, entryPath);
+			if (relative.startsWith("..") || path.isAbsolute(relative)) {
+				logger.error("Downloader", `Skipping unsafe entry: ${entryName}`);
 				continue;
 			}
 
@@ -66,7 +61,7 @@ export async function unzip(
 			} else {
 				const parentDir = path.dirname(entryPath);
 				await fsp.mkdir(parentDir, { recursive: true });
-				
+
 				// AdmZip synchronous extraction
 				const data = entry.getData();
 				await Bun.write(entryPath, data);

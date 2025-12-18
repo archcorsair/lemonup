@@ -98,12 +98,16 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 			}
 
 			// Register in DB using ScanCommand
-			const scanCmd = new ScanCommand(this.dbManager, this.configManager, installedNames);
+			const scanCmd = new ScanCommand(
+				this.dbManager,
+				this.configManager,
+				installedNames,
+			);
 			await scanCmd.execute(context);
 
 			// Update records with Git Metadata
 			// Get installed commit hash from tempDir
-			const installedHash = await GitClient.getCurrentCommit(tempDir) || null;
+			const installedHash = (await GitClient.getCurrentCommit(tempDir)) || null;
 
 			for (const addonName of installedNames) {
 				this.dbManager.updateAddon(addonName, {
@@ -129,15 +133,22 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 		}
 	}
 
-	async undo(context: CommandContext): Promise<void> {
+	async undo(_context: CommandContext): Promise<void> {
 		logger.log("InstallFromUrlCommand", "Rolling back installation");
 		const destDir = this.configManager.get().destDir;
 		for (const folder of this.installedFolders) {
 			try {
-				await fs.rm(path.join(destDir, folder), { recursive: true, force: true });
+				await fs.rm(path.join(destDir, folder), {
+					recursive: true,
+					force: true,
+				});
 				this.dbManager.removeAddon(folder);
 			} catch (err) {
-				logger.error("InstallFromUrlCommand", `Failed to remove ${folder} during undo`, err);
+				logger.error(
+					"InstallFromUrlCommand",
+					`Failed to remove ${folder} during undo`,
+					err,
+				);
 			}
 		}
 	}

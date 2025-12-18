@@ -36,7 +36,11 @@ export class RemoveAddonCommand implements Command<boolean> {
 		try {
 			await fs.cp(addonPath, this.backupPath, { recursive: true });
 		} catch (error) {
-			logger.error("Manager", `Failed to create backup for ${this.folder}`, error);
+			logger.error(
+				"Manager",
+				`Failed to create backup for ${this.folder}`,
+				error,
+			);
 			// If we can't backup, maybe we shouldn't proceed?
 			// For safety, let's proceed but log it.
 		}
@@ -53,14 +57,18 @@ export class RemoveAddonCommand implements Command<boolean> {
 			context.emit("addon:remove:complete", this.folder);
 			return true;
 		} catch (error) {
-			logger.error("Manager", `Failed to delete addon folder: ${this.folder}`, error);
+			logger.error(
+				"Manager",
+				`Failed to delete addon folder: ${this.folder}`,
+				error,
+			);
 			// Try to rollback immediately if disk removal fails?
 			await this.undo(context);
 			return false;
 		}
 	}
 
-	async undo(context: CommandContext): Promise<void> {
+	async undo(_context: CommandContext): Promise<void> {
 		if (!this.addonRecord || !this.backupPath) return;
 
 		logger.log("Manager", `Rolling back removal of ${this.folder}`);
