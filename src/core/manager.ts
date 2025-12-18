@@ -151,18 +151,44 @@ export class AddonManager extends EventEmitter {
 
 		if (addon.type === "tukui") {
 			if (addon.name === "ElvUI" || addon.folder === "ElvUI") {
+				// Try to extract git hash from TOC version (e.g. v13.08-1-g123abc)
 				const hashMatch = addon.version?.match(/-g([a-f0-9]+)/);
-				const localHash = hashMatch ? hashMatch[1] : null;
-				const remoteHash = await GitClient.getRemoteCommit("https://github.com/tukui-org/ElvUI", "main");
+				const localHashFromVer = hashMatch ? hashMatch[1] : null;
+				// Prefer stored git_commit
+				const localHash = addon.git_commit || localHashFromVer;
+
+				const remoteHash = await GitClient.getRemoteCommit(
+					"https://github.com/tukui-org/ElvUI",
+					"main",
+				);
 
 				if (remoteHash && localHash) {
-					if (remoteHash.startsWith(localHash)) {
-						return { updateAvailable: false, remoteVersion: remoteHash };
+					// Check if remote full hash starts with local short hash
+					if (remoteHash.startsWith(localHash) || localHash.startsWith(remoteHash)) {
+						return {
+							updateAvailable: false,
+							remoteVersion: remoteHash,
+						};
 					}
-					return { updateAvailable: true, remoteVersion: remoteHash };
+					return {
+						updateAvailable: true,
+						remoteVersion: remoteHash,
+					};
 				}
-				if (remoteHash) return { updateAvailable: true, remoteVersion: remoteHash };
+
+				if (remoteHash) {
+					// If we have remote but no local hash, assume update needed
+					// UNLESS we just installed it? 
+					// If git_commit is null, it means we scanned a manual install or TOC version with no hash.
+					// We can't verify.
+					return {
+						updateAvailable: true,
+						remoteVersion: remoteHash,
+					};
+				}
 			}
+
+			// Fallback for other TukUI addons or if check fails
 			return { updateAvailable: true, remoteVersion: "latest" };
 		}
 

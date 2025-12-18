@@ -113,12 +113,26 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			break;
 		case "done":
 			if (result?.updated) {
-				icon = <Text color="yellow">{nerdFonts ? "📦" : "Upd"}</Text>;
-				statusText = (
-					<Text color="yellow" wrap="truncate-end">
-						{result.message}
-					</Text>
-				);
+				// Distinguish between "Update Available" (ManageScreen) and "Updated" (UpdateScreen)
+				// ManageScreen uses "Update: ..." message convention
+				const isUpdateAvailableMsg = result.message?.startsWith("Update:");
+				
+				if (isUpdateAvailableMsg) {
+					icon = <Text color="yellow">{nerdFonts ? "📦" : "!"}</Text>;
+					statusText = (
+						<Text color="yellow" wrap="truncate-end">
+							{result.message}
+						</Text>
+					);
+				} else {
+					// "Updated to ..." - Success
+					icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
+					statusText = (
+						<Text color="green" wrap="truncate-end">
+							{result.message}
+						</Text>
+					);
+				}
 			} else {
 				icon = <Text> </Text>;
 				statusText = (
