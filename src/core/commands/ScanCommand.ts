@@ -30,7 +30,6 @@ export class ScanCommand implements Command<number> {
 			return 0;
 		}
 
-		// If doing a full scan, cleanup ignored addons from DB if they exist
 		if (!this.specificFolders) {
 			const IGNORED_FOLDERS = [
 				"ElvUI_OptionsUI",
@@ -94,7 +93,6 @@ export class ScanCommand implements Command<number> {
 					isGit = false;
 				}
 
-				// If TOC version is missing, use Git hash as fallback for display version
 				const finalVersion = version || (isGit && gitHash ? gitHash.substring(0, 7) : "Unknown");
 
 				const existing = this.dbManager.getByFolder(folderName);
@@ -113,7 +111,6 @@ export class ScanCommand implements Command<number> {
 						updated = true;
 					}
 					
-					// Update git commit hash if changed
 					if (gitHash && existing.git_commit !== gitHash) {
 						updates.git_commit = gitHash;
 						updated = true;

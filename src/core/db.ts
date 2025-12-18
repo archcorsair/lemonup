@@ -118,6 +118,8 @@ export class DatabaseManager {
 		) as (keyof AddonRecord)[];
 		if (keys.length === 0) return;
 
+		// console.log(`[DB] Updating ${folder}:`, validUpdates);
+
 		const setClause = keys.map((k) => `${k} = $${k}`).join(", ");
 		const query = this.db.query(
 			`UPDATE addons SET ${setClause} WHERE folder = $folder`,

@@ -40,7 +40,6 @@ export class AddonManager extends EventEmitter {
 	constructor(configManager?: ConfigManager) {
 		super();
 		this.configManager = configManager || new ConfigManager();
-		// Use the same directory as the config file for the database
 		const configDir = path.dirname(this.configManager.path);
 		this.dbManager = new DatabaseManager(configDir);
 
@@ -90,7 +89,7 @@ export class AddonManager extends EventEmitter {
 					name: repo.name,
 					folder: folder,
 					version: repo.installedVersion,
-					git_commit: null, // Config migration doesn't have git history
+					git_commit: null,
 					author: null,
 					interface: null,
 					url: repo.gitRemote || repo.downloadUrl || null,

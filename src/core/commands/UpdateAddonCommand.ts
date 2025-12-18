@@ -36,7 +36,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		let remoteVersion = "unknown";
 		let updateAvailable = true;
 
-		// 1. Check for updates
 		if (this.addon.type === "github") {
 			try {
 				const branch = "main";
@@ -47,7 +46,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				if (!remoteHash) throw new Error("Failed to get remote hash");
 
 				remoteVersion = remoteHash;
-				// Compare with stored git_commit if available, otherwise fallback to version
 				const localHash = this.addon.git_commit || this.addon.version;
 				updateAvailable = localHash !== remoteHash;
 			} catch (err) {
@@ -59,9 +57,30 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				};
 			}
 		} else if (this.addon.type === "tukui") {
-			// Simplified check for now
-			updateAvailable = true;
-			remoteVersion = "latest";
+			if (name === "ElvUI" || folder === "ElvUI") {
+				const hashMatch = this.addon.version?.match(/-g([a-f0-9]+)/);
+				const localHash = this.addon.git_commit || (hashMatch ? hashMatch[1] : null);
+				
+				const remoteHash = await GitClient.getRemoteCommit(
+					"https://github.com/tukui-org/ElvUI",
+					"main"
+				);
+
+				if (remoteHash) {
+					remoteVersion = remoteHash;
+					if (localHash && (remoteHash.startsWith(localHash) || localHash.startsWith(remoteHash))) {
+						updateAvailable = false;
+					} else {
+						updateAvailable = true;
+					}
+				} else {
+					updateAvailable = true;
+					remoteVersion = "latest";
+				}
+			} else {
+				updateAvailable = true;
+				remoteVersion = "latest";
+			}
 		}
 
 		context.emit("addon:update-check:complete", name, updateAvailable, remoteVersion);
@@ -75,14 +94,12 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			};
 		}
 
-		// 2. Prepare for update
 		context.emit("addon:install:start", name);
 		const tempDir = path.join(os.tmpdir(), "lemonup-updates", name);
 		await fs.rm(tempDir, { recursive: true, force: true });
 		await fs.mkdir(tempDir, { recursive: true });
 
 		try {
-			// 3. Download/Clone
 			if (this.addon.type === "tukui") {
 				context.emit("addon:install:downloading", name);
 				const zipPath = path.join(tempDir, "addon.zip");
@@ -97,7 +114,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 					throw new Error("Unzip failed");
 				}
 
-				// 4. Backup & Copy
 				await this.backupAndInstall(
 					context,
 					path.join(extractPath, folder),
@@ -109,23 +125,14 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 					throw new Error("Git Clone failed");
 				}
 
-				// 4. Backup & Copy
 				await this.backupAndInstall(context, path.join(tempDir, folder), folder);
 			}
 
-			// 5. Update DB
+			const isGitHash = remoteVersion.match(/^[a-f0-9]{40}$/);
+			
 			this.dbManager.updateAddon(folder, {
-				version: remoteVersion.substring(0, 7), // Update display version to short hash? Or keep old logic?
-				// Actually, we should probably keep TOC version if possible, but remoteVersion is the hash for git.
-				// If we update via git clone, the new files are there. ScanCommand would update the version next scan.
-				// But we want to be accurate now.
-				// Let's set git_commit to remoteVersion (hash).
-				// And version to... maybe just keep it or update it?
-				// If we don't scan, the version in DB is stale.
-				// Let's rely on a re-scan or just set hash.
-				// Ideally we should re-scan the addon folder to get the new TOC version.
-				// But for now, let's just set the commit.
-				git_commit: remoteVersion,
+				version: isGitHash ? remoteVersion.substring(0, 7) : remoteVersion,
+				git_commit: isGitHash ? remoteVersion : null,
 				last_updated: new Date().toISOString(),
 			});
 
@@ -158,7 +165,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		const destDir = this.configManager.get().destDir;
 		const destPath = path.join(destDir, folder);
 
-		// Backup current if exists
 		try {
 			await fs.access(destPath);
 			const backupBase = path.join(os.tmpdir(), "lemonup-backups");
@@ -167,7 +173,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			await fs.cp(destPath, backupPath, { recursive: true });
 			this.backupPaths.set(folder, backupPath);
 		} catch {
-			// Doesn't exist, no backup needed
 		}
 
 		context.emit("addon:install:copying", this.addon.name);
@@ -179,7 +184,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 
 		const destDir = this.configManager.get().destDir;
 
-		// Restore Disk
 		for (const [folder, backupPath] of this.backupPaths) {
 			const destPath = path.join(destDir, folder);
 			try {
@@ -190,7 +194,6 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			}
 		}
 
-		// Restore DB
 		if (this.previousRecord) {
 			this.dbManager.updateAddon(this.addon.folder, {
 				version: this.previousRecord.version,

@@ -4,6 +4,8 @@ import path from "node:path";
 import type { ConfigManager } from "../config";
 import type { DatabaseManager } from "../db";
 import * as Downloader from "../downloader";
+import * as GitClient from "../git";
+import { logger } from "../logger";
 import { isPathConfigured } from "../paths";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
@@ -30,14 +32,12 @@ export class InstallTukUICommand implements Command<boolean> {
 		context.emit("addon:install:start", this.addonFolder);
 
 		try {
-			// Download
 			context.emit("addon:install:downloading", this.addonFolder);
 			const zipPath = path.join(tempDir, "addon.zip");
 			if (!(await Downloader.download(this.url, zipPath))) {
 				throw new Error("Download failed");
 			}
 
-			// Extract
 			context.emit("addon:install:extracting", this.addonFolder);
 			const extractPath = path.join(tempDir, "extract");
 			await fs.mkdir(extractPath, { recursive: true });
@@ -45,7 +45,6 @@ export class InstallTukUICommand implements Command<boolean> {
 				throw new Error("Unzip failed");
 			}
 
-			// Copy
 			context.emit("addon:install:copying", this.addonFolder);
 			const foldersToCopy = [this.addonFolder, ...this.subFolders];
 			for (const folder of foldersToCopy) {
@@ -54,14 +53,25 @@ export class InstallTukUICommand implements Command<boolean> {
 				await fs.cp(source, dest, { recursive: true, force: true });
 			}
 
-			// Register
 			const scanCmd = new ScanCommand(this.dbManager, this.configManager, [this.addonFolder]);
 			await scanCmd.execute(context);
 
-			// Update type/url
+			let gitHash: string | null = null;
+			if (this.addonFolder === "ElvUI") {
+				try {
+					gitHash = await GitClient.getRemoteCommit(
+						"https://github.com/tukui-org/ElvUI",
+						"main",
+					);
+				} catch (e) {
+					logger.error("InstallTukUICommand", "Failed to get ElvUI git hash", e);
+				}
+			}
+
 			this.dbManager.updateAddon(this.addonFolder, {
 				type: "tukui",
 				url: this.url,
+				git_commit: gitHash,
 				last_updated: new Date().toISOString(),
 			});
 
@@ -75,5 +85,3 @@ export class InstallTukUICommand implements Command<boolean> {
 		}
 	}
 }
-
-import { logger } from "../logger";
