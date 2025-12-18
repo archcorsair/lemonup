@@ -382,8 +382,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				marginBottom={0}
 				width="100%"
 			>
-				<Box width={4} flexShrink={0}>
+				<Box width={3} flexShrink={0}>
 					<Text> </Text>
+				</Box>
+				<Box width={22} flexShrink={0}>
+					<Text bold>Status</Text>
 				</Box>
 				<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
 					<Text bold>Name</Text>
@@ -393,12 +396,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				</Box>
 				<Box width={8} flexShrink={0}>
 					<Text bold>Source</Text>
-				</Box>
-				<Box width={12} flexShrink={0}>
-					<Text bold>Version</Text>
-				</Box>
-				<Box flexGrow={1} flexShrink={1} minWidth={15} flexBasis="25%">
-					<Text bold>Status</Text>
 				</Box>
 			</Box>
 

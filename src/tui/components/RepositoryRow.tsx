@@ -152,13 +152,28 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			break;
 	}
 
+	const displayVersion = repo.version
+		? repo.version.match(/^[a-f0-9]{40}$/i)
+			? repo.version.substring(0, 7)
+			: repo.version
+		: "";
+
 	return (
-		<Box paddingX={1} width="100%">
-			<Box width={4} flexShrink={0}>
-				<Text color="blue">{isSelected ? "> " : "  "}</Text>
+		<Box paddingX={2} width="100%">
+			<Box width={3} flexShrink={0}>
+				<Text color="blue">{isSelected ? ">" : " "}</Text>
 				<Text color={isChecked ? "green" : "gray"}>
 					{isChecked ? (nerdFonts ? "●" : "*") : " "}
 				</Text>
+			</Box>
+
+			<Box width={22} flexShrink={0}>
+				<Box gap={1}>
+					<Box flexGrow={1}>{statusText}</Box>
+					<Box width={1} justifyContent="center">
+						{icon}
+					</Box>
+				</Box>
 			</Box>
 
 			<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
@@ -166,7 +181,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 					color={isSelected ? "blue" : isChecked ? "green" : undefined}
 					wrap="truncate-end"
 				>
-					{repo.name}
+					{repo.name} {displayVersion ? <Text color="gray">({displayVersion})</Text> : null}
 				</Text>
 			</Box>
 
@@ -178,25 +193,6 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 
 			<Box width={8} flexShrink={0}>
 				{typeLabel}
-			</Box>
-
-			<Box width={12} flexShrink={0}>
-				<Text color="gray" wrap="truncate-end">
-					{repo.version
-						? repo.version.match(/^[a-f0-9]{40}$/i)
-							? repo.version.substring(0, 7)
-							: repo.version
-						: "-"}
-				</Text>
-			</Box>
-
-			<Box flexGrow={1} flexShrink={1} minWidth={15} flexBasis="25%">
-				<Box gap={1}>
-					<Box width={3} justifyContent="center">
-						{icon}
-					</Box>
-					<Box flexGrow={1}>{statusText}</Box>
-				</Box>
 			</Box>
 		</Box>
 	);
