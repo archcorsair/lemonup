@@ -236,8 +236,42 @@ export class AddonManager extends EventEmitter {
 		this.dbManager.updateAddon(folder, metadata);
 	}
 
-	public async removeAddon(folder: string): Promise<boolean> {
-		const command = new RemoveAddonCommand(this.dbManager, this.configManager, folder);
-		return await this.executeCommand(command);
+		public async removeAddon(folder: string): Promise<boolean> {
+
+			const command = new RemoveAddonCommand(this.dbManager, this.configManager, folder);
+
+			return await this.executeCommand(command);
+
+		}
+
+	
+
+		public isAlreadyInstalled(urlOrFolder: string): boolean {
+
+			const addons = this.dbManager.getAll();
+
+			const clean = (u: string) =>
+
+				u.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase();
+
+	
+
+			const target = clean(urlOrFolder);
+
+	
+
+			// Check by folder name or URL
+
+			return addons.some(
+
+				(a) =>
+
+					clean(a.folder) === target || (a.url && clean(a.url) === target),
+
+			);
+
+		}
+
 	}
-}
+
+	

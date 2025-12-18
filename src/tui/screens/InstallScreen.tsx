@@ -19,7 +19,8 @@ type Mode =
 	| "installing"
 	| "result"
 	| "config-auto-confirm"
-	| "config-manual-input";
+	| "config-manual-input"
+	| "confirm-reinstall";
 
 export const InstallScreen: React.FC<InstallScreenProps> = ({
 	config: initialConfig,
@@ -60,6 +61,20 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		type: "github" | "elvui",
 		installUrl?: string,
 	) => {
+		// Safety Check: Duplicate Install
+		let exists = false;
+		if (type === "elvui") {
+			exists = addonManager.isAlreadyInstalled("ElvUI");
+		} else if (type === "github" && installUrl) {
+			exists = addonManager.isAlreadyInstalled(installUrl);
+		}
+
+		if (exists) {
+			setPendingInstall({ type, url: installUrl });
+			setMode("confirm-reinstall");
+			return;
+		}
+
 		if (!isPathConfigured(config.destDir)) {
 			setPendingInstall({ type, url: installUrl });
 			const def = getDefaultWoWPath();
@@ -151,6 +166,25 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			return;
 		}
 
+		if (mode === "confirm-reinstall") {
+			if (input.toLowerCase() === "y") {
+				// Proceed with install
+				if (pendingInstall) {
+					handleInstall(pendingInstall.type, pendingInstall.url);
+				}
+			} else if (input.toLowerCase() === "n" || key.escape || key.return) {
+				if (pendingInstall?.type === "github") {
+					setMode("github-input");
+					// Preserve the URL if available
+					if (pendingInstall.url) setUrl(pendingInstall.url);
+				} else {
+					setMode("select");
+				}
+				setPendingInstall(null);
+			}
+			return;
+		}
+
 		if (mode === "config-manual-input") {
 			if (key.return) {
 				if (manualPath.trim()) {
@@ -207,6 +241,16 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					<Text color="blue">{detectedPath}</Text>
 					<Box marginTop={1}>
 						<Text>Do you want to use this path? (Y/n)</Text>
+					</Box>
+				</Box>
+			)}
+
+			{mode === "confirm-reinstall" && (
+				<Box flexDirection="column" borderColor="red" borderStyle="round" padding={1}>
+					<Text color="red" bold>Warning: Addon Already Installed</Text>
+					<Text>It looks like this addon is already installed.</Text>
+					<Box marginTop={1}>
+						<Text>Do you want to reinstall and overwrite it? (y/N)</Text>
 					</Box>
 				</Box>
 			)}
