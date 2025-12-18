@@ -207,7 +207,7 @@ const AppContent: React.FC<AppProps> = ({
 					🍋 LemonUp
 				</Text>
 				<Box marginLeft={1}>
-					<Text color="gray">v0.0.1</Text>
+					<Text color="gray">v0.0.2</Text>
 				</Box>
 				{dryRun && (
 					<Box marginLeft={2}>
