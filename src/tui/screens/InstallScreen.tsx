@@ -47,8 +47,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	);
 
 	const OPTIONS = [
-		{ label: "Install from GitHub URL", action: "github" },
-		{ label: "Install ElvUI", action: "elvui" },
+		{ label: "Install from GitHub URL", action: "github", section: "General" },
+		{ label: "Install ElvUI", action: "elvui", section: "TukUI" },
 	];
 
 	// Ensure we have the latest config
@@ -223,11 +223,27 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 			{mode === "select" && (
 				<Box flexDirection="column">
-					{OPTIONS.map((opt, i) => (
-						<Text key={opt.action} color={i === selection ? "green" : "white"}>
-							{i === selection ? "> " : "  "} {opt.label}
-						</Text>
-					))}
+					{(() => {
+						let lastSection = "";
+						return OPTIONS.map((opt, i) => {
+							const showHeader = opt.section !== lastSection;
+							lastSection = opt.section;
+							return (
+								<Box flexDirection="column" key={opt.action}>
+									{showHeader && (
+										<Box marginTop={i > 0 ? 1 : 0} marginBottom={0}>
+											<Text color="magenta" bold underline>
+												{opt.section}
+											</Text>
+										</Box>
+									)}
+									<Text color={i === selection ? "green" : "white"}>
+										{i === selection ? "> " : "  "} {opt.label}
+									</Text>
+								</Box>
+							);
+						});
+					})()}
 				</Box>
 			)}
 
