@@ -48,7 +48,12 @@ export async function unzip(
 
 		for (const entry of zipEntries) {
 			const entryName = entry.entryName;
-			const entryPath = path.resolve(resolvedDestDir, entryName);
+
+			// Robust path traversal check: normalize and resolve against the destination
+			const entryPath = path.resolve(
+				resolvedDestDir,
+				path.normalize(entryName),
+			);
 
 			if (!entryPath.startsWith(destDirWithSep)) {
 				logger.error("Downloader", `Skipping unsafe entry: ${entryName}`);
