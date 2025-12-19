@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useReducer, useState } from "react";
+import pkg from "../../package.json";
 import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 import { FirstRunWizard } from "./FirstRunWizard";
@@ -206,7 +207,7 @@ const AppContent: React.FC<AppProps> = ({
 					🍋 LemonUp
 				</Text>
 				<Box marginLeft={1}>
-					<Text color="gray">v0.0.2</Text>
+					<Text color="gray">v{pkg.version}</Text>
 				</Box>
 				{dryRun && (
 					<Box marginLeft={2}>
