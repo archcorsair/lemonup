@@ -10,13 +10,13 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigManager } from "./config";
-import * as Downloader from "./downloader";
-import * as GitClient from "./git";
-import type { AddonManager as AddonManagerType } from "./manager";
+import { ConfigManager } from "@/core/config";
+import * as Downloader from "@/core/downloader";
+import * as GitClient from "@/core/git";
+import type { AddonManager as AddonManagerType } from "@/core/manager";
 
 // Import AddonManager
-const { AddonManager } = await import("./manager");
+const { AddonManager } = await import("@/core/manager");
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-manager");
 const CONFIG_DIR = path.join(TMP_BASE, "config");

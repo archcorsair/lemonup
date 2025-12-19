@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import archiver from "archiver";
-import * as Downloader from "./downloader";
+import * as Downloader from "@/core/downloader";
 
 const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-downloader");
 

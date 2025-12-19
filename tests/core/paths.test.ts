@@ -1,6 +1,6 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import os from "node:os";
-import { getDefaultWoWPath, isPathConfigured } from "./paths";
+import { getDefaultWoWPath, isPathConfigured } from "@/core/paths";
 
 describe("paths", () => {
 	test("isPathConfigured should return false for NOT_CONFIGURED or empty", () => {
