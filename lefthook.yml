@@ -8,4 +8,4 @@ pre-commit:
     typecheck:
       run: bun run typecheck
     test:
-      run: bun test
+      run: bun test --only-failures

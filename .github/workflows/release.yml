@@ -31,7 +31,7 @@ jobs:
         run: bun run typecheck
 
       - name: Run tests
-        run: bun test
+        run: bun test --only-failures
 
       - name: Build Standalone Executables
         run: |
