@@ -1,16 +1,24 @@
-import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigManager } from "../config";
 import { DatabaseManager } from "../db";
+import * as Downloader from "../downloader";
+import * as GitClient from "../git";
 import { InstallFromUrlCommand } from "./InstallFromUrlCommand";
 import { InstallTukUICommand } from "./InstallTukUICommand";
 import { RemoveAddonCommand } from "./RemoveAddonCommand";
 import { ScanCommand } from "./ScanCommand";
 import { UpdateAddonCommand } from "./UpdateAddonCommand";
-import * as GitClient from "../git";
-import * as Downloader from "../downloader";
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-commands");
 const CONFIG_DIR = path.join(TMP_BASE, "config");
@@ -19,16 +27,23 @@ const DEST_DIR = path.join(TMP_BASE, "AddOns");
 describe("Commands", () => {
 	let configManager: ConfigManager;
 	let dbManager: DatabaseManager;
+	// biome-ignore lint/suspicious/noExplicitAny: test mock
 	const mockContext: any = {
 		emit: mock(),
 	};
 
 	beforeEach(() => {
-		spyOn(GitClient, "getRemoteCommit").mockImplementation(() => Promise.resolve("hash"));
+		spyOn(GitClient, "getRemoteCommit").mockImplementation(() =>
+			Promise.resolve("hash"),
+		);
 		spyOn(GitClient, "clone").mockImplementation(() => Promise.resolve(true));
-		spyOn(GitClient, "getCurrentCommit").mockImplementation(() => Promise.resolve("hash"));
-		
-		spyOn(Downloader, "download").mockImplementation(() => Promise.resolve(true));
+		spyOn(GitClient, "getCurrentCommit").mockImplementation(() =>
+			Promise.resolve("hash"),
+		);
+
+		spyOn(Downloader, "download").mockImplementation(() =>
+			Promise.resolve(true),
+		);
 		spyOn(Downloader, "unzip").mockImplementation(() => Promise.resolve(true));
 
 		mockContext.emit.mockReset();
@@ -60,15 +75,17 @@ describe("Commands", () => {
 		test("should install from github url", async () => {
 			const url = "https://github.com/user/repo";
 
-			spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
-				const folderPath = path.join(dest, "RepoAddon");
-				fs.mkdirSync(folderPath, { recursive: true });
-				await Bun.write(
-					path.join(folderPath, "RepoAddon.toc"),
-					"## Title: Repo Addon",
-				);
-				return true;
-			});
+			spyOn(GitClient, "clone").mockImplementation(
+				async (_url, _branch, dest) => {
+					const folderPath = path.join(dest, "RepoAddon");
+					fs.mkdirSync(folderPath, { recursive: true });
+					await Bun.write(
+						path.join(folderPath, "RepoAddon.toc"),
+						"## Title: Repo Addon",
+					);
+					return true;
+				},
+			);
 
 			const command = new InstallFromUrlCommand(dbManager, configManager, url);
 			const result = await command.execute(mockContext);
@@ -165,6 +182,7 @@ describe("Commands", () => {
 			const addonDir = path.join(DEST_DIR, folder);
 			fs.mkdirSync(addonDir, { recursive: true });
 
+			// biome-ignore lint/suspicious/noExplicitAny: test data
 			const addon: any = {
 				name: "UpdateMe",
 				folder: folder,
@@ -179,11 +197,13 @@ describe("Commands", () => {
 
 			const newHash = "a1b2c3d4e5f678901234567890abcdef12345678";
 			spyOn(GitClient, "getRemoteCommit").mockResolvedValue(newHash);
-			spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
-				const folderPath = path.join(dest, folder);
-				fs.mkdirSync(folderPath, { recursive: true });
-				return true;
-			});
+			spyOn(GitClient, "clone").mockImplementation(
+				async (_url, _branch, dest) => {
+					const folderPath = path.join(dest, folder);
+					fs.mkdirSync(folderPath, { recursive: true });
+					return true;
+				},
+			);
 
 			const command = new UpdateAddonCommand(
 				dbManager,
@@ -208,7 +228,8 @@ describe("Commands", () => {
 			const addonDir = path.join(DEST_DIR, folder);
 			fs.mkdirSync(addonDir, { recursive: true });
 
-			const tocContent = "## Title: Existing Addon\n## Version: 1.2.3\n## Author: Me\n";
+			const tocContent =
+				"## Title: Existing Addon\n## Version: 1.2.3\n## Author: Me\n";
 			await Bun.write(path.join(addonDir, `${folder}.toc`), tocContent);
 
 			const command = new ScanCommand(dbManager, configManager);

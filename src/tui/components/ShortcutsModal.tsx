@@ -37,7 +37,7 @@ export const ShortcutsModal: React.FC<ShortcutsModalProps> = ({
 			<Box flexDirection="column" borderStyle="single" borderColor="cyan">
 				<Box width={totalWidth}>
 					<Text bold color="cyan" underline backgroundColor="black">
-						{(" ".repeat(sidePad) + "Commands").padEnd(totalWidth)}
+						{`${" ".repeat(sidePad)}Commands`.padEnd(totalWidth)}
 					</Text>
 				</Box>
 

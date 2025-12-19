@@ -51,6 +51,7 @@ Flags:
 			process.exit(0);
 		}
 	} catch (err) {
+		// biome-ignore lint/suspicious/noExplicitAny: error code property is not standard but present on ARG_UNKNOWN_OPTION
 		if (err instanceof Error && (err as any).code === "ARG_UNKNOWN_OPTION") {
 			console.error(err.message);
 			console.error("Run 'lemonup --help' for usage.");

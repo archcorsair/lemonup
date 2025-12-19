@@ -28,6 +28,7 @@ describe("paths", () => {
 
 		const fs = require("node:fs");
 		const originalExistsSync = fs.existsSync;
+		// biome-ignore lint/suspicious/noExplicitAny: path can be string or URL
 		spyOn(fs, "existsSync").mockImplementation((p: any) => {
 			if (typeof p === "string" && p.includes(".wine")) return true;
 			return false;

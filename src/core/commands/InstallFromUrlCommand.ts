@@ -35,7 +35,7 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 			};
 		}
 
-		const tempDir = path.join(os.tmpdir(), "lemonup-install-" + Date.now());
+		const tempDir = path.join(os.tmpdir(), `lemonup-install-${Date.now()}`);
 
 		try {
 			// Validate URL

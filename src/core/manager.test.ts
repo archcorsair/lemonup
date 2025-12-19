@@ -1,11 +1,19 @@
-import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigManager } from "./config";
-import type { AddonManager as AddonManagerType } from "./manager";
-import * as GitClient from "./git";
 import * as Downloader from "./downloader";
+import * as GitClient from "./git";
+import type { AddonManager as AddonManagerType } from "./manager";
 
 // Import AddonManager
 const { AddonManager } = await import("./manager");
@@ -20,11 +28,17 @@ describe("AddonManager", () => {
 
 	beforeEach(() => {
 		// Setup Spies
-		spyOn(GitClient, "getRemoteCommit").mockImplementation(() => Promise.resolve("hash"));
+		spyOn(GitClient, "getRemoteCommit").mockImplementation(() =>
+			Promise.resolve("hash"),
+		);
 		spyOn(GitClient, "clone").mockImplementation(() => Promise.resolve(true));
-		spyOn(GitClient, "getCurrentCommit").mockImplementation(() => Promise.resolve("hash"));
-		
-		spyOn(Downloader, "download").mockImplementation(() => Promise.resolve(true));
+		spyOn(GitClient, "getCurrentCommit").mockImplementation(() =>
+			Promise.resolve("hash"),
+		);
+
+		spyOn(Downloader, "download").mockImplementation(() =>
+			Promise.resolve(true),
+		);
 		spyOn(Downloader, "unzip").mockImplementation(() => Promise.resolve(true));
 
 		// Setup FS
@@ -53,6 +67,7 @@ describe("AddonManager", () => {
 	});
 
 	test("checkUpdate should return true if versions differ (fallback)", async () => {
+		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
 			name: "test-repo",
 			type: "github",
@@ -67,10 +82,14 @@ describe("AddonManager", () => {
 
 		expect(result.updateAvailable).toBe(true);
 		expect(result.remoteVersion).toBe("new-hash");
-		expect(GitClient.getRemoteCommit).toHaveBeenCalledWith("http://git", "main");
+		expect(GitClient.getRemoteCommit).toHaveBeenCalledWith(
+			"http://git",
+			"main",
+		);
 	});
 
 	test("checkUpdate should use git_commit if available", async () => {
+		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
 			name: "test-repo",
 			type: "github",
@@ -88,6 +107,7 @@ describe("AddonManager", () => {
 	});
 
 	test("checkUpdate should return false if git_commit matches remote", async () => {
+		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
 			name: "test-repo",
 			type: "github",
@@ -104,6 +124,7 @@ describe("AddonManager", () => {
 	});
 
 	test("updateAddon (GitHub) should clone and install", async () => {
+		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
 			name: "gh-repo",
 			folder: "FolderA",
@@ -113,12 +134,14 @@ describe("AddonManager", () => {
 		};
 
 		spyOn(GitClient, "getRemoteCommit").mockResolvedValue("new-hash");
-		spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dest) => {
-			const folderPath = path.join(dest, "FolderA");
-			fs.mkdirSync(folderPath, { recursive: true });
-			await Bun.write(path.join(folderPath, "file.txt"), "content");
-			return true;
-		});
+		spyOn(GitClient, "clone").mockImplementation(
+			async (_url, _branch, dest) => {
+				const folderPath = path.join(dest, "FolderA");
+				fs.mkdirSync(folderPath, { recursive: true });
+				await Bun.write(path.join(folderPath, "file.txt"), "content");
+				return true;
+			},
+		);
 
 		const result = await manager.updateAddon(addon, false);
 
@@ -131,6 +154,7 @@ describe("AddonManager", () => {
 	});
 
 	test("updateAddon (TukUI) should download and install", async () => {
+		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
 			name: "tukui-repo",
 			folder: "TukUI",

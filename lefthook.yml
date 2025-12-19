@@ -2,6 +2,7 @@ pre-commit:
   commands:
     lint:
       glob: "**/*.{ts,tsx,js,jsx,json}"
+      exclude: "**/*.test.ts"
       run: bunx biome check --write {staged_files}
       stage_fixed: true
     typecheck:

@@ -78,7 +78,7 @@ export async function clone(
  */
 export async function getCurrentCommit(
 	cwd: string,
-	gitDir?: string, // Optional, but usually implicit in cwd
+	_gitDir?: string,
 ): Promise<string | null> {
 	const cmd = ["git", "rev-parse", "HEAD"];
 	try {

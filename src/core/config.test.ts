@@ -31,6 +31,7 @@ describe("ConfigManager", () => {
 	test("should create default config", () => {
 		const fs = require("node:fs");
 		const originalExistsSync = fs.existsSync;
+		// biome-ignore lint/suspicious/noExplicitAny: path can be string or URL
 		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
 			if (typeof p === "string" && p.includes(".wine")) return true;
 			// Default behavior for other paths (needed for ConfigManager internals)
