@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import arg from "arg";
 import { render } from "ink";
-
+import pkg from "./package.json";
 import { runCLI } from "./src/cli";
 import { App } from "./src/tui/App";
 
@@ -16,13 +16,20 @@ async function main() {
 				"--test": Boolean,
 				"--help": Boolean,
 				"-h": "--help",
+				"--version": Boolean,
+				"-v": "--version",
 			},
 			{ permissive: true },
 		);
 
+		if (args["--version"]) {
+			console.log(pkg.version);
+			process.exit(0);
+		}
+
 		if (args["--help"]) {
 			console.log(`
-🍋 LemonUp - WoW Addon Manager
+🍋 LemonUp - WoW Addon Manager (v${pkg.version})
 
 Usage:
   lemonup [flags]
@@ -32,6 +39,7 @@ Flags:
   --force, -f    Force update check/installation
   --dry-run      Simulate actions without modifying files
   --test         Run in test mode (uses temp directories)
+  --version, -v  Show version number
   --help, -h     Show this help message
 			`);
 			process.exit(0);
