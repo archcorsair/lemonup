@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import fs from "node:fs/promises";
 import path from "node:path";
 import {
 	InstallFromUrlCommand,
@@ -13,7 +12,7 @@ import {
 	UpdateAddonCommand,
 	type UpdateAddonResult,
 } from "./commands/UpdateAddonCommand";
-import { type Config, ConfigManager, type Repository } from "./config";
+import { type Config, ConfigManager } from "./config";
 import { type AddonRecord, DatabaseManager } from "./db";
 import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
@@ -42,6 +41,7 @@ export interface AddonManager {
 	): boolean;
 }
 
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: Standard pattern for typed EventEmitter
 export class AddonManager extends EventEmitter {
 	private configManager: ConfigManager;
 	private dbManager: DatabaseManager;
@@ -81,7 +81,7 @@ export class AddonManager extends EventEmitter {
 			return;
 		}
 
-		if (config.repositories && config.repositories.length > 0) {
+		if (Array.isArray(config.repositories) && config.repositories.length > 0) {
 			logger.log(
 				"Manager",
 				"Migrating repositories from config to database...",
