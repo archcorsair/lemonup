@@ -33,6 +33,7 @@ export class DatabaseManager {
 	private init() {
 		this.db.run("PRAGMA journal_mode = WAL;");
 
+		// biome-ignore lint/suspicious/noExplicitAny: user_version is a custom property from the query result
 		const version = (this.db.query("PRAGMA user_version").get() as any)
 			.user_version;
 
@@ -65,6 +66,7 @@ export class DatabaseManager {
 
 			const tableInfo = this.db
 				.query("PRAGMA table_info(addons)")
+				// biome-ignore lint/suspicious/noExplicitAny: table_info result schema is dynamic
 				.all() as any[];
 			const hasGitCommit = tableInfo.some((col) => col.name === "git_commit");
 			if (!hasGitCommit) {
@@ -134,6 +136,7 @@ export class DatabaseManager {
 			params[`$${key}`] = validUpdates[key];
 		}
 
+		// biome-ignore lint/suspicious/noExplicitAny: parameters are mapped dynamically
 		query.run(params as any);
 	}
 

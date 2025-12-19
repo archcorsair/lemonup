@@ -1,5 +1,6 @@
 {
 	"name": "lemonup",
+	"version": "0.0.2",
 	"module": "index.tsx",
 	"type": "module",
 	"private": true,
@@ -10,7 +11,7 @@
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"typecheck": "tsc --noEmit",
-		"test": "bun test",
+		"test": "bun test --only-failures",
 		"clean": "rm -rf lemonup *.bun-build .*.bun-build"
 	},
 	"devDependencies": {

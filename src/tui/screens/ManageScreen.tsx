@@ -24,7 +24,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	config,
 	addonManager,
 	force = false,
-	dryRun = false,
 	onBack,
 }) => {
 	const { exit } = useApp();
@@ -35,6 +34,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 	const [refreshKey, setRefreshKey] = useState(0);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is used to trigger re-fetching when the database state changes.
 	const addons = useMemo(
 		() => addonManager.getAllAddons(),
 		[addonManager, refreshKey],

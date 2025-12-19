@@ -26,7 +26,7 @@ export class InstallTukUICommand implements Command<boolean> {
 			throw new Error("WoW Addon directory is not configured.");
 		}
 
-		const tempDir = path.join(os.tmpdir(), "lemonup-tukui-" + Date.now());
+		const tempDir = path.join(os.tmpdir(), `lemonup-tukui-${Date.now()}`);
 		await fs.mkdir(tempDir, { recursive: true });
 
 		context.emit("addon:install:start", this.addonFolder);

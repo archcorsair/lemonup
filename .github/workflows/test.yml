@@ -24,4 +24,4 @@ jobs:
       run: bun install
 
     - name: Run tests
-      run: bun test
+      run: bun test --only-failures
