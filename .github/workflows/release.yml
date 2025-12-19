@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-build:
+    name: Verify and Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build Standalone Executables
+        run: |
+          mkdir -p dist
+          # Linux x64
+          bun build --compile --minify --sourcemap --target=bun-linux-x64 ./index.tsx --outfile dist/lemonup-linux-x64
+          # Windows x64
+          bun build --compile --minify --sourcemap --target=bun-windows-x64 ./index.tsx --outfile dist/lemonup-windows-x64.exe
+          # macOS ARM64
+          bun build --compile --minify --sourcemap --target=bun-darwin-arm64 ./index.tsx --outfile dist/lemonup-macos-arm64
+          # macOS x64
+          bun build --compile --minify --sourcemap --target=bun-darwin-x64 ./index.tsx --outfile dist/lemonup-macos-x64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/lemonup-linux-x64
+            dist/lemonup-windows-x64.exe
+            dist/lemonup-macos-arm64
+            dist/lemonup-macos-x64
+          generate_release_notes: true
+          draft: true
