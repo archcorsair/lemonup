@@ -1,7 +1,7 @@
 # 🍋 LemonUp (WIP)
 
 <div align="center">
-  <img src="./lemon-wedge.png" alt="LemonUp Logo" width="150" />
+  <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
   <h3>World of Warcraft Addon Manager</h3>
   <p>A fast, lightweight, and beautiful TUI for managing your WoW addons.</p>
   <p><strong>🚧 This project is currently a Work In Progress 🚧</strong></p>
