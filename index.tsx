@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import arg from "arg";
 import { render } from "ink";
+import { runCLI } from "@/cli";
+import { App } from "@/tui/App";
 import pkg from "./package.json";
-import { runCLI } from "./src/cli";
-import { App } from "./src/tui/App";
 
 async function main() {
 	try {
