@@ -9,6 +9,8 @@ dist
 lemonup
 lemonup.exe
 test-output/
+debug_*
+debug.log
 
 # code coverage
 coverage

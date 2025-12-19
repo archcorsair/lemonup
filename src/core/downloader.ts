@@ -1,14 +1,14 @@
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
-import yauzl from "yauzl-promise";
+import AdmZip from "adm-zip";
+import { logger } from "./logger";
 
 export async function download(
 	url: string,
 	destPath: string,
 ): Promise<boolean> {
 	try {
+		logger.log("Downloader", `Downloading: ${url}`);
 		const response = await fetch(url, {
 			headers: {
 				"User-Agent":
@@ -17,12 +17,18 @@ export async function download(
 		});
 
 		if (!response.ok) {
+			logger.error(
+				"Downloader",
+				`Download failed. Status: ${response.status} ${response.statusText} for ${url}`,
+			);
 			return false;
 		}
 
 		await Bun.write(destPath, response);
+		logger.log("Downloader", "Download complete");
 		return true;
-	} catch (_error) {
+	} catch (error) {
+		logger.error("Downloader", `Download threw error for ${url}`, error);
 		return false;
 	}
 }
@@ -31,29 +37,40 @@ export async function unzip(
 	zipPath: string,
 	destDir: string,
 ): Promise<boolean> {
-	let zipFile: Awaited<ReturnType<typeof yauzl.open>> | undefined;
 	try {
-		zipFile = await yauzl.open(zipPath);
-		try {
-			for await (const entry of zipFile) {
-				const entryPath = path.join(destDir, entry.filename);
+		const zip = new AdmZip(zipPath);
+		const zipEntries = zip.getEntries();
 
-				if (entry.filename.endsWith("/")) {
-					// Directory
-					await fsp.mkdir(entryPath, { recursive: true });
-				} else {
-					// File
-					const readStream = await entry.openReadStream();
-					const parentDir = path.dirname(entryPath);
-					await fsp.mkdir(parentDir, { recursive: true });
+		const resolvedDestDir = path.resolve(destDir);
+		const destDirWithSep = resolvedDestDir.endsWith(path.sep)
+			? resolvedDestDir
+			: resolvedDestDir + path.sep;
 
-					const writeStream = fs.createWriteStream(entryPath);
-					await pipeline(readStream, writeStream);
-				}
+		for (const entry of zipEntries) {
+			const entryName = entry.entryName;
+
+			// Robust path traversal check: normalize and resolve against the destination
+			const entryPath = path.resolve(
+				resolvedDestDir,
+				path.normalize(entryName),
+			);
+
+			if (!entryPath.startsWith(destDirWithSep)) {
+				logger.error("Downloader", `Skipping unsafe entry: ${entryName}`);
+				continue;
 			}
-		} finally {
-			await zipFile?.close();
+
+			if (entry.isDirectory) {
+				await fsp.mkdir(entryPath, { recursive: true });
+			} else {
+				const parentDir = path.dirname(entryPath);
+				await fsp.mkdir(parentDir, { recursive: true });
+
+				const data = entry.getData();
+				await Bun.write(entryPath, data);
+			}
 		}
+
 		return true;
 	} catch (error) {
 		throw new Error(

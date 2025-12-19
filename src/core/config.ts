@@ -4,6 +4,7 @@ import path from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 import { logger } from "./logger";
+import { getDefaultWoWPath } from "./paths";
 
 // --- Constants ---
 
@@ -21,10 +22,10 @@ export const RepositoryTypeSchema = z.enum([REPO_TYPE.GITHUB, REPO_TYPE.TUKUI]);
 export const RepositorySchema = z.object({
 	name: z.string(),
 	type: RepositoryTypeSchema,
-	downloadUrl: z.string().optional(), // Required for tukui
-	gitRemote: z.string().optional(), // Required for github
+	downloadUrl: z.string().optional(),
+	gitRemote: z.string().optional(),
 	branch: z.string().default("main"),
-	folders: z.array(z.string()), // The folder names inside Interface/Addons
+	folders: z.array(z.string()),
 	installedVersion: z.string().nullable().default(null),
 });
 
@@ -41,10 +42,11 @@ export const ConfigSchema = z.object({
 	defaultMenuOption: z.enum(["update", "manage", "config"]).default("update"),
 	maxConcurrent: z.number().min(1).max(10).default(3),
 	nerdFonts: z.boolean().default(true),
-	checkInterval: z.number().min(0).default(60000), // ms, 0 = always check (or manually?)
+	checkInterval: z.number().min(0).default(60000),
 	backupWTF: z.boolean().default(true),
 	backupRetention: z.number().min(1).default(5),
 	debug: z.boolean().default(false),
+	migrated_to_db: z.boolean().optional().default(false),
 });
 
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -55,9 +57,9 @@ export type Config = z.infer<typeof ConfigSchema>;
 const PROJECT_NAME = "lemonup";
 
 interface ConfigManagerOptions {
-	cwd?: string; // Optional: Force a specific config directory (good for testing/dev)
-	overrides?: Partial<Config>; // Values to force on load
-	enableSafeMode?: boolean; // If true, disable saving to disk
+	cwd?: string;
+	overrides?: Partial<Config>;
+	enableSafeMode?: boolean;
 }
 
 export class ConfigManager {
@@ -82,6 +84,7 @@ export class ConfigManager {
 				backupWTF: { type: "boolean" },
 				backupRetention: { type: "number" },
 				debug: { type: "boolean" },
+				migrated_to_db: { type: "boolean" },
 			} as const,
 
 			cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -137,6 +140,15 @@ export class ConfigManager {
 		}
 	}
 
+	public removeRepository(repoName: string) {
+		const current = this.get();
+		const repos = current.repositories.filter((r) => r.name !== repoName);
+		if (repos.length !== current.repositories.length) {
+			this.store.set("repositories", repos);
+			logger.log("Config", `Removed repository: ${repoName}`);
+		}
+	}
+
 	public get path(): string {
 		return this.store.path;
 	}
@@ -147,7 +159,7 @@ export class ConfigManager {
 
 	public createDefaultConfig(): void {
 		const defaults: Config = {
-			destDir: "NOT_CONFIGURED",
+			destDir: getDefaultWoWPath(),
 			userAgent:
 				"Mozilla/5.0 (SMART-REFRIGERATOR; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/4.0 TV Safari/537.36",
 			repositories: [],
@@ -158,6 +170,7 @@ export class ConfigManager {
 			backupWTF: true,
 			backupRetention: 5,
 			debug: false,
+			migrated_to_db: false,
 		};
 		this.store.set(defaults);
 	}

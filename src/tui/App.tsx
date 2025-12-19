@@ -1,11 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Box, Text } from "ink";
+import Spinner from "ink-spinner";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 import { FirstRunWizard } from "./FirstRunWizard";
 import { ConfigScreen } from "./screens/ConfigScreen";
+import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
 import { UpdateScreen } from "./screens/UpdateScreen";
@@ -25,7 +27,32 @@ interface AppProps {
 	testMode?: boolean;
 }
 
-type Screen = "menu" | "update" | "manage" | "config";
+type Screen = "menu" | "update" | "manage" | "config" | "install";
+
+interface AppState {
+	screen: Screen;
+	isBusy: boolean;
+	lastMenuSelection?: string;
+}
+
+type AppAction =
+	| { type: "NAVIGATE"; screen: Screen }
+	| { type: "SET_BUSY"; busy: boolean }
+	| { type: "SET_MENU_SELECTION"; selection: string };
+
+function appReducer(state: AppState, action: AppAction): AppState {
+	switch (action.type) {
+		case "NAVIGATE":
+			if (state.isBusy) return state;
+			return { ...state, screen: action.screen };
+		case "SET_BUSY":
+			return { ...state, isBusy: action.busy };
+		case "SET_MENU_SELECTION":
+			return { ...state, lastMenuSelection: action.selection };
+		default:
+			return state;
+	}
+}
 
 export const App: React.FC<AppProps> = ({
 	force = false,
@@ -39,12 +66,22 @@ export const App: React.FC<AppProps> = ({
 	);
 };
 
+// Workaround for React 19 + Ink type mismatch
+const SpinnerFixed = Spinner as unknown as React.FC<{
+	type?: string;
+}>;
+
 const AppContent: React.FC<AppProps> = ({
 	force = false,
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [activeScreen, setActiveScreen] = useState<Screen>("menu");
+	const [{ screen: activeScreen, isBusy, lastMenuSelection }, dispatch] =
+		useReducer(appReducer, {
+			screen: "menu",
+			isBusy: false,
+		});
+
 	const [initialLoad, setInitialLoad] = useState(true);
 	const [showWizard, setShowWizard] = useState(false);
 	const [configManager, setConfigManager] = useState<ConfigManager | null>(
@@ -126,7 +163,7 @@ const AppContent: React.FC<AppProps> = ({
 		setConfig(cfg);
 
 		if (initialLoad) {
-			setActiveScreen("menu");
+			dispatch({ type: "NAVIGATE", screen: "menu" });
 			setInitialLoad(false);
 		}
 	}, [configManager, config, initialLoad]);
@@ -169,12 +206,19 @@ const AppContent: React.FC<AppProps> = ({
 					🍋 LemonUp
 				</Text>
 				<Box marginLeft={1}>
-					<Text color="gray">v0.0.1</Text>
+					<Text color="gray">v0.0.2</Text>
 				</Box>
 				{dryRun && (
 					<Box marginLeft={2}>
 						<Text color="yellow" bold>
 							[DRY RUN]
+						</Text>
+					</Box>
+				)}
+				{isBusy && (
+					<Box marginLeft={2}>
+						<Text color="yellow">
+							<SpinnerFixed type="dots" /> Working...
 						</Text>
 					</Box>
 				)}
@@ -184,7 +228,11 @@ const AppContent: React.FC<AppProps> = ({
 				<MainMenu
 					config={config}
 					configManager={configManager}
-					onSelect={(option) => setActiveScreen(option as Screen)}
+					initialSelection={lastMenuSelection}
+					onSelect={(option) => {
+						dispatch({ type: "SET_MENU_SELECTION", selection: option });
+						dispatch({ type: "NAVIGATE", screen: option as Screen });
+					}}
 				/>
 			)}
 
@@ -197,7 +245,7 @@ const AppContent: React.FC<AppProps> = ({
 					testMode={testMode}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						setActiveScreen("menu");
+						dispatch({ type: "NAVIGATE", screen: "menu" });
 					}}
 				/>
 			)}
@@ -210,7 +258,18 @@ const AppContent: React.FC<AppProps> = ({
 					dryRun={dryRun}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						setActiveScreen("menu");
+						dispatch({ type: "NAVIGATE", screen: "menu" });
+					}}
+				/>
+			)}
+
+			{activeScreen === "install" && config && addonManager && (
+				<InstallScreen
+					config={config}
+					addonManager={addonManager}
+					onBack={() => {
+						setConfig(addonManager.getConfig());
+						dispatch({ type: "NAVIGATE", screen: "menu" });
 					}}
 				/>
 			)}
@@ -218,7 +277,7 @@ const AppContent: React.FC<AppProps> = ({
 			{activeScreen === "config" && configManager && (
 				<ConfigScreen
 					configManager={configManager}
-					onBack={() => setActiveScreen("menu")}
+					onBack={() => dispatch({ type: "NAVIGATE", screen: "menu" })}
 				/>
 			)}
 		</Box>

@@ -1,13 +1,20 @@
-import fs from "node:fs/promises";
-import os from "node:os";
+import { EventEmitter } from "node:events";
 import path from "node:path";
 import {
-	type Config,
-	ConfigManager,
-	REPO_TYPE,
-	type Repository,
-} from "./config";
-import * as Downloader from "./downloader";
+	InstallFromUrlCommand,
+	type InstallFromUrlResult,
+} from "./commands/InstallFromUrlCommand";
+import { InstallTukUICommand } from "./commands/InstallTukUICommand";
+import { RemoveAddonCommand } from "./commands/RemoveAddonCommand";
+import { ScanCommand } from "./commands/ScanCommand";
+import type { Command, CommandContext } from "./commands/types";
+import {
+	UpdateAddonCommand,
+	type UpdateAddonResult,
+} from "./commands/UpdateAddonCommand";
+import { type Config, ConfigManager } from "./config";
+import { type AddonRecord, DatabaseManager } from "./db";
+import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
 import { logger } from "./logger";
 
@@ -19,40 +26,104 @@ export interface UpdateResult {
 	error?: string;
 }
 
-export class AddonManager {
+export interface AddonManager {
+	on<K extends keyof AddonManagerEvents>(
+		event: K,
+		listener: (...args: AddonManagerEvents[K]) => void,
+	): this;
+	off<K extends keyof AddonManagerEvents>(
+		event: K,
+		listener: (...args: AddonManagerEvents[K]) => void,
+	): this;
+	emit<K extends keyof AddonManagerEvents>(
+		event: K,
+		...args: AddonManagerEvents[K]
+	): boolean;
+}
+
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: Standard pattern for typed EventEmitter
+export class AddonManager extends EventEmitter {
 	private configManager: ConfigManager;
+	private dbManager: DatabaseManager;
 
 	constructor(configManager?: ConfigManager) {
+		super();
 		this.configManager = configManager || new ConfigManager();
+		const configDir = path.dirname(this.configManager.path);
+		this.dbManager = new DatabaseManager(configDir);
+
+		this.migrateConfig();
+	}
+
+	private async executeCommand<T>(command: Command<T>): Promise<T> {
+		const context: CommandContext = {
+			emit: (event, ...args) => this.emit(event, ...args),
+		};
+		return await command.execute(context);
 	}
 
 	public getConfig(): Config {
 		return this.configManager.get();
 	}
 
-	/**
-	 * Main entry point to update all repositories.
-	 */
-	public async updateAll(force = false): Promise<UpdateResult[]> {
+	public setConfigValue<K extends keyof Config>(key: K, value: Config[K]) {
+		this.configManager.set(key, value);
+	}
+
+	public close() {
+		this.dbManager.close();
+	}
+
+	private migrateConfig() {
 		const config = this.configManager.get();
-		const results: UpdateResult[] = [];
 
-		// Ensure temp dir exists
-		const tempDir = path.join(os.tmpdir(), "lemonup");
-		await fs.mkdir(tempDir, { recursive: true });
+		if (config.migrated_to_db) {
+			return;
+		}
 
-		for (const repo of config.repositories) {
+		if (Array.isArray(config.repositories) && config.repositories.length > 0) {
+			logger.log(
+				"Manager",
+				"Migrating repositories from config to database...",
+			);
+			for (const repo of config.repositories) {
+				const folder = repo.folders[0];
+				if (!folder) continue;
+
+				if (this.dbManager.getByFolder(folder)) continue;
+
+				this.dbManager.addAddon({
+					name: repo.name,
+					folder: folder,
+					version: repo.installedVersion,
+					git_commit: null,
+					author: null,
+					interface: null,
+					url: repo.gitRemote || repo.downloadUrl || null,
+					type: repo.type as "github" | "tukui",
+					install_date: new Date().toISOString(),
+					last_updated: new Date().toISOString(),
+				});
+				logger.log("Manager", `Migrated ${repo.name}`);
+			}
+		}
+
+		this.configManager.set("migrated_to_db", true);
+	}
+
+	public async updateAll(force = false): Promise<UpdateAddonResult[]> {
+		const addons = this.dbManager.getAll();
+		const results: UpdateAddonResult[] = [];
+
+		for (const addon of addons) {
+			if (addon.type === "manual") continue;
+
 			try {
-				const result = await this.updateRepository(
-					repo,
-					config,
-					tempDir,
-					force,
-				);
+				const result = await this.updateAddon(addon, force);
 				results.push(result);
 			} catch (error) {
 				results.push({
-					repoName: repo.name,
+					repoName: addon.name,
 					success: false,
 					updated: false,
 					error: String(error),
@@ -60,219 +131,165 @@ export class AddonManager {
 			}
 		}
 
-		// Cleanup temp dir
-		await fs.rm(tempDir, { recursive: true, force: true });
-
 		return results;
 	}
 
-	public async checkUpdate(repo: Repository): Promise<{
+	public async checkUpdate(addon: AddonRecord): Promise<{
 		updateAvailable: boolean;
 		remoteVersion: string;
 		error?: string;
 	}> {
-		const { name, gitRemote, branch, installedVersion } = repo;
-
-		if (!gitRemote) {
+		if (!addon.url) {
 			return {
 				updateAvailable: false,
 				remoteVersion: "",
-				error: "Missing gitRemote",
+				error: "Missing URL",
 			};
 		}
 
-		const remoteHash = await GitClient.getRemoteCommit(gitRemote, branch);
-		if (!remoteHash) {
-			return {
-				updateAvailable: false,
-				remoteVersion: "",
-				error: "Failed to get remote hash",
-			};
-		}
-
-		const result = {
-			updateAvailable: installedVersion !== remoteHash,
-			remoteVersion: remoteHash,
-		};
-
-		return result;
-	}
-
-	public async updateRepository(
-		repo: Repository,
-		config: Config,
-		tempBaseDir: string,
-		force: boolean,
-		dryRun = false,
-		onProgress?: (status: string) => void,
-	): Promise<UpdateResult> {
-		const { name } = repo;
-		logger.log(
-			"Manager",
-			`Starting updateRepository for ${name}. Force=${force}, DryRun=${dryRun}`,
-		);
-
-		// 1. Check Remote Version
-		onProgress?.("checking");
-		// NOTE: Both Github and TukUI use git ls-remote to check versions.
-		if (!repo.gitRemote) {
-			return {
-				repoName: name,
-				success: false,
-				updated: false,
-				error: "Missing gitRemote",
-			};
-		}
-
-		const check = await this.checkUpdate(repo);
-		if (check.error) {
-			return {
-				repoName: name,
-				success: false,
-				updated: false,
-				error: check.error,
-			};
-		}
-
-		const remoteHash = check.remoteVersion;
-
-		// 2. Compare Versions
-		if (!force && !check.updateAvailable) {
-			return {
-				repoName: name,
-				success: true,
-				updated: false,
-				message: "Up to date",
-			};
-		}
-
-		// 3. Perform Update
-		onProgress?.("downloading");
-
-		if (dryRun) {
-			await new Promise((resolve) => setTimeout(resolve, 2000));
-			return {
-				repoName: name,
-				success: true,
-				updated: true,
-				message: `[Dry Run] Would update to ${remoteHash.substring(0, 7)}`,
-			};
-		}
-
-		// Separate directory for this specific repo's operations
-		const repoTempDir = path.join(tempBaseDir, name);
-		// clean it before use
-		await fs.rm(repoTempDir, { recursive: true, force: true });
-
-		try {
-			if (repo.type === REPO_TYPE.TUKUI) {
-				await this.installTukUI(repo, config, repoTempDir);
-			} else if (repo.type === REPO_TYPE.GITHUB) {
-				await this.installGithub(repo, config, repoTempDir);
-			} else {
-				throw new Error(`Unknown type: ${repo.type}`);
+		if (addon.type === "github") {
+			const branch = "main";
+			const remoteHash = await GitClient.getRemoteCommit(addon.url, branch);
+			if (!remoteHash) {
+				return {
+					updateAvailable: false,
+					remoteVersion: "",
+					error: "Failed to get remote hash",
+				};
 			}
 
-			// 4. Update Config
-			logger.log("Manager", `Updating config for ${name} to ${remoteHash}`);
-			this.configManager.updateRepository(name, {
-				installedVersion: remoteHash,
-			});
-			return {
-				repoName: name,
-				success: true,
-				updated: true,
-				message: `Updated to ${remoteHash.substring(0, 7)}`,
-			};
-		} catch (err: unknown) {
-			logger.error("Manager", `Error updating ${name}`, err);
-			// If we catch here, we can return the nice UpdateResult with error
-			// preventing the caller from needing try/catch if we prefer.
-			// But `UpdateScreen` expects to handle bubbles OR result.success=false.
-			// Let's return the error result here so `UpdateScreen` uses it.
-			return {
-				repoName: name,
-				success: false,
-				updated: false,
-				error: err instanceof Error ? err.message : String(err),
-			};
-		}
-	}
+			// Compare with stored git_commit if available, otherwise fallback to version (legacy behavior)
+			const localHash = addon.git_commit || addon.version;
+			const isUpdate = localHash !== remoteHash;
 
-	private async installTukUI(
-		repo: Repository,
-		config: Config,
-		tempDir: string,
-	): Promise<boolean> {
-		if (!repo.downloadUrl) throw new Error("Missing downloadUrl");
-
-		await fs.mkdir(tempDir, { recursive: true });
-		const zipPath = path.join(tempDir, "addon.zip");
-
-		// Download
-		if (!(await Downloader.download(repo.downloadUrl, zipPath))) {
-			throw new Error("Download failed");
+			return { updateAvailable: isUpdate, remoteVersion: remoteHash };
 		}
 
-		// Extract
-		const extractPath = path.join(tempDir, "extract");
-		await fs.mkdir(extractPath, { recursive: true });
-		if (!(await Downloader.unzip(zipPath, extractPath))) {
-			throw new Error("Unzip failed");
-		}
+		if (addon.type === "tukui") {
+			if (addon.name === "ElvUI" || addon.folder === "ElvUI") {
+				const hashMatch = addon.version?.match(/-g([a-f0-9]+)/);
+				const localHashFromVer = hashMatch ? hashMatch[1] : null;
+				const localHash = addon.git_commit || localHashFromVer;
 
-		// Install (Copy)
-		return await this.copyFolders(extractPath, config.destDir, repo.folders);
-	}
+				const remoteHash = await GitClient.getRemoteCommit(
+					"https://github.com/tukui-org/ElvUI",
+					"main",
+				);
 
-	private async installGithub(
-		repo: Repository,
-		config: Config,
-		tempDir: string,
-	): Promise<boolean> {
-		if (!repo.gitRemote) throw new Error("Missing gitRemote");
-
-		// Clone directly to tempDir
-		if (!(await GitClient.clone(repo.gitRemote, repo.branch, tempDir))) {
-			throw new Error("Git Clone failed");
-		}
-
-		// Install (Copy)
-		return await this.copyFolders(tempDir, config.destDir, repo.folders);
-	}
-
-	private async copyFolders(
-		sourceBase: string,
-		destBase: string,
-		folders: string[],
-	): Promise<boolean> {
-		try {
-			// Ensure destination base directory exists (important for Test Mode or fresh installs)
-			await fs.mkdir(destBase, { recursive: true });
-
-			for (const folder of folders) {
-				const source = path.join(sourceBase, folder);
-				const dest = path.join(destBase, folder);
-
-				// Ensure source exists
-				const sourceStat = await fs.stat(source).catch(() => null);
-				if (!sourceStat || !sourceStat.isDirectory()) {
-					console.error(
-						`Source folder not found or not a directory: ${source}`,
-					);
-					return false;
+				if (remoteHash && localHash) {
+					// Check for hash equality, handling short vs full hash scenarios.
+					// We assume that if one hash is a prefix of the other, they refer to the same commit.
+					if (
+						remoteHash.startsWith(localHash) ||
+						localHash.startsWith(remoteHash)
+					) {
+						return {
+							updateAvailable: false,
+							remoteVersion: remoteHash,
+						};
+					}
+					return {
+						updateAvailable: true,
+						remoteVersion: remoteHash,
+					};
 				}
 
-				// Copy recursively using native fs.cp for cross-platform support
-				await fs.cp(source, dest, { recursive: true, force: true });
+				if (remoteHash) {
+					return {
+						updateAvailable: true,
+						remoteVersion: remoteHash,
+					};
+				}
 			}
-			return true;
-		} catch (error) {
-			// console.error("Copy failed:", error);
-			// Don't log, throw to propagate to UI
-			throw new Error(
-				`Copy failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
+
+			return { updateAvailable: true, remoteVersion: "latest" };
 		}
+
+		return { updateAvailable: false, remoteVersion: "" };
+	}
+
+	public async updateAddon(
+		addon: AddonRecord,
+		force: boolean,
+	): Promise<UpdateAddonResult> {
+		const command = new UpdateAddonCommand(
+			this.dbManager,
+			this.configManager,
+			addon,
+			force,
+		);
+		return await this.executeCommand(command);
+	}
+
+	public async installFromUrl(url: string): Promise<InstallFromUrlResult> {
+		const command = new InstallFromUrlCommand(
+			this.dbManager,
+			this.configManager,
+			url,
+		);
+		return await this.executeCommand(command);
+	}
+
+	public async installTukUI(
+		url: string,
+		addonFolder: string,
+		subFolders: string[] = [],
+	): Promise<boolean> {
+		const command = new InstallTukUICommand(
+			this.dbManager,
+			this.configManager,
+			url,
+			addonFolder,
+			subFolders,
+		);
+		return await this.executeCommand(command);
+	}
+
+	public getAllAddons() {
+		return this.dbManager.getAll();
+	}
+
+	public getAddon(folder: string) {
+		return this.dbManager.getByFolder(folder);
+	}
+
+	public async scanInstalledAddons(
+		specificFolders?: string[],
+	): Promise<number> {
+		const command = new ScanCommand(
+			this.dbManager,
+			this.configManager,
+			specificFolders,
+		);
+		return await this.executeCommand(command);
+	}
+
+	public updateAddonMetadata(folder: string, metadata: Partial<AddonRecord>) {
+		this.dbManager.updateAddon(folder, metadata);
+	}
+
+	public async removeAddon(folder: string): Promise<boolean> {
+		const command = new RemoveAddonCommand(
+			this.dbManager,
+			this.configManager,
+			folder,
+		);
+		return await this.executeCommand(command);
+	}
+
+	public isAlreadyInstalled(urlOrFolder: string): boolean {
+		const addons = this.dbManager.getAll();
+		const clean = (u: string) =>
+			u
+				.replace(/\/$/, "")
+				.replace(/\.git$/, "")
+				.toLowerCase();
+
+		const target = clean(urlOrFolder);
+
+		// Check by folder name or URL
+		return addons.some(
+			(a) => clean(a.folder) === target || (a.url && clean(a.url) === target),
+		);
 	}
 }

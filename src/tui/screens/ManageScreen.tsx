@@ -3,13 +3,14 @@ import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import pLimit from "p-limit";
 import type React from "react";
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { BackupManager } from "../../core/backup";
-import type { Config, Repository } from "../../core/config";
+import type { Config } from "../../core/config";
 import type { AddonManager, UpdateResult } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
 import { ShortcutsModal } from "../components/ShortcutsModal";
+import { useAddonManagerEvent } from "../hooks/useAddonManager";
 
 interface ManageScreenProps {
 	config: Config;
@@ -32,39 +33,80 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [globalMessage, setGlobalMessage] = useState("");
 
-	// 1. Queries for Status Checking
+	const [refreshKey, setRefreshKey] = useState(0);
+
+	const addons = useMemo(
+		() => addonManager.getAllAddons(),
+		[addonManager, refreshKey],
+	);
+
 	const queries = useQueries({
-		queries: config.repositories.map((repo) => ({
-			queryKey: ["addon", repo.name],
+		queries: addons.map((addon) => ({
+			queryKey: ["addon", addon.folder],
 			queryFn: async () => {
-				// Fetch fresh config to ensure we check against the potentially updated installedVersion
-				const freshConfig = addonManager.getConfig();
-				const freshRepo = freshConfig.repositories.find(
-					(r) => r.name === repo.name,
-				);
-				if (!freshRepo)
+				const freshAddon = addonManager.getAddon(addon.folder);
+				if (!freshAddon)
 					return {
 						updateAvailable: false,
 						remoteVersion: "",
-						error: "Repo not found",
+						error: "Addon not found in DB",
 						checkedVersion: null,
 					};
 
-				const res = await addonManager.checkUpdate(freshRepo);
-				return { ...res, checkedVersion: freshRepo.installedVersion };
+				const res = await addonManager.checkUpdate(freshAddon);
+				return { ...res, checkedVersion: freshAddon.version };
 			},
-			staleTime: config.checkInterval, // User configured check interval
+			staleTime: config.checkInterval,
 		})),
 	});
 
-	// Track granular progress for updates
 	const [updateProgress, setUpdateProgress] = useState<
 		Record<string, RepoStatus>
 	>({});
 
+	useAddonManagerEvent(
+		addonManager,
+		"addon:update-check:start",
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "checking" }));
+		}, []),
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:downloading",
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "downloading" }));
+		}, []),
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:extracting",
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "extracting" }));
+		}, []),
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:copying",
+		useCallback((folder) => {
+			setUpdateProgress((prev) => ({ ...prev, [folder]: "copying" }));
+		}, []),
+	);
+	useAddonManagerEvent(
+		addonManager,
+		"addon:install:complete",
+		useCallback((folder) => {
+			setUpdateProgress((prev) => {
+				const next = { ...prev };
+				delete next[folder];
+				return next;
+			});
+		}, []),
+	);
+
 	// 2. Mutation for Updating
 	const updateMutation = useMutation({
-		mutationFn: async ({ repo }: { repo: Repository }) => {
+		mutationFn: async ({ folder }: { folder: string }) => {
 			const os = await import("node:os");
 			const path = await import("node:path");
 			const fs = await import("node:fs/promises");
@@ -72,54 +114,41 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			const tempDir = path.join(os.tmpdir(), "lemonup-manage-single");
 			await fs.mkdir(tempDir, { recursive: true });
 
+			const addon = addonManager.getAddon(folder);
+			if (!addon) throw new Error("Addon not found");
+
 			try {
-				const result = await addonManager.updateRepository(
-					repo,
-					addonManager.getConfig(),
-					tempDir,
-					force,
-					dryRun,
-					(status) => {
-						setUpdateProgress((prev) => ({
-							...prev,
-							[repo.name]: status as RepoStatus,
-						}));
-					},
-				);
+				const result = await addonManager.updateAddon(addon, force);
 				return result;
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-				// Clean up progress
 				setUpdateProgress((prev) => {
 					const next = { ...prev };
-					delete next[repo.name];
+					delete next[addon.folder];
 					return next;
 				});
 			}
 		},
 		onSuccess: (_, variables) => {
 			queryClient.invalidateQueries({
-				queryKey: ["addon", variables.repo.name],
+				queryKey: ["addon", variables.folder],
 			});
 		},
 	});
 
 	// Helpers
-	const runUpdates = async (idsToUpdate: string[]) => {
-		if (idsToUpdate.length === 0) return;
+	const runUpdates = async (foldersToUpdate: string[]) => {
+		if (foldersToUpdate.length === 0) return;
 		setGlobalMessage(
-			`Updating ${idsToUpdate.length} addon${idsToUpdate.length > 1 ? "s" : ""}...`,
+			`Updating ${foldersToUpdate.length} addon${foldersToUpdate.length > 1 ? "s" : ""}...`,
 		);
 
 		// Run with concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
-		const promises = idsToUpdate.map((name) => {
+		const promises = foldersToUpdate.map((folder) => {
 			return limit(async () => {
-				const repo = config.repositories.find((r) => r.name === name);
-				if (repo) {
-					await updateMutation.mutateAsync({ repo });
-				}
+				await updateMutation.mutateAsync({ folder });
 			});
 		});
 
@@ -129,16 +158,16 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		setTimeout(() => setGlobalMessage(""), 3000);
 	};
 
-	const runChecks = async (idsToCheck: string[]) => {
-		if (!idsToCheck.length) return;
+	const runChecks = async (foldersToCheck: string[]) => {
+		if (!foldersToCheck.length) return;
 
 		// Run with concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
 		// Trigger refetch for specific items
-		const promises = idsToCheck.map((name) => {
+		const promises = foldersToCheck.map((folder) => {
 			return limit(async () => {
-				const idx = config.repositories.findIndex((r) => r.name === name);
+				const idx = addons.findIndex((r) => r.folder === folder);
 				if (idx !== -1 && queries[idx]) {
 					await queries[idx].refetch();
 				}
@@ -148,10 +177,64 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		await Promise.all(promises);
 	};
 
+	// 3. Mutation for Deletion
+	const deleteMutation = useMutation({
+		mutationFn: async ({ folder }: { folder: string }) => {
+			await addonManager.removeAddon(folder);
+		},
+		onSuccess: (_, variables) => {
+			// Uncheck removed item
+			if (selectedIds.has(variables.folder)) {
+				setSelectedIds((prev) => {
+					const next = new Set(prev);
+					next.delete(variables.folder);
+					return next;
+				});
+			}
+			// Invalidate to refresh list
+			// We need to refetch the whole list or force re-render?
+			// getAllAddons is direct call. We must trigger re-render of component.
+			// Since `addons` is const computed on render, assume invalidating queries might not be enough if addons list itself isn't a query.
+			// `addons` comes from `addonManager.getAllAddons()` which is SYNC.
+			// But we need to force re-render.
+			// We can do this by using a dummy state or making addons a query.
+			// For now, let's assume parent re-renders or we force it.
+			// Actually, `addons` is not state, it's derived. We need to force update.
+			// Let's verify if Tanstack Query invalidation helps here? No, addons is not from query.
+			// We should ideally wrap `getAllAddons` in a query.
+			// Or simpler: increment a version counter.
+		},
+	});
+
+	const runDeletes = async (foldersToDelete: string[]) => {
+		setGlobalMessage("Deleting...");
+		for (const folder of foldersToDelete) {
+			await deleteMutation.mutateAsync({ folder });
+		}
+		setRefreshKey((prev) => prev + 1); // Trigger re-render to refresh addon list
+		setGlobalMessage(`Deleted ${foldersToDelete.length} addons.`);
+		setTimeout(() => setGlobalMessage(""), 3000);
+		setConfirmDelete(false);
+	};
+
+	// CONFIRMATION STATE
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const [pendingDelete, setPendingDelete] = useState<string[]>([]);
+
 	// Menu state
 	const [showMenu, setShowMenu] = useState(false);
 
 	useInput((input, key) => {
+		if (confirmDelete) {
+			if (input === "y" || key.return) {
+				runDeletes(pendingDelete);
+			} else if (input === "n" || key.escape) {
+				setConfirmDelete(false);
+				setPendingDelete([]);
+			}
+			return;
+		}
+
 		// Shortcuts for menu
 		const toggleMenu = () => setShowMenu((prev) => !prev);
 		const closeMenu = () => setShowMenu(false);
@@ -186,7 +269,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return;
 		}
 
-		if (showMenu && ["k", "j", " ", "u", "c"].includes(input)) {
+		if (showMenu && ["k", "j", " ", "u", "c", "d"].includes(input)) {
 			setShowMenu(false);
 		}
 		if (showMenu && (key.upArrow || key.downArrow)) {
@@ -198,20 +281,18 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}
 
 		if (key.downArrow || input === "j") {
-			setSelectedIndex((prev) =>
-				Math.min(config.repositories.length - 1, prev + 1),
-			);
+			setSelectedIndex((prev) => Math.min(addons.length - 1, prev + 1));
 		}
 
 		if (input === " ") {
-			const currentRepo = config.repositories[selectedIndex];
-			if (currentRepo) {
+			const currentAddon = addons[selectedIndex];
+			if (currentAddon) {
 				setSelectedIds((prev) => {
 					const next = new Set(prev);
-					if (next.has(currentRepo.name)) {
-						next.delete(currentRepo.name);
+					if (next.has(currentAddon.folder)) {
+						next.delete(currentAddon.folder);
 					} else {
-						next.add(currentRepo.name);
+						next.add(currentAddon.folder);
 					}
 					return next;
 				});
@@ -222,9 +303,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			if (selectedIds.size > 0) {
 				runUpdates(Array.from(selectedIds));
 			} else {
-				const currentRepo = config.repositories[selectedIndex];
-				if (currentRepo) {
-					runUpdates([currentRepo.name]);
+				const currentAddon = addons[selectedIndex];
+				if (currentAddon) {
+					runUpdates([currentAddon.folder]);
 				}
 			}
 		}
@@ -233,10 +314,23 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			if (selectedIds.size > 0) {
 				runChecks(Array.from(selectedIds));
 			} else {
-				const currentRepo = config.repositories[selectedIndex];
-				if (currentRepo) {
-					runChecks([currentRepo.name]);
+				const currentAddon = addons[selectedIndex];
+				if (currentAddon) {
+					runChecks([currentAddon.folder]);
 				}
+			}
+		}
+
+		if (input === "d" || key.delete) {
+			const targets =
+				selectedIds.size > 0
+					? Array.from(selectedIds)
+					: addons[selectedIndex]
+						? [addons[selectedIndex].folder]
+						: [];
+			if (targets.length > 0) {
+				setPendingDelete(targets);
+				setConfirmDelete(true);
 			}
 		}
 
@@ -280,85 +374,125 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				paddingX={1}
 				marginTop={1}
 				marginBottom={0}
+				width="100%"
 			>
-				<Box width={4}>
+				<Box width={3} flexShrink={0}>
 					<Text> </Text>
 				</Box>
-				<Box width={20}>
+				<Box width={22} flexShrink={0}>
+					<Text bold>Status</Text>
+				</Box>
+				<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
 					<Text bold>Name</Text>
 				</Box>
-				<Box width={10}>
+				<Box flexGrow={1} flexShrink={1} minWidth={10} flexBasis="15%">
+					<Text bold>Author</Text>
+				</Box>
+				<Box width={8} flexShrink={0}>
 					<Text bold>Source</Text>
-				</Box>
-				<Box width={15}>
-					<Text bold>Installed</Text>
-				</Box>
-				<Box width={30}>
-					<Text bold>Status</Text>
 				</Box>
 			</Box>
 
 			<Box flexDirection="column">
-				{config.repositories.map((repo, idx) => {
-					const isSelected = selectedIndex === idx;
-					const isChecked = selectedIds.has(repo.name);
+				{addons.length === 0 ? (
+					<Box
+						flexDirection="column"
+						alignItems="center"
+						justifyContent="center"
+						paddingY={5}
+						width="100%"
+					>
+						<Text color="yellow" bold italic>
+							"Lok-tar ogar! ...Wait, where is everyone?"
+						</Text>
+						<Box marginTop={1}>
+							<Text color="gray">
+								Your inventory is empty. No addons found in your bags.
+							</Text>
+						</Box>
+						<Box marginTop={1}>
+							<Text color="cyan">
+								Visit the 'Install Addon' section to start your collection!
+							</Text>
+						</Box>
+					</Box>
+				) : (
+					addons.map((addon, idx) => {
+						const isSelected = selectedIndex === idx;
+						const isChecked = selectedIds.has(addon.folder);
 
-					const query = queries[idx];
-					if (!query) return null;
-					const { data, isLoading, isFetching, error } = query;
+						const query = queries[idx];
+						if (!query) return null;
+						const { data, isLoading, isFetching, error } = query;
 
-					const isUpdating =
-						updateMutation.isPending &&
-						updateMutation.variables?.repo.name === repo.name;
+						const isUpdating =
+							updateMutation.isPending &&
+							updateMutation.variables?.folder === addon.folder;
 
-					let status: RepoStatus = "idle";
-					let result: UpdateResult | undefined;
+						let status: RepoStatus = "idle";
+						let result: UpdateResult | undefined;
 
-					if (isUpdating) {
-						status = updateProgress[repo.name] || "checking";
-					} else if (isLoading || isFetching) status = "checking";
-					else if (error) status = "error";
-					else if (data) status = "done";
+						if (isUpdating) {
+							status = updateProgress[addon.folder] || "checking";
+						} else if (isLoading || isFetching) status = "checking";
+						else if (error) status = "error";
+						else if (data) status = "done";
 
-					// Mock result for "done" state based on query data
-					if (status === "done" && data) {
-						if (data.updateAvailable) {
-							result = {
-								repoName: repo.name,
-								success: true,
-								updated: true,
-								// DEBUG: Show versions
-								message: `Update Avail: ${String(data.checkedVersion).substring(0, 7)} -> ${String(data.remoteVersion).substring(0, 7)}`,
-							};
-						} else {
-							result = {
-								repoName: repo.name,
-								success: true,
-								updated: false,
-								message: "Up to date",
-							};
+						// Mock result for "done" state based on query data
+						if (status === "done" && data) {
+							if (data.updateAvailable) {
+								const versionDisplay = data.remoteVersion
+									? data.remoteVersion.length > 10
+										? data.remoteVersion.substring(0, 7)
+										: data.remoteVersion
+									: "";
+								result = {
+									repoName: addon.name,
+									success: true,
+									updated: true,
+									message: versionDisplay
+										? `Update: ${versionDisplay}`
+										: "Update Available",
+								};
+							} else {
+								result = {
+									repoName: addon.name,
+									success: true,
+									updated: false,
+									message: "Up to date",
+								};
+							}
 						}
-					}
 
-					return (
-						<RepositoryRow
-							key={repo.name}
-							repo={repo}
-							status={status}
-							result={result}
-							nerdFonts={config.nerdFonts}
-							isSelected={isSelected}
-							isChecked={isChecked}
-						/>
-					);
-				})}
+						return (
+							<RepositoryRow
+								key={addon.folder}
+								repo={addon}
+								status={status}
+								result={result}
+								nerdFonts={config.nerdFonts}
+								isSelected={isSelected}
+								isChecked={isChecked}
+							/>
+						);
+					})
+				)}
 			</Box>
 
 			<ControlBar
 				message={
-					globalMessage ? (
+					confirmDelete ? (
+						<Text color="red" bold>
+							Confirm: Delete{" "}
+							{pendingDelete.length > 1
+								? `${pendingDelete.length} addons`
+								: pendingDelete[0]}
+							?
+						</Text>
+					) : globalMessage ? (
 						globalMessage.includes("Done") ||
-						globalMessage.includes("Complete") ? (
+						globalMessage.includes("Complete") ||
+						globalMessage.includes("Deleted") ? (
 							<Text color="green">✔ {globalMessage}</Text>
 						) : (
 							<Text color="yellow">
@@ -368,17 +502,25 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						)
 					) : (
 						<Text color="gray">
-							Selected: {selectedIds.size} / {config.repositories.length}
+							Selected: {selectedIds.size} / {addons.length}
 						</Text>
 					)
 				}
-				controls={[
-					{ key: "↑/↓", label: "nav" },
-					{ key: "space", label: "select" },
-					{ key: "u", label: "update" },
-					{ key: "c", label: "check" },
-					{ key: "m", label: "menu" },
-				]}
+				controls={
+					confirmDelete
+						? [
+								{ key: "y", label: "confirm" },
+								{ key: "n", label: "cancel" },
+							]
+						: [
+								{ key: "↑/↓", label: "nav" },
+								{ key: "space", label: "select" },
+								{ key: "u", label: "update" },
+								{ key: "c", label: "check" },
+								{ key: "d", label: "delete" },
+								{ key: "m", label: "menu" },
+							]
+				}
 			/>
 
 			<ShortcutsModal
@@ -388,6 +530,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					{ key: "Space", label: "Select/Deselect" },
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },
+					{ key: "d", label: "Delete Selected" },
 					{ key: "b", label: "Backup WTF" },
 					{ key: "q", label: "Quit Application" },
 					{ key: "Esc", label: "Go Back / Close" },
