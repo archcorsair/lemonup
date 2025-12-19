@@ -1,4 +1,5 @@
 import arg from "arg";
+import pkg from "../../package.json";
 import { ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
 
@@ -7,14 +8,21 @@ export async function runCLI() {
 		"--force": Boolean,
 		"-f": "--force",
 		"--cli": Boolean, // Consumed by index.ts, but valid here
+		"--version": Boolean,
+		"-v": "--version",
 	});
+
+	if (args["--version"]) {
+		console.log(pkg.version);
+		return;
+	}
 
 	const force = args["--force"] || false;
 
 	const configManager = new ConfigManager();
 	const manager = new AddonManager(configManager);
 
-	console.log("Starting Lemonup (CLI Mode)...");
+	console.log(`Starting Lemonup v${pkg.version} (CLI Mode)...`);
 
 	const config = manager.getConfig();
 	if (!config.repositories.length) {

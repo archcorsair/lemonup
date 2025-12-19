@@ -45,6 +45,9 @@ jobs:
           # macOS x64
           bun build --compile --minify --sourcemap --target=bun-darwin-x64 ./index.tsx --outfile dist/lemonup-macos-x64
 
+      - name: Debug - List Dist
+        run: ls -R dist
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -55,3 +58,4 @@ jobs:
             dist/lemonup-macos-x64
           generate_release_notes: true
           draft: true
+          fail_on_unmatched_files: true

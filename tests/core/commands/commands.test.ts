@@ -10,15 +10,15 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigManager } from "../config";
-import { DatabaseManager } from "../db";
-import * as Downloader from "../downloader";
-import * as GitClient from "../git";
-import { InstallFromUrlCommand } from "./InstallFromUrlCommand";
-import { InstallTukUICommand } from "./InstallTukUICommand";
-import { RemoveAddonCommand } from "./RemoveAddonCommand";
-import { ScanCommand } from "./ScanCommand";
-import { UpdateAddonCommand } from "./UpdateAddonCommand";
+import { ConfigManager } from "@/core/config";
+import { DatabaseManager } from "@/core/db";
+import * as Downloader from "@/core/downloader";
+import * as GitClient from "@/core/git";
+import { InstallFromUrlCommand } from "@/core/commands/InstallFromUrlCommand";
+import { InstallTukUICommand } from "@/core/commands/InstallTukUICommand";
+import { RemoveAddonCommand } from "@/core/commands/RemoveAddonCommand";
+import { ScanCommand } from "@/core/commands/ScanCommand";
+import { UpdateAddonCommand } from "@/core/commands/UpdateAddonCommand";
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-commands");
 const CONFIG_DIR = path.join(TMP_BASE, "config");

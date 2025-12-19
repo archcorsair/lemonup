@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigManager, REPO_TYPE } from "./config";
+import { ConfigManager, REPO_TYPE } from "@/core/config";
 
 const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-config");
 

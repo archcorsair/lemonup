@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BackupManager } from "./backup";
+import { BackupManager } from "@/core/backup";
 
 const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-backup");
 const RETAIL_DIR = path.join(TMP_BASE, "_retail_");

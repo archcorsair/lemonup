@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type AddonRecord, DatabaseManager } from "./db";
+import { type AddonRecord, DatabaseManager } from "@/core/db";
 
 const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-db");
 
