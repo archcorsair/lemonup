@@ -146,7 +146,13 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 			if (this.addon.type === "tukui") {
 				context.emit("addon:install:downloading", folder);
 				const zipPath = path.join(tempDir, "addon.zip");
-				if (!(await Downloader.download(this.addon.url || "", zipPath))) {
+
+				let downloadUrl = this.addon.url || "";
+				if (name === "ElvUI" || folder === "ElvUI") {
+					downloadUrl = "https://api.tukui.org/v1/download/dev/elvui/main";
+				}
+
+				if (!(await Downloader.download(downloadUrl, zipPath))) {
 					throw new Error("Download failed");
 				}
 

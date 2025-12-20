@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
@@ -28,6 +29,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 }) => {
 	const { exit } = useApp();
 	const { flashKey } = useKeyFeedback();
+	const queryClient = useQueryClient();
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
 		{},
@@ -40,6 +42,15 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 
 	const allAddons = useMemo(() => addonManager.getAllAddons(), [addonManager]);
 	const hasRun = useRef(false);
+	const remoteVersions = useRef<Record<string, string>>({});
+
+	useAddonManagerEvent(
+		addonManager,
+		"addon:update-check:complete",
+		(folder, _updateAvailable, remoteVersion) => {
+			remoteVersions.current[folder] = remoteVersion;
+		},
+	);
 
 	useAddonManagerEvent(addonManager, "addon:update-check:start", (folder) => {
 		const addon = allAddons.find((a) => a.folder === folder);
@@ -116,27 +127,86 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 				setBackupStatus("skipped");
 			}
 
-			const updateResults = await addonManager.updateAll(force);
-
-			// Map results to folders for rendering
+			// Manual update loop to support caching
+			const updateResults: UpdateAddonResult[] = [];
 			const resultsMap: Record<string, UpdateAddonResult> = {};
 			const statusMap: Record<string, RepoStatus> = {};
 
-			for (const res of updateResults) {
-				const addon = allAddons.find((a) => a.name === res.repoName);
-				if (addon) {
+			for (const addon of allAddons) {
+				if (addon.type === "manual") continue;
+
+				// Check Cache
+				const queryKey = ["addon", addon.folder];
+				const state = queryClient.getQueryState(queryKey);
+				const now = Date.now();
+				const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
+				const cachedData = state?.data as
+					| { updateAvailable: boolean; remoteVersion: string }
+					| undefined;
+
+				// Skip if fresh and known to be up-to-date
+				if (
+					!force &&
+					cachedData &&
+					dataUpdatedAt > 0 &&
+					now - dataUpdatedAt < freshConfig.checkInterval &&
+					!cachedData.updateAvailable
+				) {
+					const res: UpdateAddonResult = {
+						repoName: addon.name,
+						success: true,
+						updated: false,
+						message: "Skipped (Recently Checked)",
+					};
+					updateResults.push(res);
 					resultsMap[addon.folder] = res;
-					statusMap[addon.folder] = res.success ? "done" : "error";
+					statusMap[addon.folder] = "done";
+					setResults((prev) => ({ ...prev, [addon.folder]: res }));
+					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "done" }));
+					continue;
+				}
+
+				try {
+					const result = await addonManager.updateAddon(addon, force);
+					updateResults.push(result);
+					resultsMap[addon.folder] = result;
+					statusMap[addon.folder] = result.success ? "done" : "error";
+
+					setResults((prev) => ({ ...prev, [addon.folder]: result }));
+					setRepoStatuses((prev) => ({
+						...prev,
+						[addon.folder]: result.success ? "done" : "error",
+					}));
+
+					// Update Cache
+					const remoteVer = remoteVersions.current[addon.folder] || "";
+					queryClient.setQueryData(queryKey, {
+						updateAvailable: false, // It's just updated or confirmed up-to-date
+						remoteVersion: remoteVer,
+						checkedVersion: addon.version, // Assuming success update updates local version?
+						// Note: checking cache structure in ManageScreen.tsx:
+						// return { ...res, checkedVersion: freshAddon.version };
+					});
+				} catch (error) {
+					const res = {
+						repoName: addon.name,
+						success: false,
+						updated: false,
+						error: String(error),
+					};
+					updateResults.push(res);
+					resultsMap[addon.folder] = res;
+					statusMap[addon.folder] = "error";
+					setResults((prev) => ({ ...prev, [addon.folder]: res }));
+					setRepoStatuses((prev) => ({ ...prev, [addon.folder]: "error" }));
 				}
 			}
 
-			setResults(resultsMap);
-			setRepoStatuses((prev) => ({ ...prev, ...statusMap }));
 			setIsDone(true);
 		};
 
 		runUpdates();
-	}, [addonManager, force, testMode, allAddons]);
+	}, [addonManager, force, testMode, allAddons, queryClient]);
 
 	useInput((input, key) => {
 		if (key.escape || (input === "q" && isDone)) {
