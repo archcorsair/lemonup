@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ConfigManager } from "../config";
-import type { DatabaseManager } from "../db";
-import * as Downloader from "../downloader";
-import * as GitClient from "../git";
-import { logger } from "../logger";
-import { isPathConfigured } from "../paths";
+import type { ConfigManager } from "@/core/config";
+import type { DatabaseManager } from "@/core/db";
+import * as Downloader from "@/core/downloader";
+import * as GitClient from "@/core/git";
+import { logger } from "@/core/logger";
+import { isPathConfigured } from "@/core/paths";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
 

@@ -1,7 +1,7 @@
 import { Box, Text, useApp, useInput } from "ink";
 import type React from "react";
 import { useState } from "react";
-import type { ConfigManager } from "../core/config";
+import type { ConfigManager } from "@/core/config";
 
 interface FirstRunWizardProps {
 	configManager: ConfigManager;

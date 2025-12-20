@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import React from "react";
-import { useAppStore } from "../store/useAppStore";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 export interface ControlHelp {
 	key: string;

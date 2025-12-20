@@ -3,13 +3,13 @@ import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { UpdateAddonResult } from "../../core/commands/UpdateAddonCommand";
-import type { Config } from "../../core/config";
-import type { AddonManager } from "../../core/manager";
-import { ControlBar } from "../components/ControlBar";
-import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
-import { useAddonManagerEvent } from "../hooks/useAddonManager";
-import { useAppStore } from "../store/useAppStore";
+import type { UpdateAddonResult } from "@/core/commands/UpdateAddonCommand";
+import type { Config } from "@/core/config";
+import type { AddonManager } from "@/core/manager";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
+import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface UpdateScreenProps {
 	config: Config;

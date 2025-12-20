@@ -2,9 +2,9 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
-import type { ConfigManager } from "../../core/config";
-import { ControlBar } from "../components/ControlBar";
-import { useAppStore } from "../store/useAppStore";
+import type { ConfigManager } from "@/core/config";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ScreenProps {
 	configManager: ConfigManager;

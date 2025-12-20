@@ -2,15 +2,11 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
-import type { Config } from "../../core/config";
-import type { AddonManager } from "../../core/manager";
-import {
-	getDefaultWoWPath,
-	isPathConfigured,
-	pathExists,
-} from "../../core/paths";
-import { ControlBar } from "../components/ControlBar";
-import { useAppStore } from "../store/useAppStore";
+import type { Config } from "@/core/config";
+import type { AddonManager } from "@/core/manager";
+import { getDefaultWoWPath, isPathConfigured, pathExists } from "@/core/paths";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface InstallScreenProps {
 	config: Config;

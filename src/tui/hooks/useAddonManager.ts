@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import type { AddonManagerEvents } from "../../core/events";
-import type { AddonManager } from "../../core/manager";
+import type { AddonManagerEvents } from "@/core/events";
+import type { AddonManager } from "@/core/manager";
 
 export function useAddonManagerEvent<E extends keyof AddonManagerEvents>(
 	manager: AddonManager | null,

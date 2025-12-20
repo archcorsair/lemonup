@@ -4,14 +4,14 @@ import Spinner from "ink-spinner";
 import pLimit from "p-limit";
 import type React from "react";
 import { useCallback, useMemo, useState } from "react";
-import { BackupManager } from "../../core/backup";
-import type { Config } from "../../core/config";
-import type { AddonManager, UpdateResult } from "../../core/manager";
-import { ControlBar } from "../components/ControlBar";
-import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
-import { ShortcutsModal } from "../components/ShortcutsModal";
-import { useAddonManagerEvent } from "../hooks/useAddonManager";
-import { useAppStore } from "../store/useAppStore";
+import { BackupManager } from "@/core/backup";
+import type { Config } from "@/core/config";
+import type { AddonManager, UpdateResult } from "@/core/manager";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
+import { ShortcutsModal } from "@/tui/components/ShortcutsModal";
+import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ManageScreenProps {
 	config: Config;
