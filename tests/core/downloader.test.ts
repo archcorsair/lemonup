@@ -11,7 +11,7 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import archiver from "archiver";
+import AdmZip from "adm-zip";
 import * as Downloader from "@/core/downloader";
 
 const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-downloader");
@@ -72,18 +72,10 @@ describe("Downloader", () => {
 		const extractDir = path.join(TMP_DIR, "extract");
 
 		// Create a real zip file
-		await new Promise((resolve, reject) => {
-			const output = fs.createWriteStream(zipPath);
-			const archive = archiver("zip");
-
-			output.on("close", resolve);
-			archive.on("error", reject);
-
-			archive.pipe(output);
-			archive.append("file-content", { name: "test-file.txt" });
-			archive.append("nested-content", { name: "folder/nested.txt" });
-			archive.finalize();
-		});
+		const zip = new AdmZip();
+		zip.addFile("test-file.txt", Buffer.from("file-content"));
+		zip.addFile("folder/nested.txt", Buffer.from("nested-content"));
+		zip.writeZip(zipPath);
 
 		const result = await Downloader.unzip(zipPath, extractDir);
 

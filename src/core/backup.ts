@@ -1,7 +1,6 @@
-import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
-import archiver from "archiver";
+import AdmZip from "adm-zip";
 
 export const BackupManager = {
 	/**
@@ -66,24 +65,16 @@ export const BackupManager = {
 		const zipFileName = `WTF-${timestamp}.zip`;
 		const zipFilePath = path.join(backupsWtfDir, zipFileName);
 
-		return new Promise((resolve, reject) => {
-			const output = fs.createWriteStream(zipFilePath);
-			const archive = archiver("zip", {
-				zlib: { level: 9 },
-			});
-
-			output.on("close", () => {
-				resolve(zipFilePath);
-			});
-
-			archive.on("error", (err) => {
-				reject(err);
-			});
-
-			archive.pipe(output);
-			archive.directory(wtfDir, "WTF");
-			archive.finalize();
-		});
+		try {
+			const zip = new AdmZip();
+			zip.addLocalFolder(wtfDir, "WTF");
+			zip.writeZip(zipFilePath);
+			return zipFilePath;
+		} catch (error) {
+			throw new Error(
+				`Backup failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	},
 
 	/**
