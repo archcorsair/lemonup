@@ -3,6 +3,7 @@ import type React from "react";
 import { useState } from "react";
 import type { Config, ConfigManager } from "../../core/config";
 import { ControlBar } from "../components/ControlBar";
+import { useKeyFeedback } from "../context/KeyFeedbackContext";
 
 interface MainMenuProps {
 	config: Config;
@@ -25,6 +26,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 	onSelect,
 }) => {
 	const { exit } = useApp();
+	const { flashKey } = useKeyFeedback();
 	const [selectedIndex, setSelectedIndex] = useState(() => {
 		const targetId = initialSelection || config.defaultMenuOption;
 		const idx = OPTIONS.findIndex((opt) => opt.id === targetId);
@@ -36,15 +38,19 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
 	useInput((input, key) => {
 		if (key.upArrow || input === "k") {
+			flashKey("↑/↓");
 			setSelectedIndex((prev) => (prev > 0 ? prev - 1 : OPTIONS.length - 1));
 		} else if (key.downArrow || input === "j") {
+			flashKey("↑/↓");
 			setSelectedIndex((prev) => (prev < OPTIONS.length - 1 ? prev + 1 : 0));
 		} else if (key.return) {
+			flashKey("enter");
 			const selected = OPTIONS[selectedIndex];
 			if (selected) {
 				onSelect(selected.id);
 			}
 		} else if (input === " " || key.rightArrow || input === "l") {
+			flashKey("space");
 			// Set Default
 			const selected = OPTIONS[selectedIndex];
 			if (selected) {
@@ -60,6 +66,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 				}
 			}
 		} else if (input === "q" || key.escape) {
+			flashKey("q");
 			exit();
 		}
 	});

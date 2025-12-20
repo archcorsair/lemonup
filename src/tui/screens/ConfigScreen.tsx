@@ -3,6 +3,8 @@ import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "../../core/config";
+import { ControlBar } from "../components/ControlBar";
+import { useKeyFeedback } from "../context/KeyFeedbackContext";
 
 interface ScreenProps {
 	configManager: ConfigManager;
@@ -22,6 +24,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	configManager,
 	onBack,
 }) => {
+	const { flashKey } = useKeyFeedback();
 	const [maxConcurrent, setMaxConcurrent] = useState(3);
 	const [destDir, setDestDir] = useState("");
 	const [nerdFonts, setNerdFonts] = useState(true);
@@ -76,12 +79,14 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		];
 
 		if (key.upArrow) {
+			flashKey("↑/↓");
 			const idx = fields.indexOf(activeField);
 			const prev = fields[Math.max(0, idx - 1)];
 			if (prev) setActiveField(prev);
 			return;
 		}
 		if (key.downArrow || key.tab) {
+			flashKey("↑/↓");
 			const idx = fields.indexOf(activeField);
 			const next = fields[Math.min(fields.length - 1, idx + 1)];
 			if (next) setActiveField(next);
@@ -89,12 +94,14 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		}
 
 		if (key.escape) {
+			flashKey("esc");
 			onBack();
 			return;
 		}
 
 		if (activeField === "maxConcurrent") {
 			if (key.leftArrow || input === "h") {
+				flashKey("←/→");
 				const newVal = Math.max(1, maxConcurrent - 1);
 				setMaxConcurrent(newVal);
 				configManager.set("maxConcurrent", newVal);
@@ -102,6 +109,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				setTimeout(() => setSaved(false), 1000);
 			}
 			if (key.rightArrow || input === "l") {
+				flashKey("←/→");
 				const newVal = Math.min(10, maxConcurrent + 1);
 				setMaxConcurrent(newVal);
 				configManager.set("maxConcurrent", newVal);
@@ -111,6 +119,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		}
 
 		if (activeField === "destDir" && key.return) {
+			flashKey("enter");
 			configManager.set("destDir", destDir);
 			setSaved(true);
 			setTimeout(() => setSaved(false), 1000);
@@ -124,6 +133,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				input === "l" ||
 				input === " "
 			) {
+				flashKey(input === " " ? "space" : "←/→");
 				setNerdFonts(!nerdFonts);
 				configManager.set("nerdFonts", !nerdFonts);
 				setSaved(true);
@@ -133,6 +143,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 		if (activeField === "checkInterval") {
 			if (key.leftArrow || input === "h") {
+				flashKey("←/→");
 				const newVal = getPrevInterval(checkInterval);
 				setCheckInterval(newVal);
 				configManager.set("checkInterval", newVal * 1000);
@@ -140,6 +151,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				setTimeout(() => setSaved(false), 1000);
 			}
 			if (key.rightArrow || input === "l") {
+				flashKey("←/→");
 				const newVal = getNextInterval(checkInterval);
 				setCheckInterval(newVal);
 				configManager.set("checkInterval", newVal * 1000);
@@ -156,6 +168,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				input === "l" ||
 				input === " "
 			) {
+				flashKey(input === " " ? "space" : "←/→");
 				setBackupWTF(!backupWTF);
 				configManager.set("backupWTF", !backupWTF);
 				setSaved(true);
@@ -165,6 +178,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 		if (activeField === "backupRetention") {
 			if (key.leftArrow || input === "h") {
+				flashKey("←/→");
 				const newVal = Math.max(1, backupRetention - 1);
 				setBackupRetention(newVal);
 				configManager.set("backupRetention", newVal);
@@ -172,6 +186,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				setTimeout(() => setSaved(false), 1000);
 			}
 			if (key.rightArrow || input === "l") {
+				flashKey("←/→");
 				const newVal = Math.min(20, backupRetention + 1); // Cap at 20
 				setBackupRetention(newVal);
 				configManager.set("backupRetention", newVal);
@@ -188,6 +203,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				input === "l" ||
 				input === " "
 			) {
+				flashKey(input === " " ? "space" : "←/→");
 				setDebug(!debug);
 				configManager.set("debug", !debug);
 				setSaved(true);
@@ -277,14 +293,20 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				</Box>
 			</Box>
 
-			<Box marginTop={0}>
-				<Text color="gray">
-					{activeField === "destDir"
+			<ControlBar
+				message={
+					activeField === "destDir"
 						? "Type path and press Enter to save."
-						: "Use Left/Right arrows to change."}
-					{" Up/Down to switch."}
-				</Text>
-			</Box>
+						: undefined
+				}
+				controls={[
+					{ key: "↑/↓", label: "nav" },
+					{ key: "←/→", label: "modify" },
+					{ key: "space", label: "toggle" },
+					{ key: "enter", label: "save text" },
+					{ key: "esc", label: "back" },
+				]}
+			/>
 		</Box>
 	);
 };

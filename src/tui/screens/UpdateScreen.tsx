@@ -7,6 +7,7 @@ import type { Config } from "../../core/config";
 import type { AddonManager } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
+import { useKeyFeedback } from "../context/KeyFeedbackContext";
 import { useAddonManagerEvent } from "../hooks/useAddonManager";
 
 interface UpdateScreenProps {
@@ -26,6 +27,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	onBack,
 }) => {
 	const { exit } = useApp();
+	const { flashKey } = useKeyFeedback();
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
 		{},
@@ -138,8 +140,13 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 
 	useInput((input, key) => {
 		if (key.escape || (input === "q" && isDone)) {
-			if (key.escape) onBack();
-			else if (input === "q") exit();
+			if (key.escape) {
+				flashKey("esc");
+				onBack();
+			} else if (input === "q") {
+				flashKey("q");
+				exit();
+			}
 		}
 	});
 
