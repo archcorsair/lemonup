@@ -32,7 +32,6 @@ export class InstallTukUICommand implements Command<boolean> {
 		context.emit("addon:install:start", this.addonFolder);
 
 		try {
-			// Fetch TukUI details
 			let details: TukUI.TukUIAddon | null = null;
 			try {
 				details = await TukUI.getAddonDetails(this.addonFolder);
@@ -40,7 +39,6 @@ export class InstallTukUICommand implements Command<boolean> {
 				logger.error("InstallTukUICommand", "Failed to fetch TukUI details", e);
 			}
 
-			// Resolve URL
 			let downloadUrl = this.url;
 			if ((!downloadUrl || downloadUrl === "latest") && details) {
 				downloadUrl = details.url;
@@ -81,27 +79,14 @@ export class InstallTukUICommand implements Command<boolean> {
 			// Update Main Addon
 			this.dbManager.updateAddon(this.addonFolder, {
 				type: "tukui",
-				url: downloadUrl, // Store the download URL used? Or maybe details.web_url?
-				// Storing the ephemeral download URL might be bad if we re-use it.
-				// But UpdateAddonCommand re-fetches it.
-				// However, `url` in DB is used for identifying sometimes.
-				// Let's store the URL we used for now, or maybe the web URL if available?
-				// The previous code stored `this.url`.
-				// If we want to be clean, maybe store `details.url`?
-				// But that is tokenized.
-				// Let's store `details.web_url` if available?
-				// But `manager.checkUpdate` uses `url`? No, it uses `name`.
-				// `UpdateAddonCommand` uses `name`.
-				// So `url` field is less critical for TukUI type.
-				// Let's just store `downloadUrl` for now to be safe with existing logic.
+				url: downloadUrl,
 				version: details?.version || "unknown",
 				author: details?.author || null,
 				last_updated: new Date().toISOString(),
 				parent: null,
-				git_commit: null, // No longer using git hash
+				git_commit: null,
 			});
 
-			// Update Sub Folders (Dependencies)
 			for (const subFolder of this.subFolders) {
 				this.dbManager.updateAddon(subFolder, {
 					type: "tukui",

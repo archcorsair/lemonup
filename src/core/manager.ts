@@ -142,6 +142,10 @@ export class AddonManager extends EventEmitter {
 		remoteVersion: string;
 		error?: string;
 	}> {
+		if (addon.parent) {
+			return { updateAvailable: false, remoteVersion: "" };
+		}
+
 		if (!addon.url) {
 			return {
 				updateAvailable: false,

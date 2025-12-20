@@ -32,6 +32,16 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 
 	async execute(context: CommandContext): Promise<UpdateAddonResult> {
 		const { name, folder } = this.addon;
+
+		if (this.addon.parent) {
+			return {
+				repoName: name,
+				success: true,
+				updated: false,
+				message: `Managed by ${this.addon.parent}`,
+			};
+		}
+
 		context.emit("addon:update-check:start", folder);
 
 		this.previousRecord = { ...this.addon };
