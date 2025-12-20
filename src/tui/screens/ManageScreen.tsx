@@ -450,7 +450,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	});
 
 	return (
-		<Box flexDirection="column" padding={1} height="100%" width="100%">
+		<Box flexDirection="column" height="100%" width="100%">
 			<Text color="magenta" bold>
 				Manage Addons
 			</Text>
