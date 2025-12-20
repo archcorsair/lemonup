@@ -32,6 +32,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	const [backupWTF, setBackupWTF] = useState(true);
 	const [backupRetention, setBackupRetention] = useState(5);
 	const [debug, setDebug] = useState(false);
+	const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
 	const [activeField, setActiveField] = useState<Field>("maxConcurrent");
 	const [saved, setSaved] = useState(false);
@@ -212,24 +213,57 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		}
 	});
 
-	const renderLabel = (field: Field, label: string) => (
-		<Box
-			borderStyle={activeField === field ? "round" : undefined}
-			borderColor="blue"
-			paddingX={1}
-			width="100%"
-		>
-			<Box width={30}>
-				<Text bold>{label}: </Text>
+	const ConfigOption: React.FC<{
+		label: string;
+		isActive: boolean;
+		helpText?: string;
+		children: React.ReactNode;
+	}> = ({ label, isActive, helpText, children }) => {
+		useEffect(() => {
+			if (isActive) {
+				setCommandHelp(
+					helpText || "Use Left/Right arrows to change. Up/Down to switch.",
+				);
+			}
+		}, [isActive, helpText]);
+
+		return (
+			<Box
+				borderStyle={isActive ? "round" : undefined}
+				borderColor="blue"
+				paddingX={1}
+				width="100%"
+			>
+				<Box width={30}>
+					<Text bold>{label}: </Text>
+				</Box>
+				<Box flexGrow={1}>{children}</Box>
 			</Box>
-			<Box flexGrow={1}>
-				{field === "maxConcurrent" && (
+		);
+	};
+
+	return (
+		<Box flexDirection="column" padding={1}>
+			<Text color="blue" bold>
+				Configuration
+			</Text>
+
+			<Box marginTop={1} flexDirection="column" gap={0}>
+				<ConfigOption
+					label="Max Concurrent Downloads"
+					isActive={activeField === "maxConcurrent"}
+				>
 					<Text color="yellow" bold>
 						{"<"} {maxConcurrent} {">"}
 					</Text>
-				)}
-				{field === "destDir" &&
-					(activeField === "destDir" ? (
+				</ConfigOption>
+
+				<ConfigOption
+					label="WoW Interface Directory"
+					isActive={activeField === "destDir"}
+					helpText="Type path and press Enter to save."
+				>
+					{activeField === "destDir" ? (
 						<TextInput
 							value={destDir}
 							onChange={setDestDir}
@@ -243,50 +277,53 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 						<Text color={destDir ? "white" : "gray"}>
 							{destDir || "Not Configured"}
 						</Text>
-					))}
-				{field === "nerdFonts" && (
+					)}
+				</ConfigOption>
+
+				<ConfigOption
+					label="Nerd Fonts (Icons)"
+					isActive={activeField === "nerdFonts"}
+				>
 					<Text color={nerdFonts ? "green" : "red"}>
 						{nerdFonts ? "Enabled" : "Disabled"}
 					</Text>
-				)}
-				{field === "checkInterval" && (
+				</ConfigOption>
+
+				<ConfigOption
+					label="Update Check Interval"
+					isActive={activeField === "checkInterval"}
+				>
 					<Text color="yellow">
 						{"<"} {formatInterval(checkInterval)} {">"}
 					</Text>
-				)}
-				{field === "backupWTF" && (
+				</ConfigOption>
+
+				<ConfigOption
+					label="Backup 'WTF' Folder"
+					isActive={activeField === "backupWTF"}
+				>
 					<Text color={backupWTF ? "green" : "red"}>
 						{backupWTF ? "Enabled" : "Disabled"}
 					</Text>
-				)}
-				{field === "backupRetention" && (
+				</ConfigOption>
+
+				<ConfigOption
+					label="Backup Retention Count"
+					isActive={activeField === "backupRetention"}
+				>
 					<Text color="yellow" bold>
 						{"<"} {backupRetention} {">"}
 					</Text>
-				)}
-				{field === "debug" && (
+				</ConfigOption>
+
+				<ConfigOption
+					label="Enable Debug Logging"
+					isActive={activeField === "debug"}
+				>
 					<Text color={debug ? "green" : "gray"}>
 						{debug ? "Enabled" : "Disabled"}
 					</Text>
-				)}
-			</Box>
-		</Box>
-	);
-
-	return (
-		<Box flexDirection="column" padding={1}>
-			<Text color="blue" bold>
-				Configuration
-			</Text>
-
-			<Box marginTop={1} flexDirection="column" gap={0}>
-				{renderLabel("maxConcurrent", "Max Concurrent Downloads")}
-				{renderLabel("destDir", "WoW Interface Directory")}
-				{renderLabel("nerdFonts", "Nerd Fonts (Icons)")}
-				{renderLabel("checkInterval", "Update Check Interval")}
-				{renderLabel("backupWTF", "Backup 'WTF' Folder")}
-				{renderLabel("backupRetention", "Backup Retention Count")}
-				{renderLabel("debug", "Enable Debug Logging")}
+				</ConfigOption>
 
 				<Box marginLeft={2} height={1} marginTop={1}>
 					{saved && <Text color="green">Saved!</Text>}
@@ -294,11 +331,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 			</Box>
 
 			<ControlBar
-				message={
-					activeField === "destDir" ? (
-						<Text>Type path and press Enter to save.</Text>
-					) : undefined
-				}
+				message={commandHelp ? <Text>{commandHelp}</Text> : undefined}
 				controls={[
 					{ key: "↑/↓", label: "nav" },
 					{ key: "←/→", label: "modify" },
