@@ -209,26 +209,46 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		const limit = pLimit(config.maxConcurrent);
 
 		// Trigger refetch for specific items
-		const promises = foldersToCheck.map((folder) => {
-			return limit(async () => {
-				const idx = visibleAddons.findIndex((r) => r.record.folder === folder);
-				const queryKey = ["addon", folder];
-				const state = queryClient.getQueryState(queryKey);
-				const now = Date.now();
-				const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
 
-				// If data exists and is younger than checkInterval, skip
-				if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
-					return;
-				}
+		const results = await Promise.all(
+			foldersToCheck.map((folder) => {
+				return limit(async () => {
+					const idx = visibleAddons.findIndex(
+						(r) => r.record.folder === folder,
+					);
 
-				if (idx !== -1 && queries[idx]) {
-					await queries[idx].refetch();
-				}
-			});
-		});
+					const queryKey = ["addon", folder];
 
-		await Promise.all(promises);
+					const state = queryClient.getQueryState(queryKey);
+
+					const now = Date.now();
+
+					const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
+
+					// If data exists and is younger than checkInterval, skip
+
+					if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
+						return false;
+					}
+
+					if (idx !== -1 && queries[idx]) {
+						await queries[idx].refetch();
+
+						return true;
+					}
+
+					return false;
+				});
+			}),
+		);
+
+		const checkedCount = results.filter(Boolean).length;
+
+		if (checkedCount === 0 && foldersToCheck.length > 0) {
+			setGlobalMessage("Skipped (Recently Checked)");
+
+			setTimeout(() => setGlobalMessage(""), 2000);
+		}
 	};
 
 	// Mutation for Deletion
@@ -563,6 +583,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						globalMessage.includes("Complete") ||
 						globalMessage.includes("Deleted") ? (
 							<Text color="green">✔ {globalMessage}</Text>
+						) : globalMessage.includes("Skipped") ? (
+							<Text color="cyan">ℹ {globalMessage}</Text>
 						) : (
 							<Text color="yellow">
 								{/* @ts-expect-error: Spinner types mismatch */}
