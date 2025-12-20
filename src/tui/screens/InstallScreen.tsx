@@ -32,7 +32,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	addonManager,
 	onBack,
 }) => {
-	// Local config state to reflect updates immediately
 	const flashKey = useAppStore((state) => state.flashKey);
 	const [config, setConfig] = useState(initialConfig);
 	const [mode, setMode] = useState<Mode>("select");
@@ -43,7 +42,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	const [manualPath, setManualPath] = useState("");
 	const [detectedPath, setDetectedPath] = useState("");
 
-	// Store pending install action to retry after config
 	const [pendingInstall, setPendingInstall] = useState<{
 		type: "url" | "elvui";
 		url?: string;
@@ -58,7 +56,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		{ label: "Install ElvUI", action: "elvui", section: "TukUI" },
 	];
 
-	// Ensure we have the latest config
 	useEffect(() => {
 		setConfig(addonManager.getConfig());
 	}, [addonManager]);
@@ -67,7 +64,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		type: "url" | "elvui",
 		installUrl?: string,
 	) => {
-		// Safety Check: Duplicate Install
 		let exists = false;
 		if (type === "elvui") {
 			exists = addonManager.isAlreadyInstalled("ElvUI");
@@ -162,11 +158,9 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		if (mode === "config-auto-confirm") {
 			if (input.toLowerCase() === "y" || key.return) {
 				flashKey("enter");
-				// User accepted auto-detected path
 				await savePathAndRetry(detectedPath);
 			} else if (input.toLowerCase() === "n" || key.escape) {
 				flashKey("esc");
-				// User rejected, offer manual input
 				setMode("config-manual-input");
 			}
 			return;
@@ -175,7 +169,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		if (mode === "confirm-reinstall") {
 			if (input.toLowerCase() === "y") {
 				flashKey("enter");
-				// Proceed with install
 				if (pendingInstall) {
 					await handleInstall(pendingInstall.type, pendingInstall.url);
 				}
@@ -183,7 +176,6 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				flashKey("esc");
 				if (pendingInstall && pendingInstall.type === "url") {
 					setMode("url-input");
-					// Preserve the URL if available
 					if (pendingInstall.url) setUrl(pendingInstall.url);
 				} else {
 					setMode("select");
@@ -200,15 +192,12 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					if (pathExists(manualPath.trim())) {
 						await savePathAndRetry(manualPath.trim());
 					} else {
-						// Optional: show error or confirm creation?
-						// For now, let's just accept it but warn?
-						// Or simpler: just save it. The install command checks again.
 						await savePathAndRetry(manualPath.trim());
 					}
 				}
 			} else if (key.escape) {
 				flashKey("esc");
-				setMode("select"); // Cancel entire flow
+				setMode("select");
 				setPendingInstall(null);
 			}
 			return;

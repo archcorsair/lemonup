@@ -135,7 +135,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 			for (const addon of allAddons) {
 				if (addon.type === "manual") continue;
 
-				// Check Cache
 				const queryKey = ["addon", addon.folder];
 				const state = queryClient.getQueryState(queryKey);
 				const now = Date.now();
@@ -144,7 +143,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 					| { updateAvailable: boolean; remoteVersion: string }
 					| undefined;
 
-				// Skip if fresh and known to be up-to-date
 				if (
 					!force &&
 					cachedData &&
@@ -178,14 +176,11 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 						[addon.folder]: result.success ? "done" : "error",
 					}));
 
-					// Update Cache
 					const remoteVer = remoteVersions.current[addon.folder] || "";
 					queryClient.setQueryData(queryKey, {
-						updateAvailable: false, // It's just updated or confirmed up-to-date
+						updateAvailable: false,
 						remoteVersion: remoteVer,
-						checkedVersion: addon.version, // Assuming success update updates local version?
-						// Note: checking cache structure in ManageScreen.tsx:
-						// return { ...res, checkedVersion: freshAddon.version };
+						checkedVersion: addon.version,
 					});
 				} catch (error) {
 					const res = {

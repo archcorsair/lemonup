@@ -10,7 +10,7 @@ interface AppState {
 	// Global UI State
 	isBusy: boolean;
 
-	// Key Feedback State (Replaces KeyFeedbackContext)
+	// Key Feedback State
 	activeKey: string | null;
 
 	// Actions
