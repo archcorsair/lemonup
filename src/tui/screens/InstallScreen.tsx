@@ -39,7 +39,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	const [detectedPath, setDetectedPath] = useState("");
 
 	const [pendingInstall, setPendingInstall] = useState<{
-		type: "url" | "elvui";
+		type: "url" | "elvui" | "tukui";
 		url?: string;
 	} | null>(null);
 
@@ -50,6 +50,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	const OPTIONS = [
 		{ label: "Install from URL", action: "url", section: "General" },
 		{ label: "Install ElvUI", action: "elvui", section: "TukUI" },
+		{ label: "Install TukUI", action: "tukui", section: "TukUI" },
 	];
 
 	useEffect(() => {
@@ -57,12 +58,14 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	}, [addonManager]);
 
 	const checkConfigAndInstall = async (
-		type: "url" | "elvui",
+		type: "url" | "elvui" | "tukui",
 		installUrl?: string,
 	) => {
 		let exists = false;
 		if (type === "elvui") {
 			exists = addonManager.isAlreadyInstalled("ElvUI");
+		} else if (type === "tukui") {
+			exists = addonManager.isAlreadyInstalled("Tukui");
 		} else if (type === "url" && installUrl) {
 			exists = addonManager.isAlreadyInstalled(installUrl);
 		}
@@ -83,7 +86,10 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		}
 	};
 
-	const handleInstall = async (type: "url" | "elvui", installUrl?: string) => {
+	const handleInstall = async (
+		type: "url" | "elvui" | "tukui",
+		installUrl?: string,
+	) => {
 		setMode("installing");
 		setStatus("Installing...");
 		setResultStatus("success");
@@ -104,13 +110,18 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				}
 			} else if (type === "elvui") {
 				setStatus("Downloading ElvUI from TukUI...");
-				await addonManager.installTukUI(
-					"https://api.tukui.org/v1/download/dev/elvui/main",
-					"ElvUI",
-					["ElvUI_Options", "ElvUI_Libraries"],
-				);
+				await addonManager.installTukUI("latest", "ElvUI", [
+					"ElvUI_Options",
+					"ElvUI_Libraries",
+				]);
 
 				setResultMessage("ElvUI Installed Successfully");
+				setResultStatus("success");
+			} else if (type === "tukui") {
+				setStatus("Downloading TukUI...");
+				await addonManager.installTukUI("latest", "Tukui", []);
+
+				setResultMessage("TukUI Installed Successfully");
 				setResultStatus("success");
 			}
 		} catch (e) {
@@ -211,6 +222,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					setMode("url-input");
 				} else if (action === "elvui") {
 					await checkConfigAndInstall("elvui");
+				} else if (action === "tukui") {
+					await checkConfigAndInstall("tukui");
 				}
 			} else if (key.escape || input === "q") {
 				flashKey("esc");

@@ -6,6 +6,7 @@ import type { AddonRecord, DatabaseManager } from "@/core/db";
 import * as Downloader from "@/core/downloader";
 import * as GitClient from "@/core/git";
 import { logger } from "@/core/logger";
+import * as TukUI from "@/core/tukui";
 import * as WoWInterface from "@/core/wowinterface";
 import type { Command, CommandContext } from "./types";
 
@@ -38,6 +39,7 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		let updateAvailable = true;
 		let wowInterfaceDetails: WoWInterface.WoWInterfaceAddonDetails | null =
 			null;
+		let tukuiDetails: TukUI.TukUIAddon | null = null;
 
 		if (this.addon.type === "github") {
 			try {
@@ -88,34 +90,22 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				};
 			}
 		} else if (this.addon.type === "tukui") {
-			if (name === "ElvUI" || folder === "ElvUI") {
-				const hashMatch = this.addon.version?.match(/-g([a-f0-9]+)/);
-				const localHash =
-					this.addon.git_commit || (hashMatch ? hashMatch[1] : null);
+			try {
+				tukuiDetails = await TukUI.getAddonDetails(name);
 
-				const remoteHash = await GitClient.getRemoteCommit(
-					"https://github.com/tukui-org/ElvUI",
-					"main",
-				);
-
-				if (remoteHash) {
-					remoteVersion = remoteHash;
-					if (
-						localHash &&
-						(remoteHash.startsWith(localHash) ||
-							localHash.startsWith(remoteHash))
-					) {
-						updateAvailable = false;
-					} else {
-						updateAvailable = true;
-					}
+				if (tukuiDetails) {
+					remoteVersion = tukuiDetails.version;
+					updateAvailable = remoteVersion !== this.addon.version;
 				} else {
-					updateAvailable = true;
-					remoteVersion = "latest";
+					throw new Error(`Could not find addon details for ${name} on TukUI`);
 				}
-			} else {
-				updateAvailable = true;
-				remoteVersion = "latest";
+			} catch (err) {
+				return {
+					repoName: name,
+					success: false,
+					updated: false,
+					error: String(err),
+				};
 			}
 		}
 
@@ -143,14 +133,11 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		try {
 			let extractRoot = tempDir;
 
-			if (this.addon.type === "tukui") {
+			if (this.addon.type === "tukui" && tukuiDetails) {
 				context.emit("addon:install:downloading", folder);
 				const zipPath = path.join(tempDir, "addon.zip");
 
-				let downloadUrl = this.addon.url || "";
-				if (name === "ElvUI" || folder === "ElvUI") {
-					downloadUrl = "https://api.tukui.org/v1/download/dev/elvui/main";
-				}
+				const downloadUrl = tukuiDetails.url;
 
 				if (!(await Downloader.download(downloadUrl, zipPath))) {
 					throw new Error("Download failed");
