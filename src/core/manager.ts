@@ -17,6 +17,7 @@ import { type AddonRecord, DatabaseManager } from "./db";
 import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
 import { logger } from "./logger";
+import * as WoWInterface from "./wowinterface";
 
 export interface UpdateResult {
 	repoName: string;
@@ -101,6 +102,7 @@ export class AddonManager extends EventEmitter {
 					interface: null,
 					url: repo.gitRemote || repo.downloadUrl || null,
 					type: repo.type as "github" | "tukui",
+					parent: null,
 					install_date: new Date().toISOString(),
 					last_updated: new Date().toISOString(),
 				});
@@ -160,7 +162,17 @@ export class AddonManager extends EventEmitter {
 
 			// Compare with stored git_commit if available, otherwise fallback to version (legacy behavior)
 			const localHash = addon.git_commit || addon.version;
-			const isUpdate = localHash !== remoteHash;
+			let isUpdate = localHash !== remoteHash;
+
+			// Handle short vs full hash comparison
+			if (localHash && remoteHash) {
+				if (
+					remoteHash.startsWith(localHash) ||
+					localHash.startsWith(remoteHash)
+				) {
+					isUpdate = false;
+				}
+			}
 
 			return { updateAvailable: isUpdate, remoteVersion: remoteHash };
 		}
@@ -203,6 +215,30 @@ export class AddonManager extends EventEmitter {
 			}
 
 			return { updateAvailable: true, remoteVersion: "latest" };
+		}
+
+		if (addon.type === "wowinterface") {
+			const addonId = WoWInterface.getAddonIdFromUrl(addon.url);
+			if (!addonId) {
+				return {
+					updateAvailable: false,
+					remoteVersion: "",
+					error: "Invalid WoWInterface URL",
+				};
+			}
+
+			const details = await WoWInterface.getAddonDetails(addonId);
+			if (!details) {
+				return {
+					updateAvailable: false,
+					remoteVersion: "",
+					error: "Failed to fetch WoWInterface details",
+				};
+			}
+
+			// Simple string comparison for now, assuming UIVersion changes on update
+			const isUpdate = details.UIVersion !== addon.version;
+			return { updateAvailable: isUpdate, remoteVersion: details.UIVersion };
 		}
 
 		return { updateAvailable: false, remoteVersion: "" };

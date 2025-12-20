@@ -11,13 +11,18 @@ import { getDefaultWoWPath } from "./paths";
 export const REPO_TYPE = {
 	GITHUB: "github",
 	TUKUI: "tukui",
+	WOWINTERFACE: "wowinterface",
 } as const;
 
 export type RepoType = (typeof REPO_TYPE)[keyof typeof REPO_TYPE];
 
 // --- Zod Schemas ---
 
-export const RepositoryTypeSchema = z.enum([REPO_TYPE.GITHUB, REPO_TYPE.TUKUI]);
+export const RepositoryTypeSchema = z.enum([
+	REPO_TYPE.GITHUB,
+	REPO_TYPE.TUKUI,
+	REPO_TYPE.WOWINTERFACE,
+]);
 
 export const RepositorySchema = z.object({
 	name: z.string(),
@@ -102,6 +107,14 @@ export class ConfigManager {
 				destDir: "NOT_CONFIGURED",
 				userAgent: "DEFAULT_UA",
 				repositories: [],
+				defaultMenuOption: "update",
+				maxConcurrent: 3,
+				nerdFonts: true,
+				checkInterval: 60000,
+				backupWTF: true,
+				backupRetention: 5,
+				debug: false,
+				migrated_to_db: false,
 				...this.overrides,
 			} as unknown as Config;
 		}
