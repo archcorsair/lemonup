@@ -10,6 +10,7 @@ import {
 	pathExists,
 } from "../../core/paths";
 import { ControlBar } from "../components/ControlBar";
+import { useKeyFeedback } from "../context/KeyFeedbackContext";
 
 interface InstallScreenProps {
 	config: Config;
@@ -32,6 +33,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	onBack,
 }) => {
 	// Local config state to reflect updates immediately
+	const { flashKey } = useKeyFeedback();
 	const [config, setConfig] = useState(initialConfig);
 	const [mode, setMode] = useState<Mode>("select");
 	const [selection, setSelection] = useState(0);
@@ -150,6 +152,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 		if (mode === "result") {
 			if (key.return || key.escape || input === "q") {
+				flashKey("enter");
 				setUrl("");
 				setMode("select");
 			}
@@ -158,9 +161,11 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 		if (mode === "config-auto-confirm") {
 			if (input.toLowerCase() === "y" || key.return) {
+				flashKey("enter");
 				// User accepted auto-detected path
 				await savePathAndRetry(detectedPath);
 			} else if (input.toLowerCase() === "n" || key.escape) {
+				flashKey("esc");
 				// User rejected, offer manual input
 				setMode("config-manual-input");
 			}
@@ -169,11 +174,13 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 		if (mode === "confirm-reinstall") {
 			if (input.toLowerCase() === "y") {
+				flashKey("enter");
 				// Proceed with install
 				if (pendingInstall) {
 					await handleInstall(pendingInstall.type, pendingInstall.url);
 				}
 			} else if (input.toLowerCase() === "n" || key.escape || key.return) {
+				flashKey("esc");
 				if (pendingInstall && pendingInstall.type === "url") {
 					setMode("url-input");
 					// Preserve the URL if available
@@ -188,6 +195,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 		if (mode === "config-manual-input") {
 			if (key.return) {
+				flashKey("enter");
 				if (manualPath.trim()) {
 					if (pathExists(manualPath.trim())) {
 						await savePathAndRetry(manualPath.trim());
@@ -199,6 +207,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					}
 				}
 			} else if (key.escape) {
+				flashKey("esc");
 				setMode("select"); // Cancel entire flow
 				setPendingInstall(null);
 			}
@@ -211,6 +220,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 			} else if (key.downArrow) {
 				setSelection((prev) => (prev < OPTIONS.length - 1 ? prev + 1 : prev));
 			} else if (key.return) {
+				flashKey("enter");
 				const action = OPTIONS[selection]?.action;
 				if (action === "url") {
 					setMode("url-input");
@@ -218,14 +228,17 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					await checkConfigAndInstall("elvui");
 				}
 			} else if (key.escape || input === "q") {
+				flashKey("esc");
 				onBack();
 			}
 		} else if (mode === "url-input") {
 			if (key.return) {
+				flashKey("enter");
 				if (url.trim()) {
 					await checkConfigAndInstall("url", url);
 				}
 			} else if (key.escape) {
+				flashKey("esc");
 				setMode("select");
 			}
 		}

@@ -206,9 +206,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			</Box>
 
 			<Box flexGrow={1} flexShrink={1} minWidth={10} flexBasis="15%">
-				<Text color="gray" wrap="truncate-end">
-					{repo.author || "-"}
-				</Text>
+				<Text wrap="truncate-end">{repo.author || "-"}</Text>
 			</Box>
 
 			<Box width={8} flexShrink={0}>

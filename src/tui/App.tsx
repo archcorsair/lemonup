@@ -6,6 +6,7 @@ import { useEffect, useReducer, useState } from "react";
 import pkg from "../../package.json";
 import { type Config, ConfigManager } from "../core/config";
 import { AddonManager } from "../core/manager";
+import { KeyFeedbackProvider } from "./context/KeyFeedbackContext";
 import { FirstRunWizard } from "./FirstRunWizard";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
@@ -62,7 +63,9 @@ export const App: React.FC<AppProps> = ({
 }) => {
 	return (
 		<QueryClientProvider client={queryClient}>
-			<AppContent force={force} dryRun={dryRun} testMode={testMode} />
+			<KeyFeedbackProvider>
+				<AppContent force={force} dryRun={dryRun} testMode={testMode} />
+			</KeyFeedbackProvider>
 		</QueryClientProvider>
 	);
 };
