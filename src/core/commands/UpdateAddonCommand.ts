@@ -8,6 +8,7 @@ import * as GitClient from "@/core/git";
 import { logger } from "@/core/logger";
 import * as TukUI from "@/core/tukui";
 import * as WoWInterface from "@/core/wowinterface";
+import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
 
 export interface UpdateAddonResult {
@@ -214,6 +215,14 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 					await this.backupAndInstall(context, source, f);
 				}
 			}
+
+			// Ensure all installed folders are in the DB
+			const scanCmd = new ScanCommand(
+				this.dbManager,
+				this.configManager,
+				foldersToInstall,
+			);
+			await scanCmd.execute(context);
 
 			const isGitHash = remoteVersion.match(/^[a-f0-9]{40}$/);
 			const newVersion = isGitHash

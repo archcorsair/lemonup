@@ -30,19 +30,6 @@ export class ScanCommand implements Command<number> {
 			return 0;
 		}
 
-		if (!this.specificFolders) {
-			const IGNORED_FOLDERS = [
-				"ElvUI_OptionsUI",
-				"ElvUI_Options",
-				"ElvUI_Libraries",
-			];
-			for (const ignored of IGNORED_FOLDERS) {
-				if (this.dbManager.getByFolder(ignored)) {
-					this.dbManager.removeAddon(ignored);
-				}
-			}
-		}
-
 		const tocGlob = new Bun.Glob("*/*.toc");
 		let count = 0;
 
@@ -53,13 +40,6 @@ export class ScanCommand implements Command<number> {
 			if (this.specificFolders && !this.specificFolders.includes(folderName)) {
 				continue;
 			}
-
-			if (
-				folderName === "ElvUI_OptionsUI" ||
-				folderName === "ElvUI_Options" ||
-				folderName === "ElvUI_Libraries"
-			)
-				continue;
 
 			context.emit("scan:progress", folderName);
 
