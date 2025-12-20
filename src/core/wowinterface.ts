@@ -36,17 +36,16 @@ export async function getAddonDetails(
 			return null;
 		}
 
-		const data = await response.json();
+		const data = (await response.json()) as unknown;
 
-		if (!Array.isArray(data) || data.length === 0) {
-			logger.error("WoWInterface", "Invalid API response format");
+		if (data && typeof data === "object" && "ERROR" in data) {
+			const err = data as { ERROR: unknown };
+			logger.error("WoWInterface", `API Error: ${String(err.ERROR)}`);
 			return null;
 		}
 
-		// Check for API-level error
-		// biome-ignore lint/suspicious/noExplicitAny: API can return error object
-		if ((data as any).ERROR) {
-			logger.error("WoWInterface", `API Error: ${(data as any).ERROR}`);
+		if (!Array.isArray(data) || data.length === 0) {
+			logger.error("WoWInterface", "Invalid API response format");
 			return null;
 		}
 

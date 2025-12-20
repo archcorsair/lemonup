@@ -40,7 +40,10 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		"idle" | "running" | "success" | "error" | "skipped"
 	>("idle");
 
-	const allAddons = useMemo(() => addonManager.getAllAddons(), [addonManager]);
+	const allAddons = useMemo(
+		() => addonManager.getAllAddons().filter((a) => !a.parent),
+		[addonManager],
+	);
 	const hasRun = useRef(false);
 	const remoteVersions = useRef<Record<string, string>>({});
 
