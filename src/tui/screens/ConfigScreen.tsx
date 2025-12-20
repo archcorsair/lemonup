@@ -295,9 +295,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 			<ControlBar
 				message={
-					activeField === "destDir"
-						? "Type path and press Enter to save."
-						: undefined
+					activeField === "destDir" ? (
+						<Text>Type path and press Enter to save.</Text>
+					) : undefined
 				}
 				controls={[
 					{ key: "↑/↓", label: "nav" },
