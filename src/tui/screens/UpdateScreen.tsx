@@ -8,8 +8,8 @@ import type { Config } from "../../core/config";
 import type { AddonManager } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
 import { useAddonManagerEvent } from "../hooks/useAddonManager";
+import { useAppStore } from "../store/useAppStore";
 
 interface UpdateScreenProps {
 	config: Config;
@@ -28,7 +28,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	onBack,
 }) => {
 	const { exit } = useApp();
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const queryClient = useQueryClient();
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(

@@ -3,7 +3,7 @@ import type React from "react";
 import { useState } from "react";
 import type { Config, ConfigManager } from "../../core/config";
 import { ControlBar } from "../components/ControlBar";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
+import { useAppStore } from "../store/useAppStore";
 
 interface MainMenuProps {
 	config: Config;
@@ -26,7 +26,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 	onSelect,
 }) => {
 	const { exit } = useApp();
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const [selectedIndex, setSelectedIndex] = useState(() => {
 		const targetId = initialSelection || config.defaultMenuOption;
 		const idx = OPTIONS.findIndex((opt) => opt.id === targetId);

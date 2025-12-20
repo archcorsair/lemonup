@@ -4,7 +4,7 @@ import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "../../core/config";
 import { ControlBar } from "../components/ControlBar";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
+import { useAppStore } from "../store/useAppStore";
 
 interface ScreenProps {
 	configManager: ConfigManager;
@@ -24,7 +24,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	configManager,
 	onBack,
 }) => {
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const [maxConcurrent, setMaxConcurrent] = useState(3);
 	const [destDir, setDestDir] = useState("");
 	const [nerdFonts, setNerdFonts] = useState(true);

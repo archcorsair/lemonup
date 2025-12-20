@@ -10,8 +10,8 @@ import type { AddonManager, UpdateResult } from "../../core/manager";
 import { ControlBar } from "../components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
 import { ShortcutsModal } from "../components/ShortcutsModal";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
 import { useAddonManagerEvent } from "../hooks/useAddonManager";
+import { useAppStore } from "../store/useAppStore";
 
 interface ManageScreenProps {
 	config: Config;
@@ -29,7 +29,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 }) => {
 	const { exit } = useApp();
 	const queryClient = useQueryClient();
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [globalMessage, setGlobalMessage] = useState("");

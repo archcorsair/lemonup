@@ -10,7 +10,7 @@ import {
 	pathExists,
 } from "../../core/paths";
 import { ControlBar } from "../components/ControlBar";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
+import { useAppStore } from "../store/useAppStore";
 
 interface InstallScreenProps {
 	config: Config;
@@ -33,7 +33,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	onBack,
 }) => {
 	// Local config state to reflect updates immediately
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const [config, setConfig] = useState(initialConfig);
 	const [mode, setMode] = useState<Mode>("select");
 	const [selection, setSelection] = useState(0);
