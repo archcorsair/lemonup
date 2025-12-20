@@ -13,6 +13,7 @@ import path from "node:path";
 import { ConfigManager } from "@/core/config";
 import * as Downloader from "@/core/downloader";
 import * as GitClient from "@/core/git";
+import * as TukUI from "@/core/tukui";
 import type { AddonManager as AddonManagerType } from "@/core/manager";
 
 // Import AddonManager
@@ -160,12 +161,22 @@ describe("AddonManager", () => {
 	test("updateAddon (TukUI) should download and install", async () => {
 		// biome-ignore lint/suspicious/noExplicitAny: test data
 		const addon: any = {
-			name: "tukui-repo",
+			name: "TukUI",
 			folder: "TukUI",
 			type: "tukui",
 			url: "http://download",
-			version: "old-hash",
+			version: "old-version",
 		};
+
+		spyOn(TukUI, "getAddonDetails").mockResolvedValue({
+			id: -1,
+			slug: "tukui",
+			name: "Tukui",
+			version: "new-version",
+			url: "http://download",
+			author: "Tukz",
+			directories: ["Tukui"],
+		} as any);
 
 		spyOn(Downloader, "download").mockResolvedValue(true);
 		spyOn(Downloader, "unzip").mockImplementation(async (_zipPath, dest) => {

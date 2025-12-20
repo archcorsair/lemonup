@@ -17,6 +17,7 @@ import { type AddonRecord, DatabaseManager } from "./db";
 import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
 import { logger } from "./logger";
+import * as TukUI from "./tukui";
 import * as WoWInterface from "./wowinterface";
 
 export interface UpdateResult {
@@ -141,6 +142,10 @@ export class AddonManager extends EventEmitter {
 		remoteVersion: string;
 		error?: string;
 	}> {
+		if (addon.parent) {
+			return { updateAvailable: false, remoteVersion: "" };
+		}
+
 		if (!addon.url) {
 			return {
 				updateAvailable: false,
@@ -178,43 +183,23 @@ export class AddonManager extends EventEmitter {
 		}
 
 		if (addon.type === "tukui") {
-			if (addon.name === "ElvUI" || addon.folder === "ElvUI") {
-				const hashMatch = addon.version?.match(/-g([a-f0-9]+)/);
-				const localHashFromVer = hashMatch ? hashMatch[1] : null;
-				const localHash = addon.git_commit || localHashFromVer;
-
-				const remoteHash = await GitClient.getRemoteCommit(
-					"https://github.com/tukui-org/ElvUI",
-					"main",
-				);
-
-				if (remoteHash && localHash) {
-					// Check for hash equality, handling short vs full hash scenarios.
-					// We assume that if one hash is a prefix of the other, they refer to the same commit.
-					if (
-						remoteHash.startsWith(localHash) ||
-						localHash.startsWith(remoteHash)
-					) {
-						return {
-							updateAvailable: false,
-							remoteVersion: remoteHash,
-						};
-					}
+			try {
+				const details = await TukUI.getAddonDetails(addon.name);
+				if (details) {
+					const isUpdate = details.version !== addon.version;
 					return {
-						updateAvailable: true,
-						remoteVersion: remoteHash,
+						updateAvailable: isUpdate,
+						remoteVersion: details.version,
 					};
 				}
-
-				if (remoteHash) {
-					return {
-						updateAvailable: true,
-						remoteVersion: remoteHash,
-					};
-				}
+				return {
+					updateAvailable: false,
+					remoteVersion: "",
+					error: "Addon details not found",
+				};
+			} catch (e) {
+				return { updateAvailable: false, remoteVersion: "", error: String(e) };
 			}
-
-			return { updateAvailable: true, remoteVersion: "latest" };
 		}
 
 		if (addon.type === "wowinterface") {

@@ -19,6 +19,7 @@ import { InstallTukUICommand } from "@/core/commands/InstallTukUICommand";
 import { RemoveAddonCommand } from "@/core/commands/RemoveAddonCommand";
 import { isPathConfigured } from "@/core/paths";
 import * as WoWInterface from "@/core/wowinterface";
+import * as TukUI from "@/core/tukui";
 import { ScanCommand } from "@/core/commands/ScanCommand";
 import { UpdateAddonCommand } from "@/core/commands/UpdateAddonCommand";
 
@@ -151,6 +152,16 @@ describe("Commands", () => {
 		test("should install ElvUI", async () => {
 			const url = "http://elvui";
 			const folder = "ElvUI";
+
+			spyOn(TukUI, "getAddonDetails").mockResolvedValue({
+				id: -1,
+				slug: "elvui",
+				name: "ElvUI",
+				version: "1.0",
+				url: "http://elvui",
+				author: "Tukz",
+				directories: ["ElvUI"],
+			} as any);
 
 			spyOn(Downloader, "download").mockResolvedValue(true);
 			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {

@@ -4,9 +4,9 @@ import path from "node:path";
 import type { ConfigManager } from "@/core/config";
 import type { DatabaseManager } from "@/core/db";
 import * as Downloader from "@/core/downloader";
-import * as GitClient from "@/core/git";
 import { logger } from "@/core/logger";
 import { isPathConfigured } from "@/core/paths";
+import * as TukUI from "@/core/tukui";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
 
@@ -32,9 +32,25 @@ export class InstallTukUICommand implements Command<boolean> {
 		context.emit("addon:install:start", this.addonFolder);
 
 		try {
+			let details: TukUI.TukUIAddon | null = null;
+			try {
+				details = await TukUI.getAddonDetails(this.addonFolder);
+			} catch (e) {
+				logger.error("InstallTukUICommand", "Failed to fetch TukUI details", e);
+			}
+
+			let downloadUrl = this.url;
+			if ((!downloadUrl || downloadUrl === "latest") && details) {
+				downloadUrl = details.url;
+			}
+
+			if (!downloadUrl) {
+				throw new Error("No download URL provided or found");
+			}
+
 			context.emit("addon:install:downloading", this.addonFolder);
 			const zipPath = path.join(tempDir, "addon.zip");
-			if (!(await Downloader.download(this.url, zipPath))) {
+			if (!(await Downloader.download(downloadUrl, zipPath))) {
 				throw new Error("Download failed");
 			}
 
@@ -60,39 +76,26 @@ export class InstallTukUICommand implements Command<boolean> {
 			);
 			await scanCmd.execute(context);
 
-			let gitHash: string | null = null;
-			if (this.addonFolder === "ElvUI") {
-				try {
-					gitHash = await GitClient.getRemoteCommit(
-						"https://github.com/tukui-org/ElvUI",
-						"main",
-					);
-				} catch (e) {
-					logger.error(
-						"InstallTukUICommand",
-						"Failed to get ElvUI git hash",
-						e,
-					);
-				}
-			}
-
 			// Update Main Addon
 			this.dbManager.updateAddon(this.addonFolder, {
 				type: "tukui",
-				url: this.url,
-				git_commit: gitHash,
+				url: downloadUrl,
+				version: details?.version || "unknown",
+				author: details?.author || null,
 				last_updated: new Date().toISOString(),
 				parent: null,
+				git_commit: null,
 			});
 
-			// Update Sub Folders (Dependencies)
 			for (const subFolder of this.subFolders) {
 				this.dbManager.updateAddon(subFolder, {
 					type: "tukui",
-					url: this.url,
-					git_commit: gitHash,
+					url: downloadUrl,
+					version: details?.version || "unknown",
+					author: details?.author || null,
 					last_updated: new Date().toISOString(),
 					parent: this.addonFolder,
+					git_commit: null,
 				});
 			}
 
