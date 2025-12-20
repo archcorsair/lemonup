@@ -20,6 +20,8 @@ interface RepositoryRowProps {
 	nerdFonts?: boolean;
 	isSelected?: boolean;
 	isChecked?: boolean;
+	isChild?: boolean;
+	isLastChild?: boolean;
 }
 
 export const RepositoryRow: React.FC<RepositoryRowProps> = ({
@@ -29,6 +31,8 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 	nerdFonts = true,
 	isSelected = false,
 	isChecked = false,
+	isChild = false,
+	isLastChild = false,
 }) => {
 	let icon = <Text color="gray">·</Text>;
 	let statusText = <Text color="gray">Waiting</Text>;
@@ -36,6 +40,8 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 	const typeLabel =
 		repo.type === "tukui" ? (
 			<Text color="magenta">[TukUI]</Text>
+		) : repo.type === "wowinterface" ? (
+			<Text color="yellow">[WoWI]</Text>
 		) : repo.type === "manual" ? (
 			<Text color="gray">[Man]</Text>
 		) : (
@@ -69,7 +75,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			) : (
 				<Text color="cyan">↓</Text>
 			);
-			if (repo.type === "tukui") {
+			if (repo.type === "tukui" || repo.type === "wowinterface") {
 				statusText = (
 					<Text color="cyan" wrap="truncate-end">
 						Downloading Zip...
@@ -158,6 +164,12 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			: repo.version
 		: "";
 
+	// Tree View Indentation
+	let namePrefix = null;
+	if (isChild) {
+		namePrefix = <Text color="gray">{isLastChild ? "└── " : "├── "}</Text>;
+	}
+
 	return (
 		<Box paddingX={2} width="100%">
 			<Box width={3} flexShrink={0}>
@@ -168,15 +180,22 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 			</Box>
 
 			<Box width={22} flexShrink={0}>
-				<Box gap={1}>
-					<Box flexGrow={1}>{statusText}</Box>
-					<Box width={1} justifyContent="center">
-						{icon}
+				{!isChild ? (
+					<Box gap={1} flexDirection="row">
+						<Box flexGrow={1} flexShrink={1}>
+							{statusText}
+						</Box>
+						<Box width={2} justifyContent="flex-end">
+							{icon}
+						</Box>
 					</Box>
-				</Box>
+				) : (
+					<Text> </Text>
+				)}
 			</Box>
 
 			<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
+				{namePrefix}
 				<Text
 					color={isSelected ? "blue" : isChecked ? "green" : undefined}
 					wrap="truncate-end"

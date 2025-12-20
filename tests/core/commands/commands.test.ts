@@ -17,6 +17,8 @@ import * as GitClient from "@/core/git";
 import { InstallFromUrlCommand } from "@/core/commands/InstallFromUrlCommand";
 import { InstallTukUICommand } from "@/core/commands/InstallTukUICommand";
 import { RemoveAddonCommand } from "@/core/commands/RemoveAddonCommand";
+import { isPathConfigured } from "@/core/paths";
+import * as WoWInterface from "@/core/wowinterface";
 import { ScanCommand } from "@/core/commands/ScanCommand";
 import { UpdateAddonCommand } from "@/core/commands/UpdateAddonCommand";
 
@@ -36,14 +38,27 @@ describe("Commands", () => {
 		spyOn(GitClient, "getRemoteCommit").mockImplementation(() =>
 			Promise.resolve("hash"),
 		);
-		spyOn(GitClient, "clone").mockImplementation(() => Promise.resolve(true));
+		spyOn(GitClient, "clone").mockImplementation(async (_url, _branch, dir) => {
+			fs.mkdirSync(dir, { recursive: true });
+			const repoName = "RepoAddon";
+			const addonDir = path.join(dir, repoName);
+			fs.mkdirSync(addonDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(addonDir, `${repoName}.toc`),
+				`## Title: ${repoName}`,
+			);
+			return true;
+		});
 		spyOn(GitClient, "getCurrentCommit").mockImplementation(() =>
 			Promise.resolve("hash"),
 		);
 
-		spyOn(Downloader, "download").mockImplementation(() =>
-			Promise.resolve(true),
-		);
+		spyOn(Downloader, "download").mockImplementation((_url, dest) => {
+			if (dest) {
+				fs.writeFileSync(dest, "dummy zip content");
+			}
+			return Promise.resolve(true);
+		});
 		spyOn(Downloader, "unzip").mockImplementation(() => Promise.resolve(true));
 
 		mockContext.emit.mockReset();
@@ -75,20 +90,12 @@ describe("Commands", () => {
 		test("should install from github url", async () => {
 			const url = "https://github.com/user/repo";
 
-			spyOn(GitClient, "clone").mockImplementation(
-				async (_url, _branch, dest) => {
-					const folderPath = path.join(dest, "RepoAddon");
-					fs.mkdirSync(folderPath, { recursive: true });
-					await Bun.write(
-						path.join(folderPath, "RepoAddon.toc"),
-						"## Title: Repo Addon",
-					);
-					return true;
-				},
-			);
-
 			const command = new InstallFromUrlCommand(dbManager, configManager, url);
 			const result = await command.execute(mockContext);
+
+			if (!result.success) {
+				console.error("Install failed:", result.error);
+			}
 
 			expect(result.success).toBe(true);
 			expect(result.installedAddons).toContain("RepoAddon");
@@ -102,6 +109,41 @@ describe("Commands", () => {
 			expect(addon).toBeTruthy();
 			expect(addon?.type).toBe("github");
 			expect(addon?.url).toBe(url);
+		});
+
+		test("should install from wowinterface url", async () => {
+			const url = "https://wowinterface.com/downloads/info5108-Clique.html";
+			const mockDetails = {
+				UID: "5108",
+				UIName: "Clique",
+				UIVersion: "4.2.11",
+				UIDownload: "http://download/clique.zip",
+				UIAuthorName: "Cladhaire",
+				UIFileName: "clique.zip",
+			};
+
+			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue(mockDetails);
+			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {
+				const folderPath = path.join(dest, "Clique");
+				fs.mkdirSync(folderPath, { recursive: true });
+				await Bun.write(
+					path.join(folderPath, "Clique.toc"),
+					"## Title: Clique",
+				);
+				return true;
+			});
+
+			const command = new InstallFromUrlCommand(dbManager, configManager, url);
+			const result = await command.execute(mockContext);
+
+			if (!result.success) {
+				console.error("WowInstall Failed:", result.error);
+			}
+
+			expect(result.success).toBe(true);
+			expect(result.installedAddons).toContain("Clique");
+			expect(WoWInterface.getAddonDetails).toHaveBeenCalledWith("5108");
+			expect(dbManager.getByFolder("Clique")?.type).toBe("wowinterface");
 		});
 	});
 
@@ -155,6 +197,7 @@ describe("Commands", () => {
 				folder: folder,
 				version: "1.0",
 				type: "manual",
+				parent: null,
 				git_commit: null,
 				author: null,
 				interface: null,
@@ -201,6 +244,10 @@ describe("Commands", () => {
 				async (_url, _branch, dest) => {
 					const folderPath = path.join(dest, folder);
 					fs.mkdirSync(folderPath, { recursive: true });
+					await Bun.write(
+						path.join(folderPath, `${folder}.toc`),
+						`## Title: ${folder}`,
+					);
 					return true;
 				},
 			);
@@ -219,6 +266,62 @@ describe("Commands", () => {
 
 			const updated = dbManager.getByFolder(folder);
 			expect(updated?.git_commit).toBe(newHash);
+		});
+
+		test("should update wowinterface addon", async () => {
+			const folder = "WoWAddon";
+			const addonDir = path.join(DEST_DIR, folder);
+			fs.mkdirSync(addonDir, { recursive: true });
+
+			// biome-ignore lint/suspicious/noExplicitAny: test data
+			const addon: any = {
+				name: "WoWAddon",
+				folder: folder,
+				type: "wowinterface",
+				url: "https://wowinterface.com/downloads/info123-WoWAddon.html",
+				version: "1.0",
+				author: null,
+				interface: null,
+			};
+
+			dbManager.addAddon({ ...addon, install_date: "", last_updated: "" });
+
+			const mockDetails = {
+				UID: "123",
+				UIName: "WoWAddon",
+				UIVersion: "1.1",
+				UIDownload: "http://download/wowaddon.zip",
+				UIAuthorName: "Author",
+				UIFileName: "wowaddon.zip",
+			};
+
+			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue(mockDetails);
+			spyOn(Downloader, "download").mockResolvedValue(true);
+			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {
+				const folderPath = path.join(dest, folder);
+				fs.mkdirSync(folderPath, { recursive: true });
+				await Bun.write(
+					path.join(folderPath, `${folder}.toc`),
+					`## Title: ${folder}`,
+				);
+				return true;
+			});
+
+			const command = new UpdateAddonCommand(
+				dbManager,
+				configManager,
+				addon,
+				false,
+			);
+			const result = await command.execute(mockContext);
+
+			expect(result.success).toBe(true);
+			expect(result.updated).toBe(true);
+			expect(WoWInterface.getAddonDetails).toHaveBeenCalled();
+			expect(Downloader.download).toHaveBeenCalled();
+
+			const updated = dbManager.getByFolder(folder);
+			expect(updated?.version).toBe("1.1");
 		});
 	});
 

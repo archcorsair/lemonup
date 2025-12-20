@@ -19,7 +19,7 @@ interface InstallScreenProps {
 
 type Mode =
 	| "select"
-	| "github-input"
+	| "url-input"
 	| "installing"
 	| "result"
 	| "config-auto-confirm"
@@ -43,7 +43,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 	// Store pending install action to retry after config
 	const [pendingInstall, setPendingInstall] = useState<{
-		type: "github" | "elvui";
+		type: "url" | "elvui";
 		url?: string;
 	} | null>(null);
 
@@ -52,7 +52,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	);
 
 	const OPTIONS = [
-		{ label: "Install from GitHub URL", action: "github", section: "General" },
+		{ label: "Install from URL", action: "url", section: "General" },
 		{ label: "Install ElvUI", action: "elvui", section: "TukUI" },
 	];
 
@@ -62,14 +62,14 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 	}, [addonManager]);
 
 	const checkConfigAndInstall = async (
-		type: "github" | "elvui",
+		type: "url" | "elvui",
 		installUrl?: string,
 	) => {
 		// Safety Check: Duplicate Install
 		let exists = false;
 		if (type === "elvui") {
 			exists = addonManager.isAlreadyInstalled("ElvUI");
-		} else if (type === "github" && installUrl) {
+		} else if (type === "url" && installUrl) {
 			exists = addonManager.isAlreadyInstalled(installUrl);
 		}
 
@@ -89,18 +89,15 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 		}
 	};
 
-	const handleInstall = async (
-		type: "github" | "elvui",
-		installUrl?: string,
-	) => {
+	const handleInstall = async (type: "url" | "elvui", installUrl?: string) => {
 		setMode("installing");
 		setStatus("Installing...");
 		setResultStatus("success");
 
 		try {
-			if (type === "github") {
+			if (type === "url") {
 				if (!installUrl) throw new Error("No URL provided");
-				setStatus(`Cloning ${installUrl}...`);
+				setStatus(`Installing from ${installUrl}...`);
 				const res = await addonManager.installFromUrl(installUrl);
 				if (res.success) {
 					setResultMessage(
@@ -177,8 +174,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 					await handleInstall(pendingInstall.type, pendingInstall.url);
 				}
 			} else if (input.toLowerCase() === "n" || key.escape || key.return) {
-				if (pendingInstall?.type === "github") {
-					setMode("github-input");
+				if (pendingInstall && pendingInstall.type === "url") {
+					setMode("url-input");
 					// Preserve the URL if available
 					if (pendingInstall.url) setUrl(pendingInstall.url);
 				} else {
@@ -215,18 +212,18 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				setSelection((prev) => (prev < OPTIONS.length - 1 ? prev + 1 : prev));
 			} else if (key.return) {
 				const action = OPTIONS[selection]?.action;
-				if (action === "github") {
-					setMode("github-input");
+				if (action === "url") {
+					setMode("url-input");
 				} else if (action === "elvui") {
 					await checkConfigAndInstall("elvui");
 				}
 			} else if (key.escape || input === "q") {
 				onBack();
 			}
-		} else if (mode === "github-input") {
+		} else if (mode === "url-input") {
 			if (key.return) {
 				if (url.trim()) {
-					await checkConfigAndInstall("github", url);
+					await checkConfigAndInstall("url", url);
 				}
 			} else if (key.escape) {
 				setMode("select");
@@ -314,9 +311,9 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				</Box>
 			)}
 
-			{mode === "github-input" && (
+			{mode === "url-input" && (
 				<Box>
-					<Text>Repo URL: </Text>
+					<Text>URL: </Text>
 					<TextInput value={url} onChange={setUrl} onSubmit={() => {}} />
 				</Box>
 			)}
@@ -335,14 +332,14 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 			<ControlBar
 				message={
-					mode === "github-input" ? <Text>Enter Git URL</Text> : undefined
+					mode === "url-input" ? (
+						<Text>Enter URL (GitHub/WoWInterface)</Text>
+					) : undefined
 				}
 				controls={[
 					{ key: "esc", label: "back/cancel" },
 					...(mode === "select" ? [{ key: "enter", label: "select" }] : []),
-					...(mode === "github-input"
-						? [{ key: "enter", label: "install" }]
-						: []),
+					...(mode === "url-input" ? [{ key: "enter", label: "install" }] : []),
 				]}
 			/>
 		</Box>

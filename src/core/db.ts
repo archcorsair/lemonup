@@ -12,7 +12,8 @@ export const AddonRecordSchema = z.object({
 	author: z.string().nullable(),
 	interface: z.string().nullable(),
 	url: z.string().nullable(),
-	type: z.enum(["github", "tukui", "manual"]),
+	type: z.enum(["github", "tukui", "manual", "wowinterface"]),
+	parent: z.string().nullable().default(null),
 	install_date: z.string(),
 	last_updated: z.string(),
 });
@@ -41,6 +42,9 @@ export class DatabaseManager {
 
 		if (version < 1) {
 			this.migrateToV1();
+		}
+		if (version < 2) {
+			this.migrateToV2();
 		}
 	}
 
@@ -83,6 +87,15 @@ export class DatabaseManager {
 		logger.log("Database", "Migration to Schema V1 complete");
 	}
 
+	private migrateToV2() {
+		logger.log("Database", "Migrating to Schema V2...");
+		this.db.transaction(() => {
+			this.db.run("ALTER TABLE addons ADD COLUMN parent TEXT DEFAULT NULL");
+			this.db.run("PRAGMA user_version = 2");
+		})();
+		logger.log("Database", "Migration to Schema V2 complete");
+	}
+
 	public getAll(): AddonRecord[] {
 		return this.db
 			.query("SELECT * FROM addons ORDER BY name ASC")
@@ -98,8 +111,8 @@ export class DatabaseManager {
 	public addAddon(addon: AddonRecord): void {
 		const data = AddonRecordSchema.parse(addon);
 		const query = this.db.query(`
-			INSERT INTO addons (name, folder, version, git_commit, author, interface, url, type, install_date, last_updated)
-			VALUES ($name, $folder, $version, $git_commit, $author, $interface, $url, $type, $install_date, $last_updated)
+			INSERT INTO addons (name, folder, version, git_commit, author, interface, url, type, parent, install_date, last_updated)
+			VALUES ($name, $folder, $version, $git_commit, $author, $interface, $url, $type, $parent, $install_date, $last_updated)
 		`);
 
 		query.run({
@@ -111,6 +124,7 @@ export class DatabaseManager {
 			$interface: data.interface,
 			$url: data.url,
 			$type: data.type,
+			$parent: data.parent,
 			$install_date: data.install_date,
 			$last_updated: data.last_updated,
 		});

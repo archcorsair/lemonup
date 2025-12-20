@@ -37,6 +37,7 @@ describe("DatabaseManager", () => {
 			interface: "100000",
 			url: "https://github.com/test/test",
 			type: "github",
+			parent: null,
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
 		};
@@ -59,6 +60,7 @@ describe("DatabaseManager", () => {
 			interface: "100000",
 			url: null,
 			type: "manual",
+			parent: null,
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
 		};
@@ -84,6 +86,7 @@ describe("DatabaseManager", () => {
 			interface: "100000",
 			url: null,
 			type: "manual",
+			parent: null,
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
 		};
@@ -105,6 +108,7 @@ describe("DatabaseManager", () => {
 			interface: "123",
 			url: null,
 			type: "manual",
+			parent: null,
 			install_date: "",
 			last_updated: "",
 		};

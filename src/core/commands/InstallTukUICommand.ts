@@ -53,9 +53,11 @@ export class InstallTukUICommand implements Command<boolean> {
 				await fs.cp(source, dest, { recursive: true, force: true });
 			}
 
-			const scanCmd = new ScanCommand(this.dbManager, this.configManager, [
-				this.addonFolder,
-			]);
+			const scanCmd = new ScanCommand(
+				this.dbManager,
+				this.configManager,
+				foldersToCopy,
+			);
 			await scanCmd.execute(context);
 
 			let gitHash: string | null = null;
@@ -74,12 +76,25 @@ export class InstallTukUICommand implements Command<boolean> {
 				}
 			}
 
+			// Update Main Addon
 			this.dbManager.updateAddon(this.addonFolder, {
 				type: "tukui",
 				url: this.url,
 				git_commit: gitHash,
 				last_updated: new Date().toISOString(),
+				parent: null,
 			});
+
+			// Update Sub Folders (Dependencies)
+			for (const subFolder of this.subFolders) {
+				this.dbManager.updateAddon(subFolder, {
+					type: "tukui",
+					url: this.url,
+					git_commit: gitHash,
+					last_updated: new Date().toISOString(),
+					parent: this.addonFolder,
+				});
+			}
 
 			context.emit("addon:install:complete", this.addonFolder);
 			return true;

@@ -33,18 +33,57 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [globalMessage, setGlobalMessage] = useState("");
 
 	const [refreshKey, setRefreshKey] = useState(0);
+	const [showLibs, setShowLibs] = useState(false);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is used to trigger re-fetching when the database state changes.
-	const addons = useMemo(
-		() => addonManager.getAllAddons(),
-		[addonManager, refreshKey],
-	);
+	const visibleAddons = useMemo(() => {
+		const all = addonManager.getAllAddons();
+		const parents = all.filter((a) => !a.parent);
+
+		// Sort parents by name (case-insensitive)
+		parents.sort((a, b) =>
+			a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+		);
+
+		if (!showLibs) {
+			return parents.map((a) => ({
+				record: a,
+				isChild: false,
+				isLastChild: false,
+			}));
+		}
+
+		const result: {
+			record: (typeof parents)[0];
+			isChild: boolean;
+			isLastChild: boolean;
+		}[] = [];
+		for (const p of parents) {
+			result.push({ record: p, isChild: false, isLastChild: false });
+
+			// Find children
+			const children = all.filter((a) => a.parent === p.folder);
+			// Sort children
+			children.sort((a, b) =>
+				a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+			);
+
+			children.forEach((c, i) => {
+				result.push({
+					record: c,
+					isChild: true,
+					isLastChild: i === children.length - 1,
+				});
+			});
+		}
+		return result;
+	}, [addonManager, refreshKey, showLibs]);
 
 	const queries = useQueries({
-		queries: addons.map((addon) => ({
-			queryKey: ["addon", addon.folder],
+		queries: visibleAddons.map((item) => ({
+			queryKey: ["addon", item.record.folder],
 			queryFn: async () => {
-				const freshAddon = addonManager.getAddon(addon.folder);
+				const freshAddon = addonManager.getAddon(item.record.folder);
 				if (!freshAddon)
 					return {
 						updateAvailable: false,
@@ -71,6 +110,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			setUpdateProgress((prev) => ({ ...prev, [folder]: "checking" }));
 		}, []),
 	);
+
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:downloading",
@@ -78,6 +118,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			setUpdateProgress((prev) => ({ ...prev, [folder]: "downloading" }));
 		}, []),
 	);
+
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:extracting",
@@ -85,6 +126,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			setUpdateProgress((prev) => ({ ...prev, [folder]: "extracting" }));
 		}, []),
 	);
+
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:copying",
@@ -92,6 +134,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			setUpdateProgress((prev) => ({ ...prev, [folder]: "copying" }));
 		}, []),
 	);
+
 	useAddonManagerEvent(
 		addonManager,
 		"addon:install:complete",
@@ -104,7 +147,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}, []),
 	);
 
-	// 2. Mutation for Updating
+	// Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			const os = await import("node:os");
@@ -143,7 +186,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			`Updating ${foldersToUpdate.length} addon${foldersToUpdate.length > 1 ? "s" : ""}...`,
 		);
 
-		// Run with concurrency limit
+		// Enforce concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
 		const promises = foldersToUpdate.map((folder) => {
@@ -161,13 +204,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const runChecks = async (foldersToCheck: string[]) => {
 		if (!foldersToCheck.length) return;
 
-		// Run with concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
 		// Trigger refetch for specific items
 		const promises = foldersToCheck.map((folder) => {
 			return limit(async () => {
-				const idx = addons.findIndex((r) => r.folder === folder);
+				const idx = visibleAddons.findIndex((r) => r.record.folder === folder);
 				if (idx !== -1 && queries[idx]) {
 					await queries[idx].refetch();
 				}
@@ -177,13 +219,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		await Promise.all(promises);
 	};
 
-	// 3. Mutation for Deletion
+	// Mutation for Deletion
 	const deleteMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			await addonManager.removeAddon(folder);
 		},
 		onSuccess: (_, variables) => {
-			// Uncheck removed item
 			if (selectedIds.has(variables.folder)) {
 				setSelectedIds((prev) => {
 					const next = new Set(prev);
@@ -191,18 +232,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					return next;
 				});
 			}
-			// Invalidate to refresh list
-			// We need to refetch the whole list or force re-render?
-			// getAllAddons is direct call. We must trigger re-render of component.
-			// Since `addons` is const computed on render, assume invalidating queries might not be enough if addons list itself isn't a query.
-			// `addons` comes from `addonManager.getAllAddons()` which is SYNC.
-			// But we need to force re-render.
-			// We can do this by using a dummy state or making addons a query.
-			// For now, let's assume parent re-renders or we force it.
-			// Actually, `addons` is not state, it's derived. We need to force update.
-			// Let's verify if Tanstack Query invalidation helps here? No, addons is not from query.
-			// We should ideally wrap `getAllAddons` in a query.
-			// Or simpler: increment a version counter.
 		},
 	});
 
@@ -217,11 +246,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		setConfirmDelete(false);
 	};
 
-	// CONFIRMATION STATE
 	const [confirmDelete, setConfirmDelete] = useState(false);
 	const [pendingDelete, setPendingDelete] = useState<string[]>([]);
-
-	// Menu state
 	const [showMenu, setShowMenu] = useState(false);
 
 	useInput((input, key) => {
@@ -235,7 +261,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return;
 		}
 
-		// Shortcuts for menu
 		const toggleMenu = () => setShowMenu((prev) => !prev);
 		const closeMenu = () => setShowMenu(false);
 
@@ -264,6 +289,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return;
 		}
 
+		if (input === "l") {
+			setShowLibs((prev) => !prev);
+			setSelectedIndex(0); // Reset selection to avoid bounds error
+			return;
+		}
+
 		if (input === "q") {
 			exit();
 			return;
@@ -276,23 +307,36 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			setShowMenu(false);
 		}
 
+		const getNextIndex = (current: number, direction: 1 | -1) => {
+			let next = current + direction;
+			while (next >= 0 && next < visibleAddons.length) {
+				const item = visibleAddons[next];
+				if (item && !item.isChild) {
+					return next;
+				}
+				next += direction;
+			}
+			return current;
+		};
+
 		if (key.upArrow || input === "k") {
-			setSelectedIndex((prev) => Math.max(0, prev - 1));
+			setSelectedIndex((prev) => getNextIndex(prev, -1));
 		}
 
 		if (key.downArrow || input === "j") {
-			setSelectedIndex((prev) => Math.min(addons.length - 1, prev + 1));
+			setSelectedIndex((prev) => getNextIndex(prev, 1));
 		}
 
 		if (input === " ") {
-			const currentAddon = addons[selectedIndex];
-			if (currentAddon) {
+			const currentItem = visibleAddons[selectedIndex];
+			if (currentItem && !currentItem.isChild) {
+				// Only allow selecting parent addons
 				setSelectedIds((prev) => {
 					const next = new Set(prev);
-					if (next.has(currentAddon.folder)) {
-						next.delete(currentAddon.folder);
+					if (next.has(currentItem.record.folder)) {
+						next.delete(currentItem.record.folder);
 					} else {
-						next.add(currentAddon.folder);
+						next.add(currentItem.record.folder);
 					}
 					return next;
 				});
@@ -303,9 +347,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			if (selectedIds.size > 0) {
 				runUpdates(Array.from(selectedIds));
 			} else {
-				const currentAddon = addons[selectedIndex];
-				if (currentAddon) {
-					runUpdates([currentAddon.folder]);
+				const currentItem = visibleAddons[selectedIndex];
+				if (currentItem && !currentItem.isChild) {
+					runUpdates([currentItem.record.folder]);
 				}
 			}
 		}
@@ -314,9 +358,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			if (selectedIds.size > 0) {
 				runChecks(Array.from(selectedIds));
 			} else {
-				const currentAddon = addons[selectedIndex];
-				if (currentAddon) {
-					runChecks([currentAddon.folder]);
+				const currentItem = visibleAddons[selectedIndex];
+				if (currentItem && !currentItem.isChild) {
+					runChecks([currentItem.record.folder]);
 				}
 			}
 		}
@@ -325,8 +369,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			const targets =
 				selectedIds.size > 0
 					? Array.from(selectedIds)
-					: addons[selectedIndex]
-						? [addons[selectedIndex].folder]
+					: visibleAddons[selectedIndex] &&
+							!visibleAddons[selectedIndex].isChild
+						? [visibleAddons[selectedIndex].record.folder]
 						: [];
 			if (targets.length > 0) {
 				setPendingDelete(targets);
@@ -394,7 +439,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			</Box>
 
 			<Box flexDirection="column">
-				{addons.length === 0 ? (
+				{visibleAddons.length === 0 ? (
 					<Box
 						flexDirection="column"
 						alignItems="center"
@@ -417,7 +462,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						</Box>
 					</Box>
 				) : (
-					addons.map((addon, idx) => {
+					visibleAddons.map((item, idx) => {
+						const addon = item.record;
 						const isSelected = selectedIndex === idx;
 						const isChecked = selectedIds.has(addon.folder);
 
@@ -438,7 +484,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						else if (error) status = "error";
 						else if (data) status = "done";
 
-						// Mock result for "done" state based on query data
 						if (status === "done" && data) {
 							if (data.updateAvailable) {
 								const versionDisplay = data.remoteVersion
@@ -473,6 +518,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								nerdFonts={config.nerdFonts}
 								isSelected={isSelected}
 								isChecked={isChecked}
+								isChild={item.isChild}
+								isLastChild={item.isLastChild}
 							/>
 						);
 					})
@@ -502,7 +549,13 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						)
 					) : (
 						<Text color="gray">
-							Selected: {selectedIds.size} / {addons.length}
+							Selected: {selectedIds.size} /{" "}
+							{visibleAddons.filter((a) => !a.isChild).length}
+							{showLibs ? (
+								<Text color="gray"> [Libs: Visible]</Text>
+							) : (
+								<Text color="gray"> [Libs: Hidden]</Text>
+							)}
 						</Text>
 					)
 				}
@@ -517,7 +570,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								{ key: "space", label: "select" },
 								{ key: "u", label: "update" },
 								{ key: "c", label: "check" },
-								{ key: "d", label: "delete" },
+								{ key: "l", label: showLibs ? "hide libs" : "show libs" },
 								{ key: "m", label: "menu" },
 							]
 				}
@@ -530,6 +583,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					{ key: "Space", label: "Select/Deselect" },
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },
+					{ key: "l", label: "Toggle Libs" },
 					{ key: "d", label: "Delete Selected" },
 					{ key: "b", label: "Backup WTF" },
 					{ key: "q", label: "Quit Application" },

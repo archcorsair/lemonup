@@ -138,7 +138,8 @@ export class ScanCommand implements Command<number> {
 						author: author,
 						interface: gameInterface,
 						url: null,
-						type: isGit ? "github" : "manual",
+						type: "manual",
+						parent: null,
 						install_date: new Date().toISOString(),
 						last_updated: new Date().toISOString(),
 					});

@@ -139,6 +139,10 @@ describe("AddonManager", () => {
 				const folderPath = path.join(dest, "FolderA");
 				fs.mkdirSync(folderPath, { recursive: true });
 				await Bun.write(path.join(folderPath, "file.txt"), "content");
+				await Bun.write(
+					path.join(folderPath, "FolderA.toc"),
+					"## Title: FolderA",
+				);
 				return true;
 			},
 		);
@@ -167,6 +171,10 @@ describe("AddonManager", () => {
 		spyOn(Downloader, "unzip").mockImplementation(async (_zipPath, dest) => {
 			const folderPath = path.join(dest, "TukUI");
 			fs.mkdirSync(folderPath, { recursive: true });
+			await Bun.write(
+				path.join(folderPath, "TukUI.toc"),
+				"## Title: TukUI",
+			);
 			return true;
 		});
 
