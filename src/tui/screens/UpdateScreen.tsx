@@ -3,13 +3,13 @@ import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { UpdateAddonResult } from "../../core/commands/UpdateAddonCommand";
-import type { Config } from "../../core/config";
-import type { AddonManager } from "../../core/manager";
-import { ControlBar } from "../components/ControlBar";
-import { type RepoStatus, RepositoryRow } from "../components/RepositoryRow";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
-import { useAddonManagerEvent } from "../hooks/useAddonManager";
+import type { UpdateAddonResult } from "@/core/commands/UpdateAddonCommand";
+import type { Config } from "@/core/config";
+import type { AddonManager } from "@/core/manager";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
+import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface UpdateScreenProps {
 	config: Config;
@@ -28,7 +28,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 	onBack,
 }) => {
 	const { exit } = useApp();
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const queryClient = useQueryClient();
 
 	const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
@@ -135,7 +135,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 			for (const addon of allAddons) {
 				if (addon.type === "manual") continue;
 
-				// Check Cache
 				const queryKey = ["addon", addon.folder];
 				const state = queryClient.getQueryState(queryKey);
 				const now = Date.now();
@@ -144,7 +143,6 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 					| { updateAvailable: boolean; remoteVersion: string }
 					| undefined;
 
-				// Skip if fresh and known to be up-to-date
 				if (
 					!force &&
 					cachedData &&
@@ -178,14 +176,11 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 						[addon.folder]: result.success ? "done" : "error",
 					}));
 
-					// Update Cache
 					const remoteVer = remoteVersions.current[addon.folder] || "";
 					queryClient.setQueryData(queryKey, {
-						updateAvailable: false, // It's just updated or confirmed up-to-date
+						updateAvailable: false,
 						remoteVersion: remoteVer,
-						checkedVersion: addon.version, // Assuming success update updates local version?
-						// Note: checking cache structure in ManageScreen.tsx:
-						// return { ...res, checkedVersion: freshAddon.version };
+						checkedVersion: addon.version,
 					});
 				} catch (error) {
 					const res = {

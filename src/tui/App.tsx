@@ -2,17 +2,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useState } from "react";
+import { type Config, ConfigManager } from "@/core/config";
+import { AddonManager } from "@/core/manager";
 import pkg from "../../package.json";
-import { type Config, ConfigManager } from "../core/config";
-import { AddonManager } from "../core/manager";
-import { KeyFeedbackProvider } from "./context/KeyFeedbackContext";
 import { FirstRunWizard } from "./FirstRunWizard";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
 import { UpdateScreen } from "./screens/UpdateScreen";
+import { useAppStore } from "./store/useAppStore";
 
 const queryClient = new QueryClient({
 	defaultOptions: {
@@ -29,33 +29,6 @@ interface AppProps {
 	testMode?: boolean;
 }
 
-type Screen = "menu" | "update" | "manage" | "config" | "install";
-
-interface AppState {
-	screen: Screen;
-	isBusy: boolean;
-	lastMenuSelection?: string;
-}
-
-type AppAction =
-	| { type: "NAVIGATE"; screen: Screen }
-	| { type: "SET_BUSY"; busy: boolean }
-	| { type: "SET_MENU_SELECTION"; selection: string };
-
-function appReducer(state: AppState, action: AppAction): AppState {
-	switch (action.type) {
-		case "NAVIGATE":
-			if (state.isBusy) return state;
-			return { ...state, screen: action.screen };
-		case "SET_BUSY":
-			return { ...state, isBusy: action.busy };
-		case "SET_MENU_SELECTION":
-			return { ...state, lastMenuSelection: action.selection };
-		default:
-			return state;
-	}
-}
-
 export const App: React.FC<AppProps> = ({
 	force = false,
 	dryRun = false,
@@ -63,9 +36,7 @@ export const App: React.FC<AppProps> = ({
 }) => {
 	return (
 		<QueryClientProvider client={queryClient}>
-			<KeyFeedbackProvider>
-				<AppContent force={force} dryRun={dryRun} testMode={testMode} />
-			</KeyFeedbackProvider>
+			<AppContent force={force} dryRun={dryRun} testMode={testMode} />
 		</QueryClientProvider>
 	);
 };
@@ -80,11 +51,13 @@ const AppContent: React.FC<AppProps> = ({
 	dryRun = false,
 	testMode = false,
 }) => {
-	const [{ screen: activeScreen, isBusy, lastMenuSelection }, dispatch] =
-		useReducer(appReducer, {
-			screen: "menu",
-			isBusy: false,
-		});
+	const activeScreen = useAppStore((state) => state.activeScreen);
+	const isBusy = useAppStore((state) => state.isBusy);
+	const lastMenuSelection = useAppStore((state) => state.lastMenuSelection);
+	const navigate = useAppStore((state) => state.navigate);
+	const setLastMenuSelection = useAppStore(
+		(state) => state.setLastMenuSelection,
+	);
 
 	const [initialLoad, setInitialLoad] = useState(true);
 	const [showWizard, setShowWizard] = useState(false);
@@ -167,10 +140,10 @@ const AppContent: React.FC<AppProps> = ({
 		setConfig(cfg);
 
 		if (initialLoad) {
-			dispatch({ type: "NAVIGATE", screen: "menu" });
+			navigate("menu");
 			setInitialLoad(false);
 		}
-	}, [configManager, config, initialLoad]);
+	}, [configManager, config, initialLoad, navigate]);
 
 	const handleWizardComplete = () => {
 		setShowWizard(false);
@@ -234,8 +207,9 @@ const AppContent: React.FC<AppProps> = ({
 					configManager={configManager}
 					initialSelection={lastMenuSelection}
 					onSelect={(option) => {
-						dispatch({ type: "SET_MENU_SELECTION", selection: option });
-						dispatch({ type: "NAVIGATE", screen: option as Screen });
+						setLastMenuSelection(option);
+						// @ts-expect-error: Screen type is broad
+						navigate(option);
 					}}
 				/>
 			)}
@@ -249,7 +223,7 @@ const AppContent: React.FC<AppProps> = ({
 					testMode={testMode}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						dispatch({ type: "NAVIGATE", screen: "menu" });
+						navigate("menu");
 					}}
 				/>
 			)}
@@ -262,7 +236,7 @@ const AppContent: React.FC<AppProps> = ({
 					dryRun={dryRun}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						dispatch({ type: "NAVIGATE", screen: "menu" });
+						navigate("menu");
 					}}
 				/>
 			)}
@@ -273,7 +247,7 @@ const AppContent: React.FC<AppProps> = ({
 					addonManager={addonManager}
 					onBack={() => {
 						setConfig(addonManager.getConfig());
-						dispatch({ type: "NAVIGATE", screen: "menu" });
+						navigate("menu");
 					}}
 				/>
 			)}
@@ -281,7 +255,7 @@ const AppContent: React.FC<AppProps> = ({
 			{activeScreen === "config" && configManager && (
 				<ConfigScreen
 					configManager={configManager}
-					onBack={() => dispatch({ type: "NAVIGATE", screen: "menu" })}
+					onBack={() => navigate("menu")}
 				/>
 			)}
 		</Box>

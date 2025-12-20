@@ -2,9 +2,9 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
-import type { ConfigManager } from "../../core/config";
-import { ControlBar } from "../components/ControlBar";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
+import type { ConfigManager } from "@/core/config";
+import { ControlBar } from "@/tui/components/ControlBar";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ScreenProps {
 	configManager: ConfigManager;
@@ -24,7 +24,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	configManager,
 	onBack,
 }) => {
-	const { flashKey } = useKeyFeedback();
+	const flashKey = useAppStore((state) => state.flashKey);
 	const [maxConcurrent, setMaxConcurrent] = useState(3);
 	const [destDir, setDestDir] = useState("");
 	const [nerdFonts, setNerdFonts] = useState(true);
@@ -295,9 +295,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 			<ControlBar
 				message={
-					activeField === "destDir"
-						? "Type path and press Enter to save."
-						: undefined
+					activeField === "destDir" ? (
+						<Text>Type path and press Enter to save.</Text>
+					) : undefined
 				}
 				controls={[
 					{ key: "↑/↓", label: "nav" },

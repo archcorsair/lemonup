@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ConfigManager } from "../config";
-import type { AddonRecord, DatabaseManager } from "../db";
-import * as GitClient from "../git";
-import { logger } from "../logger";
+import type { ConfigManager } from "@/core/config";
+import type { AddonRecord, DatabaseManager } from "@/core/db";
+import * as GitClient from "@/core/git";
+import { logger } from "@/core/logger";
 import type { Command, CommandContext } from "./types";
 
 export class ScanCommand implements Command<number> {

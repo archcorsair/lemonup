@@ -1,7 +1,7 @@
 import arg from "arg";
+import { ConfigManager } from "@/core/config";
+import { AddonManager } from "@/core/manager";
 import pkg from "../../package.json";
-import { ConfigManager } from "../core/config";
-import { AddonManager } from "../core/manager";
 
 export async function runCLI() {
 	const args = arg({

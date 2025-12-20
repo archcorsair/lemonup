@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ConfigManager } from "../config";
-import type { AddonRecord, DatabaseManager } from "../db";
-import { logger } from "../logger";
+import type { ConfigManager } from "@/core/config";
+import type { AddonRecord, DatabaseManager } from "@/core/db";
+import { logger } from "@/core/logger";
 import type { Command, CommandContext } from "./types";
 
 export class RemoveAddonCommand implements Command<boolean> {

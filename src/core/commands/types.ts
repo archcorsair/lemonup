@@ -1,4 +1,4 @@
-import type { AddonManagerEvents } from "../events";
+import type { AddonManagerEvents } from "@/core/events";
 
 export interface CommandContext {
 	emit<E extends keyof AddonManagerEvents>(

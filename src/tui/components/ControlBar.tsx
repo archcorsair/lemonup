@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import React from "react";
-import { useKeyFeedback } from "../context/KeyFeedbackContext";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 export interface ControlHelp {
 	key: string;
@@ -16,7 +16,7 @@ export const ControlBar: React.FC<ControlBarProps> = ({
 	message,
 	controls,
 }) => {
-	const { activeKey } = useKeyFeedback();
+	const activeKey = useAppStore((state) => state.activeKey);
 
 	return (
 		<Box marginTop={1} borderStyle="double" borderColor="gray" paddingX={1}>
