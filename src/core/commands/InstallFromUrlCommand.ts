@@ -43,10 +43,21 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 		);
 
 		try {
-			// Validate URL
 			const parsed = new URL(this.url);
 			const isGitHub = parsed.hostname.endsWith("github.com");
 			const isWoWInterface = parsed.hostname.endsWith("wowinterface.com");
+			const isCurseforge = parsed.hostname.endsWith("curseforge.com");
+			const isWago = parsed.hostname.endsWith("wago.io");
+
+			if (isCurseforge) {
+				throw new Error(
+					"Curseforge addons are not currently supported by LemonUp",
+				);
+			}
+
+			if (isWago) {
+				throw new Error("Wago addons will be supported soon!");
+			}
 
 			if (!isGitHub && !isWoWInterface) {
 				throw new Error(
@@ -63,7 +74,6 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 
 			if (isGitHub) {
 				repoType = "github";
-				// Clone
 				context.emit("addon:install:downloading", this.url);
 				if (!(await GitClient.clone(this.url, "main", tempDir))) {
 					throw new Error("Git Clone failed");
