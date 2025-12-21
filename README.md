@@ -4,13 +4,25 @@
   <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
   <h3>World of Warcraft Addon Manager</h3>
   <p>A fast, lightweight, and beautiful TUI for managing your WoW addons.</p>
-  <p><strong>🚧 This project is currently a Work In Progress 🚧</strong></p>
   <img width="1795" height="679" alt="lemonup_screenshot" src="https://github.com/user-attachments/assets/9390e669-386a-45b9-9db7-2654256f3baf" />
 </div>
 
 ---
 
 **LemonUp** is a terminal-based addon manager for World of Warcraft built with [Bun](https://bun.com) and [Ink](https://github.com/vadimdemedes/ink). It simplifies the process of installing, updating, and managing your addons directly from your terminal with a modern, interactive interface.
+## ⚠️ Active Development
+<p><strong>🚧 This project is under active development and isn't production ready, use at your own risk! 🚧</strong></p>
+
+**Supported Addon Sources**
+
+| Platform      | Support Status |
+|---------------|----------------|
+| GitHub        | ✅ Supported   |
+| WowInterface  | ✅ Supported   |
+| TukUI         | ✅ Supported   |
+| Wago.io       | ⏳ WIP         |
+| WowAce        | ❌ Unsupported |
+| CurseForge    | ❌ Unsupported |
 
 ## ✨ Features
 
