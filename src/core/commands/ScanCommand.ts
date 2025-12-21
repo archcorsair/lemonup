@@ -32,6 +32,7 @@ export class ScanCommand implements Command<number> {
 
 		const tocGlob = new Bun.Glob("*/*.toc");
 		let count = 0;
+		const folderDeps = new Map<string, string[]>();
 
 		for await (const file of tocGlob.scan({ cwd: addonsDir })) {
 			const folderName = path.dirname(file);
@@ -52,6 +53,9 @@ export class ScanCommand implements Command<number> {
 				const versionMatch = content.match(/^## Version:\s*(.*)/m);
 				const authorMatch = content.match(/^## Author:\s*(.*)/m);
 				const interfaceMatch = content.match(/^## Interface:\s*(.*)/m);
+				const depsMatch = content.match(
+					/^## (?:Dependencies|RequiredDeps):\s*(.*)/m,
+				);
 
 				const title = titleMatch?.[1]?.trim() ?? folderName;
 				const cleanTitle = title.replace(/\|c[0-9a-fA-F]{8}(.*?)\|r/g, "$1");
@@ -59,6 +63,11 @@ export class ScanCommand implements Command<number> {
 				const version = versionMatch?.[1]?.trim() ?? null;
 				const author = authorMatch?.[1]?.trim() ?? null;
 				const gameInterface = interfaceMatch?.[1]?.trim() ?? null;
+
+				const deps = depsMatch?.[1]?.split(/,\s*|\s+/).filter(Boolean) || [];
+				if (deps.length > 0) {
+					folderDeps.set(folderName, deps);
+				}
 
 				const gitPath = path.join(addonsDir, folderName, ".git");
 				let isGit = false;
@@ -131,6 +140,64 @@ export class ScanCommand implements Command<number> {
 					`Scan:${folderName}`,
 					e instanceof Error ? e.message : String(e),
 				);
+			}
+		}
+
+		// Post-scan: Check for parent-child relationships
+		const allAddons = this.dbManager.getAll();
+		const sortedAddons = [...allAddons].sort(
+			(a, b) => a.folder.length - b.folder.length,
+		);
+
+		for (const addon of allAddons) {
+			if (addon.parent) continue;
+
+			// Strategy 1: Prefix Matching
+			const possibleParents = sortedAddons.filter((candidate) => {
+				if (candidate.folder === addon.folder) return false;
+				const child = addon.folder.toLowerCase();
+				const parent = candidate.folder.toLowerCase();
+
+				if (child.startsWith(`${parent}_`) || child.startsWith(`${parent}-`)) {
+					return true;
+				}
+				if (child.startsWith(parent)) {
+					return true;
+				}
+				return false;
+			});
+
+			let parent = possibleParents[0];
+
+			// Strategy 2: Dependencies (handling DBM-Core -> DBM-Naxx)
+			if (!parent) {
+				const deps = folderDeps.get(addon.folder);
+				if (deps && deps.length > 0) {
+					for (const depName of deps) {
+						const depAddon = allAddons.find(
+							(a) => a.folder.toLowerCase() === depName.toLowerCase(),
+						);
+						if (depAddon) {
+							// Check if the dependency looks like a "Core" or base addon
+							// DBM-Naxx depends on DBM-Core. DBM-Naxx contains "DBM".
+							const depBase = depAddon.folder
+								.replace(/[-_]Core$/i, "")
+								.replace(/[-_]Base$/i, "");
+
+							if (
+								addon.folder.toLowerCase().startsWith(depBase.toLowerCase()) &&
+								depBase.length >= 3 // Avoid matching short common prefixes accidentally
+							) {
+								parent = depAddon;
+								break;
+							}
+						}
+					}
+				}
+			}
+
+			if (parent) {
+				this.dbManager.updateAddon(addon.folder, { parent: parent.folder });
 			}
 		}
 
