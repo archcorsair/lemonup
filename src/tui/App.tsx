@@ -180,7 +180,7 @@ const AppContent: React.FC<AppProps> = ({
 				paddingX={1}
 			>
 				<Text bold color="cyan">
-					🍋 LemonUp
+					LemonUp 🍋
 				</Text>
 				<Box marginLeft={1}>
 					<Text color="gray">v{pkg.version}</Text>

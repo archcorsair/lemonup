@@ -29,7 +29,7 @@ async function main() {
 
 		if (args["--help"]) {
 			console.log(`
-🍋 LemonUp - WoW Addon Manager (v${pkg.version})
+LemonUp 🍋 - WoW Addon Manager (v${pkg.version})
 
 Usage:
   lemonup [flags]
