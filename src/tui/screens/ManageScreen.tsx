@@ -1,6 +1,8 @@
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import Fuse from "fuse.js";
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
+import TextInput from "ink-text-input";
 import pLimit from "p-limit";
 import type React from "react";
 import { useCallback, useMemo, useState } from "react";
@@ -37,15 +39,68 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [showLibs, setShowLibs] = useState(false);
 
+	const [searchQuery, setSearchQuery] = useState("");
+	const [isSearching, setIsSearching] = useState(false);
+	const [sortConfig, setSortConfig] = useState<{
+		key: "status" | "name" | "author" | "source";
+		direction: "asc" | "desc";
+	}>({ key: "name", direction: "asc" });
+
+	const [updateProgress, setUpdateProgress] = useState<
+		Record<string, RepoStatus>
+	>({});
+
+	const getStatusPriority = useCallback(
+		(folder: string) => {
+			if (updateProgress[folder]) return 0;
+			const state = queryClient.getQueryState<any>(["addon", folder]);
+			if (state?.fetchStatus === "fetching") return 0;
+			if (state?.status === "error") return 2;
+			if (state?.data?.updateAvailable) return 1;
+			if (state?.data) return 4;
+			return 3;
+		},
+		[updateProgress, queryClient],
+	);
+
 	// biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is used to trigger re-fetching when the database state changes.
 	const visibleAddons = useMemo(() => {
 		const all = addonManager.getAllAddons();
-		const parents = all.filter((a) => !a.parent);
+		let parents = all.filter((a) => !a.parent);
 
-		// Sort parents by name (case-insensitive)
-		parents.sort((a, b) =>
-			a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
-		);
+		if (searchQuery.length > 0) {
+			const fuse = new Fuse(parents, {
+				keys: ["name", "author"],
+				threshold: 0.3,
+			});
+			parents = fuse.search(searchQuery).map((r) => r.item);
+		}
+
+		parents.sort((a, b) => {
+			let res = 0;
+			switch (sortConfig.key) {
+				case "name":
+					res = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+					break;
+				case "author":
+					res = (a.author || "")
+						.toLowerCase()
+						.localeCompare((b.author || "").toLowerCase());
+					break;
+				case "source":
+					res = a.type.localeCompare(b.type);
+					if (res === 0) {
+						res = (a.url || "")
+							.toLowerCase()
+							.localeCompare((b.url || "").toLowerCase());
+					}
+					break;
+				case "status":
+					res = getStatusPriority(a.folder) - getStatusPriority(b.folder);
+					break;
+			}
+			return sortConfig.direction === "asc" ? res : -res;
+		});
 
 		if (!showLibs) {
 			return parents.map((a) => ({
@@ -79,7 +134,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			});
 		}
 		return result;
-	}, [addonManager, refreshKey, showLibs]);
+	}, [
+		addonManager,
+		refreshKey,
+		showLibs,
+		searchQuery,
+		sortConfig,
+		getStatusPriority,
+	]);
 
 	const queries = useQueries({
 		queries: visibleAddons.map((item) => ({
@@ -100,10 +162,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			staleTime: config.checkInterval,
 		})),
 	});
-
-	const [updateProgress, setUpdateProgress] = useState<
-		Record<string, RepoStatus>
-	>({});
 
 	useAddonManagerEvent(
 		addonManager,
@@ -283,6 +341,17 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [showMenu, setShowMenu] = useState(false);
 
 	useInput((input, key) => {
+		if (isSearching) {
+			if (key.escape) {
+				setIsSearching(false);
+				setSearchQuery("");
+			}
+			if (key.return) {
+				setIsSearching(false);
+			}
+			return;
+		}
+
 		if (confirmDelete) {
 			if (input === "y" || key.return) {
 				flashKey("y");
@@ -315,6 +384,29 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				return;
 			}
 			onBack();
+			return;
+		}
+
+		if (input === "/") {
+			setIsSearching(true);
+			return;
+		}
+
+		if (["1", "2", "3", "4"].includes(input)) {
+			const map: Record<string, "status" | "name" | "author" | "source"> = {
+				"1": "status",
+				"2": "name",
+				"3": "author",
+				"4": "source",
+			};
+			const k = map[input];
+			if (k) {
+				setSortConfig((prev) => ({
+					key: k,
+					direction:
+						prev.key === k && prev.direction === "asc" ? "desc" : "asc",
+				}));
+			}
 			return;
 		}
 
@@ -451,9 +543,19 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 	return (
 		<Box flexDirection="column" height="100%" width="100%">
-			<Text color="magenta" bold>
-				Manage Addons
-			</Text>
+			<Box flexDirection="row" gap={2}>
+				<Text color="magenta" bold>
+					Manage Addons
+				</Text>
+				{isSearching ? (
+					<Box>
+						<Text color="cyan">Search: </Text>
+						<TextInput value={searchQuery} onChange={setSearchQuery} />
+					</Box>
+				) : (
+					<Text color="gray">[/] search</Text>
+				)}
+			</Box>
 
 			<Box
 				borderStyle="single"
@@ -467,42 +569,89 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					<Text> </Text>
 				</Box>
 				<Box width={22} flexShrink={0}>
-					<Text bold>Status</Text>
+					<Text bold>
+						Status{" "}
+						{sortConfig.key === "status"
+							? sortConfig.direction === "asc"
+								? "▲"
+								: "▼"
+							: ""}
+					</Text>
 				</Box>
 				<Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
-					<Text bold>Name</Text>
+					<Text bold>
+						Name{" "}
+						{sortConfig.key === "name"
+							? sortConfig.direction === "asc"
+								? "▲"
+								: "▼"
+							: ""}
+					</Text>
 				</Box>
 				<Box flexGrow={1} flexShrink={1} minWidth={10} flexBasis="15%">
-					<Text bold>Author</Text>
+					<Text bold>
+						Author{" "}
+						{sortConfig.key === "author"
+							? sortConfig.direction === "asc"
+								? "▲"
+								: "▼"
+							: ""}
+					</Text>
 				</Box>
 				<Box width={8} flexShrink={0}>
-					<Text bold>Source</Text>
+					<Text bold>
+						Source{" "}
+						{sortConfig.key === "source"
+							? sortConfig.direction === "asc"
+								? "▲"
+								: "▼"
+							: ""}
+					</Text>
 				</Box>
 			</Box>
 
 			<Box flexDirection="column">
 				{visibleAddons.length === 0 ? (
-					<Box
-						flexDirection="column"
-						alignItems="center"
-						justifyContent="center"
-						paddingY={5}
-						width="100%"
-					>
-						<Text color="yellow" bold italic>
-							"Lok-tar ogar! ...Wait, where is everyone?"
-						</Text>
-						<Box marginTop={1}>
-							<Text color="gray">
-								Your inventory is empty. No addons found in your bags.
+					searchQuery.length > 0 ? (
+						<Box
+							flexDirection="column"
+							alignItems="center"
+							justifyContent="center"
+							paddingY={5}
+							width="100%"
+						>
+							<Text color="yellow" bold italic>
+								"By the Light! No results found for '{searchQuery}'"
 							</Text>
+							<Box marginTop={1}>
+								<Text color="gray">
+									Try adjusting your search criteria or clear the search.
+								</Text>
+							</Box>
 						</Box>
-						<Box marginTop={1}>
-							<Text color="cyan">
-								Visit the 'Install Addon' section to start your collection!
+					) : (
+						<Box
+							flexDirection="column"
+							alignItems="center"
+							justifyContent="center"
+							paddingY={5}
+							width="100%"
+						>
+							<Text color="yellow" bold italic>
+								"Lok-tar ogar! ...Wait, where is everyone?"
 							</Text>
+							<Box marginTop={1}>
+								<Text color="gray">
+									Your inventory is empty. No addons found in your bags.
+								</Text>
+							</Box>
+							<Box marginTop={1}>
+								<Text color="cyan">
+									Visit the 'Install Addon' section to start your collection!
+								</Text>
+							</Box>
 						</Box>
-					</Box>
+					)
 				) : (
 					visibleAddons.map((item, idx) => {
 						const addon = item.record;
@@ -613,6 +762,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								{ key: "u", label: "update" },
 								{ key: "c", label: "check" },
 								{ key: "l", label: showLibs ? "hide libs" : "show libs" },
+								{ key: "1-4", label: "sort" },
 								{ key: "m", label: "menu" },
 							]
 				}
