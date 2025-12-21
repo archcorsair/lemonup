@@ -57,5 +57,46 @@ jobs:
             dist/lemonup-macos-arm64
             dist/lemonup-macos-x64
           generate_release_notes: true
-          draft: true
           fail_on_unmatched_files: true
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: verify-and-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Homebrew Repository
+        uses: actions/checkout@v4
+        with:
+          repository: archcorsair/homebrew-lemonup
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: homebrew-lemonup
+
+      - name: Calculate SHA256 Checksums
+        id: calculate-sha
+        run: |
+          echo "Calculating SHA256 hashes"
+          SHA_LINUX_X64=$(shasum -a 256 dist/lemonup-linux-x64 | cut -d' ' -f1)
+          SHA_MACOS_X64=$(shasum -a 256 dist/lemonup-macos-x64 | cut -d' ' -f1)
+          SHA_MACOS_ARM64=$(shasum -a 256 dist/lemonup-macos-arm64 | cut -d' ' -f1)
+          SHA_WINDOWS_X64=$(shasum -a 256 dist/lemonup-windows-x64.exe | cut -d' ' -f1)
+
+          echo "::set-output name=sha_linux_x64::${SHA_LINUX_X64}"
+          echo "::set-output name=sha_macos_x64::${SHA_MACOS_X64}"
+          echo "::set-output name=sha_macos_arm64::${SHA_MACOS_ARM64}"
+          echo "::set-output name=sha_windows_x64::${SHA_WINDOWS_X64}"
+
+      - name: Update Lemonup Formula
+        run: |
+          cd homebrew-lemonup
+          sed -i "s/version \".*\"/version \"$GITHUB_REF_NAME\"/" Formula/lemonup.rb
+          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_macos_arm64 }}\"/" Formula/lemonup.rb
+          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_macos_x64 }}\"/" Formula/lemonup.rb
+          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_linux_x64 }}\"/" Formula/lemonup.rb
+          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_windows_x64 }}\"/" Formula/lemonup.rb
+
+          git add Formula/lemonup.rb
+          git commit -m "Update Homebrew formula for version $GITHUB_REF_NAME"
+          git push
+
+      - name: Verify Commit
+        run: git log -1
