@@ -25,6 +25,10 @@
 - **🔄 Smart Updates:** Checks for updates using Git commit hashes for accuracy.
 - **⚡ Parallel Processing:** Updates multiple addons concurrently.
 
+## Getting Started
+
+The easiest way to start using LemonUp is by heading over to our [getting started page](https://lemonup.org/getting-started.html)
+
 ## 🛠️ Building & Installation
 
 LemonUp aims to provide pre-built executables for all major operating systems in future releases. For now, you can build it yourself:
