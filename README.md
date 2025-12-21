@@ -24,6 +24,14 @@
 | WowAce        | ❌ Unsupported |
 | CurseForge    | ❌ Unsupported |
 
+**Supported Game Flavors**
+
+| Flavor        | Support Status |
+|---------------|----------------|
+| Retail        | ✅ Supported   |
+| Classic       | ⏳ WIP         |
+| Other         | ⏳ WIP         |
+
 ## ✨ Features
 
 - **🚀 Fast & Lightweight:** Built on the blazing-fast Bun runtime.
