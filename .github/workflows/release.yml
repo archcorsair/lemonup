@@ -94,6 +94,8 @@ jobs:
           sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_linux_x64 }}\"/" Formula/lemonup.rb
           sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_windows_x64 }}\"/" Formula/lemonup.rb
 
+          git config user.email "archcorsair@gmail.com  "
+          git config user.name "Daniel Shneyder"
           git add Formula/lemonup.rb
           git commit -m "Update Homebrew formula for version $GITHUB_REF_NAME"
           git push
