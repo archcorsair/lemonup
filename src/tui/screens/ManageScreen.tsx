@@ -118,9 +118,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		for (const p of parents) {
 			result.push({ record: p, isChild: false, isLastChild: false });
 
-			// Find children
 			const children = all.filter((a) => a.parent === p.folder);
-			// Sort children
 			children.sort((a, b) =>
 				a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
 			);
@@ -207,7 +205,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}, []),
 	);
 
-	// Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			const os = await import("node:os");
@@ -266,8 +263,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		const limit = pLimit(config.maxConcurrent);
 
-		// Trigger refetch for specific items
-
 		const results = await Promise.all(
 			foldersToCheck.map((folder) => {
 				return limit(async () => {
@@ -278,13 +273,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					const queryKey = ["addon", folder];
 
 					const state = queryClient.getQueryState(queryKey);
-
 					const now = Date.now();
-
 					const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
 
 					// If data exists and is younger than checkInterval, skip
-
 					if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
 						return false;
 					}
@@ -309,7 +301,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}
 	};
 
-	// Mutation for Deletion
 	const deleteMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			await addonManager.removeAddon(folder);
@@ -419,7 +410,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		if (input === "l") {
 			flashKey("l");
 			setShowLibs((prev) => !prev);
-			setSelectedIndex(0); // Reset selection to avoid bounds error
+			setSelectedIndex(0);
 			return;
 		}
 
@@ -761,7 +752,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								{ key: "space", label: "select" },
 								{ key: "u", label: "update" },
 								{ key: "c", label: "check" },
-								{ key: "l", label: showLibs ? "hide libs" : "show libs" },
 								{ key: "1-4", label: "sort" },
 								{ key: "m", label: "menu" },
 							]
