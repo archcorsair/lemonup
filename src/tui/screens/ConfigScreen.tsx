@@ -4,6 +4,7 @@ import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "@/core/config";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ScreenProps {
@@ -35,7 +36,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
 	const [activeField, setActiveField] = useState<Field>("maxConcurrent");
-	const [saved, setSaved] = useState(false);
+	const { toast, showToast } = useToast();
 
 	const getNextInterval = (current: number) => {
 		if (current < 60) return Math.min(60, current + 10);
@@ -106,24 +107,21 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				const newVal = Math.max(1, maxConcurrent - 1);
 				setMaxConcurrent(newVal);
 				configManager.set("maxConcurrent", newVal);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 			if (key.rightArrow || input === "l") {
 				flashKey("←/→");
 				const newVal = Math.min(10, maxConcurrent + 1);
 				setMaxConcurrent(newVal);
 				configManager.set("maxConcurrent", newVal);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 
 		if (activeField === "destDir" && key.return) {
 			flashKey("enter");
 			configManager.set("destDir", destDir);
-			setSaved(true);
-			setTimeout(() => setSaved(false), 1000);
+			showToast("Saved!", 1000);
 		}
 
 		if (activeField === "nerdFonts") {
@@ -137,8 +135,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				flashKey(input === " " ? "space" : "←/→");
 				setNerdFonts(!nerdFonts);
 				configManager.set("nerdFonts", !nerdFonts);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 
@@ -148,16 +145,14 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				const newVal = getPrevInterval(checkInterval);
 				setCheckInterval(newVal);
 				configManager.set("checkInterval", newVal * 1000);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 			if (key.rightArrow || input === "l") {
 				flashKey("←/→");
 				const newVal = getNextInterval(checkInterval);
 				setCheckInterval(newVal);
 				configManager.set("checkInterval", newVal * 1000);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 
@@ -172,8 +167,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				flashKey(input === " " ? "space" : "←/→");
 				setBackupWTF(!backupWTF);
 				configManager.set("backupWTF", !backupWTF);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 
@@ -183,16 +177,14 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				const newVal = Math.max(1, backupRetention - 1);
 				setBackupRetention(newVal);
 				configManager.set("backupRetention", newVal);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 			if (key.rightArrow || input === "l") {
 				flashKey("←/→");
 				const newVal = Math.min(20, backupRetention + 1); // Cap at 20
 				setBackupRetention(newVal);
 				configManager.set("backupRetention", newVal);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 
@@ -207,8 +199,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 				flashKey(input === " " ? "space" : "←/→");
 				setDebug(!debug);
 				configManager.set("debug", !debug);
-				setSaved(true);
-				setTimeout(() => setSaved(false), 1000);
+				showToast("Saved!", 1000);
 			}
 		}
 	});
@@ -269,8 +260,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 							onChange={setDestDir}
 							onSubmit={(val) => {
 								configManager.set("destDir", val);
-								setSaved(true);
-								setTimeout(() => setSaved(false), 1000);
+								showToast("Saved!", 1000);
 							}}
 						/>
 					) : (
@@ -324,14 +314,16 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 						{debug ? "Enabled" : "Disabled"}
 					</Text>
 				</ConfigOption>
-
-				<Box marginLeft={2} height={1} marginTop={1}>
-					{saved && <Text color="green">Saved!</Text>}
-				</Box>
 			</Box>
 
 			<ControlBar
-				message={commandHelp ? <Text>{commandHelp}</Text> : undefined}
+				message={
+					toast?.message ? (
+						<Text color="green">{toast.message}</Text>
+					) : commandHelp ? (
+						<Text>{commandHelp}</Text>
+					) : undefined
+				}
 				controls={[
 					{ key: "↑/↓", label: "nav" },
 					{ key: "←/→", label: "modify" },

@@ -13,6 +13,7 @@ import { ControlBar } from "@/tui/components/ControlBar";
 import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ManageScreenProps {
@@ -32,8 +33,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const { exit } = useApp();
 	const queryClient = useQueryClient();
 	const flashKey = useAppStore((state) => state.flashKey);
-	const toast = useAppStore((state) => state.toast);
-	const showToast = useAppStore((state) => state.showToast);
+	const { toast, showToast } = useToast();
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 

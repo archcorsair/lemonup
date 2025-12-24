@@ -3,6 +3,7 @@ import type React from "react";
 import { useState } from "react";
 import type { Config, ConfigManager } from "@/core/config";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface MainMenuProps {
@@ -34,7 +35,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 	});
 
 	const [defaultOption, setDefaultOption] = useState(config.defaultMenuOption);
-	const [feedbackMessage, setFeedbackMessage] = useState("");
+	const { toast, showToast } = useToast();
 
 	useInput((input, key) => {
 		if (key.upArrow || input === "k") {
@@ -55,14 +56,12 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 			const selected = OPTIONS[selectedIndex];
 			if (selected) {
 				if (selected.id === "config") {
-					setFeedbackMessage("Why would you even want that?");
-					setTimeout(() => setFeedbackMessage(""), 2000);
+					showToast("Why would you even want that?", 2000);
 				} else {
 					const newDefault = selected.id as "update" | "manage" | "config";
 					configManager.set("defaultMenuOption", newDefault);
 					setDefaultOption(newDefault);
-					setFeedbackMessage("Default Updated");
-					setTimeout(() => setFeedbackMessage(""), 2000);
+					showToast("Default Updated", 2000);
 				}
 			}
 		} else if (input === "q" || key.escape) {
@@ -93,8 +92,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 			})}
 			<ControlBar
 				message={
-					feedbackMessage ? (
-						<Text color="yellow">{feedbackMessage}</Text>
+					toast?.message ? (
+						<Text color="yellow">{toast.message}</Text>
 					) : undefined
 				}
 				controls={[
