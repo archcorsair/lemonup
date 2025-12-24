@@ -13,13 +13,26 @@ interface ScreenProps {
 }
 
 type Field =
-	| "maxConcurrent"
 	| "destDir"
-	| "nerdFonts"
+	| "maxConcurrent"
 	| "checkInterval"
 	| "backupWTF"
 	| "backupRetention"
+	| "nerdFonts"
 	| "debug";
+
+const SectionHeader: React.FC<{ title: string; first?: boolean }> = ({
+	title,
+	first,
+}) => (
+	<Box marginTop={first ? 0 : 1} marginBottom={0}>
+		<Text color="blueBright">{"── "}</Text>
+		<Text color="blueBright" bold>
+			{title}
+		</Text>
+		<Text color="blueBright">{" ──"}</Text>
+	</Box>
+);
 
 export const ConfigScreen: React.FC<ScreenProps> = ({
 	configManager,
@@ -29,19 +42,19 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	const [maxConcurrent, setMaxConcurrent] = useState(3);
 	const [destDir, setDestDir] = useState("");
 	const [nerdFonts, setNerdFonts] = useState(true);
-	const [checkInterval, setCheckInterval] = useState(60); // Display in seconds
+	const [checkInterval, setCheckInterval] = useState(60);
 	const [backupWTF, setBackupWTF] = useState(true);
 	const [backupRetention, setBackupRetention] = useState(5);
 	const [debug, setDebug] = useState(false);
 	const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
-	const [activeField, setActiveField] = useState<Field>("maxConcurrent");
+	const [activeField, setActiveField] = useState<Field>("destDir");
 	const { toast, showToast } = useToast();
 
 	const getNextInterval = (current: number) => {
 		if (current < 60) return Math.min(60, current + 10);
-		if (current < 900) return Math.min(900, current + 60); // 1m steps up to 15m
-		return Math.min(3600, current + 300); // 5m steps up to 60m
+		if (current < 900) return Math.min(900, current + 60);
+		return Math.min(3600, current + 300);
 	};
 
 	const getPrevInterval = (current: number) => {
@@ -63,7 +76,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		setMaxConcurrent(cfg.maxConcurrent);
 		setDestDir(cfg.destDir === "NOT_CONFIGURED" ? "" : cfg.destDir);
 		setNerdFonts(cfg.nerdFonts);
-		setCheckInterval(cfg.checkInterval / 1000); // Storage is ms, UI is seconds
+		setCheckInterval(cfg.checkInterval / 1000);
 		setBackupWTF(cfg.backupWTF);
 		setBackupRetention(cfg.backupRetention);
 		setDebug(cfg.debug);
@@ -71,23 +84,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 	useInput((input, key) => {
 		const fields: Field[] = [
-			"maxConcurrent",
 			"destDir",
-			"nerdFonts",
+			"maxConcurrent",
 			"checkInterval",
 			"backupWTF",
 			"backupRetention",
+			"nerdFonts",
 			"debug",
 		];
 
-		if (key.upArrow) {
+		if (key.upArrow || input === "k") {
 			flashKey("↑/↓");
 			const idx = fields.indexOf(activeField);
 			const prev = fields[Math.max(0, idx - 1)];
 			if (prev) setActiveField(prev);
 			return;
 		}
-		if (key.downArrow || key.tab) {
+		if (key.downArrow || key.tab || input === "j") {
 			flashKey("↑/↓");
 			const idx = fields.indexOf(activeField);
 			const next = fields[Math.min(fields.length - 1, idx + 1)];
@@ -181,7 +194,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 			}
 			if (key.rightArrow || input === "l") {
 				flashKey("←/→");
-				const newVal = Math.min(20, backupRetention + 1); // Cap at 20
+				const newVal = Math.min(20, backupRetention + 1);
 				setBackupRetention(newVal);
 				configManager.set("backupRetention", newVal);
 				showToast("Saved!", 1000);
@@ -219,14 +232,18 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 		}, [isActive, helpText]);
 
 		return (
-			<Box
-				borderStyle={isActive ? "round" : undefined}
-				borderColor="blue"
-				paddingX={1}
-				width="100%"
-			>
-				<Box width={30}>
-					<Text bold>{label}: </Text>
+			<Box paddingLeft={1}>
+				<Text color={isActive ? "cyan" : "whiteBright"} dimColor={!isActive}>
+					{isActive ? "› " : "  "}
+				</Text>
+				<Box width={28}>
+					<Text
+						color={isActive ? "white" : "whiteBright"}
+						bold={isActive}
+						dimColor={!isActive}
+					>
+						{label}
+					</Text>
 				</Box>
 				<Box flexGrow={1}>{children}</Box>
 			</Box>
@@ -235,22 +252,18 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 	return (
 		<Box flexDirection="column" padding={1}>
-			<Text color="blue" bold>
-				Configuration
-			</Text>
+			{/* Screen Title */}
+			<Box marginBottom={1}>
+				<Text color="cyanBright" bold>
+					⚙ Settings
+				</Text>
+			</Box>
 
-			<Box marginTop={1} flexDirection="column" gap={0}>
+			<Box flexDirection="column" gap={0}>
+				{/* General */}
+				<SectionHeader title="General" first />
 				<ConfigOption
-					label="Max Concurrent Downloads"
-					isActive={activeField === "maxConcurrent"}
-				>
-					<Text color="yellow" bold>
-						{"<"} {maxConcurrent} {">"}
-					</Text>
-				</ConfigOption>
-
-				<ConfigOption
-					label="WoW Interface Directory"
+					label="WoW AddOns Directory"
 					isActive={activeField === "destDir"}
 					helpText="Type path and press Enter to save."
 				>
@@ -270,6 +283,46 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 					)}
 				</ConfigOption>
 
+				{/* Updates */}
+				<SectionHeader title="Updates" />
+				<ConfigOption
+					label="Max Concurrent Downloads"
+					isActive={activeField === "maxConcurrent"}
+				>
+					<Text color="yellow" bold>
+						{"◂"} {maxConcurrent} {"▸"}
+					</Text>
+				</ConfigOption>
+				<ConfigOption
+					label="Check Interval"
+					isActive={activeField === "checkInterval"}
+				>
+					<Text color="yellow">
+						{"◂"} {formatInterval(checkInterval)} {"▸"}
+					</Text>
+				</ConfigOption>
+
+				{/* Backup */}
+				<SectionHeader title="Backup" />
+				<ConfigOption
+					label="Auto-backup WTF Folder"
+					isActive={activeField === "backupWTF"}
+				>
+					<Text color={backupWTF ? "green" : "red"}>
+						{backupWTF ? "Enabled" : "Disabled"}
+					</Text>
+				</ConfigOption>
+				<ConfigOption
+					label="Backup Retention"
+					isActive={activeField === "backupRetention"}
+				>
+					<Text color="yellow" bold>
+						{"◂"} {backupRetention} backups {"▸"}
+					</Text>
+				</ConfigOption>
+
+				{/* Appearance */}
+				<SectionHeader title="Appearance" />
 				<ConfigOption
 					label="Nerd Fonts (Icons)"
 					isActive={activeField === "nerdFonts"}
@@ -279,37 +332,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 					</Text>
 				</ConfigOption>
 
-				<ConfigOption
-					label="Update Check Interval"
-					isActive={activeField === "checkInterval"}
-				>
-					<Text color="yellow">
-						{"<"} {formatInterval(checkInterval)} {">"}
-					</Text>
-				</ConfigOption>
-
-				<ConfigOption
-					label="Backup 'WTF' Folder"
-					isActive={activeField === "backupWTF"}
-				>
-					<Text color={backupWTF ? "green" : "red"}>
-						{backupWTF ? "Enabled" : "Disabled"}
-					</Text>
-				</ConfigOption>
-
-				<ConfigOption
-					label="Backup Retention Count"
-					isActive={activeField === "backupRetention"}
-				>
-					<Text color="yellow" bold>
-						{"<"} {backupRetention} {">"}
-					</Text>
-				</ConfigOption>
-
-				<ConfigOption
-					label="Enable Debug Logging"
-					isActive={activeField === "debug"}
-				>
+				{/* Advanced */}
+				<SectionHeader title="Advanced" />
+				<ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
 					<Text color={debug ? "green" : "gray"}>
 						{debug ? "Enabled" : "Disabled"}
 					</Text>

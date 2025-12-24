@@ -47,7 +47,10 @@ export const ConfigSchema = z.object({
 	defaultMenuOption: z.enum(["update", "manage", "config"]).default("update"),
 	maxConcurrent: z.number().min(1).max(10).default(3),
 	nerdFonts: z.boolean().default(true),
-	checkInterval: z.number().min(0).default(60000),
+	checkInterval: z
+		.number()
+		.min(60000)
+		.default(60000 * 5), // 5 minutes
 	backupWTF: z.boolean().default(true),
 	backupRetention: z.number().min(1).default(5),
 	debug: z.boolean().default(false),
@@ -99,7 +102,6 @@ export class ConfigManager {
 
 	public get(): Config {
 		const raw = this.store.store;
-		// Validate on read to ensure integrity
 		const result = ConfigSchema.safeParse(raw);
 		if (!result.success) {
 			// If schema is invalid (first run or corrupted) return defaults or empty structure
@@ -110,7 +112,7 @@ export class ConfigManager {
 				defaultMenuOption: "update",
 				maxConcurrent: 3,
 				nerdFonts: true,
-				checkInterval: 60000,
+				checkInterval: 60000 * 5,
 				backupWTF: true,
 				backupRetention: 5,
 				debug: false,
@@ -179,7 +181,7 @@ export class ConfigManager {
 			defaultMenuOption: "update",
 			maxConcurrent: 3,
 			nerdFonts: true,
-			checkInterval: 60000,
+			checkInterval: 60000 * 5,
 			backupWTF: true,
 			backupRetention: 5,
 			debug: false,
