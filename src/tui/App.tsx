@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
@@ -36,7 +36,9 @@ export const App: React.FC<AppProps> = ({
 }) => {
 	return (
 		<QueryClientProvider client={queryClient}>
-			<AppContent force={force} dryRun={dryRun} testMode={testMode} />
+			<TerminalSizeGuard>
+				<AppContent force={force} dryRun={dryRun} testMode={testMode} />
+			</TerminalSizeGuard>
 		</QueryClientProvider>
 	);
 };
@@ -45,6 +47,45 @@ export const App: React.FC<AppProps> = ({
 const SpinnerFixed = Spinner as unknown as React.FC<{
 	type?: string;
 }>;
+
+const MIN_TERMINAL_WIDTH = 80;
+const MIN_TERMINAL_HEIGHT = 20;
+
+const TerminalSizeGuard: React.FC<{ children: React.ReactNode }> = ({
+	children,
+}) => {
+	const { stdout } = useStdout();
+	const [dims, setDims] = useState({
+		cols: stdout.columns ?? 80,
+		rows: stdout.rows ?? 24,
+	});
+
+	useEffect(() => {
+		const handler = () => {
+			setDims({
+				cols: stdout.columns ?? 80,
+				rows: stdout.rows ?? 24,
+			});
+		};
+		stdout.on("resize", handler);
+		return () => {
+			stdout.off("resize", handler);
+		};
+	}, [stdout]);
+
+	if (dims.cols < MIN_TERMINAL_WIDTH || dims.rows < MIN_TERMINAL_HEIGHT) {
+		return (
+			<Box justifyContent="center" alignItems="center" height="100%">
+				<Text color="yellow">
+					Terminal too small ({dims.cols}x{dims.rows}). Minimum:{" "}
+					{MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}
+				</Text>
+			</Box>
+		);
+	}
+
+	return <>{children}</>;
+};
 
 const AppContent: React.FC<AppProps> = ({
 	force = false,
@@ -178,27 +219,30 @@ const AppContent: React.FC<AppProps> = ({
 				borderStyle="single"
 				borderColor="blue"
 				paddingX={1}
+				minHeight={3}
 			>
-				<Text bold color="cyan">
-					LemonUp 🍋
-				</Text>
-				<Box marginLeft={1}>
-					<Text color="gray">v{pkg.version}</Text>
+				<Box flexDirection="row">
+					<Text bold color="cyan">
+						LemonUp 🍋
+					</Text>
+					<Box marginLeft={1}>
+						<Text color="gray">v{pkg.version}</Text>
+					</Box>
+					{dryRun && (
+						<Box marginLeft={2}>
+							<Text color="yellow" bold>
+								[DRY RUN]
+							</Text>
+						</Box>
+					)}
+					{isBusy && (
+						<Box marginLeft={2}>
+							<Text color="yellow">
+								<SpinnerFixed type="dots" /> Working...
+							</Text>
+						</Box>
+					)}
 				</Box>
-				{dryRun && (
-					<Box marginLeft={2}>
-						<Text color="yellow" bold>
-							[DRY RUN]
-						</Text>
-					</Box>
-				)}
-				{isBusy && (
-					<Box marginLeft={2}>
-						<Text color="yellow">
-							<SpinnerFixed type="dots" /> Working...
-						</Text>
-					</Box>
-				)}
 			</Box>
 
 			{activeScreen === "menu" && (

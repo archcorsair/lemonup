@@ -32,9 +32,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const { exit } = useApp();
 	const queryClient = useQueryClient();
 	const flashKey = useAppStore((state) => state.flashKey);
+	const toast = useAppStore((state) => state.toast);
+	const showToast = useAppStore((state) => state.showToast);
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-	const [globalMessage, setGlobalMessage] = useState("");
 
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [showLibs, setShowLibs] = useState(false);
@@ -239,14 +240,40 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	// Helpers
 	const runUpdates = async (foldersToUpdate: string[]) => {
 		if (foldersToUpdate.length === 0) return;
-		setGlobalMessage(
-			`Updating ${foldersToUpdate.length} addon${foldersToUpdate.length > 1 ? "s" : ""}...`,
+
+		const now = Date.now();
+
+		// Filter out addons that were recently checked with no update available
+		const foldersNeedingUpdate = foldersToUpdate.filter((folder) => {
+			const queryKey = ["addon", folder];
+			const state = queryClient.getQueryState<{ updateAvailable: boolean }>(
+				queryKey,
+			);
+			const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
+
+			// If recently checked and no update available, skip
+			if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
+				if (state?.data?.updateAvailable === false) {
+					return false;
+				}
+			}
+			return true;
+		});
+
+		if (foldersNeedingUpdate.length === 0) {
+			showToast("Skipped (Recently Checked)", 2000);
+			return;
+		}
+
+		showToast(
+			`Updating ${foldersNeedingUpdate.length} addon${foldersNeedingUpdate.length > 1 ? "s" : ""}...`,
+			0,
 		);
 
 		// Enforce concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
-		const promises = foldersToUpdate.map((folder) => {
+		const promises = foldersNeedingUpdate.map((folder) => {
 			return limit(async () => {
 				await updateMutation.mutateAsync({ folder });
 			});
@@ -254,8 +281,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		await Promise.all(promises);
 
-		setGlobalMessage("Job's Done");
-		setTimeout(() => setGlobalMessage(""), 3000);
+		showToast("Job's Done");
 	};
 
 	const runChecks = async (foldersToCheck: string[]) => {
@@ -295,9 +321,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		const checkedCount = results.filter(Boolean).length;
 
 		if (checkedCount === 0 && foldersToCheck.length > 0) {
-			setGlobalMessage("Skipped (Recently Checked)");
-
-			setTimeout(() => setGlobalMessage(""), 2000);
+			showToast("Skipped (Recently Checked)", 2000);
 		}
 	};
 
@@ -317,13 +341,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	});
 
 	const runDeletes = async (foldersToDelete: string[]) => {
-		setGlobalMessage("Deleting...");
+		showToast("Deleting...", 0);
 		for (const folder of foldersToDelete) {
 			await deleteMutation.mutateAsync({ folder });
 		}
 		setRefreshKey((prev) => prev + 1); // Trigger re-render to refresh addon list
-		setGlobalMessage(`Deleted ${foldersToDelete.length} addons.`);
-		setTimeout(() => setGlobalMessage(""), 3000);
+		showToast(`Deleted ${foldersToDelete.length} addons.`);
 		setConfirmDelete(false);
 	};
 
@@ -506,25 +529,24 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		if (input === "b") {
 			flashKey("b");
 			const runBackup = async () => {
-				setGlobalMessage("Backing up WTF...");
+				showToast("Backing up WTF...", 0);
 				try {
 					const result = await BackupManager.backupWTF(config.destDir);
 
 					if (result === null) {
-						setGlobalMessage("Backup Failed: WTF folder not found");
+						showToast("Backup Failed: WTF folder not found");
 					} else if (result === "skipped-recent") {
-						setGlobalMessage("Backup Skipped (Too Recent)");
+						showToast("Backup Skipped (Too Recent)");
 					} else {
 						// Result is the path to the zip file
 						await BackupManager.cleanupBackups(
 							config.destDir,
 							config.backupRetention,
 						);
-						setGlobalMessage("Backup Complete!");
+						showToast("Backup Complete!");
 					}
-					setTimeout(() => setGlobalMessage(""), 3000);
 				} catch (error) {
-					setGlobalMessage(`Backup Failed: ${(error as Error).message}`);
+					showToast(`Backup Failed: ${(error as Error).message}`);
 				}
 			};
 			runBackup();
@@ -718,17 +740,17 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								: pendingDelete[0]}
 							?
 						</Text>
-					) : globalMessage ? (
-						globalMessage.includes("Done") ||
-						globalMessage.includes("Complete") ||
-						globalMessage.includes("Deleted") ? (
-							<Text color="green">✔ {globalMessage}</Text>
-						) : globalMessage.includes("Skipped") ? (
-							<Text color="cyan">ℹ {globalMessage}</Text>
+					) : toast?.message ? (
+						toast.message.includes("Done") ||
+						toast.message.includes("Complete") ||
+						toast.message.includes("Deleted") ? (
+							<Text color="green">✔ {toast.message}</Text>
+						) : toast.message.includes("Skipped") ? (
+							<Text color="cyan">ℹ {toast.message}</Text>
 						) : (
 							<Text color="yellow">
 								{/* @ts-expect-error: Spinner types mismatch */}
-								<Spinner type="dots" /> {globalMessage}
+								<Spinner type="dots" /> {toast.message}
 							</Text>
 						)
 					) : (
