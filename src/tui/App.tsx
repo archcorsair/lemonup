@@ -1,11 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Box, Text, useStdout } from "ink";
-import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { type Config, ConfigManager } from "@/core/config";
 import { AddonManager } from "@/core/manager";
-import pkg from "../../package.json";
+import { Header } from "./components/Header";
 import { FirstRunWizard } from "./FirstRunWizard";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
@@ -42,11 +41,6 @@ export const App: React.FC<AppProps> = ({
 		</QueryClientProvider>
 	);
 };
-
-// Workaround for React 19 + Ink type mismatch
-const SpinnerFixed = Spinner as unknown as React.FC<{
-	type?: string;
-}>;
 
 const MIN_TERMINAL_WIDTH = 80;
 const MIN_TERMINAL_HEIGHT = 20;
@@ -214,36 +208,7 @@ const AppContent: React.FC<AppProps> = ({
 			borderStyle="round"
 			borderColor="cyan"
 		>
-			<Box
-				marginBottom={1}
-				borderStyle="single"
-				borderColor="blue"
-				paddingX={1}
-				minHeight={3}
-			>
-				<Box flexDirection="row">
-					<Text bold color="cyan">
-						LemonUp 🍋
-					</Text>
-					<Box marginLeft={1}>
-						<Text color="gray">v{pkg.version}</Text>
-					</Box>
-					{dryRun && (
-						<Box marginLeft={2}>
-							<Text color="yellow" bold>
-								[DRY RUN]
-							</Text>
-						</Box>
-					)}
-					{isBusy && (
-						<Box marginLeft={2}>
-							<Text color="yellow">
-								<SpinnerFixed type="dots" /> Working...
-							</Text>
-						</Box>
-					)}
-				</Box>
-			</Box>
+			<Header dryRun={dryRun} isBusy={isBusy} testMode={testMode} />
 
 			{activeScreen === "menu" && (
 				<MainMenu

@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import arg from "arg";
-import { render } from "ink";
 import { runCLI } from "@/cli";
 import { App } from "@/tui/App";
+import { withFullScreen } from "@/tui/withFullScreen";
 import pkg from "./package.json";
 
 async function main() {
@@ -48,13 +48,14 @@ Flags:
 		if (args["--cli"]) {
 			await runCLI();
 		} else {
-			const { waitUntilExit } = render(
+			const { start, waitUntilExit } = withFullScreen(
 				<App
 					force={args["--force"]}
 					dryRun={args["--dry-run"]}
 					testMode={args["--test"]}
 				/>,
 			);
+			await start();
 			await waitUntilExit();
 			process.exit(0);
 		}
