@@ -10,9 +10,10 @@ import { BackupManager } from "@/core/backup";
 import type { Config } from "@/core/config";
 import type { AddonManager, UpdateResult } from "@/core/manager";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
-import { ShortcutsModal } from "@/tui/components/ShortcutsModal";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface ManageScreenProps {
@@ -32,9 +33,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const { exit } = useApp();
 	const queryClient = useQueryClient();
 	const flashKey = useAppStore((state) => state.flashKey);
+	const { toast, showToast } = useToast();
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-	const [globalMessage, setGlobalMessage] = useState("");
 
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [showLibs, setShowLibs] = useState(false);
@@ -118,9 +119,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		for (const p of parents) {
 			result.push({ record: p, isChild: false, isLastChild: false });
 
-			// Find children
 			const children = all.filter((a) => a.parent === p.folder);
-			// Sort children
 			children.sort((a, b) =>
 				a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
 			);
@@ -207,7 +206,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		}, []),
 	);
 
-	// Mutation for Updating
 	const updateMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			const os = await import("node:os");
@@ -242,14 +240,40 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	// Helpers
 	const runUpdates = async (foldersToUpdate: string[]) => {
 		if (foldersToUpdate.length === 0) return;
-		setGlobalMessage(
-			`Updating ${foldersToUpdate.length} addon${foldersToUpdate.length > 1 ? "s" : ""}...`,
+
+		const now = Date.now();
+
+		// Filter out addons that were recently checked with no update available
+		const foldersNeedingUpdate = foldersToUpdate.filter((folder) => {
+			const queryKey = ["addon", folder];
+			const state = queryClient.getQueryState<{ updateAvailable: boolean }>(
+				queryKey,
+			);
+			const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
+
+			// If recently checked and no update available, skip
+			if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
+				if (state?.data?.updateAvailable === false) {
+					return false;
+				}
+			}
+			return true;
+		});
+
+		if (foldersNeedingUpdate.length === 0) {
+			showToast("Skipped (Recently Checked)", 2000);
+			return;
+		}
+
+		showToast(
+			`Updating ${foldersNeedingUpdate.length} addon${foldersNeedingUpdate.length > 1 ? "s" : ""}...`,
+			0,
 		);
 
 		// Enforce concurrency limit
 		const limit = pLimit(config.maxConcurrent);
 
-		const promises = foldersToUpdate.map((folder) => {
+		const promises = foldersNeedingUpdate.map((folder) => {
 			return limit(async () => {
 				await updateMutation.mutateAsync({ folder });
 			});
@@ -257,16 +281,13 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		await Promise.all(promises);
 
-		setGlobalMessage("Job's Done");
-		setTimeout(() => setGlobalMessage(""), 3000);
+		showToast("Job's Done");
 	};
 
 	const runChecks = async (foldersToCheck: string[]) => {
 		if (!foldersToCheck.length) return;
 
 		const limit = pLimit(config.maxConcurrent);
-
-		// Trigger refetch for specific items
 
 		const results = await Promise.all(
 			foldersToCheck.map((folder) => {
@@ -278,13 +299,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					const queryKey = ["addon", folder];
 
 					const state = queryClient.getQueryState(queryKey);
-
 					const now = Date.now();
-
 					const dataUpdatedAt = state?.dataUpdatedAt ?? 0;
 
 					// If data exists and is younger than checkInterval, skip
-
 					if (dataUpdatedAt > 0 && now - dataUpdatedAt < config.checkInterval) {
 						return false;
 					}
@@ -303,13 +321,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		const checkedCount = results.filter(Boolean).length;
 
 		if (checkedCount === 0 && foldersToCheck.length > 0) {
-			setGlobalMessage("Skipped (Recently Checked)");
-
-			setTimeout(() => setGlobalMessage(""), 2000);
+			showToast("Skipped (Recently Checked)", 2000);
 		}
 	};
 
-	// Mutation for Deletion
 	const deleteMutation = useMutation({
 		mutationFn: async ({ folder }: { folder: string }) => {
 			await addonManager.removeAddon(folder);
@@ -326,13 +341,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	});
 
 	const runDeletes = async (foldersToDelete: string[]) => {
-		setGlobalMessage("Deleting...");
+		showToast("Deleting...", 0);
 		for (const folder of foldersToDelete) {
 			await deleteMutation.mutateAsync({ folder });
 		}
 		setRefreshKey((prev) => prev + 1); // Trigger re-render to refresh addon list
-		setGlobalMessage(`Deleted ${foldersToDelete.length} addons.`);
-		setTimeout(() => setGlobalMessage(""), 3000);
+		showToast(`Deleted ${foldersToDelete.length} addons.`);
 		setConfirmDelete(false);
 	};
 
@@ -364,23 +378,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return;
 		}
 
-		const toggleMenu = () => setShowMenu((prev) => !prev);
-		const closeMenu = () => setShowMenu(false);
-
-		// If menu is open, capture keys
-		if (showMenu) {
-			if (key.escape || input === "m" || input === "q") {
-				if (key.escape) {
-					closeMenu();
-					return;
-				}
-				closeMenu();
-			}
-		}
-
 		if (key.escape) {
 			if (showMenu) {
 				setShowMenu(false);
+				return;
+			}
+			// Clear filter first if active, then go back
+			if (searchQuery.length > 0) {
+				setSearchQuery("");
 				return;
 			}
 			onBack();
@@ -412,14 +417,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		if (input === "m") {
 			flashKey("m");
-			toggleMenu();
+			setShowMenu((prev) => !prev);
 			return;
 		}
 
 		if (input === "l") {
 			flashKey("l");
 			setShowLibs((prev) => !prev);
-			setSelectedIndex(0); // Reset selection to avoid bounds error
+			setSelectedIndex(0);
 			return;
 		}
 
@@ -515,25 +520,24 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		if (input === "b") {
 			flashKey("b");
 			const runBackup = async () => {
-				setGlobalMessage("Backing up WTF...");
+				showToast("Backing up WTF...", 0);
 				try {
 					const result = await BackupManager.backupWTF(config.destDir);
 
 					if (result === null) {
-						setGlobalMessage("Backup Failed: WTF folder not found");
+						showToast("Backup Failed: WTF folder not found");
 					} else if (result === "skipped-recent") {
-						setGlobalMessage("Backup Skipped (Too Recent)");
+						showToast("Backup Skipped (Too Recent)");
 					} else {
 						// Result is the path to the zip file
 						await BackupManager.cleanupBackups(
 							config.destDir,
 							config.backupRetention,
 						);
-						setGlobalMessage("Backup Complete!");
+						showToast("Backup Complete!");
 					}
-					setTimeout(() => setGlobalMessage(""), 3000);
 				} catch (error) {
-					setGlobalMessage(`Backup Failed: ${(error as Error).message}`);
+					showToast(`Backup Failed: ${(error as Error).message}`);
 				}
 			};
 			runBackup();
@@ -551,6 +555,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					<Box>
 						<Text color="cyan">Search: </Text>
 						<TextInput value={searchQuery} onChange={setSearchQuery} />
+					</Box>
+				) : searchQuery.length > 0 ? (
+					<Box>
+						<Text color="cyan">Filtered: "{searchQuery}"</Text>
+						<Text color="gray"> [/] edit [esc] clear</Text>
 					</Box>
 				) : (
 					<Text color="gray">[/] search</Text>
@@ -727,17 +736,17 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								: pendingDelete[0]}
 							?
 						</Text>
-					) : globalMessage ? (
-						globalMessage.includes("Done") ||
-						globalMessage.includes("Complete") ||
-						globalMessage.includes("Deleted") ? (
-							<Text color="green">✔ {globalMessage}</Text>
-						) : globalMessage.includes("Skipped") ? (
-							<Text color="cyan">ℹ {globalMessage}</Text>
+					) : toast?.message ? (
+						toast.message.includes("Done") ||
+						toast.message.includes("Complete") ||
+						toast.message.includes("Deleted") ? (
+							<Text color="green">✔ {toast.message}</Text>
+						) : toast.message.includes("Skipped") ? (
+							<Text color="cyan">ℹ {toast.message}</Text>
 						) : (
 							<Text color="yellow">
 								{/* @ts-expect-error: Spinner types mismatch */}
-								<Spinner type="dots" /> {globalMessage}
+								<Spinner type="dots" /> {toast.message}
 							</Text>
 						)
 					) : (
@@ -761,17 +770,17 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								{ key: "space", label: "select" },
 								{ key: "u", label: "update" },
 								{ key: "c", label: "check" },
-								{ key: "l", label: showLibs ? "hide libs" : "show libs" },
 								{ key: "1-4", label: "sort" },
 								{ key: "m", label: "menu" },
 							]
 				}
 			/>
 
-			<ShortcutsModal
-				visible={showMenu}
+			<HelpPanel
+				expanded={showMenu}
 				shortcuts={[
 					{ key: "↑/↓", label: "Navigate" },
+					{ key: "/", label: "Search/Filter" },
 					{ key: "Space", label: "Select/Deselect" },
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },

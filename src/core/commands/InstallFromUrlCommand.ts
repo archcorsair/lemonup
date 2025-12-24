@@ -192,15 +192,34 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 
 			// Fallback: If one folder is a prefix of others? (ElvUI vs ElvUI_Config)
 			if (!mainAddonName && installedNames.length > 1) {
-				// Sort by length, shortest first. Check if shortest is prefix of others.
+				// Sort by length, shortest first.
 				const sorted = [...installedNames].sort((a, b) => a.length - b.length);
+
+				// Heuristic 1: Shortest folder is prefix of MOST others (allow some deviations like Libs)
 				const shortest = sorted[0];
 				if (shortest) {
-					const isPrefixToAll = sorted
-						.slice(1)
-						.every((name) => name.startsWith(shortest));
-					if (isPrefixToAll) {
+					const prefixCount = sorted.filter((n) =>
+						n.startsWith(shortest),
+					).length;
+					// If shortest is prefix for at least 50% of items, assume it's parent
+					if (prefixCount / sorted.length >= 0.5) {
 						mainAddonName = shortest;
+					}
+				}
+
+				// Heuristic 2: Target Name Similarity
+				// If we still don't have one, check if any folder is a substring of targetName
+				// e.g. target="Details-Damage-Meter", folder="Details"
+				if (!mainAddonName && targetName) {
+					const candidates = installedNames.filter(
+						(name) =>
+							targetName.toLowerCase().includes(name.toLowerCase()) ||
+							name.toLowerCase().includes(targetName.toLowerCase()),
+					);
+					// Pick the shortest candidate that matches (likely the root name)
+					if (candidates.length > 0) {
+						candidates.sort((a, b) => a.length - b.length);
+						mainAddonName = candidates[0] || null;
 					}
 				}
 			}
@@ -210,7 +229,14 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 					(await GitClient.getCurrentCommit(tempDir)) || null;
 				for (const addonName of installedNames) {
 					const isParent = mainAddonName && addonName === mainAddonName;
-					const parent = mainAddonName && !isParent ? mainAddonName : null;
+					// If we found a main addon, force it as parent for everyone else in this batch
+					let parent = mainAddonName && !isParent ? mainAddonName : null;
+
+					// Preserve existing parent from Scan if we failed to find one
+					if (!parent && !isParent) {
+						const existing = this.dbManager.getByFolder(addonName);
+						if (existing?.parent) parent = existing.parent;
+					}
 
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,
@@ -223,7 +249,12 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 			} else if (repoType === "wowinterface" && wowInterfaceDetails !== null) {
 				for (const addonName of installedNames) {
 					const isParent = mainAddonName && addonName === mainAddonName;
-					const parent = mainAddonName && !isParent ? mainAddonName : null;
+					let parent = mainAddonName && !isParent ? mainAddonName : null;
+
+					if (!parent && !isParent) {
+						const existing = this.dbManager.getByFolder(addonName);
+						if (existing?.parent) parent = existing.parent;
+					}
 
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,

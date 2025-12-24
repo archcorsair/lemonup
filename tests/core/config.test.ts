@@ -48,7 +48,7 @@ describe("ConfigManager", () => {
 
 		// getDefaultWoWPath returns a path on supported platforms
 		expect(config.destDir).not.toBe("NOT_CONFIGURED");
-		expect(config.checkInterval).toBe(60000);
+		expect(config.checkInterval).toBe(60000 * 5);
 		expect(manager.hasConfigFile).toBe(true);
 
 		spy.mockRestore();
