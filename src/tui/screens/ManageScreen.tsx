@@ -397,6 +397,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				setShowMenu(false);
 				return;
 			}
+			// Clear filter first if active, then go back
+			if (searchQuery.length > 0) {
+				setSearchQuery("");
+				return;
+			}
 			onBack();
 			return;
 		}
@@ -564,6 +569,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					<Box>
 						<Text color="cyan">Search: </Text>
 						<TextInput value={searchQuery} onChange={setSearchQuery} />
+					</Box>
+				) : searchQuery.length > 0 ? (
+					<Box>
+						<Text color="cyan">Filtered: "{searchQuery}"</Text>
+						<Text color="gray"> [/] edit [esc] clear</Text>
 					</Box>
 				) : (
 					<Text color="gray">[/] search</Text>
