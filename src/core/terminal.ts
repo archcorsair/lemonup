@@ -6,6 +6,11 @@ export enum TerminalProgressState {
 	Warning = 4,
 }
 
+// ANSI Escape Sequence Constants
+const ESC = "\x1b";
+const OSC = `${ESC}]`;
+const ST = `${ESC}\\`;
+
 /**
  * Sets the terminal progress bar using OSC 9;4 sequences.
  * Supported by Ghostty, WezTerm, iTerm2, etc.
@@ -15,11 +20,7 @@ export const setTerminalProgress = (
 	state: TerminalProgressState,
 	progress = 0,
 ) => {
-	// ST (String Terminator) can be \x07 (BEL) or \x1b\\ (ESC \)
-	// Using \x1b\\ is safer for some terminals, but \x07 is common.
-	// User example used standard OSC closing. using \x1b\\ (ESC \) is standard ST.
-	const ST = "\x1b\\";
-	const OSC = "\x1b]";
+	if (!process.stdout.isTTY) return;
 
 	// Ensure progress is 0-100
 	const p = Math.max(0, Math.min(100, Math.round(progress)));
