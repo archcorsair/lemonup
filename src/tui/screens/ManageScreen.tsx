@@ -10,8 +10,8 @@ import { BackupManager } from "@/core/backup";
 import type { Config } from "@/core/config";
 import type { AddonManager, UpdateResult } from "@/core/manager";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
-import { ShortcutsModal } from "@/tui/components/ShortcutsModal";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
 import { useAppStore } from "@/tui/store/useAppStore";
 
@@ -378,20 +378,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return;
 		}
 
-		const toggleMenu = () => setShowMenu((prev) => !prev);
-		const closeMenu = () => setShowMenu(false);
-
-		// If menu is open, capture keys
-		if (showMenu) {
-			if (key.escape || input === "m" || input === "q") {
-				if (key.escape) {
-					closeMenu();
-					return;
-				}
-				closeMenu();
-			}
-		}
-
 		if (key.escape) {
 			if (showMenu) {
 				setShowMenu(false);
@@ -431,7 +417,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		if (input === "m") {
 			flashKey("m");
-			toggleMenu();
+			setShowMenu((prev) => !prev);
 			return;
 		}
 
@@ -790,10 +776,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				}
 			/>
 
-			<ShortcutsModal
-				visible={showMenu}
+			<HelpPanel
+				expanded={showMenu}
 				shortcuts={[
 					{ key: "↑/↓", label: "Navigate" },
+					{ key: "/", label: "Search/Filter" },
 					{ key: "Space", label: "Select/Deselect" },
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },
