@@ -33,7 +33,7 @@
   - **Files:** `src/tui/hooks/useTheme.ts`
   - **Step 1:** Create hook that selects `state.theme` from store.
 
-- [ ] Task: Refactor Components to use Dynamic Theme
+- [x] Task: Refactor Components to use Dynamic Theme 83c0d8c
   - **Description:** Update all components to use `useTheme()` instead of importing `THEME`.
   - **Files:** `src/tui/components/*.tsx`
   - **Step 1:** Update `Header.tsx`, `ControlBar.tsx`, `RepositoryRow.tsx`, `HelpPanel.tsx`, `ScreenTitle.tsx`.
