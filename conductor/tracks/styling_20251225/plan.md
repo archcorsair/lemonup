@@ -1,56 +1,21 @@
-# Plan: Adopt ink-color-pipe
+# Plan: Tune Light Theme for Readability
 
-## Phase 1: Foundation & Setup [checkpoint: 9985789]
+## Phase 1: Iterative Tuning
 
-- [x] Task: Install `ink-color-pipe` dependency ed0a184
-  - **Description:** Add the library to the project using Bun.
-  - **Files:** `package.json`
-  - **Step 1:** Run `bun add ink-color-pipe`.
-
-- [x] Task: Create centralized Theme Registry 3b2ff12
-  - **Description:** Define the semantic style constants for the application.
+- [ ] Task: Analyze and Refine Light Theme Palette
+  - **Description:** Review `src/tui/theme.ts` and modify `LIGHT_THEME` definitions to use higher contrast colors. Focus on replacing readable colors (Yellow, Cyan) with darker alternatives (Blue, Magenta, Black).
   - **Files:** `src/tui/theme.ts`
-  - **Step 1:** Create `src/tui/theme.ts`.
-  - **Step 2:** Define a `THEME` constant object.
-  - **Step 3:** Populate it with initial semantic keys matching current usage (e.g., `brand`, `success`, `error`, `warning`, `muted`, `highlight`). Use `ink-color-pipe` style strings (e.g., `'cyan.bold'`).
+  - **Step 1:** Read current `src/tui/theme.ts`.
+  - **Step 2:** Modify `LIGHT_THEME` object.
+    -   `brand`: cyan -> blue (or magenta)
+    -   `success`: green -> green (ensure not bright)
+    -   `warning`: yellow -> magenta (or orange if supported, likely not)
+    -   `info`: blue -> blue
+    -   `key`: yellow -> magenta or black.bold
+  - **Step 3:** Commit changes.
 
-- [x] Task: Conductor - User Manual Verification 'Foundation & Setup' (Protocol in workflow.md)
+- [ ] Task: User Feedback Loop
+  - **Description:** Ask user to verify readability.
+  - **Status:** Pending user confirmation.
 
-## Phase 2: Component Refactoring (Core UI) [checkpoint: d72d3db]
-
-- [x] Task: Refactor `Header.tsx` to use Theme b72368b
-  - **Description:** Update the Header component to use `<Color>` and `THEME`.
-  - **Files:** `src/tui/components/Header.tsx`
-  - **Step 1:** Write Test: Verify Header renders with current text.
-  - **Step 2:** Implementation: Import `Color` from `ink-color-pipe` and `THEME`. Replace direct `Text` color props or `ink-gradient` (if replacing) or wrap content in `<Color styles={THEME.brand}>` where appropriate.
-  - **Step 3:** Verify: Ensure visual output remains consistent/improved.
-
-- [x] Task: Refactor `ControlBar.tsx` to use Theme 0a24f54
-  - **Description:** Update the ControlBar (footer) to use `<Color>` and `THEME`.
-  - **Files:** `src/tui/components/ControlBar.tsx`
-  - **Step 1:** Write Test: Verify ControlBar rendering.
-  - **Step 2:** Implementation: Use `THEME.keybinding` (or similar) for keys and `THEME.description` for text.
-
-- [x] Task: Refactor `ScreenTitle.tsx` to use Theme 439ab1b
-  - **Description:** Update the ScreenTitle to use `<Color>` and `THEME`.
-  - **Files:** `src/tui/components/ScreenTitle.tsx`
-  - **Step 1:** Write Test: Verify ScreenTitle.
-  - **Step 2:** Implementation: Apply standard heading styles from `THEME`.
-
-- [x] Task: Conductor - User Manual Verification 'Component Refactoring (Core UI)' (Protocol in workflow.md)
-
-## Phase 3: Component Refactoring (Lists & Help) [checkpoint: bffe456]
-
-- [x] Task: Refactor `RepositoryRow.tsx` to use Theme 18a977c
-  - **Description:** Update the list items to use standard styling for names, versions, and status.
-  - **Files:** `src/tui/components/RepositoryRow.tsx`
-  - **Step 1:** Write Test: Verify row rendering.
-  - **Step 2:** Implementation: Use `THEME.addonName`, `THEME.version`, `THEME.installed`, etc.
-
-- [x] Task: Refactor `HelpPanel.tsx` to use Theme 4a26330
-  - **Description:** Update the help panel to use theme constants.
-  - **Files:** `src/tui/components/HelpPanel.tsx`
-  - **Step 1:** Write Test: Verify help panel.
-  - **Step 2:** Implementation: Standardize help text styling.
-
-- [x] Task: Conductor - User Manual Verification 'Component Refactoring (Lists & Help)' (Protocol in workflow.md)
+- [ ] Task: Conductor - User Manual Verification 'Iterative Tuning' (Protocol in workflow.md)

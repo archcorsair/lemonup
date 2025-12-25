@@ -1,28 +1,24 @@
-# Specification: Adopt ink-color-pipe for Improved Styling
+# Specification: Tune Light Theme for Readability
 
 ## Context
-The project aims for a polished, modern, and customizable TUI. Currently, styling is likely handled via raw `ink` components or basic color props. To achieve the "World of Warcraft" aesthetic and support future theming (light/dark modes, user themes), we need a robust foundation. `ink-color-pipe` offers a flexible, string-based styling syntax (chalk-pipe) that is ideal for creating a centralized theme registry.
+The initial implementation of the Light Theme used standard ANSI colors which often lack sufficient contrast on white terminal backgrounds (e.g., standard Yellow or Cyan can be unreadable). To ensure accessibility and a polished look, we need to tune the color palette specifically for light mode.
 
 ## Goals
-1.  **Install & Configure:** specific library `ink-color-pipe` is installed.
-2.  **Centralize Styling:** Create a `theme.ts` (or similar) to define semantic style constants (e.g., `success`, `error`, `highlight`, `wowPrimary`) using `ink-color-pipe` syntax.
-3.  **Refactor Components:** Update key UI components (ControlBar, Header, HelpPanel, etc.) to use the `<Color>` component and the centralized theme constants.
-4.  **Verify:** Ensure no visual regressions and that the new styling system works as expected.
+1.  **High Contrast:** Ensure all text is legible against a white background.
+2.  **Semantic Clarity:** Maintain clear distinction between status types (Success, Error, Warning, Info) using appropriate colors.
+3.  **Aesthetic:** Create a pleasing, modern look that fits the "clean" design goal.
 
 ## Technical Design
--   **Dependency:** `ink-color-pipe`
--   **Theme System:**
-    -   Create `src/tui/theme.ts`.
-    -   Export a `THEME` object containing style strings (e.g., `{ success: 'green.bold', error: 'bgRed.white' }`).
-    -   This allows changing the "theme" in one place.
--   **Component Usage:**
-    -   Replace `<Text color="green">` with `<Color styles={THEME.success}>`.
-    -   Use `chalkPipe` for programmatic string formatting if needed (e.g., logging).
-
-## User Experience
--   **Visuals:** The TUI should look more consistent.
--   **Future-Proofing:** This change is primarily foundational, enabling easier re-skinning later.
+-   **File:** `src/tui/theme.ts`
+-   **Palette Adjustments (Light Theme):**
+    -   **Text:** `black` or `black.bold`.
+    -   **Brand:** Shift from `cyan` to something darker like `blue` or `magenta` if `cyan` is too light.
+    -   **Success:** Standard `green` might be too light. Consider `green` (standard ANSI green is usually darker than bright green). Avoid `greenBright`.
+    -   **Warning:** `yellow` is notoriously hard to read on white. Consider `magenta` or `red` (if distinct from error) or use background colors (e.g., `black` text on `yellow` bg). Or use `keywords` like `blue`.
+    -   **Error:** `red` is usually fine.
+    -   **Table/List Headers:** `black.bold`.
+    -   **Selected Item:** `blue` or `inverse` (white on black).
 
 ## Constraints
--   Must maintain the existing dark-mode friendly look for now (no drastic visual changes yet, just implementation refactor).
--   Must use `bun` for all package operations.
+-   Must work within `ink-color-pipe` capabilities (standard ANSI colors + modifiers).
+-   Must not affect `DARK_THEME`.
