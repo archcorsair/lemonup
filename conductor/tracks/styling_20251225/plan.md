@@ -2,7 +2,7 @@
 
 ## Phase 1: Foundation & Setup
 
-- [ ] Task: Install `ink-color-pipe` dependency
+- [x] Task: Install `ink-color-pipe` dependency ed0a184
   - **Description:** Add the library to the project using Bun.
   - **Files:** `package.json`
   - **Step 1:** Run `bun add ink-color-pipe`.
