@@ -5,7 +5,7 @@ import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
 import pkg from "../../../package.json";
-import { THEME } from "../theme";
+import { useTheme } from "../hooks/useTheme";
 
 // Workaround for React 19 + Ink type mismatch
 const SpinnerFixed = Spinner as unknown as React.FC<{
@@ -28,6 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
   isBusy = false,
   testMode = false,
 }) => {
+  const { theme } = useTheme();
   const { stdout } = useStdout();
   const [dims, setDims] = useState({
     cols: stdout.columns ?? 80,
@@ -63,7 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
           </Box>
 
           <Box marginLeft={1}>
-            <Color styles={THEME.version}>
+            <Color styles={theme.version}>
               <Text>🍋 v{pkg.version}</Text>
             </Color>
           </Box>
@@ -71,14 +72,14 @@ export const Header: React.FC<HeaderProps> = ({
 
         {dryRun && (
           <Box marginLeft={2}>
-            <Color styles={THEME.dryRun}>
+            <Color styles={theme.dryRun}>
               <Text>[DRY RUN]</Text>
             </Color>
           </Box>
         )}
         {isBusy && (
           <Box marginLeft={2}>
-            <Color styles={THEME.busy}>
+            <Color styles={theme.busy}>
               <Text>
                 <SpinnerFixed type="dots" /> Working...
               </Text>
@@ -89,7 +90,7 @@ export const Header: React.FC<HeaderProps> = ({
 
       {testMode && (
         <Box>
-          <Color styles={THEME.testMode}>
+          <Color styles={theme.testMode}>
             <Text>
               TEST MODE ({dims.cols}x{dims.rows})
             </Text>

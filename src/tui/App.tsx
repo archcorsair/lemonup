@@ -93,6 +93,8 @@ const AppContent: React.FC<AppProps> = ({
   const setLastMenuSelection = useAppStore(
     (state) => state.setLastMenuSelection,
   );
+  const setTheme = useAppStore((state) => state.setTheme);
+  const theme = useAppStore((state) => state.theme);
 
   const [initialLoad, setInitialLoad] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
@@ -173,12 +175,13 @@ const AppContent: React.FC<AppProps> = ({
 
     const cfg = configManager.get();
     setConfig(cfg);
+    setTheme(cfg.theme);
 
     if (initialLoad) {
       navigate("menu");
       setInitialLoad(false);
     }
-  }, [configManager, config, initialLoad, navigate]);
+  }, [configManager, config, initialLoad, navigate, setTheme]);
 
   const handleWizardComplete = () => {
     setShowWizard(false);
@@ -206,7 +209,7 @@ const AppContent: React.FC<AppProps> = ({
       flexDirection="column"
       padding={1}
       borderStyle="round"
-      borderColor="cyan"
+      borderColor={theme.brand.split(".")[0]}
     >
       <Header dryRun={dryRun} isBusy={isBusy} testMode={testMode} />
 
