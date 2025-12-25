@@ -27,7 +27,7 @@ const SectionHeader: React.FC<{ title: string; first?: boolean }> = ({
 	first,
 }) => (
 	<Box marginTop={first ? 0 : 1} marginBottom={0}>
-		<Text color="magenta" bold underline>
+		<Text color="yellow" bold underline>
 			{title}
 		</Text>
 	</Box>
@@ -250,8 +250,10 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 	};
 
 	return (
-		<Box flexDirection="column" padding={1}>
-			<ScreenTitle title="Settings" />
+		<Box flexDirection="column">
+			<Box marginBottom={1}>
+				<ScreenTitle title="Settings" />
+			</Box>
 
 			<Box flexDirection="column" gap={0}>
 				{/* General */}
