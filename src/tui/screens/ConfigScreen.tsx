@@ -192,16 +192,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         setTheme(nextTheme);
         configManager.set("theme", nextTheme);
 
-        // Verify persistence
-        const saved = configManager.get().theme;
-        if (saved !== nextTheme) {
-          showToast(`Save Error: ${saved}`, 2000);
-        } else {
-          showToast("Theme Updated!", 1000);
+        // Extensive Debug
+        try {
+          // Force strict sync?
+          const fs = require("node:fs");
+          const raw = fs.readFileSync(configManager.path, "utf-8");
+          const json = JSON.parse(raw);
+
+          // Verify via ConfigManager getter too
+          const getterVal = configManager.get().theme;
+
+          showToast(`File: ${json.theme} | Get: ${getterVal}`, 5000);
+        } catch (e) {
+          // @ts-expect-error
+          showToast(`Debug Err: ${e.message}`, 5000);
         }
       }
     }
-
     if (activeField === "checkInterval") {
       if (key.leftArrow || input === "h") {
         flashKey("←/→");
