@@ -1,6 +1,6 @@
 # Plan: Adopt ink-color-pipe
 
-## Phase 1: Foundation & Setup
+## Phase 1: Foundation & Setup [checkpoint: 9985789]
 
 - [x] Task: Install `ink-color-pipe` dependency ed0a184
   - **Description:** Add the library to the project using Bun.
@@ -14,7 +14,7 @@
   - **Step 2:** Define a `THEME` constant object.
   - **Step 3:** Populate it with initial semantic keys matching current usage (e.g., `brand`, `success`, `error`, `warning`, `muted`, `highlight`). Use `ink-color-pipe` style strings (e.g., `'cyan.bold'`).
 
-- [ ] Task: Conductor - User Manual Verification 'Foundation & Setup' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Foundation & Setup' (Protocol in workflow.md)
 
 ## Phase 2: Component Refactoring (Core UI)
 
