@@ -39,7 +39,7 @@
 
 - [x] Task: Conductor - User Manual Verification 'Component Refactoring (Core UI)' (Protocol in workflow.md)
 
-## Phase 3: Component Refactoring (Lists & Help)
+## Phase 3: Component Refactoring (Lists & Help) [checkpoint: bffe456]
 
 - [x] Task: Refactor `RepositoryRow.tsx` to use Theme 18a977c
   - **Description:** Update the list items to use standard styling for names, versions, and status.
@@ -53,4 +53,4 @@
   - **Step 1:** Write Test: Verify help panel.
   - **Step 2:** Implementation: Standardize help text styling.
 
-- [ ] Task: Conductor - User Manual Verification 'Component Refactoring (Lists & Help)' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Component Refactoring (Lists & Help)' (Protocol in workflow.md)
