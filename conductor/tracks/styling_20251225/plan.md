@@ -41,7 +41,7 @@
 
 ## Phase 3: Component Refactoring (Lists & Help)
 
-- [ ] Task: Refactor `RepositoryRow.tsx` to use Theme
+- [x] Task: Refactor `RepositoryRow.tsx` to use Theme 18a977c
   - **Description:** Update the list items to use standard styling for names, versions, and status.
   - **Files:** `src/tui/components/RepositoryRow.tsx`
   - **Step 1:** Write Test: Verify row rendering.
