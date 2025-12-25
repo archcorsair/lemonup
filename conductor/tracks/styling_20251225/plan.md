@@ -47,7 +47,7 @@
   - **Step 1:** Write Test: Verify row rendering.
   - **Step 2:** Implementation: Use `THEME.addonName`, `THEME.version`, `THEME.installed`, etc.
 
-- [ ] Task: Refactor `HelpPanel.tsx` to use Theme
+- [x] Task: Refactor `HelpPanel.tsx` to use Theme 4a26330
   - **Description:** Update the help panel to use theme constants.
   - **Files:** `src/tui/components/HelpPanel.tsx`
   - **Step 1:** Write Test: Verify help panel.
