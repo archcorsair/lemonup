@@ -16,7 +16,7 @@
 
 - [x] Task: Conductor - User Manual Verification 'Foundation & Setup' (Protocol in workflow.md)
 
-## Phase 2: Component Refactoring (Core UI)
+## Phase 2: Component Refactoring (Core UI) [checkpoint: d72d3db]
 
 - [x] Task: Refactor `Header.tsx` to use Theme b72368b
   - **Description:** Update the Header component to use `<Color>` and `THEME`.
@@ -37,7 +37,7 @@
   - **Step 1:** Write Test: Verify ScreenTitle.
   - **Step 2:** Implementation: Apply standard heading styles from `THEME`.
 
-- [ ] Task: Conductor - User Manual Verification 'Component Refactoring (Core UI)' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Component Refactoring (Core UI)' (Protocol in workflow.md)
 
 ## Phase 3: Component Refactoring (Lists & Help)
 
