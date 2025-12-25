@@ -309,7 +309,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 								<Box flexDirection="column" key={opt.action}>
 									{showHeader && (
 										<Box marginTop={i > 0 ? 1 : 0} marginBottom={0}>
-											<Text color="magenta" bold underline>
+											<Text color="yellow" bold underline>
 												{opt.section}
 											</Text>
 										</Box>
