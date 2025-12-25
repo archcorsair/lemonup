@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [ ] Track: Implement Light Theme and Theme Settings
-*Link: [./conductor/tracks/light_theme_20251225/](./conductor/tracks/light_theme_20251225/)*
+## [ ] Track: Fix Config Schema Validation Errors in Tests
+*Link: [./conductor/tracks/fix_schema_validation_20251225/](./conductor/tracks/fix_schema_validation_20251225/)*
