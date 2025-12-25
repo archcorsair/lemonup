@@ -108,6 +108,7 @@ export class ConfigManager {
 
   public get(): Config {
     const raw = this.store.store;
+    logger.log("Config", `Raw theme: ${raw.theme}`);
     const result = ConfigSchema.safeParse(raw);
     if (!result.success) {
       // Log validation error
@@ -119,7 +120,7 @@ export class ConfigManager {
 
       // If schema is invalid (first run or corrupted) return defaults or empty structure
       // Try to preserve raw values that might be valid (like theme)
-      return {
+      const fallback = {
         destDir: "NOT_CONFIGURED",
         userAgent: "DEFAULT_UA",
         repositories: [],
@@ -136,9 +137,12 @@ export class ConfigManager {
         ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
+      logger.log("Config", `Fallback theme: ${fallback.theme}`);
+      return fallback;
     }
     const config = { ...result.data, ...this.overrides };
     logger.setEnabled(config.debug || false);
+    logger.log("Config", `Valid theme: ${config.theme}`);
     return config;
   }
 
