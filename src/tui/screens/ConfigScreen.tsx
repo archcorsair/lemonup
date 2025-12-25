@@ -191,7 +191,14 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         const nextTheme = themeMode === "dark" ? "light" : "dark";
         setTheme(nextTheme);
         configManager.set("theme", nextTheme);
-        showToast("Theme Updated!", 1000);
+
+        // Verify persistence
+        const saved = configManager.get().theme;
+        if (saved !== nextTheme) {
+          showToast(`Save Error: ${saved}`, 2000);
+        } else {
+          showToast("Theme Updated!", 1000);
+        }
       }
     }
 

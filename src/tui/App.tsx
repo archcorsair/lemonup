@@ -267,7 +267,10 @@ const AppContent: React.FC<AppProps> = ({
       {activeScreen === "config" && configManager && (
         <ConfigScreen
           configManager={configManager}
-          onBack={() => navigate("menu")}
+          onBack={() => {
+            setConfig(configManager.get());
+            navigate("menu");
+          }}
         />
       )}
     </Box>
