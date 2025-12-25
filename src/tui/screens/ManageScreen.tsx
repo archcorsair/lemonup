@@ -54,6 +54,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const getStatusPriority = useCallback(
 		(folder: string) => {
 			if (updateProgress[folder]) return 0;
+			// biome-ignore lint/suspicious/noExplicitAny: React Query state type is dynamic
 			const state = queryClient.getQueryState<any>(["addon", folder]);
 			if (state?.fetchStatus === "fetching") return 0;
 			if (state?.status === "error") return 2;
@@ -67,17 +68,25 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	// biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is used to trigger re-fetching when the database state changes.
 	const visibleAddons = useMemo(() => {
 		const all = addonManager.getAllAddons();
-		let parents = all.filter((a) => !a.parent);
+
+		// Filter out owned folders (those in other addons' ownedFolders)
+		const ownedFolders = new Set(all.flatMap((a) => a.ownedFolders));
+		let filtered = all.filter((a) => !ownedFolders.has(a.folder));
+
+		// Filter out libraries if showLibs is false
+		if (!showLibs) {
+			filtered = filtered.filter((a) => a.kind !== "library");
+		}
 
 		if (searchQuery.length > 0) {
-			const fuse = new Fuse(parents, {
+			const fuse = new Fuse(filtered, {
 				keys: ["name", "author"],
 				threshold: 0.3,
 			});
-			parents = fuse.search(searchQuery).map((r) => r.item);
+			filtered = fuse.search(searchQuery).map((r) => r.item);
 		}
 
-		parents.sort((a, b) => {
+		filtered.sort((a, b) => {
 			let res = 0;
 			switch (sortConfig.key) {
 				case "name":
@@ -103,35 +112,49 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			return sortConfig.direction === "asc" ? res : -res;
 		});
 
-		if (!showLibs) {
-			return parents.map((a) => ({
-				record: a,
-				isChild: false,
-				isLastChild: false,
-			}));
-		}
-
+		// Build result with owned folders as children when showLibs is true
 		const result: {
-			record: (typeof parents)[0];
+			record: (typeof filtered)[0];
 			isChild: boolean;
 			isLastChild: boolean;
 		}[] = [];
-		for (const p of parents) {
-			result.push({ record: p, isChild: false, isLastChild: false });
 
-			const children = all.filter((a) => a.parent === p.folder);
-			children.sort((a, b) =>
-				a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
-			);
+		for (const addon of filtered) {
+			result.push({ record: addon, isChild: false, isLastChild: false });
 
-			children.forEach((c, i) => {
-				result.push({
-					record: c,
-					isChild: true,
-					isLastChild: i === children.length - 1,
+			// Show owned folders as children (they don't have DB records, so create display entries)
+			if (showLibs && addon.ownedFolders.length > 0) {
+				addon.ownedFolders.forEach((folderName, i) => {
+					// Create a display-only record for the owned folder
+					const childRecord: (typeof filtered)[0] = {
+						id: undefined,
+						name: folderName,
+						folder: folderName,
+						ownedFolders: [],
+						kind: "addon",
+						kindOverride: false,
+						flavor: addon.flavor,
+						version: addon.version,
+						git_commit: addon.git_commit,
+						author: addon.author,
+						interface: addon.interface,
+						url: addon.url,
+						type: addon.type,
+						requiredDeps: [],
+						optionalDeps: [],
+						embeddedLibs: [],
+						install_date: addon.install_date,
+						last_updated: addon.last_updated,
+					};
+					result.push({
+						record: childRecord,
+						isChild: true,
+						isLastChild: i === addon.ownedFolders.length - 1,
+					});
 				});
-			});
+			}
 		}
+
 		return result;
 	}, [
 		addonManager,
@@ -517,6 +540,21 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			}
 		}
 
+		if (input === "t") {
+			flashKey("t");
+			const currentItem = visibleAddons[selectedIndex];
+			if (currentItem && !currentItem.isChild) {
+				const addon = currentItem.record;
+				const newKind = addon.kind === "library" ? "addon" : "library";
+				addonManager.updateAddonMetadata(addon.folder, {
+					kind: newKind,
+					kindOverride: true,
+				});
+				setRefreshKey((prev) => prev + 1);
+				showToast(`${addon.name} marked as ${newKind}`);
+			}
+		}
+
 		if (input === "b") {
 			flashKey("b");
 			const runBackup = async () => {
@@ -785,6 +823,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },
 					{ key: "l", label: "Toggle Libs" },
+					{ key: "t", label: "Toggle Kind" },
 					{ key: "d", label: "Delete Selected" },
 					{ key: "b", label: "Backup WTF" },
 					{ key: "q", label: "Quit Application" },

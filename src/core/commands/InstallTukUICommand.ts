@@ -69,34 +69,26 @@ export class InstallTukUICommand implements Command<boolean> {
 				await fs.cp(source, dest, { recursive: true, force: true });
 			}
 
-			const scanCmd = new ScanCommand(
-				this.dbManager,
-				this.configManager,
-				foldersToCopy,
-			);
+			// Only scan the main folder (subFolders are owned, not separate addons)
+			const scanCmd = new ScanCommand(this.dbManager, this.configManager, [
+				this.addonFolder,
+			]);
 			await scanCmd.execute(context);
 
-			// Update Main Addon
+			// Update main addon with ownedFolders and TukUI metadata
 			this.dbManager.updateAddon(this.addonFolder, {
 				type: "tukui",
 				url: downloadUrl,
 				version: details?.version || "unknown",
 				author: details?.author || null,
+				ownedFolders: this.subFolders,
 				last_updated: new Date().toISOString(),
-				parent: null,
 				git_commit: null,
 			});
 
+			// Remove any existing DB records for subFolders (they're tracked via ownedFolders)
 			for (const subFolder of this.subFolders) {
-				this.dbManager.updateAddon(subFolder, {
-					type: "tukui",
-					url: downloadUrl,
-					version: details?.version || "unknown",
-					author: details?.author || null,
-					last_updated: new Date().toISOString(),
-					parent: this.addonFolder,
-					git_commit: null,
-				});
+				this.dbManager.removeAddon(subFolder);
 			}
 
 			context.emit("addon:install:complete", this.addonFolder);

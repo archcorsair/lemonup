@@ -1,46 +1,46 @@
 {
-	"name": "lemonup",
-	"version": "0.0.11",
-	"module": "index.tsx",
-	"type": "module",
-	"private": true,
-	"scripts": {
-		"start": "bun run index.tsx",
-		"dev": "bun run --watch index.tsx",
-		"build": "bun build --compile --minify --sourcemap ./index.tsx --outfile lemonup",
-		"lint": "biome check .",
-		"lint:fix": "biome check --write .",
-		"typecheck": "tsc --noEmit",
-		"test": "bun test --only-failures",
-		"clean": "rm -rf lemonup *.bun-build .*.bun-build"
-	},
-	"devDependencies": {
-		"@biomejs/biome": "^2.3.10",
-		"@types/adm-zip": "^0.5.7",
-		"@types/bun": "latest",
-		"@types/ink-spinner": "^3.0.5",
-		"@types/ink-text-input": "^2.0.5",
-		"@types/node": "^25.0.3",
-		"@types/react": "^19.2.7",
-		"lefthook": "^2.0.12",
-		"react-devtools-core": "^7.0.1"
-	},
-	"peerDependencies": {
-		"typescript": "^5.9.3"
-	},
-	"dependencies": {
-		"@tanstack/react-query": "^5.90.12",
-		"adm-zip": "^0.5.16",
-		"arg": "^5.0.2",
-		"conf": "^15.0.2",
-		"fs": "^0.0.1-security",
-		"fuse.js": "^7.1.0",
-		"ink": "^6.5.1",
-		"ink-spinner": "^5.0.0",
-		"ink-text-input": "^6.0.0",
-		"p-limit": "^7.2.0",
-		"react": "^19.2.3",
-		"zod": "^4.2.1",
-		"zustand": "^5.0.9"
-	}
+  "name": "lemonup",
+  "version": "0.1.0",
+  "module": "index.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run index.tsx",
+    "dev": "bun run --watch index.tsx",
+    "build": "bun build --compile --minify --sourcemap ./index.tsx --outfile lemonup",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --only-failures",
+    "clean": "rm -rf lemonup *.bun-build .*.bun-build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.10",
+    "@types/adm-zip": "^0.5.7",
+    "@types/bun": "latest",
+    "@types/ink-spinner": "^3.0.5",
+    "@types/ink-text-input": "^2.0.5",
+    "@types/node": "^25.0.3",
+    "@types/react": "^19.2.7",
+    "lefthook": "^2.0.12",
+    "react-devtools-core": "^7.0.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.90.12",
+    "adm-zip": "^0.5.16",
+    "arg": "^5.0.2",
+    "conf": "^15.0.2",
+    "fs": "^0.0.1-security",
+    "fuse.js": "^7.1.0",
+    "ink": "^6.5.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "p-limit": "^7.2.0",
+    "react": "^19.2.3",
+    "zod": "^4.2.1",
+    "zustand": "^5.0.9"
+  }
 }

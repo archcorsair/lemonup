@@ -108,14 +108,18 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 				await fs.unlink(zipPath);
 			}
 
-			// Scan for folders containing .toc
+			// Scan for first-level folders containing .toc (ignore embedded libs in subfolders)
 			const tocGlob = new Bun.Glob("**/*.toc");
 			const foundFolders = new Set<string>();
 
 			for await (const file of tocGlob.scan({ cwd: tempDir })) {
 				const dir = path.dirname(file);
 				if (dir !== ".") {
-					foundFolders.add(dir);
+					// Only add first-level folders (no "/" in path = top-level addon folder)
+					const firstLevel = dir.split("/")[0];
+					if (firstLevel) {
+						foundFolders.add(firstLevel);
+					}
 				}
 			}
 
@@ -138,9 +142,9 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 			}
 
 			if (foldersToCopy.length > 0) {
-				for (const folder of foldersToCopy) {
-					const folderName = path.basename(folder);
-					const source = path.join(tempDir, folder);
+				for (const folderName of foldersToCopy) {
+					// folderName is already first-level only (e.g., "Clique", not "Clique/libs/...")
+					const source = path.join(tempDir, folderName);
 					const dest = path.join(config.destDir, folderName);
 					await fs.cp(source, dest, { recursive: true, force: true });
 					installedNames.push(folderName);
@@ -228,41 +232,23 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 				const installedHash =
 					(await GitClient.getCurrentCommit(tempDir)) || null;
 				for (const addonName of installedNames) {
-					const isParent = mainAddonName && addonName === mainAddonName;
-					// If we found a main addon, force it as parent for everyone else in this batch
-					let parent = mainAddonName && !isParent ? mainAddonName : null;
-
-					// Preserve existing parent from Scan if we failed to find one
-					if (!parent && !isParent) {
-						const existing = this.dbManager.getByFolder(addonName);
-						if (existing?.parent) parent = existing.parent;
-					}
-
+					// TODO: Handle multi-folder addons via ownedFolders
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,
 						type: REPO_TYPE.GITHUB,
 						git_commit: installedHash,
 						last_updated: new Date().toISOString(),
-						parent: parent,
 					});
 				}
 			} else if (repoType === "wowinterface" && wowInterfaceDetails !== null) {
 				for (const addonName of installedNames) {
-					const isParent = mainAddonName && addonName === mainAddonName;
-					let parent = mainAddonName && !isParent ? mainAddonName : null;
-
-					if (!parent && !isParent) {
-						const existing = this.dbManager.getByFolder(addonName);
-						if (existing?.parent) parent = existing.parent;
-					}
-
+					// TODO: Handle multi-folder addons via ownedFolders
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,
 						type: REPO_TYPE.WOWINTERFACE,
 						version: wowInterfaceDetails.UIVersion,
 						author: wowInterfaceDetails.UIAuthorName,
 						last_updated: new Date().toISOString(),
-						parent: parent,
 					});
 				}
 			}

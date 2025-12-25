@@ -208,7 +208,13 @@ describe("Commands", () => {
 				folder: folder,
 				version: "1.0",
 				type: "manual",
-				parent: null,
+				ownedFolders: [],
+				kind: "addon",
+				kindOverride: false,
+				flavor: "retail",
+				requiredDeps: [],
+				optionalDeps: [],
+				embeddedLibs: [],
 				git_commit: null,
 				author: null,
 				interface: null,
@@ -217,10 +223,11 @@ describe("Commands", () => {
 				last_updated: new Date().toISOString(),
 			});
 
-			const command = new RemoveAddonCommand(dbManager, configManager, folder);
+			const command = new RemoveAddonCommand(dbManager, configManager, folder, false);
 			const result = await command.execute(mockContext);
 
-			expect(result).toBe(true);
+			expect(result.success).toBe(true);
+			expect(result.removedFolders).toContain(folder);
 			expect(fs.existsSync(addonDir)).toBe(false);
 			expect(dbManager.getByFolder(folder)).toBeNull();
 			expect(mockContext.emit).toHaveBeenCalledWith(

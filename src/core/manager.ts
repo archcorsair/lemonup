@@ -5,7 +5,10 @@ import {
 	type InstallFromUrlResult,
 } from "./commands/InstallFromUrlCommand";
 import { InstallTukUICommand } from "./commands/InstallTukUICommand";
-import { RemoveAddonCommand } from "./commands/RemoveAddonCommand";
+import {
+	RemoveAddonCommand,
+	type RemoveAddonResult,
+} from "./commands/RemoveAddonCommand";
 import { ScanCommand } from "./commands/ScanCommand";
 import type { Command, CommandContext } from "./commands/types";
 import {
@@ -103,7 +106,13 @@ export class AddonManager extends EventEmitter {
 					interface: null,
 					url: repo.gitRemote || repo.downloadUrl || null,
 					type: repo.type as "github" | "tukui",
-					parent: null,
+					ownedFolders: [],
+					kind: "addon",
+					kindOverride: false,
+					flavor: "retail",
+					requiredDeps: [],
+					optionalDeps: [],
+					embeddedLibs: [],
 					install_date: new Date().toISOString(),
 					last_updated: new Date().toISOString(),
 				});
@@ -142,9 +151,7 @@ export class AddonManager extends EventEmitter {
 		remoteVersion: string;
 		error?: string;
 	}> {
-		if (addon.parent) {
-			return { updateAvailable: false, remoteVersion: "" };
-		}
+		// TODO: Check if addon is owned by another via getOwnerOf
 
 		if (!addon.url) {
 			return {
@@ -289,11 +296,15 @@ export class AddonManager extends EventEmitter {
 		this.dbManager.updateAddon(folder, metadata);
 	}
 
-	public async removeAddon(folder: string): Promise<boolean> {
+	public async removeAddon(
+		folder: string,
+		force = false,
+	): Promise<RemoveAddonResult> {
 		const command = new RemoveAddonCommand(
 			this.dbManager,
 			this.configManager,
 			folder,
+			force,
 		);
 		return await this.executeCommand(command);
 	}

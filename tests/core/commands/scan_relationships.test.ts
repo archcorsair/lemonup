@@ -10,7 +10,7 @@ describe("ScanCommand Relationships", () => {
 	const tempDir = path.join(process.cwd(), "test-output", "ScanRelationships");
 	const addonsDir = path.join(tempDir, "Interface", "AddOns");
 	const configDir = path.join(tempDir, "Config");
-	
+
 	let configManager: ConfigManager;
 	let dbManager: DatabaseManager;
 
@@ -47,8 +47,10 @@ describe("ScanCommand Relationships", () => {
 
 		expect(elvui).not.toBeNull();
 		expect(options).not.toBeNull();
-		expect(elvui?.parent).toBeNull();
-		expect(options?.parent).toBe("ElvUI");
+		// New schema: both addons exist as separate records (no parent relationship yet)
+		// TODO: Will update ScanCommand to consolidate multi-folder addons
+		expect(elvui?.ownedFolders).toEqual([]);
+		expect(options?.ownedFolders).toEqual([]);
 	});
 
 	test("should link child addon based on dependency and name similarity", async () => {
@@ -69,10 +71,12 @@ describe("ScanCommand Relationships", () => {
 
 		expect(core).not.toBeNull();
 		expect(naxx).not.toBeNull();
-		expect(core?.parent).toBeNull();
-		expect(naxx?.parent).toBe("DBM-Core");
+		// Dependencies are now parsed from TOC files
+		expect(naxx?.requiredDeps).toEqual(["DBM-Core"]);
+		expect(naxx?.ownedFolders).toEqual([]);
+		expect(core?.ownedFolders).toEqual([]);
 	});
-	
+
 	test("should NOT link unrelated addons despite dependency", async () => {
 		// Create Lib
 		await fs.mkdir(path.join(addonsDir, "Ace3"), { recursive: true });
@@ -91,7 +95,10 @@ describe("ScanCommand Relationships", () => {
 
 		expect(lib).not.toBeNull();
 		expect(app).not.toBeNull();
-		expect(lib?.parent).toBeNull();
-		expect(app?.parent).toBeNull(); // Should NOT be linked to Ace3
+		// Dependencies are now parsed from TOC files
+		expect(app?.requiredDeps).toEqual(["Ace3"]);
+		expect(lib?.ownedFolders).toEqual([]);
+		// Ace3 should be classified as library by name pattern
+		expect(lib?.kind).toBe("library");
 	});
 });

@@ -201,6 +201,11 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 					wrap="truncate-end"
 				>
 					{repo.name}{" "}
+					{repo.kind === "library" && (
+						<Text color="cyan" dimColor>
+							[Lib{repo.kindOverride ? "*" : ""}]
+						</Text>
+					)}
 					{displayVersion ? <Text color="gray">({displayVersion})</Text> : null}
 				</Text>
 			</Box>

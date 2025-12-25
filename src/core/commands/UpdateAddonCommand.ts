@@ -33,12 +33,14 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 	async execute(context: CommandContext): Promise<UpdateAddonResult> {
 		const { name, folder } = this.addon;
 
-		if (this.addon.parent) {
+		// Check if this folder is owned by another addon
+		const owner = this.dbManager.getOwnerOf(folder);
+		if (owner) {
 			return {
 				repoName: name,
-				success: true,
+				success: false,
 				updated: false,
-				message: `Managed by ${this.addon.parent}`,
+				message: `Managed by ${owner.folder} - update that addon instead`,
 			};
 		}
 
@@ -240,22 +242,18 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				: remoteVersion;
 			const newCommit = isGitHash ? remoteVersion : null;
 
-			const parentFolder = this.addon.parent || folder;
+			// Update the main addon record, preserving ownedFolders
+			const ownedFolders = this.addon.ownedFolders || [];
+			this.dbManager.updateAddon(this.addon.folder, {
+				version: newVersion,
+				git_commit: newCommit,
+				last_updated: new Date().toISOString(),
+				ownedFolders, // Preserve existing ownedFolders
+			});
 
-			for (const installedFolder of foldersToInstall) {
-				let myParent: string | null = null;
-				if (installedFolder === parentFolder) {
-					myParent = null;
-				} else {
-					myParent = parentFolder;
-				}
-
-				this.dbManager.updateAddon(installedFolder, {
-					version: newVersion,
-					git_commit: newCommit,
-					last_updated: new Date().toISOString(),
-					parent: myParent,
-				});
+			// For multi-folder addons, remove any subfolder records (they're owned)
+			for (const ownedFolder of ownedFolders) {
+				this.dbManager.removeAddon(ownedFolder);
 			}
 
 			context.emit("addon:install:complete", folder);
@@ -326,7 +324,8 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		if (this.previousRecord) {
 			this.dbManager.updateAddon(this.addon.folder, {
 				version: this.previousRecord.version,
-				last_updated: this.previousRecord.last_updated,
+				last_updated:
+					this.previousRecord.last_updated || new Date().toISOString(),
 			});
 		}
 	}
