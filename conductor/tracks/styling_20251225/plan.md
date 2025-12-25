@@ -25,7 +25,7 @@
   - **Step 2:** Implementation: Import `Color` from `ink-color-pipe` and `THEME`. Replace direct `Text` color props or `ink-gradient` (if replacing) or wrap content in `<Color styles={THEME.brand}>` where appropriate.
   - **Step 3:** Verify: Ensure visual output remains consistent/improved.
 
-- [ ] Task: Refactor `ControlBar.tsx` to use Theme
+- [x] Task: Refactor `ControlBar.tsx` to use Theme 0a24f54
   - **Description:** Update the ControlBar (footer) to use `<Color>` and `THEME`.
   - **Files:** `src/tui/components/ControlBar.tsx`
   - **Step 1:** Write Test: Verify ControlBar rendering.
