@@ -2,11 +2,12 @@
 
 ## Phase 1: Investigation & Fix
 
-- [ ] Task: Reproduce and Analyze Zod Error
+- [x] Task: Reproduce and Analyze Zod Error
   - **Description:** Run tests and identify exactly which tests trigger the error and why.
   - **Files:** `tests/core/config.test.ts`, `src/core/config.ts`
   - **Step 1:** Run `bun test tests/core/config.test.ts` and capture output.
   - **Step 2:** Confirm `destDir` is the culprit.
+  - **Status:** Reproduced. ZodError logs for `destDir` confirmed in `config.test.ts`.
 
 - [ ] Task: Update Config Schema Defaults
   - **Description:** Make `destDir` optional with a default value in the Zod schema to align with the application's "NOT_CONFIGURED" fallback logic. This is the cleanest fix.
