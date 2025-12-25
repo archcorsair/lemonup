@@ -28,7 +28,7 @@
 
 ## Phase 2: Component Migration & UI
 
-- [ ] Task: Create `useTheme` Hook
+- [x] Task: Create `useTheme` Hook a67c5d1
   - **Description:** A helper hook to easily access the current theme in components.
   - **Files:** `src/tui/hooks/useTheme.ts`
   - **Step 1:** Create hook that selects `state.theme` from store.
