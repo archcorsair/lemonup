@@ -627,8 +627,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			<ScreenTitle title="Manage Addons">
 				{isSearching ? (
 					<Box>
-						<Text color="cyan">Search: </Text>
-						<TextInput value={searchQuery} onChange={setSearchQuery} />
+						{searchQuery.length > 0 && <Text color="cyan">Search: </Text>}
+						<TextInput
+							value={searchQuery}
+							onChange={setSearchQuery}
+							placeholder="Search addons by name or author (esc to cancel):"
+						/>
 					</Box>
 				) : searchQuery.length > 0 ? (
 					<Box>
@@ -636,7 +640,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 						<Text color="gray"> [/] edit [esc] clear</Text>
 					</Box>
 				) : (
-					<Text color="gray">[/] search</Text>
+					<Text color="cyan">[/] search</Text>
 				)}
 			</ScreenTitle>
 
@@ -837,7 +841,12 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								Selected: {selectedIds.size} /{" "}
 								{visibleAddons.filter((a) => !a.isChild).length}
 							</Text>
-							{showLibs && <Text color="gray"> [Libs: Visible]</Text>}
+							{showLibs && (
+								<Text color="whiteBright">
+									{" "}
+									[Libs: <Text color="green">Visible</Text>]
+								</Text>
+							)}
 						</Box>
 					)
 				}
