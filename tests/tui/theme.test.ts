@@ -1,11 +1,27 @@
 import { expect, test, describe } from "bun:test";
 // @ts-ignore - This file doesn't exist yet, but we are writing the test first
-import { THEME } from "@/tui/theme";
+import { THEME, DARK_THEME, LIGHT_THEME, themes } from "@/tui/theme";
 
 describe("Theme Registry", () => {
-  test("exports a THEME object", () => {
+  test("exports legacy THEME object", () => {
     expect(THEME).toBeDefined();
     expect(typeof THEME).toBe("object");
+  });
+
+  test("exports DARK_THEME and LIGHT_THEME", () => {
+    expect(DARK_THEME).toBeDefined();
+    expect(LIGHT_THEME).toBeDefined();
+  });
+
+  test("themes have consistent keys", () => {
+    const darkKeys = Object.keys(DARK_THEME).sort();
+    const lightKeys = Object.keys(LIGHT_THEME).sort();
+    expect(darkKeys).toEqual(lightKeys);
+  });
+
+  test("themes map contains both", () => {
+    expect(themes.dark).toBe(DARK_THEME);
+    expect(themes.light).toBe(LIGHT_THEME);
   });
 
   test("defines core semantic styles", () => {
