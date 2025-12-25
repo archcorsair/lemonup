@@ -1,6 +1,6 @@
 /**
- * Centralized Theme Registry for LemonUp
- * Uses ink-color-pipe syntax (chalk-pipe) for flexible styling.
+ * Theme Registry
+ * Uses ink-color-pipe for styling.
  */
 
 export const THEME = {
