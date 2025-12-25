@@ -37,7 +37,8 @@ export const RepositorySchema = z.object({
 export const ConfigSchema = z.object({
   destDir: z
     .string()
-    .describe("Path to World of Warcraft/_retail_/Interface/AddOns"),
+    .describe("Path to World of Warcraft/_retail_/Interface/AddOns")
+    .default("NOT_CONFIGURED"),
   userAgent: z
     .string()
     .default(
@@ -108,15 +109,15 @@ export class ConfigManager {
 
   public get(): Config {
     const raw = this.store.store;
-    logger.log("Config", `Raw theme: ${raw.theme}`);
     const result = ConfigSchema.safeParse(raw);
     if (!result.success) {
-      // Log validation error
-      console.error("[Config] Validation failed:", result.error);
-      logger.error(
-        "Config",
-        `Validation failed: ${JSON.stringify(result.error)}`,
-      );
+      // Log validation error only if debug is enabled, or warn
+      if (this.store.store.debug) {
+        logger.error(
+          "Config",
+          `Validation failed: ${JSON.stringify(result.error)}`,
+        );
+      }
 
       // If schema is invalid (first run or corrupted) return defaults or empty structure
       // Try to preserve raw values that might be valid (like theme)
@@ -137,12 +138,10 @@ export class ConfigManager {
         ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
-      logger.log("Config", `Fallback theme: ${fallback.theme}`);
       return fallback;
     }
     const config = { ...result.data, ...this.overrides };
     logger.setEnabled(config.debug || false);
-    logger.log("Config", `Valid theme: ${config.theme}`);
     return config;
   }
 
