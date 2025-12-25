@@ -17,7 +17,7 @@
   - **Step 4:** Ensure `THEME` is still exported (as a getter or proxy) temporarily if needed, or prepare for refactor.
   - **Step 5:** Update tests.
 
-- [ ] Task: Update Store for Dynamic Theming
+- [x] Task: Update Store for Dynamic Theming e8ab2af
   - **Description:** specific `theme` state in the Zustand store.
   - **Files:** `src/tui/store/useAppStore.ts`, `tests/tui/store.test.ts` (if exists) or create one.
   - **Step 1:** Add `theme` (the object) and `themeMode` (string) to the store interface.
