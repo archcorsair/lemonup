@@ -1,8 +1,10 @@
 import { Box, Text } from "ink";
+import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import type React from "react";
 import type { AddonRecord } from "@/core/db";
 import type { UpdateResult } from "@/core/manager";
+import { THEME } from "../theme";
 
 export type RepoStatus =
   | "idle"
@@ -34,87 +36,127 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
   isChild = false,
   isLastChild = false,
 }) => {
-  let icon = <Text color="gray">·</Text>;
-  let statusText = <Text color="gray">Waiting</Text>;
+  let icon = (
+    <Color styles={THEME.statusIdle}>
+      <Text>·</Text>
+    </Color>
+  );
+  let statusText = (
+    <Color styles={THEME.statusIdle}>
+      <Text>Waiting</Text>
+    </Color>
+  );
 
   const typeLabel =
     repo.type === "tukui" ? (
-      <Text color="magenta">[TukUI]</Text>
+      <Color styles={THEME.repoTukui}>
+        <Text>[TukUI]</Text>
+      </Color>
     ) : repo.type === "wowinterface" ? (
-      <Text color="yellow">[WoWI]</Text>
+      <Color styles={THEME.repoWowi}>
+        <Text>[WoWI]</Text>
+      </Color>
     ) : repo.type === "manual" ? (
-      <Text color="gray">[Man]</Text>
+      <Color styles={THEME.repoManual}>
+        <Text>[Man]</Text>
+      </Color>
     ) : (
-      <Text color="blue">[Git]</Text>
+      <Color styles={THEME.repoGit}>
+        <Text>[Git]</Text>
+      </Color>
     );
 
   switch (status) {
     case "idle":
-      icon = <Text color="gray">·</Text>;
-      statusText = <Text color="gray">Idle</Text>;
+      icon = (
+        <Color styles={THEME.statusIdle}>
+          <Text>·</Text>
+        </Color>
+      );
+      statusText = (
+        <Color styles={THEME.statusIdle}>
+          <Text>Idle</Text>
+        </Color>
+      );
       break;
     case "checking":
       icon = nerdFonts ? (
-        <Text color="yellow">
-          <SpinnerFixed type="dots" />
-        </Text>
+        <Color styles={THEME.statusChecking}>
+          <Text>
+            <SpinnerFixed type="dots" />
+          </Text>
+        </Color>
       ) : (
-        <Text color="yellow">?</Text>
+        <Color styles={THEME.statusChecking}>
+          <Text>?</Text>
+        </Color>
       );
       statusText = (
-        <Text color="yellow" wrap="truncate-end">
-          Checking...
-        </Text>
+        <Color styles={THEME.statusChecking}>
+          <Text wrap="truncate-end">Checking...</Text>
+        </Color>
       );
       break;
     case "downloading":
       icon = nerdFonts ? (
-        <Text color="cyan">
-          <SpinnerFixed type="dots" />
-        </Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>
+            <SpinnerFixed type="dots" />
+          </Text>
+        </Color>
       ) : (
-        <Text color="cyan">↓</Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>↓</Text>
+        </Color>
       );
       if (repo.type === "tukui" || repo.type === "wowinterface") {
         statusText = (
-          <Text color="cyan" wrap="truncate-end">
-            Downloading Zip...
-          </Text>
+          <Color styles={THEME.statusWorking}>
+            <Text wrap="truncate-end">Downloading Zip...</Text>
+          </Color>
         );
       } else {
         statusText = (
-          <Text color="cyan" wrap="truncate-end">
-            Git Syncing...
-          </Text>
+          <Color styles={THEME.statusWorking}>
+            <Text wrap="truncate-end">Git Syncing...</Text>
+          </Color>
         );
       }
       break;
     case "extracting":
       icon = nerdFonts ? (
-        <Text color="cyan">
-          <SpinnerFixed type="dots" />
-        </Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>
+            <SpinnerFixed type="dots" />
+          </Text>
+        </Color>
       ) : (
-        <Text color="cyan">E</Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>E</Text>
+        </Color>
       );
       statusText = (
-        <Text color="cyan" wrap="truncate-end">
-          Extracting...
-        </Text>
+        <Color styles={THEME.statusWorking}>
+          <Text wrap="truncate-end">Extracting...</Text>
+        </Color>
       );
       break;
     case "copying":
       icon = nerdFonts ? (
-        <Text color="cyan">
-          <SpinnerFixed type="dots" />
-        </Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>
+            <SpinnerFixed type="dots" />
+          </Text>
+        </Color>
       ) : (
-        <Text color="cyan">C</Text>
+        <Color styles={THEME.statusWorking}>
+          <Text>C</Text>
+        </Color>
       );
       statusText = (
-        <Text color="cyan" wrap="truncate-end">
-          Copying...
-        </Text>
+        <Color styles={THEME.statusWorking}>
+          <Text wrap="truncate-end">Copying...</Text>
+        </Color>
       );
       break;
     case "done":
@@ -124,36 +166,48 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
         const isUpdateAvailableMsg = result.message?.startsWith("Update:");
 
         if (isUpdateAvailableMsg) {
-          icon = <Text color="yellow">{nerdFonts ? "📦" : "!"}</Text>;
+          icon = (
+            <Color styles={THEME.statusWarning}>
+              <Text>{nerdFonts ? "📦" : "!"}</Text>
+            </Color>
+          );
           statusText = (
-            <Text color="yellow" wrap="truncate-end">
-              {result.message}
-            </Text>
+            <Color styles={THEME.statusWarning}>
+              <Text wrap="truncate-end">{result.message}</Text>
+            </Color>
           );
         } else {
           // "Updated to ..." - Success
-          icon = <Text color="green">{nerdFonts ? "✔" : "OK"}</Text>;
+          icon = (
+            <Color styles={THEME.statusSuccess}>
+              <Text>{nerdFonts ? "✔" : "OK"}</Text>
+            </Color>
+          );
           statusText = (
-            <Text color="green" wrap="truncate-end">
-              {result.message}
-            </Text>
+            <Color styles={THEME.statusSuccess}>
+              <Text wrap="truncate-end">{result.message}</Text>
+            </Color>
           );
         }
       } else {
         icon = <Text> </Text>;
         statusText = (
-          <Text color="green" wrap="truncate-end">
-            Up to date
-          </Text>
+          <Color styles={THEME.statusSuccess}>
+            <Text wrap="truncate-end">Up to date</Text>
+          </Color>
         );
       }
       break;
     case "error":
-      icon = <Text color="red">{nerdFonts ? "✘" : "X"}</Text>;
+      icon = (
+        <Color styles={THEME.statusError}>
+          <Text>{nerdFonts ? "✘" : "X"}</Text>
+        </Color>
+      );
       statusText = (
-        <Text color="red" wrap="truncate-end">
-          {result?.error || "Error"}
-        </Text>
+        <Color styles={THEME.statusError}>
+          <Text wrap="truncate-end">{result?.error || "Error"}</Text>
+        </Color>
       );
       break;
   }
@@ -167,16 +221,29 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
   // Tree View Indentation
   let namePrefix = null;
   if (isChild) {
-    namePrefix = <Text color="gray">{isLastChild ? "└── " : "├── "}</Text>;
+    namePrefix = (
+      <Color styles={THEME.treePrefix}>
+        <Text>{isLastChild ? "└── " : "├── "}</Text>
+      </Color>
+    );
   }
+
+  // Row selection/checked styles
+  const nameStyle = isSelected
+    ? THEME.selection
+    : isChecked
+      ? THEME.checked
+      : undefined;
 
   return (
     <Box paddingX={2} width="100%">
       <Box width={3} flexShrink={0}>
-        <Text color="blue">{isSelected ? ">" : " "}</Text>
-        <Text color={isChecked ? "green" : "gray"}>
-          {isChecked ? (nerdFonts ? "●" : "*") : " "}
-        </Text>
+        <Color styles={THEME.selection}>
+          <Text>{isSelected ? ">" : " "}</Text>
+        </Color>
+        <Color styles={isChecked ? THEME.checked : THEME.unchecked}>
+          <Text>{isChecked ? (nerdFonts ? "●" : "*") : " "}</Text>
+        </Color>
       </Box>
 
       <Box width={22} flexShrink={0}>
@@ -196,18 +263,19 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
 
       <Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
         {namePrefix}
-        <Text
-          color={isSelected ? "blue" : isChecked ? "green" : undefined}
-          wrap="truncate-end"
-        >
-          {repo.name}{" "}
-          {repo.kind === "library" && (
-            <Text color="cyan" dimColor>
-              [Lib{repo.kindOverride ? "*" : ""}]
-            </Text>
-          )}
-          {displayVersion ? <Text color="gray">({displayVersion})</Text> : null}
-        </Text>
+        <Color styles={nameStyle}>
+          <Text wrap="truncate-end">{repo.name} </Text>
+        </Color>
+        {repo.kind === "library" && (
+          <Color styles={THEME.library}>
+            <Text>[Lib{repo.kindOverride ? "*" : ""}]</Text>
+          </Color>
+        )}
+        {displayVersion ? (
+          <Color styles={THEME.version}>
+            <Text>({displayVersion})</Text>
+          </Color>
+        ) : null}
       </Box>
 
       <Box flexGrow={1} flexShrink={1} minWidth={10} flexBasis="15%">

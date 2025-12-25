@@ -38,4 +38,25 @@ export const THEME = {
   keyInactive: "white.bold",
   labelActive: "magenta",
   labelInactive: "white",
+
+  // Repository Types
+  repoTukui: "magenta",
+  repoWowi: "yellow",
+  repoManual: "gray",
+  repoGit: "blue",
+
+  // Status Colors
+  statusIdle: "gray",
+  statusWorking: "cyan", // downloading, extracting, copying
+  statusChecking: "yellow",
+  statusSuccess: "green",
+  statusWarning: "yellow", // update available
+  statusError: "red",
+
+  // Tree & List
+  treePrefix: "gray",
+  selection: "blue",
+  checked: "green",
+  unchecked: "gray",
+  library: "cyan.dim",
 } as const;
