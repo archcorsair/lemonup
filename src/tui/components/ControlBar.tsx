@@ -21,7 +21,7 @@ export const ControlBar: React.FC<ControlBarProps> = ({
 	return (
 		<Box marginTop={1} borderStyle="double" borderColor="gray" paddingX={1}>
 			<Box flexGrow={1}>{message}</Box>
-			<Box>
+			<Box flexWrap="wrap">
 				<Text>controls: </Text>
 				{controls.map((ctrl, idx) => {
 					const isActive =

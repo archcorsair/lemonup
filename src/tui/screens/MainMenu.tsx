@@ -80,13 +80,10 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 					<Box key={opt.id}>
 						<Text color={isSelected ? "green" : "white"}>
 							{isSelected ? "> " : "  "}
+						</Text>
+						<Text color={isDefault ? "yellow" : isSelected ? "green" : "white"}>
 							{opt.label}
 						</Text>
-						{isDefault && (
-							<Box marginLeft={2}>
-								<Text color="yellow">{" ●"}</Text>
-							</Box>
-						)}
 					</Box>
 				);
 			})}

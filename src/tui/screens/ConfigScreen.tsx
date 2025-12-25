@@ -4,6 +4,7 @@ import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "@/core/config";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
@@ -26,11 +27,9 @@ const SectionHeader: React.FC<{ title: string; first?: boolean }> = ({
 	first,
 }) => (
 	<Box marginTop={first ? 0 : 1} marginBottom={0}>
-		<Text color="blueBright">{"── "}</Text>
-		<Text color="blueBright" bold>
+		<Text color="magenta" bold underline>
 			{title}
 		</Text>
-		<Text color="blueBright">{" ──"}</Text>
 	</Box>
 );
 
@@ -252,12 +251,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
 	return (
 		<Box flexDirection="column" padding={1}>
-			{/* Screen Title */}
-			<Box marginBottom={1}>
-				<Text color="cyanBright" bold>
-					⚙ Settings
-				</Text>
-			</Box>
+			<ScreenTitle title="Settings" />
 
 			<Box flexDirection="column" gap={0}>
 				{/* General */}

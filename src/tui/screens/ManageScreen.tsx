@@ -12,6 +12,7 @@ import type { AddonManager, UpdateResult } from "@/core/manager";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
+import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
 import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
@@ -38,7 +39,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
 	const [refreshKey, setRefreshKey] = useState(0);
-	const [showLibs, setShowLibs] = useState(false);
+	const [showLibs, setShowLibs] = useState(config.showLibs);
 
 	const [searchQuery, setSearchQuery] = useState("");
 	const [isSearching, setIsSearching] = useState(false);
@@ -50,6 +51,15 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 	const [updateProgress, setUpdateProgress] = useState<
 		Record<string, RepoStatus>
 	>({});
+
+	// Confirmations
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const [pendingDelete, setPendingDelete] = useState<string[]>([]);
+	const [confirmKind, setConfirmKind] = useState(false);
+	const [pendingKindAddon, setPendingKindAddon] = useState<
+		(typeof visibleAddons)[0] | null
+	>(null);
+	const [confirmBackup, setConfirmBackup] = useState(false);
 
 	const getStatusPriority = useCallback(
 		(folder: string) => {
@@ -373,8 +383,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 		setConfirmDelete(false);
 	};
 
-	const [confirmDelete, setConfirmDelete] = useState(false);
-	const [pendingDelete, setPendingDelete] = useState<string[]>([]);
 	const [showMenu, setShowMenu] = useState(false);
 
 	useInput((input, key) => {
@@ -397,6 +405,62 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				flashKey("n");
 				setConfirmDelete(false);
 				setPendingDelete([]);
+			}
+			return;
+		}
+
+		if (confirmKind) {
+			if (input === "y" || key.return) {
+				flashKey("y");
+				if (pendingKindAddon) {
+					const addon = pendingKindAddon.record;
+					const newKind = addon.kind === "library" ? "addon" : "library";
+					addonManager.updateAddonMetadata(addon.folder, {
+						kind: newKind,
+						kindOverride: true,
+					});
+					setRefreshKey((prev) => prev + 1);
+					showToast(`${addon.name} marked as ${newKind}`);
+				}
+				setConfirmKind(false);
+				setPendingKindAddon(null);
+			} else if (input === "n" || key.escape) {
+				flashKey("n");
+				setConfirmKind(false);
+				setPendingKindAddon(null);
+			}
+			return;
+		}
+
+		if (confirmBackup) {
+			if (input === "y" || key.return) {
+				flashKey("y");
+				const runBackup = async () => {
+					showToast("Backing up WTF...", 0);
+					try {
+						const result = await BackupManager.backupWTF(config.destDir);
+
+						if (result === null) {
+							showToast("Backup Failed: WTF folder not found");
+						} else if (result === "skipped-recent") {
+							showToast("Backup Skipped (Too Recent)");
+						} else {
+							// Result is the path to the zip file
+							await BackupManager.cleanupBackups(
+								config.destDir,
+								config.backupRetention,
+							);
+							showToast("Backup Complete!");
+						}
+					} catch (error) {
+						showToast(`Backup Failed: ${(error as Error).message}`);
+					}
+				};
+				runBackup();
+				setConfirmBackup(false);
+			} else if (input === "n" || key.escape) {
+				flashKey("n");
+				setConfirmBackup(false);
 			}
 			return;
 		}
@@ -446,7 +510,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
 		if (input === "l") {
 			flashKey("l");
-			setShowLibs((prev) => !prev);
+			const newVal = !showLibs;
+			setShowLibs(newVal);
+			addonManager.setConfigValue("showLibs", newVal);
 			setSelectedIndex(0);
 			return;
 		}
@@ -544,51 +610,21 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			flashKey("t");
 			const currentItem = visibleAddons[selectedIndex];
 			if (currentItem && !currentItem.isChild) {
-				const addon = currentItem.record;
-				const newKind = addon.kind === "library" ? "addon" : "library";
-				addonManager.updateAddonMetadata(addon.folder, {
-					kind: newKind,
-					kindOverride: true,
-				});
-				setRefreshKey((prev) => prev + 1);
-				showToast(`${addon.name} marked as ${newKind}`);
+				setPendingKindAddon(currentItem);
+				setConfirmKind(true);
 			}
 		}
 
 		if (input === "b") {
 			flashKey("b");
-			const runBackup = async () => {
-				showToast("Backing up WTF...", 0);
-				try {
-					const result = await BackupManager.backupWTF(config.destDir);
-
-					if (result === null) {
-						showToast("Backup Failed: WTF folder not found");
-					} else if (result === "skipped-recent") {
-						showToast("Backup Skipped (Too Recent)");
-					} else {
-						// Result is the path to the zip file
-						await BackupManager.cleanupBackups(
-							config.destDir,
-							config.backupRetention,
-						);
-						showToast("Backup Complete!");
-					}
-				} catch (error) {
-					showToast(`Backup Failed: ${(error as Error).message}`);
-				}
-			};
-			runBackup();
 			if (showMenu) setShowMenu(false);
+			setConfirmBackup(true);
 		}
 	});
 
 	return (
 		<Box flexDirection="column" height="100%" width="100%">
-			<Box flexDirection="row" gap={2}>
-				<Text color="magenta" bold>
-					Manage Addons
-				</Text>
+			<ScreenTitle title="Manage Addons">
 				{isSearching ? (
 					<Box>
 						<Text color="cyan">Search: </Text>
@@ -602,7 +638,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 				) : (
 					<Text color="gray">[/] search</Text>
 				)}
-			</Box>
+			</ScreenTitle>
 
 			<Box
 				borderStyle="single"
@@ -774,6 +810,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 								: pendingDelete[0]}
 							?
 						</Text>
+					) : confirmKind ? (
+						<Text color="cyan" bold>
+							Confirm: Toggle type for {pendingKindAddon?.record.name}?
+						</Text>
+					) : confirmBackup ? (
+						<Text color="cyan" bold>
+							Confirm: Backup WTF folder?
+						</Text>
 					) : toast?.message ? (
 						toast.message.includes("Done") ||
 						toast.message.includes("Complete") ||
@@ -798,7 +842,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					)
 				}
 				controls={
-					confirmDelete
+					confirmDelete || confirmKind || confirmBackup
 						? [
 								{ key: "y", label: "confirm" },
 								{ key: "n", label: "cancel" },

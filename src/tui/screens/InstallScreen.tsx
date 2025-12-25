@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
@@ -6,6 +7,7 @@ import type { Config } from "@/core/config";
 import type { AddonManager } from "@/core/manager";
 import { getDefaultWoWPath, isPathConfigured, pathExists } from "@/core/paths";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface InstallScreenProps {
@@ -244,7 +246,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
 	return (
 		<Box flexDirection="column" gap={1}>
-			<Text bold>Install Addon</Text>
+			<ScreenTitle title="Install Addon" />
 
 			{mode === "config-auto-confirm" && (
 				<Box
@@ -329,7 +331,12 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 				</Box>
 			)}
 
-			{mode === "installing" && <Text color="yellow">{status}</Text>}
+			{mode === "installing" && (
+				<Text color="yellow">
+					{/* @ts-expect-error: Spinner types mismatch */}
+					<Spinner type="dots" /> {status}
+				</Text>
+			)}
 
 			{mode === "result" && (
 				<Box flexDirection="column">
