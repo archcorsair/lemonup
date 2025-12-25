@@ -58,6 +58,7 @@ export const ConfigSchema = z.object({
   debug: z.boolean().default(false),
   migrated_to_db: z.boolean().optional().default(false),
   showLibs: z.boolean().default(false),
+  theme: z.enum(["dark", "light"]).default("dark"),
 });
 
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -97,6 +98,7 @@ export class ConfigManager {
         debug: { type: "boolean" },
         migrated_to_db: { type: "boolean" },
         showLibs: { type: "boolean" },
+        theme: { type: "string" },
       } as const,
 
       cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -192,6 +194,7 @@ export class ConfigManager {
       debug: false,
       migrated_to_db: false,
       showLibs: false,
+      theme: "dark",
     };
     this.store.set(defaults);
   }
