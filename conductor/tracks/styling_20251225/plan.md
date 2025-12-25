@@ -18,7 +18,7 @@
 
 ## Phase 2: Component Refactoring (Core UI)
 
-- [ ] Task: Refactor `Header.tsx` to use Theme
+- [x] Task: Refactor `Header.tsx` to use Theme b72368b
   - **Description:** Update the Header component to use `<Color>` and `THEME`.
   - **Files:** `src/tui/components/Header.tsx`
   - **Step 1:** Write Test: Verify Header renders with current text.
