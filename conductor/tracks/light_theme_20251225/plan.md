@@ -39,7 +39,7 @@
   - **Step 1:** Update `Header.tsx`, `ControlBar.tsx`, `RepositoryRow.tsx`, `HelpPanel.tsx`, `ScreenTitle.tsx`.
   - **Step 2:** Replace `import { THEME }` with `const theme = useTheme()`.
 
-- [ ] Task: Add Theme Setting to ConfigScreen
+- [x] Task: Add Theme Setting to ConfigScreen 616c45f
   - **Description:** Add a selector to change the theme.
   - **Files:** `src/tui/screens/ConfigScreen.tsx`
   - **Step 1:** Add a new field/row for "Theme".
