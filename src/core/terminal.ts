@@ -1,9 +1,9 @@
 export enum TerminalProgressState {
-	Remove = 0,
-	Running = 1,
-	Error = 2,
-	Paused = 3,
-	Warning = 4,
+  Remove = 0,
+  Running = 1,
+  Error = 2,
+  Paused = 3,
+  Warning = 4,
 }
 
 // ANSI Escape Sequence Constants
@@ -17,18 +17,18 @@ const ST = `${ESC}\\`;
  * Format: OSC 9 ; 4 ; <state> ; <progress> ST
  */
 export const setTerminalProgress = (
-	state: TerminalProgressState,
-	progress = 0,
+  state: TerminalProgressState,
+  progress = 0,
 ) => {
-	if (!process.stdout.isTTY) return;
+  if (!process.stdout.isTTY) return;
 
-	// Ensure progress is 0-100
-	const p = Math.max(0, Math.min(100, Math.round(progress)));
+  // Ensure progress is 0-100
+  const p = Math.max(0, Math.min(100, Math.round(progress)));
 
-	const seq = `${OSC}9;4;${state};${p}${ST}`;
-	process.stdout.write(seq);
+  const seq = `${OSC}9;4;${state};${p}${ST}`;
+  process.stdout.write(seq);
 };
 
 export const clearTerminalProgress = () => {
-	setTerminalProgress(TerminalProgressState.Remove);
+  setTerminalProgress(TerminalProgressState.Remove);
 };

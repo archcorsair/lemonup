@@ -1,9 +1,9 @@
 import type { AddonKind } from "@/core/db";
 
 export interface LibraryDetectionResult {
-	kind: AddonKind;
-	confidence: "high" | "medium" | "low";
-	reason: string;
+  kind: AddonKind;
+  confidence: "high" | "medium" | "low";
+  reason: string;
 }
 
 /**
@@ -11,11 +11,11 @@ export interface LibraryDetectionResult {
  * These are common WoW library naming conventions.
  */
 const LIBRARY_NAME_PATTERNS = [
-	/^Lib[A-Z]/, // LibStub, LibDBIcon, LibSharedMedia, etc.
-	/^Ace[A-Z0-9]/, // Ace3, AceAddon, AceDB, etc.
-	/-\d+\.\d+$/, // LibSharedMedia-3.0, CallbackHandler-1.0
-	/^CallbackHandler/, // CallbackHandler-1.0
-	/^LibStub$/, // LibStub
+  /^Lib[A-Z]/, // LibStub, LibDBIcon, LibSharedMedia, etc.
+  /^Ace[A-Z0-9]/, // Ace3, AceAddon, AceDB, etc.
+  /-\d+\.\d+$/, // LibSharedMedia-3.0, CallbackHandler-1.0
+  /^CallbackHandler/, // CallbackHandler-1.0
+  /^LibStub$/, // LibStub
 ];
 
 /**
@@ -30,45 +30,45 @@ const LIBRARY_NAME_PATTERNS = [
  * @returns Classification result with kind, confidence, and reason
  */
 export function detectLibraryKind(
-	folderName: string,
-	tocMetadata: { xLibrary?: boolean },
-	dependencyInfo: { hasDependents: boolean; hasDependencies: boolean },
+  folderName: string,
+  tocMetadata: { xLibrary?: boolean },
+  dependencyInfo: { hasDependents: boolean; hasDependencies: boolean },
 ): LibraryDetectionResult {
-	// Primary: Explicit TOC metadata (highest confidence)
-	if (tocMetadata.xLibrary === true) {
-		return {
-			kind: "library",
-			confidence: "high",
-			reason: "TOC X-Library: true",
-		};
-	}
+  // Primary: Explicit TOC metadata (highest confidence)
+  if (tocMetadata.xLibrary === true) {
+    return {
+      kind: "library",
+      confidence: "high",
+      reason: "TOC X-Library: true",
+    };
+  }
 
-	// Secondary: Name pattern matching (medium confidence)
-	const matchesLibraryPattern = LIBRARY_NAME_PATTERNS.some((pattern) =>
-		pattern.test(folderName),
-	);
-	if (matchesLibraryPattern) {
-		return {
-			kind: "library",
-			confidence: "medium",
-			reason: "Name matches library pattern",
-		};
-	}
+  // Secondary: Name pattern matching (medium confidence)
+  const matchesLibraryPattern = LIBRARY_NAME_PATTERNS.some((pattern) =>
+    pattern.test(folderName),
+  );
+  if (matchesLibraryPattern) {
+    return {
+      kind: "library",
+      confidence: "medium",
+      reason: "Name matches library pattern",
+    };
+  }
 
-	// Tertiary: Dependency graph heuristic (low confidence)
-	// If something is depended upon but has no dependencies itself, likely a library
-	if (dependencyInfo.hasDependents && !dependencyInfo.hasDependencies) {
-		return {
-			kind: "library",
-			confidence: "low",
-			reason: "Only depended on, has no dependencies",
-		};
-	}
+  // Tertiary: Dependency graph heuristic (low confidence)
+  // If something is depended upon but has no dependencies itself, likely a library
+  if (dependencyInfo.hasDependents && !dependencyInfo.hasDependencies) {
+    return {
+      kind: "library",
+      confidence: "low",
+      reason: "Only depended on, has no dependencies",
+    };
+  }
 
-	// Default: Regular addon
-	return {
-		kind: "addon",
-		confidence: "high",
-		reason: "Default classification",
-	};
+  // Default: Regular addon
+  return {
+    kind: "addon",
+    confidence: "high",
+    reason: "Default classification",
+  };
 }

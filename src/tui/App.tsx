@@ -14,259 +14,259 @@ import { UpdateScreen } from "./screens/UpdateScreen";
 import { useAppStore } from "./store/useAppStore";
 
 const queryClient = new QueryClient({
-	defaultOptions: {
-		queries: {
-			staleTime: 60 * 1000,
-			gcTime: 5 * 60 * 1000,
-		},
-	},
+  defaultOptions: {
+    queries: {
+      staleTime: 60 * 1000,
+      gcTime: 5 * 60 * 1000,
+    },
+  },
 });
 
 interface AppProps {
-	force?: boolean;
-	dryRun?: boolean;
-	testMode?: boolean;
+  force?: boolean;
+  dryRun?: boolean;
+  testMode?: boolean;
 }
 
 export const App: React.FC<AppProps> = ({
-	force = false,
-	dryRun = false,
-	testMode = false,
+  force = false,
+  dryRun = false,
+  testMode = false,
 }) => {
-	return (
-		<QueryClientProvider client={queryClient}>
-			<TerminalSizeGuard>
-				<AppContent force={force} dryRun={dryRun} testMode={testMode} />
-			</TerminalSizeGuard>
-		</QueryClientProvider>
-	);
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TerminalSizeGuard>
+        <AppContent force={force} dryRun={dryRun} testMode={testMode} />
+      </TerminalSizeGuard>
+    </QueryClientProvider>
+  );
 };
 
 const MIN_TERMINAL_WIDTH = 80;
 const MIN_TERMINAL_HEIGHT = 20;
 
 const TerminalSizeGuard: React.FC<{ children: React.ReactNode }> = ({
-	children,
+  children,
 }) => {
-	const { stdout } = useStdout();
-	const [dims, setDims] = useState({
-		cols: stdout.columns ?? 80,
-		rows: stdout.rows ?? 24,
-	});
+  const { stdout } = useStdout();
+  const [dims, setDims] = useState({
+    cols: stdout.columns ?? 80,
+    rows: stdout.rows ?? 24,
+  });
 
-	useEffect(() => {
-		const handler = () => {
-			setDims({
-				cols: stdout.columns ?? 80,
-				rows: stdout.rows ?? 24,
-			});
-		};
-		stdout.on("resize", handler);
-		return () => {
-			stdout.off("resize", handler);
-		};
-	}, [stdout]);
+  useEffect(() => {
+    const handler = () => {
+      setDims({
+        cols: stdout.columns ?? 80,
+        rows: stdout.rows ?? 24,
+      });
+    };
+    stdout.on("resize", handler);
+    return () => {
+      stdout.off("resize", handler);
+    };
+  }, [stdout]);
 
-	if (dims.cols < MIN_TERMINAL_WIDTH || dims.rows < MIN_TERMINAL_HEIGHT) {
-		return (
-			<Box justifyContent="center" alignItems="center" height="100%">
-				<Text color="yellow">
-					Terminal too small ({dims.cols}x{dims.rows}). Minimum:{" "}
-					{MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}
-				</Text>
-			</Box>
-		);
-	}
+  if (dims.cols < MIN_TERMINAL_WIDTH || dims.rows < MIN_TERMINAL_HEIGHT) {
+    return (
+      <Box justifyContent="center" alignItems="center" height="100%">
+        <Text color="yellow">
+          Terminal too small ({dims.cols}x{dims.rows}). Minimum:{" "}
+          {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}
+        </Text>
+      </Box>
+    );
+  }
 
-	return <>{children}</>;
+  return <>{children}</>;
 };
 
 const AppContent: React.FC<AppProps> = ({
-	force = false,
-	dryRun = false,
-	testMode = false,
+  force = false,
+  dryRun = false,
+  testMode = false,
 }) => {
-	const activeScreen = useAppStore((state) => state.activeScreen);
-	const isBusy = useAppStore((state) => state.isBusy);
-	const lastMenuSelection = useAppStore((state) => state.lastMenuSelection);
-	const navigate = useAppStore((state) => state.navigate);
-	const setLastMenuSelection = useAppStore(
-		(state) => state.setLastMenuSelection,
-	);
+  const activeScreen = useAppStore((state) => state.activeScreen);
+  const isBusy = useAppStore((state) => state.isBusy);
+  const lastMenuSelection = useAppStore((state) => state.lastMenuSelection);
+  const navigate = useAppStore((state) => state.navigate);
+  const setLastMenuSelection = useAppStore(
+    (state) => state.setLastMenuSelection,
+  );
 
-	const [initialLoad, setInitialLoad] = useState(true);
-	const [showWizard, setShowWizard] = useState(false);
-	const [configManager, setConfigManager] = useState<ConfigManager | null>(
-		null,
-	);
-	const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
-	const [config, setConfig] = useState<Config | null>(null);
+  const [initialLoad, setInitialLoad] = useState(true);
+  const [showWizard, setShowWizard] = useState(false);
+  const [configManager, setConfigManager] = useState<ConfigManager | null>(
+    null,
+  );
+  const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
+  const [config, setConfig] = useState<Config | null>(null);
 
-	useEffect(() => {
-		if (configManager) return;
+  useEffect(() => {
+    if (configManager) return;
 
-		let manager: ConfigManager;
-		if (testMode) {
-			const fs = require("node:fs");
-			const path = require("node:path");
-			const os = require("node:os");
+    let manager: ConfigManager;
+    if (testMode) {
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const os = require("node:os");
 
-			const tempConfigDir = path.join(os.tmpdir(), "lemonup-test-config");
-			fs.mkdirSync(tempConfigDir, { recursive: true });
+      const tempConfigDir = path.join(os.tmpdir(), "lemonup-test-config");
+      fs.mkdirSync(tempConfigDir, { recursive: true });
 
-			const configFile = path.join(tempConfigDir, "config.json");
+      const configFile = path.join(tempConfigDir, "config.json");
 
-			if (!fs.existsSync(configFile)) {
-				let realConfig: Config | null = null;
-				const sampleConfigPath = path.join(process.cwd(), "sample_config.json");
+      if (!fs.existsSync(configFile)) {
+        let realConfig: Config | null = null;
+        const sampleConfigPath = path.join(process.cwd(), "sample_config.json");
 
-				if (fs.existsSync(sampleConfigPath)) {
-					try {
-						const raw = fs.readFileSync(sampleConfigPath, "utf-8");
-						realConfig = JSON.parse(raw);
-					} catch (e) {
-						console.error("Failed to parse sample_config.json", e);
-					}
-				}
+        if (fs.existsSync(sampleConfigPath)) {
+          try {
+            const raw = fs.readFileSync(sampleConfigPath, "utf-8");
+            realConfig = JSON.parse(raw);
+          } catch (e) {
+            console.error("Failed to parse sample_config.json", e);
+          }
+        }
 
-				if (!realConfig) {
-					const realManager = new ConfigManager();
-					if (realManager.hasConfigFile) {
-						realConfig = realManager.get();
-					}
-				}
+        if (!realConfig) {
+          const realManager = new ConfigManager();
+          if (realManager.hasConfigFile) {
+            realConfig = realManager.get();
+          }
+        }
 
-				if (realConfig) {
-					fs.writeFileSync(configFile, JSON.stringify(realConfig));
-				}
-			}
+        if (realConfig) {
+          fs.writeFileSync(configFile, JSON.stringify(realConfig));
+        }
+      }
 
-			manager = new ConfigManager({
-				cwd: tempConfigDir,
-				overrides: {
-					destDir: path.join(
-						process.cwd(),
-						"test-output",
-						"Interface",
-						"AddOns",
-					),
-				},
-			});
-		} else {
-			manager = new ConfigManager();
-		}
+      manager = new ConfigManager({
+        cwd: tempConfigDir,
+        overrides: {
+          destDir: path.join(
+            process.cwd(),
+            "test-output",
+            "Interface",
+            "AddOns",
+          ),
+        },
+      });
+    } else {
+      manager = new ConfigManager();
+    }
 
-		setConfigManager(manager);
-		setAddonManager(new AddonManager(manager));
-		if (manager.hasConfigFile) {
-			setConfig(manager.get());
-		}
-	}, [testMode, configManager]);
+    setConfigManager(manager);
+    setAddonManager(new AddonManager(manager));
+    if (manager.hasConfigFile) {
+      setConfig(manager.get());
+    }
+  }, [testMode, configManager]);
 
-	useEffect(() => {
-		if (!configManager || config) return;
+  useEffect(() => {
+    if (!configManager || config) return;
 
-		if (!configManager.hasConfigFile) {
-			setShowWizard(true);
-			return;
-		}
+    if (!configManager.hasConfigFile) {
+      setShowWizard(true);
+      return;
+    }
 
-		const cfg = configManager.get();
-		setConfig(cfg);
+    const cfg = configManager.get();
+    setConfig(cfg);
 
-		if (initialLoad) {
-			navigate("menu");
-			setInitialLoad(false);
-		}
-	}, [configManager, config, initialLoad, navigate]);
+    if (initialLoad) {
+      navigate("menu");
+      setInitialLoad(false);
+    }
+  }, [configManager, config, initialLoad, navigate]);
 
-	const handleWizardComplete = () => {
-		setShowWizard(false);
-		if (configManager) {
-			const cfg = configManager.get();
-			setConfig(cfg);
-		}
-	};
+  const handleWizardComplete = () => {
+    setShowWizard(false);
+    if (configManager) {
+      const cfg = configManager.get();
+      setConfig(cfg);
+    }
+  };
 
-	if (showWizard && configManager) {
-		return (
-			<FirstRunWizard
-				configManager={configManager}
-				onComplete={handleWizardComplete}
-			/>
-		);
-	}
+  if (showWizard && configManager) {
+    return (
+      <FirstRunWizard
+        configManager={configManager}
+        onComplete={handleWizardComplete}
+      />
+    );
+  }
 
-	if (!config || !configManager) {
-		return <Text>Loading config...</Text>;
-	}
+  if (!config || !configManager) {
+    return <Text>Loading config...</Text>;
+  }
 
-	return (
-		<Box
-			flexDirection="column"
-			padding={1}
-			borderStyle="round"
-			borderColor="cyan"
-		>
-			<Header dryRun={dryRun} isBusy={isBusy} testMode={testMode} />
+  return (
+    <Box
+      flexDirection="column"
+      padding={1}
+      borderStyle="round"
+      borderColor="cyan"
+    >
+      <Header dryRun={dryRun} isBusy={isBusy} testMode={testMode} />
 
-			{activeScreen === "menu" && (
-				<MainMenu
-					config={config}
-					configManager={configManager}
-					initialSelection={lastMenuSelection}
-					onSelect={(option) => {
-						setLastMenuSelection(option);
-						// @ts-expect-error: Screen type is broad
-						navigate(option);
-					}}
-				/>
-			)}
+      {activeScreen === "menu" && (
+        <MainMenu
+          config={config}
+          configManager={configManager}
+          initialSelection={lastMenuSelection}
+          onSelect={(option) => {
+            setLastMenuSelection(option);
+            // @ts-expect-error: Screen type is broad
+            navigate(option);
+          }}
+        />
+      )}
 
-			{activeScreen === "update" && config && addonManager && (
-				<UpdateScreen
-					config={config}
-					addonManager={addonManager}
-					force={force}
-					dryRun={dryRun}
-					testMode={testMode}
-					onBack={() => {
-						setConfig(addonManager.getConfig());
-						navigate("menu");
-					}}
-				/>
-			)}
+      {activeScreen === "update" && config && addonManager && (
+        <UpdateScreen
+          config={config}
+          addonManager={addonManager}
+          force={force}
+          dryRun={dryRun}
+          testMode={testMode}
+          onBack={() => {
+            setConfig(addonManager.getConfig());
+            navigate("menu");
+          }}
+        />
+      )}
 
-			{activeScreen === "manage" && config && addonManager && (
-				<ManageScreen
-					config={config}
-					addonManager={addonManager}
-					force={force}
-					dryRun={dryRun}
-					onBack={() => {
-						setConfig(addonManager.getConfig());
-						navigate("menu");
-					}}
-				/>
-			)}
+      {activeScreen === "manage" && config && addonManager && (
+        <ManageScreen
+          config={config}
+          addonManager={addonManager}
+          force={force}
+          dryRun={dryRun}
+          onBack={() => {
+            setConfig(addonManager.getConfig());
+            navigate("menu");
+          }}
+        />
+      )}
 
-			{activeScreen === "install" && config && addonManager && (
-				<InstallScreen
-					config={config}
-					addonManager={addonManager}
-					onBack={() => {
-						setConfig(addonManager.getConfig());
-						navigate("menu");
-					}}
-				/>
-			)}
+      {activeScreen === "install" && config && addonManager && (
+        <InstallScreen
+          config={config}
+          addonManager={addonManager}
+          onBack={() => {
+            setConfig(addonManager.getConfig());
+            navigate("menu");
+          }}
+        />
+      )}
 
-			{activeScreen === "config" && configManager && (
-				<ConfigScreen
-					configManager={configManager}
-					onBack={() => navigate("menu")}
-				/>
-			)}
-		</Box>
-	);
+      {activeScreen === "config" && configManager && (
+        <ConfigScreen
+          configManager={configManager}
+          onBack={() => navigate("menu")}
+        />
+      )}
+    </Box>
+  );
 };

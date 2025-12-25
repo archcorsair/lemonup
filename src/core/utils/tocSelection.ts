@@ -1,8 +1,8 @@
 import type { GameFlavor } from "@/core/db";
 
 export interface TocSelectionResult {
-	selected: string;
-	confidence: "exact" | "fallback" | "ambiguous";
+  selected: string;
+  confidence: "exact" | "fallback" | "ambiguous";
 }
 
 /**
@@ -10,9 +10,9 @@ export interface TocSelectionResult {
  * Order matters - first match wins.
  */
 const FLAVOR_SUFFIXES: Record<GameFlavor, string[]> = {
-	retail: ["-Retail", "_Mainline", "-Mainline"],
-	classic: ["-Classic", "_Classic", "-Vanilla", "_Vanilla", "-Era", "_Era"],
-	cata: ["-Cata", "_Cata", "-Cataclysm", "_Cataclysm"],
+  retail: ["-Retail", "_Mainline", "-Mainline"],
+  classic: ["-Classic", "_Classic", "-Vanilla", "_Vanilla", "-Era", "_Era"],
+  cata: ["-Cata", "_Cata", "-Cataclysm", "_Cataclysm"],
 };
 
 /**
@@ -29,45 +29,45 @@ const FLAVOR_SUFFIXES: Record<GameFlavor, string[]> = {
  * @returns Selection result with the chosen file and confidence level
  */
 export function selectTocFile(
-	addonFolder: string,
-	tocFiles: string[],
-	targetFlavor: GameFlavor,
+  addonFolder: string,
+  tocFiles: string[],
+  targetFlavor: GameFlavor,
 ): TocSelectionResult {
-	if (tocFiles.length === 0) {
-		throw new Error(`No TOC files found for addon: ${addonFolder}`);
-	}
+  if (tocFiles.length === 0) {
+    throw new Error(`No TOC files found for addon: ${addonFolder}`);
+  }
 
-	if (tocFiles.length === 1) {
-		// Safe: we just checked length === 1
-		return { selected: tocFiles[0] as string, confidence: "exact" };
-	}
+  if (tocFiles.length === 1) {
+    // Safe: we just checked length === 1
+    return { selected: tocFiles[0] as string, confidence: "exact" };
+  }
 
-	const baseToc = `${addonFolder}.toc`;
-	const suffixes = FLAVOR_SUFFIXES[targetFlavor];
+  const baseToc = `${addonFolder}.toc`;
+  const suffixes = FLAVOR_SUFFIXES[targetFlavor];
 
-	// Look for exact flavor-specific match
-	for (const suffix of suffixes) {
-		const flavorToc = `${addonFolder}${suffix}.toc`;
-		const found = tocFiles.find(
-			(f) => f.toLowerCase() === flavorToc.toLowerCase(),
-		);
-		if (found) {
-			return { selected: found, confidence: "exact" };
-		}
-	}
+  // Look for exact flavor-specific match
+  for (const suffix of suffixes) {
+    const flavorToc = `${addonFolder}${suffix}.toc`;
+    const found = tocFiles.find(
+      (f) => f.toLowerCase() === flavorToc.toLowerCase(),
+    );
+    if (found) {
+      return { selected: found, confidence: "exact" };
+    }
+  }
 
-	// Fallback to base TOC
-	const baseFound = tocFiles.find(
-		(f) => f.toLowerCase() === baseToc.toLowerCase(),
-	);
-	if (baseFound) {
-		return { selected: baseFound, confidence: "fallback" };
-	}
+  // Fallback to base TOC
+  const baseFound = tocFiles.find(
+    (f) => f.toLowerCase() === baseToc.toLowerCase(),
+  );
+  if (baseFound) {
+    return { selected: baseFound, confidence: "fallback" };
+  }
 
-	// Ambiguous: no flavor match, no base match - pick first alphabetically
-	const sorted = [...tocFiles].sort((a, b) =>
-		a.toLowerCase().localeCompare(b.toLowerCase()),
-	);
-	// Safe: we checked tocFiles.length > 0 at the start
-	return { selected: sorted[0] as string, confidence: "ambiguous" };
+  // Ambiguous: no flavor match, no base match - pick first alphabetically
+  const sorted = [...tocFiles].sort((a, b) =>
+    a.toLowerCase().localeCompare(b.toLowerCase()),
+  );
+  // Safe: we checked tocFiles.length > 0 at the start
+  return { selected: sorted[0] as string, confidence: "ambiguous" };
 }
