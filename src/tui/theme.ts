@@ -8,22 +8,31 @@ export const THEME = {
   brand: "cyan.bold",
 
   // Status Indicators
+
   success: "green.bold",
+
   error: "red.bold",
+
   warning: "yellow.bold",
+
   info: "blue",
 
+  busy: "yellow",
+
+  dryRun: "yellow.bold",
+
+  testMode: "magenta",
+
   // Text Styles
-  muted: "gray.dim",
+
+  muted: "gray",
+
   highlight: "white.bold",
 
   // Specific UI Elements
-  keybinding: "gray",
-  description: "white",
 
-  // Addon List Styles
-  addonName: "white.bold",
-  version: "cyan",
+  version: "gray",
+
   installed: "green",
   notInstalled: "gray",
 } as const;
