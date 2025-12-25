@@ -33,14 +33,8 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 	async execute(context: CommandContext): Promise<UpdateAddonResult> {
 		const { name, folder } = this.addon;
 
-		if (this.addon.parent) {
-			return {
-				repoName: name,
-				success: true,
-				updated: false,
-				message: `Managed by ${this.addon.parent}`,
-			};
-		}
+		// TODO (Task 5): Check if addon is owned by another addon via getOwnerOf
+		// Skip update if this folder is in another addon's ownedFolders
 
 		context.emit("addon:update-check:start", folder);
 
@@ -240,21 +234,12 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				: remoteVersion;
 			const newCommit = isGitHash ? remoteVersion : null;
 
-			const parentFolder = this.addon.parent || folder;
-
+			// TODO (Task 5): Handle multi-folder addons via ownedFolders
 			for (const installedFolder of foldersToInstall) {
-				let myParent: string | null = null;
-				if (installedFolder === parentFolder) {
-					myParent = null;
-				} else {
-					myParent = parentFolder;
-				}
-
 				this.dbManager.updateAddon(installedFolder, {
 					version: newVersion,
 					git_commit: newCommit,
 					last_updated: new Date().toISOString(),
-					parent: myParent,
 				});
 			}
 

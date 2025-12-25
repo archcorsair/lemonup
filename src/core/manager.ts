@@ -103,7 +103,13 @@ export class AddonManager extends EventEmitter {
 					interface: null,
 					url: repo.gitRemote || repo.downloadUrl || null,
 					type: repo.type as "github" | "tukui",
-					parent: null,
+					ownedFolders: [],
+					kind: "addon",
+					kindOverride: false,
+					flavor: "retail",
+					requiredDeps: [],
+					optionalDeps: [],
+					embeddedLibs: [],
 					install_date: new Date().toISOString(),
 					last_updated: new Date().toISOString(),
 				});
@@ -142,9 +148,7 @@ export class AddonManager extends EventEmitter {
 		remoteVersion: string;
 		error?: string;
 	}> {
-		if (addon.parent) {
-			return { updateAvailable: false, remoteVersion: "" };
-		}
+		// TODO (Task 5): Check if addon is owned by another via getOwnerOf
 
 		if (!addon.url) {
 			return {

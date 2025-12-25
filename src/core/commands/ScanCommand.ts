@@ -128,7 +128,13 @@ export class ScanCommand implements Command<number> {
 						interface: gameInterface,
 						url: null,
 						type: "manual",
-						parent: null,
+						ownedFolders: [],
+						kind: "addon",
+						kindOverride: false,
+						flavor: "retail",
+						requiredDeps: [],
+						optionalDeps: [],
+						embeddedLibs: [],
 						install_date: new Date().toISOString(),
 						last_updated: new Date().toISOString(),
 					});
@@ -143,63 +149,8 @@ export class ScanCommand implements Command<number> {
 			}
 		}
 
-		// Post-scan: Check for parent-child relationships
-		const allAddons = this.dbManager.getAll();
-		const sortedAddons = [...allAddons].sort(
-			(a, b) => a.folder.length - b.folder.length,
-		);
-
-		for (const addon of allAddons) {
-			if (addon.parent) continue;
-
-			// Strategy 1: Prefix Matching
-			const possibleParents = sortedAddons.filter((candidate) => {
-				if (candidate.folder === addon.folder) return false;
-				const child = addon.folder.toLowerCase();
-				const parent = candidate.folder.toLowerCase();
-
-				if (child.startsWith(`${parent}_`) || child.startsWith(`${parent}-`)) {
-					return true;
-				}
-				if (child.startsWith(parent)) {
-					return true;
-				}
-				return false;
-			});
-
-			let parent = possibleParents[0];
-
-			// Strategy 2: Dependencies (handling DBM-Core -> DBM-Naxx)
-			if (!parent) {
-				const deps = folderDeps.get(addon.folder);
-				if (deps && deps.length > 0) {
-					for (const depName of deps) {
-						const depAddon = allAddons.find(
-							(a) => a.folder.toLowerCase() === depName.toLowerCase(),
-						);
-						if (depAddon) {
-							// Check if the dependency looks like a "Core" or base addon
-							// DBM-Naxx depends on DBM-Core. DBM-Naxx contains "DBM".
-							const depBase = depAddon.folder
-								.replace(/[-_]Core$/i, "")
-								.replace(/[-_]Base$/i, "");
-
-							if (
-								addon.folder.toLowerCase().startsWith(depBase.toLowerCase()) &&
-								depBase.length >= 3 // Avoid matching short common prefixes accidentally
-							) {
-								parent = depAddon;
-								break;
-							}
-						}
-					}
-				}
-			}
-
-			if (parent) {
-				this.dbManager.updateAddon(addon.folder, { parent: parent.folder });
-			}
-		}
+		// TODO (Task 5): Replace old parent-child logic with new ownedFolders + dependencies model
+		// Old parent-child relationship logic removed - will be replaced in Task 5
 
 		context.emit("scan:complete", count);
 		return count;

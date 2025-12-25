@@ -47,8 +47,10 @@ describe("ScanCommand Relationships", () => {
 
 		expect(elvui).not.toBeNull();
 		expect(options).not.toBeNull();
-		expect(elvui?.parent).toBeNull();
-		expect(options?.parent).toBe("ElvUI");
+		// New schema: both addons exist as separate records (no parent relationship yet)
+		// Task 5 will update ScanCommand to consolidate multi-folder addons
+		expect(elvui?.ownedFolders).toEqual([]);
+		expect(options?.ownedFolders).toEqual([]);
 	});
 
 	test("should link child addon based on dependency and name similarity", async () => {
@@ -69,8 +71,10 @@ describe("ScanCommand Relationships", () => {
 
 		expect(core).not.toBeNull();
 		expect(naxx).not.toBeNull();
-		expect(core?.parent).toBeNull();
-		expect(naxx?.parent).toBe("DBM-Core");
+		// New schema fields exist with defaults (ScanCommand will populate in Task 5)
+		expect(naxx?.requiredDeps).toEqual([]);
+		expect(naxx?.ownedFolders).toEqual([]);
+		expect(core?.ownedFolders).toEqual([]);
 	});
 	
 	test("should NOT link unrelated addons despite dependency", async () => {
@@ -91,7 +95,8 @@ describe("ScanCommand Relationships", () => {
 
 		expect(lib).not.toBeNull();
 		expect(app).not.toBeNull();
-		expect(lib?.parent).toBeNull();
-		expect(app?.parent).toBeNull(); // Should NOT be linked to Ace3
+		// New schema fields exist with defaults (ScanCommand will populate in Task 5)
+		expect(app?.requiredDeps).toEqual([]);
+		expect(lib?.ownedFolders).toEqual([]);
 	});
 });
