@@ -3,6 +3,7 @@ import { Box, Text, useStdout } from "ink";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { type Config, ConfigManager } from "@/core/config";
+import { logger } from "@/core/logger";
 import { AddonManager } from "@/core/manager";
 import { Header } from "./components/Header";
 import { FirstRunWizard } from "./FirstRunWizard";

@@ -191,22 +191,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         const nextTheme = themeMode === "dark" ? "light" : "dark";
         setTheme(nextTheme);
         configManager.set("theme", nextTheme);
-
-        // Extensive Debug
-        try {
-          // Force strict sync?
-          const fs = require("node:fs");
-          const raw = fs.readFileSync(configManager.path, "utf-8");
-          const json = JSON.parse(raw);
-
-          // Verify via ConfigManager getter too
-          const getterVal = configManager.get().theme;
-
-          showToast(`File: ${json.theme} | Get: ${getterVal}`, 5000);
-        } catch (e) {
-          // @ts-expect-error
-          showToast(`Debug Err: ${e.message}`, 5000);
-        }
+        showToast("Theme Updated!", 1000);
       }
     }
     if (activeField === "checkInterval") {

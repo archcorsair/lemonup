@@ -110,7 +110,15 @@ export class ConfigManager {
     const raw = this.store.store;
     const result = ConfigSchema.safeParse(raw);
     if (!result.success) {
+      // Log validation error
+      console.error("[Config] Validation failed:", result.error);
+      logger.error(
+        "Config",
+        `Validation failed: ${JSON.stringify(result.error)}`,
+      );
+
       // If schema is invalid (first run or corrupted) return defaults or empty structure
+      // Try to preserve raw values that might be valid (like theme)
       return {
         destDir: "NOT_CONFIGURED",
         userAgent: "DEFAULT_UA",
@@ -125,6 +133,7 @@ export class ConfigManager {
         migrated_to_db: false,
         showLibs: false,
         theme: "dark",
+        ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
     }
