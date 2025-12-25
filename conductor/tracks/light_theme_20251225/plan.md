@@ -2,7 +2,7 @@
 
 ## Phase 1: Theme Engine & Configuration
 
-- [ ] Task: Update Config Schema for Theme
+- [x] Task: Update Config Schema for Theme 38b7d1a
   - **Description:** Add the `theme` property to the configuration schema.
   - **Files:** `src/core/config.ts`, `tests/core/config.test.ts`
   - **Step 1:** Update `configSchema` in `src/core/config.ts` to include `theme`.
