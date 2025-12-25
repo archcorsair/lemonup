@@ -53,6 +53,10 @@ export const THEME = {
   statusWarning: "yellow", // update available
   statusError: "red",
 
+  // Help Panel
+  helpKey: "yellow.bold",
+  helpLabel: "gray",
+
   // Tree & List
   treePrefix: "gray",
   selection: "blue",
