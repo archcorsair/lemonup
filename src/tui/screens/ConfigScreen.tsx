@@ -3,6 +3,7 @@ import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "@/core/config";
+import { logger } from "@/core/logger";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useToast } from "@/tui/hooks/useToast";
@@ -48,6 +49,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
   const [activeField, setActiveField] = useState<Field>("destDir");
+  const [isEditingDestDir, setIsEditingDestDir] = useState(false);
   const { toast, showToast } = useToast();
 
   const getNextInterval = (current: number) => {
@@ -82,6 +84,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   }, [configManager]);
 
   useInput((input, key) => {
+    // If editing destDir, trap all input except Enter/Escape
+    if (isEditingDestDir) {
+      if (key.return) {
+        flashKey("enter");
+        configManager.set("destDir", destDir);
+        setIsEditingDestDir(false);
+        showToast("Saved!", 1000);
+      } else if (key.escape) {
+        flashKey("esc");
+        // Revert changes
+        const cfg = configManager.get();
+        setDestDir(cfg.destDir === "NOT_CONFIGURED" ? "" : cfg.destDir);
+        setIsEditingDestDir(false);
+      }
+      return;
+    }
+
     const fields: Field[] = [
       "destDir",
       "maxConcurrent",
@@ -130,10 +149,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       }
     }
 
-    if (activeField === "destDir" && key.return) {
+    if (activeField === "destDir" && (key.return || input === " ")) {
       flashKey("enter");
-      configManager.set("destDir", destDir);
-      showToast("Saved!", 1000);
+      setIsEditingDestDir(true);
     }
 
     if (activeField === "nerdFonts") {
@@ -261,17 +279,25 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         <ConfigOption
           label="WoW AddOns Directory"
           isActive={activeField === "destDir"}
-          helpText="Type path and press Enter to save."
+          helpText={
+            isEditingDestDir
+              ? "Press Enter to save, Esc to cancel."
+              : "Press Enter or Space to edit path."
+          }
         >
-          {activeField === "destDir" ? (
-            <TextInput
-              value={destDir}
-              onChange={setDestDir}
-              onSubmit={(val) => {
-                configManager.set("destDir", val);
-                showToast("Saved!", 1000);
-              }}
-            />
+          {isEditingDestDir ? (
+            <Box>
+              <Text color="yellow" bold>
+                [EDITING]
+              </Text>
+              <Box marginLeft={1}>
+                <TextInput
+                  value={destDir}
+                  onChange={setDestDir}
+                  onSubmit={() => {}}
+                />
+              </Box>
+            </Box>
           ) : (
             <Text color={destDir ? "white" : "gray"}>
               {destDir || "Not Configured"}
@@ -293,7 +319,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           label="Check Interval"
           isActive={activeField === "checkInterval"}
         >
-          <Text color="yellow">
+          <Text color="yellow" bold>
             {"◂"} {formatInterval(checkInterval)} {"▸"}
           </Text>
         </ConfigOption>
@@ -303,6 +329,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         <ConfigOption
           label="Auto-backup WTF Folder"
           isActive={activeField === "backupWTF"}
+          helpText="Backup only occurs when running 'Update All'."
         >
           <Text color={backupWTF ? "green" : "red"}>
             {backupWTF ? "Enabled" : "Disabled"}
@@ -331,9 +358,16 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         {/* Advanced */}
         <SectionHeader title="Advanced" />
         <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
-          <Text color={debug ? "green" : "gray"}>
-            {debug ? "Enabled" : "Disabled"}
-          </Text>
+          <Box>
+            <Text color={debug ? "green" : "gray"}>
+              {debug ? "Enabled" : "Disabled"}
+            </Text>
+            {debug && (
+              <Box marginLeft={2}>
+                <Text color="gray">({logger.getLogPath()})</Text>
+              </Box>
+            )}
+          </Box>
         </ConfigOption>
       </Box>
 
@@ -348,8 +382,8 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         controls={[
           { key: "↑/↓", label: "nav" },
           { key: "←/→", label: "modify" },
-          { key: "space", label: "toggle" },
-          { key: "enter", label: "save text" },
+          { key: "space", label: "toggle/edit" },
+          { key: "enter", label: "edit" },
           { key: "esc", label: "back" },
         ]}
       />

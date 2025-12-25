@@ -26,6 +26,10 @@ export class Logger {
     this.logPath = logPath;
   }
 
+  public getLogPath(): string {
+    return this.logPath;
+  }
+
   private getTimestamp(): string {
     return new Date().toISOString();
   }
