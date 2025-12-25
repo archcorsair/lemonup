@@ -30,9 +30,10 @@ export const THEME = {
   highlight: "white.bold",
 
   // Specific UI Elements
-
   version: "gray",
-
-  installed: "green",
-  notInstalled: "gray",
+  border: "gray",
+  keyActive: "magenta.bold",
+  keyInactive: "white.bold",
+  labelActive: "magenta",
+  labelInactive: "white",
 } as const;

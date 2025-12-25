@@ -1,6 +1,8 @@
 import { Box, Text } from "ink";
+import Color from "ink-color-pipe";
 import React from "react";
 import { useAppStore } from "@/tui/store/useAppStore";
+import { THEME } from "../theme";
 
 export interface ControlHelp {
   key: string;
@@ -19,7 +21,12 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   const activeKey = useAppStore((state) => state.activeKey);
 
   return (
-    <Box marginTop={1} borderStyle="double" borderColor="gray" paddingX={1}>
+    <Box
+      marginTop={1}
+      borderStyle="double"
+      borderColor={THEME.border}
+      paddingX={1}
+    >
       <Box flexGrow={1}>{message}</Box>
       <Box flexWrap="wrap">
         {controls.map((ctrl, idx) => {
@@ -30,13 +37,14 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           return (
             <React.Fragment key={ctrl.key}>
               {idx > 0 && <Text>, </Text>}
-              <Text bold color={isActive ? "magenta" : "white"}>
-                {ctrl.key}
-              </Text>
-              <Text color={isActive ? "magenta" : undefined}>
-                {" "}
-                ({ctrl.label})
-              </Text>
+              <Color styles={isActive ? THEME.keyActive : THEME.keyInactive}>
+                <Text>{ctrl.key}</Text>
+              </Color>
+              <Color
+                styles={isActive ? THEME.labelActive : THEME.labelInactive}
+              >
+                <Text> ({ctrl.label})</Text>
+              </Color>
             </React.Fragment>
           );
         })}
