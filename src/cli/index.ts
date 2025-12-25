@@ -4,63 +4,63 @@ import { AddonManager } from "@/core/manager";
 import pkg from "../../package.json";
 
 export async function runCLI() {
-	const args = arg({
-		"--force": Boolean,
-		"-f": "--force",
-		"--cli": Boolean, // Consumed by index.ts, but valid here
-		"--version": Boolean,
-		"-v": "--version",
-	});
+  const args = arg({
+    "--force": Boolean,
+    "-f": "--force",
+    "--cli": Boolean, // Consumed by index.ts, but valid here
+    "--version": Boolean,
+    "-v": "--version",
+  });
 
-	if (args["--version"]) {
-		console.log(pkg.version);
-		return;
-	}
+  if (args["--version"]) {
+    console.log(pkg.version);
+    return;
+  }
 
-	const force = args["--force"] || false;
+  const force = args["--force"] || false;
 
-	const configManager = new ConfigManager();
-	const manager = new AddonManager(configManager);
+  const configManager = new ConfigManager();
+  const manager = new AddonManager(configManager);
 
-	console.log(`Starting Lemonup v${pkg.version} (CLI Mode)...`);
+  console.log(`Starting Lemonup v${pkg.version} (CLI Mode)...`);
 
-	const config = manager.getConfig();
-	if (!config.repositories.length) {
-		console.warn(
-			"No repositories found in config. Please verify configuration at:",
-			configManager.path,
-		);
-		// Don't exit here, just warn.
-	}
+  const config = manager.getConfig();
+  if (!config.repositories.length) {
+    console.warn(
+      "No repositories found in config. Please verify configuration at:",
+      configManager.path,
+    );
+    // Don't exit here, just warn.
+  }
 
-	try {
-		const results = await manager.updateAll(force);
-		let successCount = 0;
-		let failCount = 0;
+  try {
+    const results = await manager.updateAll(force);
+    let successCount = 0;
+    let failCount = 0;
 
-		for (const res of results) {
-			if (res.success) {
-				if (res.updated) {
-					console.log(`[UPDATED] ${res.repoName} - ${res.message}`);
-				} else {
-					console.log(
-						`[OK]      ${res.repoName} - ${res.message || "Up to date"}`,
-					);
-				}
-				successCount++;
-			} else {
-				console.error(`[ERROR]   ${res.repoName} - ${res.error}`);
-				failCount++;
-			}
-		}
+    for (const res of results) {
+      if (res.success) {
+        if (res.updated) {
+          console.log(`[UPDATED] ${res.repoName} - ${res.message}`);
+        } else {
+          console.log(
+            `[OK]      ${res.repoName} - ${res.message || "Up to date"}`,
+          );
+        }
+        successCount++;
+      } else {
+        console.error(`[ERROR]   ${res.repoName} - ${res.error}`);
+        failCount++;
+      }
+    }
 
-		console.log(`\nFinished: ${successCount} successful, ${failCount} failed.`);
+    console.log(`\nFinished: ${successCount} successful, ${failCount} failed.`);
 
-		if (failCount > 0) {
-			process.exit(1);
-		}
-	} catch (error) {
-		console.error("Fatal error during update process:", error);
-		process.exit(1);
-	}
+    if (failCount > 0) {
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error("Fatal error during update process:", error);
+    process.exit(1);
+  }
 }

@@ -6,29 +6,29 @@ import { withFullScreen } from "@/tui/withFullScreen";
 import pkg from "./package.json";
 
 async function main() {
-	try {
-		const args = arg(
-			{
-				"--cli": Boolean,
-				"--force": Boolean,
-				"-f": "--force",
-				"--dry-run": Boolean,
-				"--test": Boolean,
-				"--help": Boolean,
-				"-h": "--help",
-				"--version": Boolean,
-				"-v": "--version",
-			},
-			{ permissive: true },
-		);
+  try {
+    const args = arg(
+      {
+        "--cli": Boolean,
+        "--force": Boolean,
+        "-f": "--force",
+        "--dry-run": Boolean,
+        "--test": Boolean,
+        "--help": Boolean,
+        "-h": "--help",
+        "--version": Boolean,
+        "-v": "--version",
+      },
+      { permissive: true },
+    );
 
-		if (args["--version"]) {
-			console.log(pkg.version);
-			process.exit(0);
-		}
+    if (args["--version"]) {
+      console.log(pkg.version);
+      process.exit(0);
+    }
 
-		if (args["--help"]) {
-			console.log(`
+    if (args["--help"]) {
+      console.log(`
 LemonUp 🍋 - WoW Addon Manager (v${pkg.version})
 
 Usage:
@@ -42,38 +42,38 @@ Flags:
   --version, -v  Show version number
   --help, -h     Show this help message
 			`);
-			process.exit(0);
-		}
+      process.exit(0);
+    }
 
-		if (args["--cli"]) {
-			await runCLI();
-		} else {
-			const { start, waitUntilExit } = withFullScreen(
-				<App
-					force={args["--force"]}
-					dryRun={args["--dry-run"]}
-					testMode={args["--test"]}
-				/>,
-			);
-			await start();
-			await waitUntilExit();
-			process.exit(0);
-		}
-	} catch (err) {
-		// biome-ignore lint/suspicious/noExplicitAny: error code property is not standard but present on ARG_UNKNOWN_OPTION
-		if (err instanceof Error && (err as any).code === "ARG_UNKNOWN_OPTION") {
-			console.error(err.message);
-			console.error("Run 'lemonup --help' for usage.");
-			process.exit(1);
-		}
+    if (args["--cli"]) {
+      await runCLI();
+    } else {
+      const { start, waitUntilExit } = withFullScreen(
+        <App
+          force={args["--force"]}
+          dryRun={args["--dry-run"]}
+          testMode={args["--test"]}
+        />,
+      );
+      await start();
+      await waitUntilExit();
+      process.exit(0);
+    }
+  } catch (err) {
+    // biome-ignore lint/suspicious/noExplicitAny: error code property is not standard but present on ARG_UNKNOWN_OPTION
+    if (err instanceof Error && (err as any).code === "ARG_UNKNOWN_OPTION") {
+      console.error(err.message);
+      console.error("Run 'lemonup --help' for usage.");
+      process.exit(1);
+    }
 
-		if (err instanceof Error) {
-			console.error(err.message);
-		} else {
-			console.error(err);
-		}
-		process.exit(1);
-	}
+    if (err instanceof Error) {
+      console.error(err.message);
+    } else {
+      console.error(err);
+    }
+    process.exit(1);
+  }
 }
 
 main().catch(console.error);
