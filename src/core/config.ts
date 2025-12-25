@@ -124,6 +124,7 @@ export class ConfigManager {
         debug: false,
         migrated_to_db: false,
         showLibs: false,
+        theme: "dark",
         ...this.overrides,
       } as unknown as Config;
     }
