@@ -26,7 +26,7 @@
 
 - [x] Task: Conductor - User Manual Verification 'Theme Engine & Configuration' (Protocol in workflow.md)
 
-## Phase 2: Component Migration & UI
+## Phase 2: Component Migration & UI [checkpoint: 487776d]
 
 - [x] Task: Create `useTheme` Hook a67c5d1
   - **Description:** A helper hook to easily access the current theme in components.
