@@ -44,7 +44,9 @@ export const ConfigSchema = z.object({
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     ),
   repositories: z.array(RepositorySchema).default([]),
-  defaultMenuOption: z.enum(["update", "manage", "config"]).default("update"),
+  defaultMenuOption: z
+    .enum(["update", "install", "manage", "config"])
+    .default("update"),
   maxConcurrent: z.number().min(1).max(10).default(3),
   nerdFonts: z.boolean().default(true),
   checkInterval: z

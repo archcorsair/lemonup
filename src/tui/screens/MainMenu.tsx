@@ -9,10 +9,9 @@ import { useAppStore } from "@/tui/store/useAppStore";
 interface MainMenuProps {
   config: Config;
   configManager: ConfigManager;
-  initialSelection?: string;
+  initialSelection?: string | null;
   onSelect: (option: string) => void;
 }
-
 const OPTIONS = [
   { id: "update", label: "Update All" },
   { id: "install", label: "Install Addon" },
