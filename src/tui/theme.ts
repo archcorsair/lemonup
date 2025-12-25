@@ -29,6 +29,8 @@ export const THEME = {
 
   highlight: "white.bold",
 
+  heading: "magenta.bold",
+
   // Specific UI Elements
   version: "gray",
   border: "gray",
