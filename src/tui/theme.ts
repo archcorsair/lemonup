@@ -62,15 +62,55 @@ export type Theme = {
 
 export const LIGHT_THEME: Theme = {
   ...DARK_THEME,
+  // Core Identity
+  brand: "blue.bold",
+
+  // Status Indicators
+  success: "green",
+  error: "red",
+  warning: "magenta",
+  info: "blue",
+  busy: "magenta",
+  dryRun: "magenta.bold",
+  testMode: "blue",
+
   // Text Styles
+  muted: "black.dim",
   highlight: "black.bold",
+  heading: "blue.bold",
 
   // Specific UI Elements
-  keyInactive: "black.bold",
+  version: "black.dim",
+  border: "black",
+  keyActive: "blue.bold",
+  keyInactive: "black",
+  labelActive: "blue",
   labelInactive: "black",
 
+  // Repository Types
+  repoTukui: "magenta",
+  repoWowi: "red",
+  repoManual: "black.dim",
+  repoGit: "blue",
+
+  // Status Colors
+  statusIdle: "black.dim",
+  statusWorking: "blue",
+  statusChecking: "magenta",
+  statusSuccess: "green",
+  statusWarning: "magenta",
+  statusError: "red",
+
+  // Help Panel
+  helpKey: "blue.bold",
+  helpLabel: "black",
+
   // Tree & List
+  treePrefix: "black.dim",
+  selection: "blue",
+  checked: "green",
   unchecked: "black.dim",
+  library: "magenta.dim",
 };
 
 export const themes = {
