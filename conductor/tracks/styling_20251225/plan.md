@@ -31,7 +31,7 @@
   - **Step 1:** Write Test: Verify ControlBar rendering.
   - **Step 2:** Implementation: Use `THEME.keybinding` (or similar) for keys and `THEME.description` for text.
 
-- [ ] Task: Refactor `ScreenTitle.tsx` to use Theme
+- [x] Task: Refactor `ScreenTitle.tsx` to use Theme 439ab1b
   - **Description:** Update the ScreenTitle to use `<Color>` and `THEME`.
   - **Files:** `src/tui/components/ScreenTitle.tsx`
   - **Step 1:** Write Test: Verify ScreenTitle.
