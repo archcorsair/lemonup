@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [ ] Track: Adopt ink-color-pipe for improved styling foundation
-*Link: [./conductor/tracks/styling_20251225/](./conductor/tracks/styling_20251225/)*
+## [ ] Track: Implement Light Theme and Theme Settings
+*Link: [./conductor/tracks/light_theme_20251225/](./conductor/tracks/light_theme_20251225/)*
