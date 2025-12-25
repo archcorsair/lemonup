@@ -8,7 +8,7 @@
   - **Step 1:** Update `configSchema` in `src/core/config.ts` to include `theme`.
   - **Step 2:** Verify with test.
 
-- [ ] Task: Define Light Theme
+- [x] Task: Define Light Theme 0162416
   - **Description:** Create the light theme definition in the registry.
   - **Files:** `src/tui/theme.ts`, `tests/tui/theme.test.ts`
   - **Step 1:** Rename `THEME` to `DARK_THEME`.
