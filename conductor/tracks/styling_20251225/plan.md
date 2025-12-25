@@ -7,7 +7,7 @@
   - **Files:** `package.json`
   - **Step 1:** Run `bun add ink-color-pipe`.
 
-- [ ] Task: Create centralized Theme Registry
+- [x] Task: Create centralized Theme Registry 3b2ff12
   - **Description:** Define the semantic style constants for the application.
   - **Files:** `src/tui/theme.ts`
   - **Step 1:** Create `src/tui/theme.ts`.
