@@ -10,7 +10,7 @@ interface Toast {
 interface AppState {
   // Navigation State
   activeScreen: Screen;
-  lastMenuSelection: string;
+  lastMenuSelection: string | null;
 
   // Global UI State
   isBusy: boolean;
@@ -34,7 +34,7 @@ let toastId = 0;
 
 export const useAppStore = create<AppState>((set, get) => ({
   activeScreen: "menu",
-  lastMenuSelection: "update", // default fallback
+  lastMenuSelection: null, // default to null so MainMenu uses config default
   isBusy: false,
   activeKey: null,
   toast: null,
