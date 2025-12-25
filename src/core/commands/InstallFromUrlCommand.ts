@@ -232,7 +232,7 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 				const installedHash =
 					(await GitClient.getCurrentCommit(tempDir)) || null;
 				for (const addonName of installedNames) {
-					// TODO (Task 5): Handle multi-folder addons via ownedFolders
+					// TODO: Handle multi-folder addons via ownedFolders
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,
 						type: REPO_TYPE.GITHUB,
@@ -242,7 +242,7 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
 				}
 			} else if (repoType === "wowinterface" && wowInterfaceDetails !== null) {
 				for (const addonName of installedNames) {
-					// TODO (Task 5): Handle multi-folder addons via ownedFolders
+					// TODO: Handle multi-folder addons via ownedFolders
 					this.dbManager.updateAddon(addonName, {
 						url: this.url,
 						type: REPO_TYPE.WOWINTERFACE,

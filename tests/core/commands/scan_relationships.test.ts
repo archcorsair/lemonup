@@ -10,7 +10,7 @@ describe("ScanCommand Relationships", () => {
 	const tempDir = path.join(process.cwd(), "test-output", "ScanRelationships");
 	const addonsDir = path.join(tempDir, "Interface", "AddOns");
 	const configDir = path.join(tempDir, "Config");
-	
+
 	let configManager: ConfigManager;
 	let dbManager: DatabaseManager;
 
@@ -48,7 +48,7 @@ describe("ScanCommand Relationships", () => {
 		expect(elvui).not.toBeNull();
 		expect(options).not.toBeNull();
 		// New schema: both addons exist as separate records (no parent relationship yet)
-		// Task 5 will update ScanCommand to consolidate multi-folder addons
+		// TODO: Will update ScanCommand to consolidate multi-folder addons
 		expect(elvui?.ownedFolders).toEqual([]);
 		expect(options?.ownedFolders).toEqual([]);
 	});
@@ -71,12 +71,12 @@ describe("ScanCommand Relationships", () => {
 
 		expect(core).not.toBeNull();
 		expect(naxx).not.toBeNull();
-		// New schema fields exist with defaults (ScanCommand will populate in Task 5)
-		expect(naxx?.requiredDeps).toEqual([]);
+		// Dependencies are now parsed from TOC files
+		expect(naxx?.requiredDeps).toEqual(["DBM-Core"]);
 		expect(naxx?.ownedFolders).toEqual([]);
 		expect(core?.ownedFolders).toEqual([]);
 	});
-	
+
 	test("should NOT link unrelated addons despite dependency", async () => {
 		// Create Lib
 		await fs.mkdir(path.join(addonsDir, "Ace3"), { recursive: true });
@@ -95,8 +95,10 @@ describe("ScanCommand Relationships", () => {
 
 		expect(lib).not.toBeNull();
 		expect(app).not.toBeNull();
-		// New schema fields exist with defaults (ScanCommand will populate in Task 5)
-		expect(app?.requiredDeps).toEqual([]);
+		// Dependencies are now parsed from TOC files
+		expect(app?.requiredDeps).toEqual(["Ace3"]);
 		expect(lib?.ownedFolders).toEqual([]);
+		// Ace3 should be classified as library by name pattern
+		expect(lib?.kind).toBe("library");
 	});
 });

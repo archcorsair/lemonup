@@ -540,6 +540,21 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 			}
 		}
 
+		if (input === "t") {
+			flashKey("t");
+			const currentItem = visibleAddons[selectedIndex];
+			if (currentItem && !currentItem.isChild) {
+				const addon = currentItem.record;
+				const newKind = addon.kind === "library" ? "addon" : "library";
+				addonManager.updateAddonMetadata(addon.folder, {
+					kind: newKind,
+					kindOverride: true,
+				});
+				setRefreshKey((prev) => prev + 1);
+				showToast(`${addon.name} marked as ${newKind}`);
+			}
+		}
+
 		if (input === "b") {
 			flashKey("b");
 			const runBackup = async () => {
@@ -808,6 +823,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 					{ key: "u", label: "Update Selected" },
 					{ key: "c", label: "Check Updates" },
 					{ key: "l", label: "Toggle Libs" },
+					{ key: "t", label: "Toggle Kind" },
 					{ key: "d", label: "Delete Selected" },
 					{ key: "b", label: "Backup WTF" },
 					{ key: "q", label: "Quit Application" },

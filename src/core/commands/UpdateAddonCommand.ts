@@ -33,8 +33,16 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 	async execute(context: CommandContext): Promise<UpdateAddonResult> {
 		const { name, folder } = this.addon;
 
-		// TODO (Task 5): Check if addon is owned by another addon via getOwnerOf
-		// Skip update if this folder is in another addon's ownedFolders
+		// Check if this folder is owned by another addon
+		const owner = this.dbManager.getOwnerOf(folder);
+		if (owner) {
+			return {
+				repoName: name,
+				success: false,
+				updated: false,
+				message: `Managed by ${owner.folder} - update that addon instead`,
+			};
+		}
 
 		context.emit("addon:update-check:start", folder);
 
@@ -234,13 +242,18 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 				: remoteVersion;
 			const newCommit = isGitHash ? remoteVersion : null;
 
-			// TODO (Task 5): Handle multi-folder addons via ownedFolders
-			for (const installedFolder of foldersToInstall) {
-				this.dbManager.updateAddon(installedFolder, {
-					version: newVersion,
-					git_commit: newCommit,
-					last_updated: new Date().toISOString(),
-				});
+			// Update the main addon record, preserving ownedFolders
+			const ownedFolders = this.addon.ownedFolders || [];
+			this.dbManager.updateAddon(this.addon.folder, {
+				version: newVersion,
+				git_commit: newCommit,
+				last_updated: new Date().toISOString(),
+				ownedFolders, // Preserve existing ownedFolders
+			});
+
+			// For multi-folder addons, remove any subfolder records (they're owned)
+			for (const ownedFolder of ownedFolders) {
+				this.dbManager.removeAddon(ownedFolder);
 			}
 
 			context.emit("addon:install:complete", folder);
@@ -311,7 +324,8 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
 		if (this.previousRecord) {
 			this.dbManager.updateAddon(this.addon.folder, {
 				version: this.previousRecord.version,
-				last_updated: this.previousRecord.last_updated,
+				last_updated:
+					this.previousRecord.last_updated || new Date().toISOString(),
 			});
 		}
 	}

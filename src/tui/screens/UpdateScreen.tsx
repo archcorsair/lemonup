@@ -40,7 +40,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 		"idle" | "running" | "success" | "error" | "skipped"
 	>("idle");
 
-	// TODO (Task 5): Filter out owned folders
+	// TODO: Filter out owned folders
 	const allAddons = useMemo(() => addonManager.getAllAddons(), [addonManager]);
 	const hasRun = useRef(false);
 	const remoteVersions = useRef<Record<string, string>>({});
