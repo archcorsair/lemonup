@@ -27,7 +27,8 @@ type Field =
   | "nerdFonts"
   | "terminalProgress"
   | "themeMode"
-  | "debug";
+  | "debug"
+  | "restartOnboarding";
 
 const SectionHeader: React.FC<{
   title: string;
@@ -49,6 +50,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 }) => {
   const flashKey = useAppStore((state) => state.flashKey);
   const devMode = useAppStore((state) => state.devMode);
+  const triggerOnboarding = useAppStore((state) => state.triggerOnboarding);
   const { theme, themeMode, setTheme } = useTheme();
 
   const [maxConcurrent, setMaxConcurrent] = useState(3);
@@ -158,6 +160,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "terminalProgress",
       "themeMode",
       "debug",
+      "restartOnboarding",
     ];
 
     if (key.upArrow || input === "k") {
@@ -356,6 +359,13 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         showToast("Saved!", 1000);
       }
     }
+
+    if (activeField === "restartOnboarding") {
+      if (key.return || input === " ") {
+        flashKey(input === " " ? "space" : "enter");
+        triggerOnboarding();
+      }
+    }
   });
 
   const ConfigOption: React.FC<{
@@ -537,6 +547,15 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               </Box>
             )}
           </Box>
+        </ConfigOption>
+        <ConfigOption
+          label="Restart Onboarding"
+          isActive={activeField === "restartOnboarding"}
+          helpText="Press Enter or Space to restart the setup wizard."
+        >
+          <Color styles={theme.statusIdle}>
+            <Text bold>Press Enter to launch</Text>
+          </Color>
         </ConfigOption>
       </Box>
 

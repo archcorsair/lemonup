@@ -108,6 +108,8 @@ const AppContent: React.FC<AppProps> = ({
   const setDevMode = useAppStore((state) => state.setDevMode);
   const setNextCheckTime = useAppStore((state) => state.setNextCheckTime);
   const showToast = useAppStore((state) => state.showToast);
+  const showOnboarding = useAppStore((state) => state.showOnboarding);
+  const clearOnboarding = useAppStore((state) => state.clearOnboarding);
 
   const [initialLoad, setInitialLoad] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
@@ -303,6 +305,24 @@ const AppContent: React.FC<AppProps> = ({
     showToast,
     progressBar,
   ]);
+
+  // Handle store-triggered onboarding (from ConfigScreen)
+  const handleOnboardingComplete = () => {
+    clearOnboarding();
+    if (configManager) {
+      const cfg = configManager.get();
+      setConfig(cfg);
+    }
+  };
+
+  if (showOnboarding && configManager) {
+    return (
+      <FirstRunWizard
+        configManager={configManager}
+        onComplete={handleOnboardingComplete}
+      />
+    );
+  }
 
   if (showWizard && configManager) {
     return (
