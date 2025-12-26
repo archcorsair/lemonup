@@ -20,11 +20,12 @@
 
 ## Phase 2: Directory Step Refinement and Bug Fixes
 
-- [ ] Task: Relocate Validation Indicator and Improve Editing UI
+- [x] Task: Relocate Validation Indicator and Improve Editing UI
   - **Description:** Move the validation icon to the left of the path. Replace `[EDITING]` label with a more refined visual cue.
   - **Files:** `src/tui/FirstRunWizard.tsx`
   - **Step 1:** Update `DirectoryStep` layout to render the validation icon (checkmark/cross) before the path/input.
   - **Step 2:** Redesign the editing state indicator (e.g., use a different border color or a prompt icon instead of `[EDITING]`).
+  - **Commit:** b8d1339
 
 - [ ] Task: Fix Directory Validation Bug and Implement Error Feedback
   - **Description:** Prevent proceeding from Step 2 if the path is invalid. Show a visual error message on failed attempt to proceed.
