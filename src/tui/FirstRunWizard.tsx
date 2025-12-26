@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Box, Text, useApp, useInput } from "ink";
 import Color from "ink-color-pipe";
 import TextInput from "ink-text-input";
@@ -31,6 +33,13 @@ interface WizardState {
 
 const TOTAL_STEPS = 5;
 const STEP_NAMES = ["Theme", "Directory", "Addons", "Settings", "Review"];
+
+const expandPath = (p: string): string => {
+  if (p.startsWith("~/") || p === "~") {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+};
 
 // Progress bar component
 const WizardProgress: React.FC<{
@@ -587,7 +596,12 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             setDirEditMode(false);
             // Validate path when done editing
             if (wizardState.destDir) {
-              const valid = fs.existsSync(wizardState.destDir);
+              const cleaned = wizardState.destDir.trim();
+              const expanded = expandPath(cleaned);
+              if (expanded !== wizardState.destDir) {
+                updateWizardState({ destDir: expanded });
+              }
+              const valid = fs.existsSync(expanded);
               setPathValid(valid);
               if (!valid) {
                 setError("Directory not found. Please check the path.");
@@ -628,10 +642,18 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         if (key.return) {
           flashKey("enter");
 
-          const currentPath = wizardState.destDir;
-          const isValid = currentPath ? fs.existsSync(currentPath) : false;
+          const currentPath = wizardState.destDir
+            ? wizardState.destDir.trim()
+            : "";
+          const expandedPath = expandPath(currentPath);
 
-          if (!currentPath) {
+          if (expandedPath !== wizardState.destDir) {
+            updateWizardState({ destDir: expandedPath });
+          }
+
+          const isValid = expandedPath ? fs.existsSync(expandedPath) : false;
+
+          if (!expandedPath) {
             setError("WoW AddOns directory is required to continue.");
             setDirEditMode(true);
             return;
