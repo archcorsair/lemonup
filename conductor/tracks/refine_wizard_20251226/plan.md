@@ -1,6 +1,6 @@
 # Plan: Refine First Run Wizard
 
-## Phase 1: Theming and Progress Bar Visuals
+## Phase 1: Theming and Progress Bar Visuals [checkpoint: eed2fbb]
 
 - [x] Task: Audit and Refactor Theme Tokens for Wizard
   - **Description:** Review `src/tui/FirstRunWizard.tsx` for hardcoded colors. Update `src/tui/theme.ts` with any necessary semantic tokens for the wizard.
