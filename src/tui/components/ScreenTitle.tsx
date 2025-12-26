@@ -1,5 +1,7 @@
 import { Box, Text } from "ink";
+import Color from "ink-color-pipe";
 import type React from "react";
+import { useTheme } from "@/tui/hooks/useTheme";
 
 interface ScreenTitleProps {
   title: string;
@@ -9,11 +11,14 @@ interface ScreenTitleProps {
 export const ScreenTitle: React.FC<ScreenTitleProps> = ({
   title,
   children,
-}) => (
-  <Box flexDirection="row" gap={2}>
-    <Text color="magenta" bold>
-      {title}
-    </Text>
-    {children}
-  </Box>
-);
+}) => {
+  const { theme } = useTheme();
+  return (
+    <Box flexDirection="row" gap={2}>
+      <Color styles={theme.heading}>
+        <Text>{title}</Text>
+      </Color>
+      {children}
+    </Box>
+  );
+};

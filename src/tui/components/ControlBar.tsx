@@ -1,10 +1,12 @@
 import { Box, Text } from "ink";
+import Color from "ink-color-pipe";
 import React from "react";
 import { useAppStore } from "@/tui/store/useAppStore";
+import { useTheme } from "../hooks/useTheme";
 
 export interface ControlHelp {
   key: string;
-  label: string;
+  label: React.ReactNode;
 }
 
 export interface ControlBarProps {
@@ -16,13 +18,18 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   message,
   controls,
 }) => {
+  const { theme } = useTheme();
   const activeKey = useAppStore((state) => state.activeKey);
 
   return (
-    <Box marginTop={1} borderStyle="double" borderColor="gray" paddingX={1}>
+    <Box
+      marginTop={1}
+      borderStyle="double"
+      borderColor={theme.border}
+      paddingX={1}
+    >
       <Box flexGrow={1}>{message}</Box>
       <Box flexWrap="wrap">
-        <Text>controls: </Text>
         {controls.map((ctrl, idx) => {
           const isActive =
             activeKey === ctrl.key ||
@@ -31,13 +38,14 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           return (
             <React.Fragment key={ctrl.key}>
               {idx > 0 && <Text>, </Text>}
-              <Text bold color={isActive ? "magenta" : "white"}>
-                {ctrl.key}
-              </Text>
-              <Text color={isActive ? "magenta" : undefined}>
-                {" "}
-                ({ctrl.label})
-              </Text>
+              <Color styles={isActive ? theme.keyActive : theme.keyInactive}>
+                <Text>{ctrl.key}</Text>
+              </Color>
+              <Color
+                styles={isActive ? theme.labelActive : theme.labelInactive}
+              >
+                <Text> ({ctrl.label})</Text>
+              </Color>
             </React.Fragment>
           );
         })}

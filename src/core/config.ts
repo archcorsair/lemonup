@@ -37,7 +37,8 @@ export const RepositorySchema = z.object({
 export const ConfigSchema = z.object({
   destDir: z
     .string()
-    .describe("Path to World of Warcraft/_retail_/Interface/AddOns"),
+    .describe("Path to World of Warcraft/_retail_/Interface/AddOns")
+    .default("NOT_CONFIGURED"),
   userAgent: z
     .string()
     .default(
@@ -58,6 +59,7 @@ export const ConfigSchema = z.object({
   debug: z.boolean().default(false),
   migrated_to_db: z.boolean().optional().default(false),
   showLibs: z.boolean().default(false),
+  theme: z.enum(["dark", "light"]).default("dark"),
 });
 
 export type Repository = z.infer<typeof RepositorySchema>;
@@ -97,6 +99,7 @@ export class ConfigManager {
         debug: { type: "boolean" },
         migrated_to_db: { type: "boolean" },
         showLibs: { type: "boolean" },
+        theme: { type: "string" },
       } as const,
 
       cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -108,8 +111,17 @@ export class ConfigManager {
     const raw = this.store.store;
     const result = ConfigSchema.safeParse(raw);
     if (!result.success) {
+      // Log validation error only if debug is enabled, or warn
+      if (this.store.store.debug) {
+        logger.error(
+          "Config",
+          `Validation failed: ${JSON.stringify(result.error)}`,
+        );
+      }
+
       // If schema is invalid (first run or corrupted) return defaults or empty structure
-      return {
+      // Try to preserve raw values that might be valid (like theme)
+      const fallback = {
         destDir: "NOT_CONFIGURED",
         userAgent: "DEFAULT_UA",
         repositories: [],
@@ -122,8 +134,11 @@ export class ConfigManager {
         debug: false,
         migrated_to_db: false,
         showLibs: false,
+        theme: "dark",
+        ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
+      return fallback;
     }
     const config = { ...result.data, ...this.overrides };
     logger.setEnabled(config.debug || false);
@@ -192,6 +207,7 @@ export class ConfigManager {
       debug: false,
       migrated_to_db: false,
       showLibs: false,
+      theme: "dark",
     };
     this.store.set(defaults);
   }
