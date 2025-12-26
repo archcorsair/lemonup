@@ -4,8 +4,8 @@ import Gradient from "ink-gradient";
 import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
+import { useTheme } from "@/tui/hooks/useTheme";
 import pkg from "../../../package.json";
-import { useTheme } from "../hooks/useTheme";
 
 // Workaround for React 19 + Ink type mismatch
 const SpinnerFixed = Spinner as unknown as React.FC<{

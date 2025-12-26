@@ -1,4 +1,4 @@
-import { useAppStore } from "../store/useAppStore";
+import { useAppStore } from "@/tui/store/useAppStore";
 
 /**
  * Hook to access the current theme and theme mode.

@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 import Color from "ink-color-pipe";
 import type React from "react";
-import { useTheme } from "../hooks/useTheme";
+import { useTheme } from "@/tui/hooks/useTheme";
 
 interface Shortcut {
   key: string;
