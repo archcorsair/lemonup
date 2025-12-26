@@ -4,7 +4,7 @@
   <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
   <h3>World of Warcraft Addon Manager</h3>
   <p>A fast, lightweight, and beautiful TUI for managing your WoW addons.</p>
-  <img width="1795" height="679" alt="lemonup_screenshot" src="https://github.com/user-attachments/assets/9390e669-386a-45b9-9db7-2654256f3baf" />
+  <img width="1514" height="746" alt="lemonup screenshot" src="https://github.com/user-attachments/assets/f8af4c10-a84a-4ace-b9a6-4806add3294a" />
 </div>
 
 ---
