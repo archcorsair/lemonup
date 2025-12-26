@@ -215,25 +215,28 @@ const DirectoryStep: React.FC<{
           )
         ) : isEditing ? (
           <Box>
-            <Color styles={theme.statusChecking}>
-              <Text bold>[EDITING] </Text>
+            <Color styles={theme.brand}>
+              <Text bold>✎ </Text>
             </Color>
             <TextInput
               value={destDir}
               onChange={onDirChange}
+              placeholder="Enter path to WoW AddOns folder..."
               onSubmit={() => onEditToggle(false)}
             />
           </Box>
         ) : (
           <Box>
+            <Box width={3}>
+              {destDir && pathValid !== null && (
+                <Color styles={pathValid ? theme.success : theme.error}>
+                  <Text bold>{pathValid ? " ✓" : " ✗"}</Text>
+                </Color>
+              )}
+            </Box>
             <Color styles={theme.labelInactive}>
               <Text>Path: {destDir || "(press Enter to edit)"}</Text>
             </Color>
-            {destDir && pathValid !== null && (
-              <Color styles={pathValid ? theme.success : theme.error}>
-                <Text> {pathValid ? "✓" : "✗ Not found"}</Text>
-              </Color>
-            )}
           </Box>
         )}
       </Box>
