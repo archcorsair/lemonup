@@ -32,7 +32,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   addonManager,
   onBack,
 }) => {
-  const { theme, themeMode } = useTheme();
+  const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
   const [config, setConfig] = useState(initialConfig);
   const [mode, setMode] = useState<Mode>("select");
@@ -321,13 +321,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
                     </Box>
                   )}
                   <Color
-                    styles={
-                      isSelected
-                        ? themeMode === "light"
-                          ? theme.highlight
-                          : theme.success
-                        : theme.labelInactive
-                    }
+                    styles={isSelected ? theme.highlight : theme.labelInactive}
                   >
                     <Text>
                       {isSelected ? "> " : "  "} {opt.label}
