@@ -50,15 +50,18 @@ const WizardProgress: React.FC<{
       const segmentColor =
         i < currentStep ? theme.progressCompleted : theme.progressPending;
 
+      // Adjust segment length if marker is wider (checked state)
+      const segmentLen = isCompleted ? halfSegment - 1 : halfSegment;
+
       // Add leading half-segment (before marker)
       elements.push(
         <Color key={`pre-${i}`} styles={segmentColor}>
-          <Text>{"━".repeat(halfSegment)}</Text>
+          <Text>{"━".repeat(segmentLen)}</Text>
         </Color>,
       );
 
       // Add marker
-      const marker = isCompleted ? "✓" : isCurrent ? "●" : "○";
+      const marker = isCompleted ? " ✓ " : isCurrent ? "●" : "○";
       const markerColor = isCompleted
         ? theme.progressCompleted
         : isCurrent
@@ -75,7 +78,7 @@ const WizardProgress: React.FC<{
         i + 1 < currentStep ? theme.progressCompleted : theme.progressPending;
       elements.push(
         <Color key={`post-${i}`} styles={trailingColor}>
-          <Text>{"━".repeat(halfSegment)}</Text>
+          <Text>{"━".repeat(segmentLen)}</Text>
         </Color>,
       );
     }
