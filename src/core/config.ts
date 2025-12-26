@@ -54,6 +54,12 @@ export const ConfigSchema = z.object({
     .number()
     .min(60000)
     .default(60000 * 5), // 5 minutes
+  autoCheckEnabled: z.boolean().default(true),
+  autoCheckInterval: z
+    .number()
+    .min(60 * 1000) // 1 minute (dev mode), UI enforces 30min for normal use
+    .max(4 * 60 * 60 * 1000) // 4 hours
+    .default(60 * 60 * 1000), // 1 hour
   backupWTF: z.boolean().default(true),
   backupRetention: z.number().min(1).default(5),
   debug: z.boolean().default(false),
@@ -94,6 +100,8 @@ export class ConfigManager {
         maxConcurrent: { type: "number" },
         nerdFonts: { type: "boolean" },
         checkInterval: { type: "number" },
+        autoCheckEnabled: { type: "boolean" },
+        autoCheckInterval: { type: "number" },
         backupWTF: { type: "boolean" },
         backupRetention: { type: "number" },
         debug: { type: "boolean" },
@@ -129,6 +137,8 @@ export class ConfigManager {
         maxConcurrent: 3,
         nerdFonts: true,
         checkInterval: 60000 * 5,
+        autoCheckEnabled: true,
+        autoCheckInterval: 60 * 60 * 1000,
         backupWTF: true,
         backupRetention: 5,
         debug: false,
@@ -202,6 +212,8 @@ export class ConfigManager {
       maxConcurrent: 3,
       nerdFonts: true,
       checkInterval: 60000 * 5,
+      autoCheckEnabled: false,
+      autoCheckInterval: 60 * 60 * 1000,
       backupWTF: true,
       backupRetention: 5,
       debug: false,

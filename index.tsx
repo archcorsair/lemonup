@@ -14,6 +14,7 @@ async function main() {
         "-f": "--force",
         "--dry-run": Boolean,
         "--test": Boolean,
+        "--dev": Boolean,
         "--help": Boolean,
         "-h": "--help",
         "--version": Boolean,
@@ -38,7 +39,8 @@ Flags:
   --cli          Run in CLI mode (no TUI)
   --force, -f    Force update check/installation
   --dry-run      Simulate actions without modifying files
-  --test         Run in test mode (uses temp directories)
+  --test         Run in dev mode (uses temp directories)
+  --dev          Run in dev mode (uses temp directories)
   --version, -v  Show version number
   --help, -h     Show this help message
 			`);
@@ -52,7 +54,7 @@ Flags:
         <App
           force={args["--force"]}
           dryRun={args["--dry-run"]}
-          testMode={args["--test"]}
+          testMode={args["--test"] || args["--dev"]}
         />,
       );
       await start();
