@@ -58,6 +58,7 @@ The easiest way to start using LemonUp is by heading over to the [getting starte
 ## Install
 ### Available builds
 - Linux (x64)
+    - 🗒️ Note: Remember to run `chmod +x ./lemonup`
 - MacOS Apple Silicon (arm64)
 - MacOS (x64)
 - Windows (x64)
