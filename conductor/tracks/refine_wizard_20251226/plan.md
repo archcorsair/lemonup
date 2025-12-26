@@ -27,10 +27,11 @@
   - **Step 2:** Redesign the editing state indicator (e.g., use a different border color or a prompt icon instead of `[EDITING]`).
   - **Commit:** b8d1339
 
-- [ ] Task: Fix Directory Validation Bug and Implement Error Feedback
+- [x] Task: Fix Directory Validation Bug and Implement Error Feedback
   - **Description:** Prevent proceeding from Step 2 if the path is invalid. Show a visual error message on failed attempt to proceed.
   - **Files:** `src/tui/FirstRunWizard.tsx`
   - **Step 1:** Update `useInput` logic for Step 2 to block `goNext()` if `pathValid` is false or directory is empty.
   - **Step 2:** Implement an error display within the `FirstRunWizard` that triggers when navigation is blocked due to invalid input.
+  - **Commit:** 7b6626f
 
 - [ ] Task: Conductor - User Manual Verification 'Directory Step Refinement and Bug Fixes' (Protocol in workflow.md)
