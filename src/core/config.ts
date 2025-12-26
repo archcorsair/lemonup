@@ -54,7 +54,7 @@ export const ConfigSchema = z.object({
     .number()
     .min(60000)
     .default(60000 * 5), // 5 minutes
-  autoCheckEnabled: z.boolean().default(false),
+  autoCheckEnabled: z.boolean().default(true),
   autoCheckInterval: z
     .number()
     .min(60 * 1000) // 1 minute (dev mode), UI enforces 30min for normal use
@@ -137,7 +137,7 @@ export class ConfigManager {
         maxConcurrent: 3,
         nerdFonts: true,
         checkInterval: 60000 * 5,
-        autoCheckEnabled: false,
+        autoCheckEnabled: true,
         autoCheckInterval: 60 * 60 * 1000,
         backupWTF: true,
         backupRetention: 5,
