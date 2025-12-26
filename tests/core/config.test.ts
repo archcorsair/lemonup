@@ -121,4 +121,19 @@ describe("ConfigManager", () => {
 		const config2 = manager2.get();
 		expect(config2.destDir).not.toBe("/tmp/safe");
 	});
+
+	test("should default theme to dark and allow updates", () => {
+		const manager = new ConfigManager({ cwd: TMP_DIR });
+		manager.createDefaultConfig();
+
+		// Default
+		expect(manager.get().theme).toBe("dark");
+
+		// Update
+		manager.set("theme", "light");
+		expect(manager.get().theme).toBe("light");
+
+		// Invalid should throw or be ignored (depending on Zod implementation details, conf might just throw)
+		// We'll trust Zod validation here but verify the success path primarily.
+	});
 });

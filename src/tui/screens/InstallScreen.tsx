@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
@@ -8,6 +9,7 @@ import type { AddonManager } from "@/core/manager";
 import { getDefaultWoWPath, isPathConfigured, pathExists } from "@/core/paths";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
+import { useTheme } from "@/tui/hooks/useTheme";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface InstallScreenProps {
@@ -30,6 +32,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   addonManager,
   onBack,
 }) => {
+  const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
   const [config, setConfig] = useState(initialConfig);
   const [mode, setMode] = useState<Mode>("select");
@@ -305,18 +308,25 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
             return OPTIONS.map((opt, i) => {
               const showHeader = opt.section !== lastSection;
               lastSection = opt.section;
+              const isSelected = i === selection;
               return (
                 <Box flexDirection="column" key={opt.action}>
                   {showHeader && (
                     <Box marginTop={i > 0 ? 1 : 0} marginBottom={0}>
-                      <Text color="yellow" bold underline>
-                        {opt.section}
-                      </Text>
+                      <Color styles={theme.statusWarning}>
+                        <Text bold underline>
+                          {opt.section}
+                        </Text>
+                      </Color>
                     </Box>
                   )}
-                  <Text color={i === selection ? "green" : "white"}>
-                    {i === selection ? "> " : "  "} {opt.label}
-                  </Text>
+                  <Color
+                    styles={isSelected ? theme.highlight : theme.labelInactive}
+                  >
+                    <Text>
+                      {isSelected ? "> " : "  "} {opt.label}
+                    </Text>
+                  </Color>
                 </Box>
               );
             });
@@ -332,19 +342,27 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
       )}
 
       {mode === "installing" && (
-        <Text color="yellow">
-          {/* @ts-expect-error: Spinner types mismatch */}
-          <Spinner type="dots" /> {status}
-        </Text>
+        <Color styles={theme.busy}>
+          <Text>
+            {/* @ts-expect-error: Spinner types mismatch */}
+            <Spinner type="dots" /> {status}
+          </Text>
+        </Color>
       )}
 
       {mode === "result" && (
         <Box flexDirection="column">
-          <Text color={resultStatus === "success" ? "green" : "red"}>
-            {resultStatus === "success" ? "✔ " : "✘ "}
-            {resultMessage}
-          </Text>
-          <Text color="gray">Press Enter to continue</Text>
+          <Color
+            styles={resultStatus === "success" ? theme.success : theme.error}
+          >
+            <Text>
+              {resultStatus === "success" ? "✔ " : "✘ "}
+              {resultMessage}
+            </Text>
+          </Color>
+          <Color styles={theme.muted}>
+            <Text>Press Enter to continue</Text>
+          </Color>
         </Box>
       )}
 

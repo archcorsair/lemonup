@@ -69,8 +69,13 @@ const TerminalSizeGuard: React.FC<{ children: React.ReactNode }> = ({
 
   if (dims.cols < MIN_TERMINAL_WIDTH || dims.rows < MIN_TERMINAL_HEIGHT) {
     return (
-      <Box justifyContent="center" alignItems="center" height="100%">
-        <Text color="yellow">
+      <Box
+        justifyContent="center"
+        alignItems="center"
+        height={dims.rows}
+        width={dims.cols}
+      >
+        <Text bold color="#0077aa">
           Terminal too small ({dims.cols}x{dims.rows}). Minimum:{" "}
           {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}
         </Text>
@@ -93,6 +98,8 @@ const AppContent: React.FC<AppProps> = ({
   const setLastMenuSelection = useAppStore(
     (state) => state.setLastMenuSelection,
   );
+  const setTheme = useAppStore((state) => state.setTheme);
+  const theme = useAppStore((state) => state.theme);
 
   const [initialLoad, setInitialLoad] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
@@ -159,9 +166,11 @@ const AppContent: React.FC<AppProps> = ({
     setConfigManager(manager);
     setAddonManager(new AddonManager(manager));
     if (manager.hasConfigFile) {
-      setConfig(manager.get());
+      const cfg = manager.get();
+      setConfig(cfg);
+      setTheme(cfg.theme);
     }
-  }, [testMode, configManager]);
+  }, [testMode, configManager, setTheme]);
 
   useEffect(() => {
     if (!configManager || config) return;
@@ -173,12 +182,13 @@ const AppContent: React.FC<AppProps> = ({
 
     const cfg = configManager.get();
     setConfig(cfg);
+    setTheme(cfg.theme);
 
     if (initialLoad) {
       navigate("menu");
       setInitialLoad(false);
     }
-  }, [configManager, config, initialLoad, navigate]);
+  }, [configManager, config, initialLoad, navigate, setTheme]);
 
   const handleWizardComplete = () => {
     setShowWizard(false);
@@ -206,7 +216,7 @@ const AppContent: React.FC<AppProps> = ({
       flexDirection="column"
       padding={1}
       borderStyle="round"
-      borderColor="cyan"
+      borderColor={theme.brand.split(".")[0]}
     >
       <Header dryRun={dryRun} isBusy={isBusy} testMode={testMode} />
 
@@ -264,7 +274,10 @@ const AppContent: React.FC<AppProps> = ({
       {activeScreen === "config" && configManager && (
         <ConfigScreen
           configManager={configManager}
-          onBack={() => navigate("menu")}
+          onBack={() => {
+            setConfig(configManager.get());
+            navigate("menu");
+          }}
         />
       )}
     </Box>

@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import Color from "ink-color-pipe";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useState } from "react";
@@ -6,8 +7,10 @@ import type { ConfigManager } from "@/core/config";
 import { logger } from "@/core/logger";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
+import { useTheme } from "@/tui/hooks/useTheme";
 import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
+import type { Theme } from "@/tui/theme";
 
 interface ScreenProps {
   configManager: ConfigManager;
@@ -21,16 +24,20 @@ type Field =
   | "backupWTF"
   | "backupRetention"
   | "nerdFonts"
+  | "themeMode"
   | "debug";
 
-const SectionHeader: React.FC<{ title: string; first?: boolean }> = ({
-  title,
-  first,
-}) => (
+const SectionHeader: React.FC<{
+  title: string;
+  first?: boolean;
+  theme: Theme;
+}> = ({ title, first, theme }) => (
   <Box marginTop={first ? 0 : 1} marginBottom={0}>
-    <Text color="yellow" bold underline>
-      {title}
-    </Text>
+    <Color styles={theme.statusWarning}>
+      <Text bold underline>
+        {title}
+      </Text>
+    </Color>
   </Box>
 );
 
@@ -39,6 +46,8 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   onBack,
 }) => {
   const flashKey = useAppStore((state) => state.flashKey);
+  const { theme, themeMode, setTheme } = useTheme();
+
   const [maxConcurrent, setMaxConcurrent] = useState(3);
   const [destDir, setDestDir] = useState("");
   const [nerdFonts, setNerdFonts] = useState(true);
@@ -108,6 +117,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "backupWTF",
       "backupRetention",
       "nerdFonts",
+      "themeMode",
       "debug",
     ];
 
@@ -169,6 +179,21 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       }
     }
 
+    if (activeField === "themeMode") {
+      if (
+        key.leftArrow ||
+        key.rightArrow ||
+        input === "h" ||
+        input === "l" ||
+        input === " "
+      ) {
+        flashKey(input === " " ? "space" : "←/→");
+        const nextTheme = themeMode === "dark" ? "light" : "dark";
+        setTheme(nextTheme);
+        configManager.set("theme", nextTheme);
+        showToast("Theme Updated!", 1000);
+      }
+    }
     if (activeField === "checkInterval") {
       if (key.leftArrow || input === "h") {
         flashKey("←/→");
@@ -250,17 +275,13 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
     return (
       <Box paddingLeft={1}>
-        <Text color={isActive ? "cyan" : "whiteBright"} dimColor={!isActive}>
-          {isActive ? "› " : "  "}
-        </Text>
+        <Color styles={isActive ? theme.selection : undefined}>
+          <Text>{isActive ? "› " : "  "}</Text>
+        </Color>
         <Box width={28}>
-          <Text
-            color={isActive ? "white" : "whiteBright"}
-            bold={isActive}
-            dimColor={!isActive}
-          >
-            {label}
-          </Text>
+          <Color styles={isActive ? theme.highlight : theme.labelInactive}>
+            <Text bold={isActive}>{label}</Text>
+          </Color>
         </Box>
         <Box flexGrow={1}>{children}</Box>
       </Box>
@@ -275,7 +296,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
 
       <Box flexDirection="column" gap={0}>
         {/* General */}
-        <SectionHeader title="General" first />
+        <SectionHeader title="General" first theme={theme} />
         <ConfigOption
           label="WoW AddOns Directory"
           isActive={activeField === "destDir"}
@@ -287,9 +308,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         >
           {isEditingDestDir ? (
             <Box>
-              <Text color="yellow" bold>
-                [EDITING]
-              </Text>
+              <Color styles={theme.statusChecking}>
+                <Text bold>[EDITING]</Text>
+              </Color>
               <Box marginLeft={1}>
                 <TextInput
                   value={destDir}
@@ -299,72 +320,89 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               </Box>
             </Box>
           ) : (
-            <Text color={destDir ? "white" : "gray"}>
-              {destDir || "Not Configured"}
-            </Text>
+            <Color styles={destDir ? theme.labelInactive : theme.statusIdle}>
+              <Text bold>{destDir || "Not Configured"}</Text>
+            </Color>
           )}
         </ConfigOption>
 
         {/* Updates */}
-        <SectionHeader title="Updates" />
+        <SectionHeader title="Updates" theme={theme} />
         <ConfigOption
           label="Max Concurrent Downloads"
           isActive={activeField === "maxConcurrent"}
         >
-          <Text color="yellow" bold>
-            {"◂"} {maxConcurrent} {"▸"}
-          </Text>
+          <Color styles={theme.statusChecking}>
+            <Text bold>
+              {"◂"} {maxConcurrent} {"▸"}
+            </Text>
+          </Color>
         </ConfigOption>
         <ConfigOption
           label="Check Interval"
           isActive={activeField === "checkInterval"}
         >
-          <Text color="yellow" bold>
-            {"◂"} {formatInterval(checkInterval)} {"▸"}
-          </Text>
+          <Color styles={theme.statusChecking}>
+            <Text bold>
+              {"◂"} {formatInterval(checkInterval)} {"▸"}
+            </Text>
+          </Color>
         </ConfigOption>
 
         {/* Backup */}
-        <SectionHeader title="Backup" />
+        <SectionHeader title="Backup" theme={theme} />
         <ConfigOption
           label="Auto-backup WTF Folder"
           isActive={activeField === "backupWTF"}
           helpText="Backup only occurs when running 'Update All'."
         >
-          <Text color={backupWTF ? "green" : "red"}>
-            {backupWTF ? "Enabled" : "Disabled"}
-          </Text>
+          <Color styles={backupWTF ? theme.statusSuccess : theme.statusError}>
+            <Text bold>{backupWTF ? "Enabled" : "Disabled"}</Text>
+          </Color>
         </ConfigOption>
         <ConfigOption
           label="Backup Retention"
           isActive={activeField === "backupRetention"}
         >
-          <Text color="yellow" bold>
-            {"◂"} {backupRetention} backups {"▸"}
-          </Text>
+          <Color styles={theme.statusChecking}>
+            <Text bold>
+              {"◂"} {backupRetention} backups {"▸"}
+            </Text>
+          </Color>
         </ConfigOption>
 
         {/* Appearance */}
-        <SectionHeader title="Appearance" />
+        <SectionHeader title="Appearance" theme={theme} />
         <ConfigOption
           label="Nerd Fonts (Icons)"
           isActive={activeField === "nerdFonts"}
         >
-          <Text color={nerdFonts ? "green" : "red"}>
-            {nerdFonts ? "Enabled" : "Disabled"}
-          </Text>
+          <Color styles={nerdFonts ? theme.statusSuccess : theme.statusError}>
+            <Text bold>{nerdFonts ? "Enabled" : "Disabled"}</Text>
+          </Color>
+        </ConfigOption>
+        <ConfigOption label="Theme" isActive={activeField === "themeMode"}>
+          <Color
+            styles={
+              themeMode === "dark" ? theme.repoTukui : theme.statusWorking
+            }
+          >
+            <Text bold>{themeMode === "dark" ? "Dark" : "Light"}</Text>
+          </Color>
         </ConfigOption>
 
         {/* Advanced */}
-        <SectionHeader title="Advanced" />
+        <SectionHeader title="Advanced" theme={theme} />
         <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
           <Box>
-            <Text color={debug ? "green" : "gray"}>
-              {debug ? "Enabled" : "Disabled"}
-            </Text>
+            <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
+              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
+            </Color>
             {debug && (
               <Box marginLeft={2}>
-                <Text color="gray">({logger.getLogPath()})</Text>
+                <Color styles={theme.statusIdle}>
+                  <Text>({logger.getLogPath()})</Text>
+                </Color>
               </Box>
             )}
           </Box>
@@ -374,7 +412,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       <ControlBar
         message={
           toast?.message ? (
-            <Text color="green">{toast.message}</Text>
+            <Color styles={theme.statusSuccess}>
+              <Text>{toast.message}</Text>
+            </Color>
           ) : commandHelp ? (
             <Text>{commandHelp}</Text>
           ) : undefined

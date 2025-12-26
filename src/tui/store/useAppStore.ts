@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { type Theme, themes } from "@/tui/theme";
 
 export type Screen = "menu" | "update" | "manage" | "config" | "install";
 
@@ -14,6 +15,8 @@ interface AppState {
 
   // Global UI State
   isBusy: boolean;
+  theme: Theme;
+  themeMode: "dark" | "light";
 
   // Key Feedback State
   activeKey: string | null;
@@ -25,6 +28,7 @@ interface AppState {
   navigate: (screen: Screen) => void;
   setLastMenuSelection: (selection: string) => void;
   setBusy: (busy: boolean) => void;
+  setTheme: (mode: "dark" | "light") => void;
   flashKey: (key: string) => void;
   showToast: (message: string, duration?: number) => void;
   clearToast: () => void;
@@ -36,12 +40,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeScreen: "menu",
   lastMenuSelection: null, // default to null so MainMenu uses config default
   isBusy: false,
+  theme: themes.dark,
+  themeMode: "dark",
   activeKey: null,
   toast: null,
 
   navigate: (screen) => set({ activeScreen: screen }),
   setLastMenuSelection: (selection) => set({ lastMenuSelection: selection }),
   setBusy: (busy) => set({ isBusy: busy }),
+  setTheme: (mode) => set({ themeMode: mode, theme: themes[mode] }),
   flashKey: (key) => {
     set({ activeKey: key });
     setTimeout(() => {

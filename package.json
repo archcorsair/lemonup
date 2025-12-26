@@ -36,6 +36,7 @@
     "fs": "^0.0.1-security",
     "fuse.js": "^7.1.0",
     "ink": "^6.6.0",
+    "ink-color-pipe": "^5.0.0",
     "ink-gradient": "^3.0.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
