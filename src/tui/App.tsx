@@ -6,6 +6,7 @@ import { type Config, ConfigManager } from "@/core/config";
 import { AddonManager } from "@/core/manager";
 import { Header } from "./components/Header";
 import { FirstRunWizard } from "./FirstRunWizard";
+import { useProgressBar } from "./hooks/useProgressBar";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
@@ -115,6 +116,10 @@ const AppContent: React.FC<AppProps> = ({
   );
   const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
+
+  const progressBar = useProgressBar({
+    enabled: config?.terminalProgress ?? true,
+  });
 
   // Set dev mode in store when testMode prop is true
   useEffect(() => {
@@ -236,6 +241,7 @@ const AppContent: React.FC<AppProps> = ({
       const MIN_SPINNER_DURATION = 2000;
 
       setBackgroundChecking(true);
+      progressBar.start(addons.length);
       let updateCount = 0;
 
       try {
@@ -244,9 +250,12 @@ const AppContent: React.FC<AppProps> = ({
             const result = await addonManager.checkUpdate(addon);
             if (result.updateAvailable) updateCount++;
           } catch {
-            // Silently ignore check failures in background
+            await progressBar.warn();
           }
+          await progressBar.advance();
         }
+
+        await progressBar.complete();
 
         if (updateCount > 0) {
           setPendingUpdates(updateCount);
@@ -292,6 +301,7 @@ const AppContent: React.FC<AppProps> = ({
     setBackgroundChecking,
     setNextCheckTime,
     showToast,
+    progressBar,
   ]);
 
   if (showWizard && configManager) {

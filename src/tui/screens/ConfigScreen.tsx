@@ -25,6 +25,7 @@ type Field =
   | "backupWTF"
   | "backupRetention"
   | "nerdFonts"
+  | "terminalProgress"
   | "themeMode"
   | "debug";
 
@@ -58,6 +59,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [autoCheckInterval, setAutoCheckInterval] = useState(60); // minutes
   const [backupWTF, setBackupWTF] = useState(true);
   const [backupRetention, setBackupRetention] = useState(5);
+  const [terminalProgress, setTerminalProgress] = useState(true);
   const [debug, setDebug] = useState(false);
   const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
@@ -123,6 +125,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     setAutoCheckInterval(cfg.autoCheckInterval / 1000 / 60); // ms -> minutes
     setBackupWTF(cfg.backupWTF);
     setBackupRetention(cfg.backupRetention);
+    setTerminalProgress(cfg.terminalProgress);
     setDebug(cfg.debug);
   }, [configManager]);
 
@@ -152,6 +155,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "backupWTF",
       "backupRetention",
       "nerdFonts",
+      "terminalProgress",
       "themeMode",
       "debug",
     ];
@@ -210,6 +214,21 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         flashKey(input === " " ? "space" : "←/→");
         setNerdFonts(!nerdFonts);
         configManager.set("nerdFonts", !nerdFonts);
+        showToast("Saved!", 1000);
+      }
+    }
+
+    if (activeField === "terminalProgress") {
+      if (
+        key.leftArrow ||
+        key.rightArrow ||
+        input === "h" ||
+        input === "l" ||
+        input === " "
+      ) {
+        flashKey(input === " " ? "space" : "←/→");
+        setTerminalProgress(!terminalProgress);
+        configManager.set("terminalProgress", !terminalProgress);
         showToast("Saved!", 1000);
       }
     }
@@ -480,6 +499,17 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         >
           <Color styles={nerdFonts ? theme.statusSuccess : theme.statusError}>
             <Text bold>{nerdFonts ? "Enabled" : "Disabled"}</Text>
+          </Color>
+        </ConfigOption>
+        <ConfigOption
+          label="Terminal Progress Bar"
+          isActive={activeField === "terminalProgress"}
+          helpText="Shows progress in terminal tab (Ghostty, WezTerm, iTerm2)"
+        >
+          <Color
+            styles={terminalProgress ? theme.statusSuccess : theme.statusError}
+          >
+            <Text bold>{terminalProgress ? "Enabled" : "Disabled"}</Text>
           </Color>
         </ConfigOption>
         <ConfigOption label="Theme" isActive={activeField === "themeMode"}>
