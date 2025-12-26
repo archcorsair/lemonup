@@ -47,7 +47,8 @@ const WizardProgress: React.FC<{
     for (let i = 0; i < TOTAL_STEPS; i++) {
       const isCompleted = i + 1 < currentStep;
       const isCurrent = i + 1 === currentStep;
-      const segmentColor = i < currentStep ? theme.brand : theme.muted;
+      const segmentColor =
+        i < currentStep ? theme.progressCompleted : theme.progressPending;
 
       // Add leading half-segment (before marker)
       elements.push(
@@ -59,10 +60,10 @@ const WizardProgress: React.FC<{
       // Add marker
       const marker = isCompleted ? "✓" : isCurrent ? "●" : "○";
       const markerColor = isCompleted
-        ? theme.success
+        ? theme.progressCompleted
         : isCurrent
-          ? theme.brand
-          : theme.muted;
+          ? theme.progressCurrent
+          : theme.progressPending;
       elements.push(
         <Color key={`mark-${i}`} styles={markerColor}>
           <Text bold={isCurrent}>{marker}</Text>
@@ -70,7 +71,8 @@ const WizardProgress: React.FC<{
       );
 
       // Add trailing half-segment (after marker)
-      const trailingColor = i + 1 < currentStep ? theme.brand : theme.muted;
+      const trailingColor =
+        i + 1 < currentStep ? theme.progressCompleted : theme.progressPending;
       elements.push(
         <Color key={`post-${i}`} styles={trailingColor}>
           <Text>{"━".repeat(halfSegment)}</Text>
@@ -91,10 +93,10 @@ const WizardProgress: React.FC<{
         {STEP_NAMES.map((name, idx) => {
           const stepColor =
             idx + 1 === currentStep
-              ? theme.brand
+              ? theme.progressCurrent
               : idx + 1 < currentStep
-                ? theme.success
-                : theme.muted;
+                ? theme.progressCompleted
+                : theme.progressPending;
           return (
             <Box key={name} width={segmentWidth + 1} justifyContent="center">
               <Color styles={stepColor}>
@@ -777,7 +779,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       flexDirection="column"
       padding={1}
       borderStyle="round"
-      borderColor={theme.brand.split(".")[0]}
+      borderColor={theme.wizardBorder}
     >
       <Box marginBottom={1} justifyContent="space-between">
         <Color styles={theme.brand}>
