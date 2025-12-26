@@ -1,4 +1,4 @@
-# LemonUp 🍋 (Alpha)
+# LemonUp 🍋
 
 <div align="center">
   <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
@@ -53,11 +53,34 @@
 
 ## Getting Started
 
-The easiest way to start using LemonUp is by heading over to our [getting started page](https://lemonup.org/getting-started.html)
+The easiest way to start using LemonUp is by heading over to the [getting started page](https://lemonup.org/getting-started.html)
 
-## 🛠️ Building & Installation
+## Install
+### Available builds
+- Linux (x64)
+- MacOS Apple Silicon (arm64)
+- MacOS (x64)
+- Windows (x64)
 
-LemonUp aims to provide pre-built executables for all major operating systems in future releases. For now, you can build it yourself:
+Download from [releases](https://github.com/archcorsair/lemonup/releases)
+  
+### Homebrew
+```bash
+brew tap archcorsair/lemonup
+brew install lemonup
+```
+or simply
+```bash
+brew install archcorsair/lemonup/lemonup
+```
+
+### Linux Packages Managers (paru, yum, etc)
+🔜 Coming Soon
+
+### Windows Package Managers (scoop, winget)
+🔜 Coming Soon
+
+## 🔧 Building
 
 **Prerequisites:** Ensure you have [Bun](https://bun.com) installed.
 
