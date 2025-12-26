@@ -34,4 +34,12 @@
   - **Step 2:** Implement an error display within the `FirstRunWizard` that triggers when navigation is blocked due to invalid input.
   - **Commit:** 7b6626f
 
+- [x] Task: Implement Path Expansion and Input Sanitization
+  - **Description:** Support `~` expansion for home directory and sanitize path input.
+  - **Files:** `src/tui/FirstRunWizard.tsx`
+  - **Step 1:** Add a helper function to expand `~` to `os.homedir()`.
+  - **Step 2:** Update path validation logic to use the expanded path.
+  - **Step 3:** Sanitize input (trim whitespace).
+  - **Commit:** a758de5
+
 - [ ] Task: Conductor - User Manual Verification 'Directory Step Refinement and Bug Fixes' (Protocol in workflow.md)
