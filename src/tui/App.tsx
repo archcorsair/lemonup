@@ -69,8 +69,13 @@ const TerminalSizeGuard: React.FC<{ children: React.ReactNode }> = ({
 
   if (dims.cols < MIN_TERMINAL_WIDTH || dims.rows < MIN_TERMINAL_HEIGHT) {
     return (
-      <Box justifyContent="center" alignItems="center" height="100%">
-        <Text color="yellow">
+      <Box
+        justifyContent="center"
+        alignItems="center"
+        height={dims.rows}
+        width={dims.cols}
+      >
+        <Text bold color="#0077aa">
           Terminal too small ({dims.cols}x{dims.rows}). Minimum:{" "}
           {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}
         </Text>
@@ -161,9 +166,11 @@ const AppContent: React.FC<AppProps> = ({
     setConfigManager(manager);
     setAddonManager(new AddonManager(manager));
     if (manager.hasConfigFile) {
-      setConfig(manager.get());
+      const cfg = manager.get();
+      setConfig(cfg);
+      setTheme(cfg.theme);
     }
-  }, [testMode, configManager]);
+  }, [testMode, configManager, setTheme]);
 
   useEffect(() => {
     if (!configManager || config) return;

@@ -1,8 +1,10 @@
 import { Box, Text, useApp, useInput } from "ink";
+import Color from "ink-color-pipe";
 import type React from "react";
 import { useState } from "react";
 import type { Config, ConfigManager } from "@/core/config";
 import { ControlBar } from "@/tui/components/ControlBar";
+import { useTheme } from "@/tui/hooks/useTheme";
 import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
@@ -26,6 +28,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onSelect,
 }) => {
   const { exit } = useApp();
+  const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
   const [selectedIndex, setSelectedIndex] = useState(() => {
     const targetId = initialSelection || config.defaultMenuOption;
@@ -75,27 +78,45 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         const isSelected = index === selectedIndex;
         const isDefault = opt.id === defaultOption;
 
+        const getStyle = () => {
+          if (isSelected) return theme.heading;
+          if (isDefault) return theme.warning;
+          return theme.labelInactive;
+        };
+
         return (
           <Box key={opt.id}>
-            <Text color={isSelected ? "green" : "white"}>
-              {isSelected ? "> " : "  "}
-            </Text>
-            <Text color={isDefault ? "yellow" : isSelected ? "green" : "white"}>
-              {opt.label}
-            </Text>
+            <Color styles={isSelected ? theme.heading : theme.muted}>
+              <Text>{isSelected ? "> " : "  "}</Text>
+            </Color>
+            <Color styles={getStyle()}>
+              <Text bold={isSelected || isDefault}>{opt.label}</Text>
+            </Color>
           </Box>
         );
       })}
       <ControlBar
         message={
           toast?.message ? (
-            <Text color="yellow">{toast.message}</Text>
+            <Color styles={theme.warning}>
+              <Text>{toast.message}</Text>
+            </Color>
           ) : undefined
         }
         controls={[
           { key: "↑/↓", label: "nav" },
           { key: "enter", label: "select" },
-          { key: "space", label: "set default" },
+          {
+            key: "space",
+            label: (
+              <>
+                set{" "}
+                <Color styles={theme.warning}>
+                  <Text bold>default</Text>
+                </Color>
+              </>
+            ),
+          },
           { key: "q", label: "quit" },
         ]}
       />

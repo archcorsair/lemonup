@@ -6,7 +6,7 @@ import { useTheme } from "../hooks/useTheme";
 
 export interface ControlHelp {
   key: string;
-  label: string;
+  label: React.ReactNode;
 }
 
 export interface ControlBarProps {

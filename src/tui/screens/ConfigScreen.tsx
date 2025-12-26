@@ -280,9 +280,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         </Color>
         <Box width={28}>
           <Color styles={isActive ? theme.highlight : theme.labelInactive}>
-            <Text bold={isActive} dimColor={!isActive}>
-              {label}
-            </Text>
+            <Text bold={isActive}>{label}</Text>
           </Color>
         </Box>
         <Box flexGrow={1}>{children}</Box>
@@ -323,7 +321,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
             </Box>
           ) : (
             <Color styles={destDir ? theme.labelInactive : theme.statusIdle}>
-              <Text>{destDir || "Not Configured"}</Text>
+              <Text bold>{destDir || "Not Configured"}</Text>
             </Color>
           )}
         </ConfigOption>
@@ -359,7 +357,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           helpText="Backup only occurs when running 'Update All'."
         >
           <Color styles={backupWTF ? theme.statusSuccess : theme.statusError}>
-            <Text>{backupWTF ? "Enabled" : "Disabled"}</Text>
+            <Text bold>{backupWTF ? "Enabled" : "Disabled"}</Text>
           </Color>
         </ConfigOption>
         <ConfigOption
@@ -380,7 +378,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           isActive={activeField === "nerdFonts"}
         >
           <Color styles={nerdFonts ? theme.statusSuccess : theme.statusError}>
-            <Text>{nerdFonts ? "Enabled" : "Disabled"}</Text>
+            <Text bold>{nerdFonts ? "Enabled" : "Disabled"}</Text>
           </Color>
         </ConfigOption>
         <ConfigOption label="Theme" isActive={activeField === "themeMode"}>
@@ -389,7 +387,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               themeMode === "dark" ? theme.repoTukui : theme.statusWorking
             }
           >
-            <Text>{themeMode === "dark" ? "Dark" : "Light"}</Text>
+            <Text bold>{themeMode === "dark" ? "Dark" : "Light"}</Text>
           </Color>
         </ConfigOption>
 
@@ -398,7 +396,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
           <Box>
             <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
-              <Text>{debug ? "Enabled" : "Disabled"}</Text>
+              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
             </Color>
             {debug && (
               <Box marginLeft={2}>

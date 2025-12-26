@@ -40,6 +40,7 @@ export const DARK_THEME = {
   statusWorking: "cyan", // downloading, extracting, copying
   statusChecking: "yellow",
   statusSuccess: "green",
+  statusUpToDate: "green",
   statusWarning: "yellow", // update available
   statusError: "red",
 
@@ -63,54 +64,55 @@ export type Theme = {
 export const LIGHT_THEME: Theme = {
   ...DARK_THEME,
   // Core Identity
-  brand: "blue.bold",
+  brand: "#0077aa.bold",
 
   // Status Indicators
-  success: "green",
-  error: "red",
-  warning: "magenta",
-  info: "blue",
-  busy: "magenta",
-  dryRun: "magenta.bold",
-  testMode: "blue",
+  success: "#2e7d32",
+  error: "#c62828",
+  warning: "#bf5000",
+  info: "#1565c0",
+  busy: "#6a1b9a",
+  dryRun: "#bf5000.bold",
+  testMode: "#0077aa",
 
   // Text Styles
-  muted: "black.dim",
-  highlight: "black.bold",
-  heading: "blue.bold",
+  muted: "#3d3d3d",
+  highlight: "#1e3a5f.bold",
+  heading: "#0077aa.bold",
 
   // Specific UI Elements
-  version: "black.dim",
-  border: "black",
-  keyActive: "blue.bold",
-  keyInactive: "black",
-  labelActive: "blue",
-  labelInactive: "black",
+  version: "#555555",
+  border: "#1e3a5f",
+  keyActive: "#bf5000.bold",
+  keyInactive: "#2a2a2a",
+  labelActive: "#bf5000",
+  labelInactive: "#3a3a3a",
 
   // Repository Types
-  repoTukui: "magenta",
-  repoWowi: "red",
-  repoManual: "black.dim",
-  repoGit: "blue",
+  repoTukui: "#6a1b9a",
+  repoWowi: "#bf360c",
+  repoManual: "#555555",
+  repoGit: "#1565c0",
 
   // Status Colors
-  statusIdle: "black.dim",
-  statusWorking: "blue",
-  statusChecking: "magenta",
-  statusSuccess: "green",
-  statusWarning: "magenta",
-  statusError: "red",
+  statusIdle: "#555555",
+  statusWorking: "#0077aa",
+  statusChecking: "#bf5000",
+  statusSuccess: "#2e7d32",
+  statusUpToDate: "#bf5000",
+  statusWarning: "#bf5000",
+  statusError: "#c62828",
 
   // Help Panel
-  helpKey: "blue.bold",
-  helpLabel: "black",
+  helpKey: "#bf5000.bold",
+  helpLabel: "#3d3d3d",
 
   // Tree & List
-  treePrefix: "black.dim",
-  selection: "blue",
-  checked: "green",
-  unchecked: "black.dim",
-  library: "magenta.dim",
+  treePrefix: "#5a5a5a",
+  selection: "#bf5000",
+  checked: "#0077aa",
+  unchecked: "#5a5a5a",
+  library: "#6a1b9a",
 };
 
 export const themes = {

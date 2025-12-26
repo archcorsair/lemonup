@@ -1,6 +1,7 @@
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import Fuse from "fuse.js";
 import { Box, Text, useApp, useInput } from "ink";
+import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import pLimit from "p-limit";
@@ -14,6 +15,7 @@ import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useTheme } from "@/tui/hooks/useTheme";
 import { useToast } from "@/tui/hooks/useToast";
 import { useAppStore } from "@/tui/store/useAppStore";
 
@@ -34,6 +36,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
   const { exit } = useApp();
   const queryClient = useQueryClient();
   const flashKey = useAppStore((state) => state.flashKey);
+  const { theme } = useTheme();
   const { toast, showToast } = useToast();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -837,15 +840,25 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             )
           ) : (
             <Box>
-              <Text color={selectedIds.size > 0 ? "cyan" : "gray"}>
-                Selected: {selectedIds.size} /{" "}
-                {visibleAddons.filter((a) => !a.isChild).length}
-              </Text>
-              {showLibs && (
-                <Text color="whiteBright">
-                  {" "}
-                  [Libs: <Text color="green">Visible</Text>]
+              <Color
+                styles={selectedIds.size > 0 ? theme.checked : theme.muted}
+              >
+                <Text bold={selectedIds.size > 0}>
+                  Selected: {selectedIds.size} /{" "}
+                  {visibleAddons.filter((a) => !a.isChild).length}
                 </Text>
+              </Color>
+              {showLibs && (
+                <Color styles={theme.muted}>
+                  <Text>
+                    {" "}
+                    [Libs:{" "}
+                    <Color styles={theme.success}>
+                      <Text>Visible</Text>
+                    </Color>
+                    ]
+                  </Text>
+                </Color>
               )}
             </Box>
           )

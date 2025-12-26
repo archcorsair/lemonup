@@ -36,7 +36,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
   isChild = false,
   isLastChild = false,
 }) => {
-  const { theme } = useTheme();
+  const { theme, themeMode } = useTheme();
   let icon = (
     <Color styles={theme.statusIdle}>
       <Text>·</Text>
@@ -193,8 +193,10 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
       } else {
         icon = <Text> </Text>;
         statusText = (
-          <Color styles={theme.statusSuccess}>
-            <Text wrap="truncate-end">Up to date</Text>
+          <Color styles={theme.statusUpToDate}>
+            <Text bold={themeMode === "light"} wrap="truncate-end">
+              Up to date
+            </Text>
           </Color>
         );
       }
