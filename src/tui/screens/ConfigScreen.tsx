@@ -21,6 +21,7 @@ type Field =
   | "destDir"
   | "maxConcurrent"
   | "checkInterval"
+  | "autoCheck"
   | "backupWTF"
   | "backupRetention"
   | "nerdFonts"
@@ -46,12 +47,15 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   onBack,
 }) => {
   const flashKey = useAppStore((state) => state.flashKey);
+  const devMode = useAppStore((state) => state.devMode);
   const { theme, themeMode, setTheme } = useTheme();
 
   const [maxConcurrent, setMaxConcurrent] = useState(3);
   const [destDir, setDestDir] = useState("");
   const [nerdFonts, setNerdFonts] = useState(true);
   const [checkInterval, setCheckInterval] = useState(60);
+  const [autoCheckEnabled, setAutoCheckEnabled] = useState(false);
+  const [autoCheckInterval, setAutoCheckInterval] = useState(60); // minutes
   const [backupWTF, setBackupWTF] = useState(true);
   const [backupRetention, setBackupRetention] = useState(5);
   const [debug, setDebug] = useState(false);
@@ -81,12 +85,42 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     return `${mins}m ${secs}s`;
   };
 
+  // Auto-check interval: 30min steps from 30min to 4hr (dev mode allows lower)
+  const autoCheckIntervals = devMode
+    ? [1, 5, 15, 30, 60, 90, 120, 150, 180, 210, 240]
+    : [30, 60, 90, 120, 150, 180, 210, 240];
+
+  const minAutoInterval = devMode ? 1 : 30;
+
+  const formatAutoInterval = (mins: number) => {
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    const rem = mins % 60;
+    return rem === 0 ? `${hrs}hr` : `${hrs}hr ${rem}m`;
+  };
+
+  const getNextAutoInterval = (current: number): number => {
+    const idx = autoCheckIntervals.indexOf(current);
+    if (idx === -1) return autoCheckIntervals[0] ?? 60;
+    return (
+      autoCheckIntervals[Math.min(autoCheckIntervals.length - 1, idx + 1)] ?? 60
+    );
+  };
+
+  const getPrevAutoInterval = (current: number): number => {
+    const idx = autoCheckIntervals.indexOf(current);
+    if (idx === -1) return autoCheckIntervals[0] ?? minAutoInterval;
+    return autoCheckIntervals[Math.max(0, idx - 1)] ?? minAutoInterval;
+  };
+
   useEffect(() => {
     const cfg = configManager.get();
     setMaxConcurrent(cfg.maxConcurrent);
     setDestDir(cfg.destDir === "NOT_CONFIGURED" ? "" : cfg.destDir);
     setNerdFonts(cfg.nerdFonts);
     setCheckInterval(cfg.checkInterval / 1000);
+    setAutoCheckEnabled(cfg.autoCheckEnabled);
+    setAutoCheckInterval(cfg.autoCheckInterval / 1000 / 60); // ms -> minutes
     setBackupWTF(cfg.backupWTF);
     setBackupRetention(cfg.backupRetention);
     setDebug(cfg.debug);
@@ -114,6 +148,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "destDir",
       "maxConcurrent",
       "checkInterval",
+      "autoCheck",
       "backupWTF",
       "backupRetention",
       "nerdFonts",
@@ -208,6 +243,51 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         setCheckInterval(newVal);
         configManager.set("checkInterval", newVal * 1000);
         showToast("Saved!", 1000);
+      }
+    }
+
+    if (activeField === "autoCheck") {
+      // Space/Enter toggles enabled
+      if (input === " " || key.return) {
+        flashKey(input === " " ? "space" : "enter");
+        const newEnabled = !autoCheckEnabled;
+        setAutoCheckEnabled(newEnabled);
+        configManager.set("autoCheckEnabled", newEnabled);
+        showToast(newEnabled ? "Enabled" : "Disabled", 1000);
+      }
+      // Left: decrease interval or disable at minimum
+      if (key.leftArrow || input === "h") {
+        flashKey("←/→");
+        if (autoCheckEnabled) {
+          // At minimum, disable instead of staying at min
+          if (autoCheckInterval <= minAutoInterval) {
+            setAutoCheckEnabled(false);
+            configManager.set("autoCheckEnabled", false);
+            showToast("Disabled", 1000);
+          } else {
+            const newVal = getPrevAutoInterval(autoCheckInterval);
+            setAutoCheckInterval(newVal);
+            configManager.set("autoCheckInterval", newVal * 60 * 1000);
+            showToast("Saved!", 1000);
+          }
+        }
+      }
+      // Right: enable at minimum or increase interval
+      if (key.rightArrow || input === "l") {
+        flashKey("←/→");
+        if (!autoCheckEnabled) {
+          // Enable and set to minimum interval
+          setAutoCheckEnabled(true);
+          setAutoCheckInterval(minAutoInterval);
+          configManager.set("autoCheckEnabled", true);
+          configManager.set("autoCheckInterval", minAutoInterval * 60 * 1000);
+          showToast("Enabled", 1000);
+        } else {
+          const newVal = getNextAutoInterval(autoCheckInterval);
+          setAutoCheckInterval(newVal);
+          configManager.set("autoCheckInterval", newVal * 60 * 1000);
+          showToast("Saved!", 1000);
+        }
       }
     }
 
@@ -347,6 +427,27 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               {"◂"} {formatInterval(checkInterval)} {"▸"}
             </Text>
           </Color>
+        </ConfigOption>
+        <ConfigOption
+          label="Auto-check in Background"
+          isActive={activeField === "autoCheck"}
+          helpText={
+            autoCheckEnabled
+              ? "Press Space to disable. Left/Right to adjust interval."
+              : "Press Space to enable background update checking."
+          }
+        >
+          {autoCheckEnabled ? (
+            <Color styles={theme.statusChecking}>
+              <Text bold>
+                {"◂"} {formatAutoInterval(autoCheckInterval)} {"▸"}
+              </Text>
+            </Color>
+          ) : (
+            <Color styles={theme.statusError}>
+              <Text bold>Disabled</Text>
+            </Color>
+          )}
         </ConfigOption>
 
         {/* Backup */}

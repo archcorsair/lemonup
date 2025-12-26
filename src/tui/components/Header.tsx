@@ -5,6 +5,7 @@ import Spinner from "ink-spinner";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { useTheme } from "@/tui/hooks/useTheme";
+import { useAppStore } from "@/tui/store/useAppStore";
 import pkg from "../../../package.json";
 
 // Workaround for React 19 + Ink type mismatch
@@ -29,11 +30,17 @@ export const Header: React.FC<HeaderProps> = ({
   testMode = false,
 }) => {
   const { theme } = useTheme();
+  const pendingUpdates = useAppStore((state) => state.pendingUpdates);
+  const isBackgroundChecking = useAppStore(
+    (state) => state.isBackgroundChecking,
+  );
+  const nextCheckTime = useAppStore((state) => state.nextCheckTime);
   const { stdout } = useStdout();
   const [dims, setDims] = useState({
     cols: stdout.columns ?? 80,
     rows: stdout.rows ?? 24,
   });
+  const [countdown, setCountdown] = useState<string | null>(null);
 
   useEffect(() => {
     const handler = () => {
@@ -47,6 +54,29 @@ export const Header: React.FC<HeaderProps> = ({
       stdout.off("resize", handler);
     };
   }, [stdout]);
+
+  // Countdown timer for dev mode
+  useEffect(() => {
+    if (!testMode || !nextCheckTime) {
+      setCountdown(null);
+      return;
+    }
+
+    const updateCountdown = () => {
+      const remaining = Math.max(0, nextCheckTime - Date.now());
+      const totalSeconds = Math.floor(remaining / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      setCountdown(
+        `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`,
+      );
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [testMode, nextCheckTime]);
 
   return (
     <Box
@@ -68,6 +98,26 @@ export const Header: React.FC<HeaderProps> = ({
               <Text>🍋 v{pkg.version}</Text>
             </Color>
           </Box>
+
+          {isBackgroundChecking ? (
+            <Box marginLeft={1}>
+              <Color styles={theme.statusChecking}>
+                <Text>
+                  <SpinnerFixed type="dots" /> Checking...
+                </Text>
+              </Color>
+            </Box>
+          ) : (
+            pendingUpdates > 0 && (
+              <Box marginLeft={1}>
+                <Color styles={theme.warning}>
+                  <Text bold>
+                    [{pendingUpdates} update{pendingUpdates > 1 ? "s" : ""}]
+                  </Text>
+                </Color>
+              </Box>
+            )
+          )}
         </Box>
 
         {dryRun && (
@@ -89,12 +139,17 @@ export const Header: React.FC<HeaderProps> = ({
       </Box>
 
       {testMode && (
-        <Box>
+        <Box gap={2}>
           <Color styles={theme.testMode}>
             <Text>
-              TEST MODE ({dims.cols}x{dims.rows})
+              DEV MODE ({dims.cols}x{dims.rows})
             </Text>
           </Color>
+          {countdown && (
+            <Color styles={theme.info}>
+              <Text>Next check: {countdown}</Text>
+            </Color>
+          )}
         </Box>
       )}
     </Box>

@@ -30,6 +30,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
 }) => {
   const { exit } = useApp();
   const flashKey = useAppStore((state) => state.flashKey);
+  const setPendingUpdates = useAppStore((state) => state.setPendingUpdates);
   const queryClient = useQueryClient();
   const { themeMode } = useTheme();
 
@@ -200,11 +201,20 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
         }
       }
 
+      // Clear the pending updates badge since we just ran updates
+      setPendingUpdates(0);
       setIsDone(true);
     };
 
     runUpdates();
-  }, [addonManager, force, testMode, allAddons, queryClient]);
+  }, [
+    addonManager,
+    force,
+    testMode,
+    allAddons,
+    queryClient,
+    setPendingUpdates,
+  ]);
 
   useInput((input, key) => {
     if (key.escape || (input === "q" && isDone)) {

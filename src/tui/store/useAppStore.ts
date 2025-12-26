@@ -24,6 +24,14 @@ interface AppState {
   // Toast State
   toast: Toast | null;
 
+  // Background Update State
+  pendingUpdates: number;
+  isBackgroundChecking: boolean;
+  nextCheckTime: number | null; // timestamp of next scheduled check
+
+  // Dev Mode
+  devMode: boolean;
+
   // Actions
   navigate: (screen: Screen) => void;
   setLastMenuSelection: (selection: string) => void;
@@ -32,6 +40,10 @@ interface AppState {
   flashKey: (key: string) => void;
   showToast: (message: string, duration?: number) => void;
   clearToast: () => void;
+  setPendingUpdates: (count: number) => void;
+  setBackgroundChecking: (checking: boolean) => void;
+  setNextCheckTime: (time: number | null) => void;
+  setDevMode: (enabled: boolean) => void;
 }
 
 let toastId = 0;
@@ -44,6 +56,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   themeMode: "dark",
   activeKey: null,
   toast: null,
+  pendingUpdates: 0,
+  isBackgroundChecking: false,
+  nextCheckTime: null,
+  devMode: false,
 
   navigate: (screen) => set({ activeScreen: screen }),
   setLastMenuSelection: (selection) => set({ lastMenuSelection: selection }),
@@ -69,4 +85,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
   clearToast: () => set({ toast: null }),
+  setPendingUpdates: (count) => set({ pendingUpdates: count }),
+  setBackgroundChecking: (checking) => set({ isBackgroundChecking: checking }),
+  setNextCheckTime: (time) => set({ nextCheckTime: time }),
+  setDevMode: (enabled) => set({ devMode: enabled }),
 }));

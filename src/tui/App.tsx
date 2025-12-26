@@ -100,6 +100,13 @@ const AppContent: React.FC<AppProps> = ({
   );
   const setTheme = useAppStore((state) => state.setTheme);
   const theme = useAppStore((state) => state.theme);
+  const setPendingUpdates = useAppStore((state) => state.setPendingUpdates);
+  const setBackgroundChecking = useAppStore(
+    (state) => state.setBackgroundChecking,
+  );
+  const setDevMode = useAppStore((state) => state.setDevMode);
+  const setNextCheckTime = useAppStore((state) => state.setNextCheckTime);
+  const showToast = useAppStore((state) => state.showToast);
 
   const [initialLoad, setInitialLoad] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
@@ -108,6 +115,13 @@ const AppContent: React.FC<AppProps> = ({
   );
   const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
+
+  // Set dev mode in store when testMode prop is true
+  useEffect(() => {
+    if (testMode) {
+      setDevMode(true);
+    }
+  }, [testMode, setDevMode]);
 
   useEffect(() => {
     if (configManager) return;
@@ -197,6 +211,88 @@ const AppContent: React.FC<AppProps> = ({
       setConfig(cfg);
     }
   };
+
+  // Background auto-check for updates
+  useEffect(() => {
+    if (!addonManager || !config?.autoCheckEnabled) {
+      setNextCheckTime(null);
+      return;
+    }
+
+    const scheduleNextCheck = (delayMs: number) => {
+      setNextCheckTime(Date.now() + delayMs);
+    };
+
+    const checkForUpdates = async () => {
+      const addons = addonManager
+        .getAllAddons()
+        .filter((a) => a.type !== "manual");
+      if (addons.length === 0) {
+        scheduleNextCheck(config.autoCheckInterval);
+        return;
+      }
+
+      const startTime = Date.now();
+      const MIN_SPINNER_DURATION = 2000;
+
+      setBackgroundChecking(true);
+      let updateCount = 0;
+
+      try {
+        for (const addon of addons) {
+          try {
+            const result = await addonManager.checkUpdate(addon);
+            if (result.updateAvailable) updateCount++;
+          } catch {
+            // Silently ignore check failures in background
+          }
+        }
+
+        if (updateCount > 0) {
+          setPendingUpdates(updateCount);
+          showToast(
+            `${updateCount} update${updateCount > 1 ? "s" : ""} available`,
+            5000,
+          );
+        }
+      } finally {
+        // Ensure spinner shows for at least MIN_SPINNER_DURATION
+        const elapsed = Date.now() - startTime;
+        const remaining = MIN_SPINNER_DURATION - elapsed;
+
+        if (remaining > 0) {
+          await new Promise((resolve) => setTimeout(resolve, remaining));
+        }
+
+        setBackgroundChecking(false);
+        // Schedule next check
+        scheduleNextCheck(config.autoCheckInterval);
+      }
+    };
+
+    // Set initial next check time (5 seconds from now)
+    scheduleNextCheck(5000);
+
+    // Initial check after a short delay (5 seconds)
+    const initialTimeout = setTimeout(checkForUpdates, 5000);
+
+    // Recurring checks at the configured interval
+    const interval = setInterval(checkForUpdates, config.autoCheckInterval);
+
+    return () => {
+      clearTimeout(initialTimeout);
+      clearInterval(interval);
+      setNextCheckTime(null);
+    };
+  }, [
+    addonManager,
+    config?.autoCheckEnabled,
+    config?.autoCheckInterval,
+    setPendingUpdates,
+    setBackgroundChecking,
+    setNextCheckTime,
+    showToast,
+  ]);
 
   if (showWizard && configManager) {
     return (
