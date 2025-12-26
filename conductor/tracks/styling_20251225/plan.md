@@ -2,7 +2,7 @@
 
 ## Phase 1: Iterative Tuning
 
-- [ ] Task: Analyze and Refine Light Theme Palette
+- [x] Task: Analyze and Refine Light Theme Palette
   - **Description:** Review `src/tui/theme.ts` and modify `LIGHT_THEME` definitions to use higher contrast colors. Focus on replacing readable colors (Yellow, Cyan) with darker alternatives (Blue, Magenta, Black).
   - **Files:** `src/tui/theme.ts`
   - **Step 1:** Read current `src/tui/theme.ts`.
@@ -13,8 +13,9 @@
     -   `info`: blue -> blue
     -   `key`: yellow -> magenta or black.bold
   - **Step 3:** Commit changes.
+  - **Status:** Done. Updated colors.
 
-- [ ] Task: User Feedback Loop
+- [~] Task: User Feedback Loop
   - **Description:** Ask user to verify readability.
   - **Status:** Pending user confirmation.
 

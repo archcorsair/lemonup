@@ -11,6 +11,7 @@
     - `ink-gradient` - For beautiful color transitions.
     - `ink-spinner` - For loading indicators.
     - `ink-text-input` - For interactive user input.
+    - `ink-color-pipe` - For flexible, theme-based styling.
 
 ## Data & Configuration
 - **Database:** `bun:sqlite` - Bun's native, high-performance SQLite driver for addon metadata.

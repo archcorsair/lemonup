@@ -9,21 +9,24 @@
   - **Step 2:** Confirm `destDir` is the culprit.
   - **Status:** Reproduced. ZodError logs for `destDir` confirmed in `config.test.ts`.
 
-- [ ] Task: Update Config Schema Defaults
+- [x] Task: Update Config Schema Defaults
   - **Description:** Make `destDir` optional with a default value in the Zod schema to align with the application's "NOT_CONFIGURED" fallback logic. This is the cleanest fix.
   - **Files:** `src/core/config.ts`
   - **Step 1:** Update `ConfigSchema` for `destDir` to use `.default("NOT_CONFIGURED")`.
   - **Step 2:** Verify that `ConfigManager` logic still handles this correctly.
+  - **Status:** Done. Added default to schema.
 
-- [ ] Task: Clean up ConfigManager Fallback Logic
+- [x] Task: Clean up ConfigManager Fallback Logic
   - **Description:** Since validation should now pass for empty objects, the `get()` fallback logic for `destDir` might be redundant or can be simplified.
   - **Files:** `src/core/config.ts`
   - **Step 1:** Review `get()` method.
   - **Step 2:** Ensure validation logs are still useful for *actual* errors (e.g. wrong types).
+  - **Status:** Done. Removed console.error and cleaned up debug logs.
 
-- [ ] Task: Verify Fix
+- [x] Task: Verify Fix
   - **Description:** Run tests again to ensure no Zod errors appear.
   - **Files:** `tests/core/config.test.ts`
   - **Step 1:** Run `bun test`.
+  - **Status:** Verified. Clean output.
 
 - [ ] Task: Conductor - User Manual Verification 'Investigation & Fix' (Protocol in workflow.md)
