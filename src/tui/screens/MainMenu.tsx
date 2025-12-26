@@ -28,7 +28,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onSelect,
 }) => {
   const { exit } = useApp();
-  const { theme } = useTheme();
+  const { theme, themeMode, setTheme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
   const [selectedIndex, setSelectedIndex] = useState(() => {
     const targetId = initialSelection || config.defaultMenuOption;
@@ -66,6 +66,12 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           showToast("Default Updated", 2000);
         }
       }
+    } else if (input === "t") {
+      flashKey("t");
+      const nextTheme = themeMode === "dark" ? "light" : "dark";
+      setTheme(nextTheme);
+      configManager.set("theme", nextTheme);
+      showToast(`Theme: ${nextTheme}`, 1000);
     } else if (input === "q" || key.escape) {
       flashKey("q");
       exit();
@@ -117,6 +123,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               </>
             ),
           },
+          { key: "t", label: "theme" },
           { key: "q", label: "quit" },
         ]}
       />
