@@ -18,7 +18,7 @@ const OPTIONS = [
   { id: "update", label: "Update All" },
   { id: "install", label: "Install Addon" },
   { id: "manage", label: "Manage Addons" },
-  { id: "config", label: "Settings" },
+  { id: "config", label: "Config" },
 ] as const;
 
 export const MainMenu: React.FC<MainMenuProps> = ({
@@ -72,6 +72,18 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       setTheme(nextTheme);
       configManager.set("theme", nextTheme);
       showToast(`Theme: ${nextTheme}`, 1000);
+    } else if (input === "u") {
+      flashKey("u");
+      onSelect("update");
+    } else if (input === "i") {
+      flashKey("i");
+      onSelect("install");
+    } else if (input === "m") {
+      flashKey("m");
+      onSelect("manage");
+    } else if (input === "c") {
+      flashKey("c");
+      onSelect("config");
     } else if (input === "q" || key.escape) {
       flashKey("q");
       exit();
@@ -96,7 +108,10 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               <Text>{isSelected ? "> " : "  "}</Text>
             </Color>
             <Color styles={getStyle()}>
-              <Text bold={isSelected || isDefault}>{opt.label}</Text>
+              <Text bold={isSelected || isDefault} underline>
+                {opt.label.charAt(0)}
+              </Text>
+              <Text bold={isSelected || isDefault}>{opt.label.slice(1)}</Text>
             </Color>
           </Box>
         );
