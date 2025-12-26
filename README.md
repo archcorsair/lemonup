@@ -20,7 +20,7 @@
 | GitHub        | ✅ Supported   |
 | WowInterface  | ✅ Supported   |
 | TukUI         | ✅ Supported   |
-| Wago.io       | ⏳ WIP         |
+| Wago.io       | 📋 Planned     |
 | WowAce        | ❌ Unsupported |
 | CurseForge    | ❌ Unsupported |
 
@@ -36,9 +36,15 @@
 
 - **🚀 Fast & Lightweight:** Built on the blazing-fast Bun runtime.
 - **🖥️ Beautiful TUI:** Interactive terminal user interface powered by Ink.
-- **📦 Multi-Source Support:** 
+- **📦 Multi-Source Support:**
   - Install directly from **GitHub** repositories.
   - Install/Update **TukUI** & **ElvUI** seamlessly.
+  - Support for **WoWInterface** addons.
+- **🎨 Theming:** Dark and light themes inspired by [tokyonight](https://github.com/folke/tokyonight.nvim).
+  - Custom themes coming soon.
+- **⌨️ Keyboard Driven:** Vim-style navigation (j/k) and shortcuts for all actions.
+- **🔍 Search & Filter:** Fuzzy search addons by name or author.
+- **📚 Library Management:** Track addon dependencies separately, toggle visibility.
 - **🛡️ Secure & Safe:**
   - Robust path traversal protection for zip extraction.
   - Automatic **WTF folder backups** before updates.
@@ -88,28 +94,42 @@ bun run start
 
 ### CLI Arguments
 
-You can also run LemonUp with various flags for automation or specific tasks:
-
 - `--cli`: Run in non-interactive CLI mode.
 - `--force`, `-f`: Force re-installation/update of addons.
-- `--dry-run`: Simulate actions without modifying the filesystem.
-- `--test`: Run in a temporary test environment.
-- `--help`, `-h`: Show the help message.
-
-```bash
-./lemonup --help
-```
+- `--version`, `-v`: Show version information.
 
 ## 🔧 Configuration
 
-On first run, LemonUp will guide you through a setup wizard to locate your WoW installation. 
+On first run, LemonUp will guide you through a setup wizard to locate your WoW installation.
 
 You can access the **Settings** menu at any time to configure:
 - WoW Addon Directory Path
-- Update Check Interval
-- Backup Retention Policy
 - Max Concurrent Downloads
+- Update Check Interval
+- Auto-backup WTF Folder
+- Backup Retention Policy
 - Nerd Font Support
+- Theme (Dark/Light)
+- Debug Logging
+
+## ⌨️ Keyboard Shortcuts
+
+LemonUp supports vim-style navigation (`h`/`j`/`k`/`l`) throughout the interface.
+
+| Screen | Key | Action |
+|--------|-----|--------|
+| All | `↑`/`↓` or `j`/`k` | Navigate |
+| All | `esc` | Back/Cancel |
+| Main Menu | `t` | Toggle theme |
+| Main Menu | `space` | Set default option |
+| Manage | `/` | Search addons |
+| Manage | `1`-`4` | Sort by column |
+| Manage | `space` | Select addon |
+| Manage | `l` | Toggle libraries |
+| Manage | `u` | Update selected |
+| Manage | `c` | Check for updates |
+| Manage | `d` | Delete selected |
+| Manage | `b` | Backup WTF folder |
 
 ## 🤝 Contributing
 
