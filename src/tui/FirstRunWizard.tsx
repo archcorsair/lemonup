@@ -533,6 +533,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   };
 
   const goNext = () => {
+    setError(null);
     if (step < TOTAL_STEPS) {
       setStep(step + 1);
     } else {
@@ -541,6 +542,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   };
 
   const goBack = () => {
+    setError(null);
     if (step > 1) {
       setStep(step - 1);
     } else {
@@ -554,6 +556,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       // Don't go back if editing directory
       if (step === 2 && dirEditMode) {
         flashKey("esc");
+        setError(null);
         setDirEditMode(false);
         return;
       }
@@ -584,7 +587,13 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             setDirEditMode(false);
             // Validate path when done editing
             if (wizardState.destDir) {
-              setPathValid(fs.existsSync(wizardState.destDir));
+              const valid = fs.existsSync(wizardState.destDir);
+              setPathValid(valid);
+              if (!valid) {
+                setError("Directory not found. Please check the path.");
+              } else {
+                setError(null);
+              }
             }
           }
           return; // TextInput handles other input
@@ -592,6 +601,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
 
         if (key.upArrow || key.downArrow || input === "j" || input === "k") {
           flashKey("↑/↓");
+          setError(null);
           const newMode =
             wizardState.destDirMode === "auto" ? "manual" : "auto";
           updateWizardState({ destDirMode: newMode });
@@ -599,7 +609,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             const detected = getDefaultWoWPath();
             if (detected !== "NOT_CONFIGURED") {
               updateWizardState({ destDir: detected });
-              setPathValid(null); // Reset validation for auto-detect
+              setPathValid(fs.existsSync(detected));
             }
           } else {
             setPathValid(null); // Reset validation when switching to manual
@@ -609,6 +619,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         // Space bar to re-edit path
         if (input === " ") {
           flashKey("space");
+          setError(null);
           setDirEditMode(true);
           setPathValid(null); // Reset validation
           return;
@@ -616,20 +627,27 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
 
         if (key.return) {
           flashKey("enter");
-          // Can't proceed if path is invalid
-          if (wizardState.destDir && pathValid === false) {
+
+          const currentPath = wizardState.destDir;
+          const isValid = currentPath ? fs.existsSync(currentPath) : false;
+
+          if (!currentPath) {
+            setError("WoW AddOns directory is required to continue.");
             setDirEditMode(true);
             return;
           }
-          // Can't proceed without a path
-          if (!wizardState.destDir) {
-            if (wizardState.destDirMode === "auto") {
-              // Auto-detect failed, switch to manual mode
-              updateWizardState({ destDirMode: "manual" });
-            }
+
+          if (!isValid) {
+            setPathValid(false);
+            setError(
+              "Invalid directory. Please provide a valid WoW AddOns path.",
+            );
             setDirEditMode(true);
             return;
           }
+
+          setPathValid(true);
+          setError(null);
           goNext();
         }
         break;
