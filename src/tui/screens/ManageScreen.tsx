@@ -626,7 +626,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
   });
 
   return (
-    <Box flexDirection="column" height="100%" width="100%">
+    <Box flexDirection="column" gap={1} height="100%" width="100%">
       <ScreenTitle title="Manage Addons">
         {isSearching ? (
           <Box>
@@ -801,6 +801,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
                 isChecked={isChecked}
                 isChild={item.isChild}
                 isLastChild={item.isLastChild}
+                showLibs={showLibs}
               />
             );
           })

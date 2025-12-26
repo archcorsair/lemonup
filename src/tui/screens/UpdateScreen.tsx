@@ -9,6 +9,7 @@ import type { AddonManager } from "@/core/manager";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
+import { useTheme } from "@/tui/hooks/useTheme";
 import { useAppStore } from "@/tui/store/useAppStore";
 
 interface UpdateScreenProps {
@@ -30,6 +31,7 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
   const { exit } = useApp();
   const flashKey = useAppStore((state) => state.flashKey);
   const queryClient = useQueryClient();
+  const { themeMode } = useTheme();
 
   const [repoStatuses, setRepoStatuses] = useState<Record<string, RepoStatus>>(
     {},
@@ -255,7 +257,9 @@ export const UpdateScreen: React.FC<UpdateScreenProps> = ({
       <ControlBar
         message={
           isDone ? (
-            <Text color="green">✔ Job's Done!</Text>
+            <Text bold color={themeMode === "light" ? "#0077aa" : "green"}>
+              ✔ Job's Done!
+            </Text>
           ) : (
             <Box>
               <Text color="yellow">

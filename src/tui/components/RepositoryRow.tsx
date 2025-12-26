@@ -24,6 +24,7 @@ interface RepositoryRowProps {
   isChecked?: boolean;
   isChild?: boolean;
   isLastChild?: boolean;
+  showLibs?: boolean;
 }
 
 export const RepositoryRow: React.FC<RepositoryRowProps> = ({
@@ -35,6 +36,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
   isChecked = false,
   isChild = false,
   isLastChild = false,
+  showLibs = false,
 }) => {
   const { theme, themeMode } = useTheme();
   let icon = (
@@ -59,7 +61,7 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
       </Color>
     ) : repo.type === "manual" ? (
       <Color styles={theme.repoManual}>
-        <Text>[Man]</Text>
+        <Text>[Manual]</Text>
       </Color>
     ) : (
       <Color styles={theme.repoGit}>
@@ -236,7 +238,12 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
     ? theme.selection
     : isChecked
       ? theme.checked
-      : undefined;
+      : isChild
+        ? theme.childText
+        : undefined;
+
+  // Parent names are bold when libs are shown
+  const isParentWithLibs = showLibs && !isChild;
 
   return (
     <Box paddingX={2} width="100%">
@@ -267,7 +274,9 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
       <Box flexGrow={2} flexShrink={1} minWidth={15} flexBasis="20%">
         {namePrefix}
         <Color styles={nameStyle}>
-          <Text wrap="truncate-end">{repo.name} </Text>
+          <Text bold={isParentWithLibs} wrap="truncate-end">
+            {repo.name}{" "}
+          </Text>
         </Color>
         {repo.kind === "library" && (
           <Color styles={theme.library}>

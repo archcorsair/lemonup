@@ -22,7 +22,7 @@ export const DARK_THEME = {
   heading: "magenta.bold",
 
   // Specific UI Elements
-  version: "gray",
+  version: "#888888",
   border: "gray",
   keyActive: "magenta.bold",
   keyInactive: "white.bold",
@@ -32,11 +32,11 @@ export const DARK_THEME = {
   // Repository Types
   repoTukui: "magenta",
   repoWowi: "yellow",
-  repoManual: "gray",
+  repoManual: "#888888",
   repoGit: "blue",
 
   // Status Colors
-  statusIdle: "gray",
+  statusIdle: "#888888",
   statusWorking: "cyan", // downloading, extracting, copying
   statusChecking: "yellow",
   statusSuccess: "green",
@@ -50,6 +50,7 @@ export const DARK_THEME = {
 
   // Tree & List
   treePrefix: "gray",
+  childText: "white.dim",
   selection: "blue",
   checked: "green",
   unchecked: "gray",
@@ -108,11 +109,12 @@ export const LIGHT_THEME: Theme = {
   helpLabel: "#3d3d3d",
 
   // Tree & List
-  treePrefix: "#5a5a5a",
+  treePrefix: "#7a7a7a",
+  childText: "#6a6a6a",
   selection: "#bf5000",
   checked: "#0077aa",
   unchecked: "#5a5a5a",
-  library: "#6a1b9a",
+  library: "#8e44ad",
 };
 
 export const themes = {
