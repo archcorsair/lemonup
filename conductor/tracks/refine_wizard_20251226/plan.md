@@ -10,10 +10,11 @@
   - **Step 3:** Replace hardcoded colors in `FirstRunWizard.tsx` with theme references.
   - **Commit:** 416869c
 
-- [ ] Task: Implement Spacing for Progress Bar Checkmark
+- [x] Task: Implement Spacing for Progress Bar Checkmark
   - **Description:** Add horizontal spacing around the "✓" symbol in `WizardProgress` component.
   - **Files:** `src/tui/FirstRunWizard.tsx`
   - **Step 1:** Modify `renderProgressBar` logic to add padding or spaces specifically for the checkmark marker.
+  - **Commit:** ab140e4
 
 - [ ] Task: Conductor - User Manual Verification 'Theming and Progress Bar Visuals' (Protocol in workflow.md)
 
