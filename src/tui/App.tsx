@@ -109,8 +109,6 @@ const AppContent: React.FC<AppProps> = ({
   const setNextCheckTime = useAppStore((state) => state.setNextCheckTime);
   const showToast = useAppStore((state) => state.showToast);
 
-  const progressBar = useProgressBar();
-
   const [initialLoad, setInitialLoad] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
   const [configManager, setConfigManager] = useState<ConfigManager | null>(
@@ -118,6 +116,10 @@ const AppContent: React.FC<AppProps> = ({
   );
   const [addonManager, setAddonManager] = useState<AddonManager | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
+
+  const progressBar = useProgressBar({
+    enabled: config?.terminalProgress ?? true,
+  });
 
   // Set dev mode in store when testMode prop is true
   useEffect(() => {

@@ -6,6 +6,7 @@ import {
 } from "@/core/terminal";
 
 interface ProgressBarOptions {
+  enabled?: boolean; // Whether terminal progress bar is enabled (default: true)
   minDuration?: number; // Minimum total duration (default: 2000ms)
   holdDuration?: number; // Hold at 100% before clearing (default: 500ms)
   warningDuration?: number; // Warning flash duration (default: 200ms)
@@ -28,6 +29,7 @@ export const useProgressBar = (
   options: ProgressBarOptions = {},
 ): ProgressBarControls => {
   const {
+    enabled = true,
     minDuration = 2000,
     holdDuration = 500,
     warningDuration = 200,
@@ -48,9 +50,11 @@ export const useProgressBar = (
         stepStartTime: Date.now(),
         minTimePerStep: minDuration / totalSteps,
       };
-      setTerminalProgress(TerminalProgressState.Running, 0);
+      if (enabled) {
+        setTerminalProgress(TerminalProgressState.Running, 0);
+      }
     },
-    [minDuration],
+    [minDuration, enabled],
   );
 
   const advance = useCallback(async () => {
@@ -58,32 +62,37 @@ export const useProgressBar = (
     const elapsed = Date.now() - state.stepStartTime;
     const remaining = state.minTimePerStep - elapsed;
 
-    if (remaining > 0) {
+    if (enabled && remaining > 0) {
       await new Promise((r) => setTimeout(r, remaining));
     }
 
     state.currentStep++;
-    const progress = (state.currentStep / state.totalSteps) * 100;
-    setTerminalProgress(TerminalProgressState.Running, progress);
+    if (enabled) {
+      const progress = (state.currentStep / state.totalSteps) * 100;
+      setTerminalProgress(TerminalProgressState.Running, progress);
+    }
     state.stepStartTime = Date.now();
-  }, []);
+  }, [enabled]);
 
   const warn = useCallback(async () => {
+    if (!enabled) return;
     const state = stateRef.current;
     const progress = ((state.currentStep + 1) / state.totalSteps) * 100;
     setTerminalProgress(TerminalProgressState.Warning, progress);
     await new Promise((r) => setTimeout(r, warningDuration));
-  }, [warningDuration]);
+  }, [warningDuration, enabled]);
 
   const complete = useCallback(async () => {
+    if (!enabled) return;
     setTerminalProgress(TerminalProgressState.Running, 100);
     await new Promise((r) => setTimeout(r, holdDuration));
     clearTerminalProgress();
-  }, [holdDuration]);
+  }, [holdDuration, enabled]);
 
   const clear = useCallback(() => {
+    if (!enabled) return;
     clearTerminalProgress();
-  }, []);
+  }, [enabled]);
 
   return useMemo(
     () => ({ start, advance, warn, complete, clear }),
