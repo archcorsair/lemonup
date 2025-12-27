@@ -5,12 +5,26 @@ import { Box, Text, useApp, useInput } from "ink";
 import Color from "ink-color-pipe";
 import TextInput from "ink-text-input";
 import type React from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ConfigManager } from "@/core/config";
-import { getDefaultWoWPath } from "@/core/paths";
+import { getDefaultWoWPath, searchForWoW } from "@/core/paths";
 import { ControlBar } from "./components/ControlBar";
 import { useTheme } from "./hooks/useTheme";
 import { useAppStore } from "./store/useAppStore";
+
+const SimpleSpinner = () => {
+  const [frame, setFrame] = useState(0);
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setFrame((f) => (f + 1) % frames.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, []);
+
+  return <Text>{frames[frame]}</Text>;
+};
 
 interface FirstRunWizardProps {
   configManager: ConfigManager;
@@ -163,6 +177,9 @@ const DirectoryStep: React.FC<{
   onEditToggle: (editing: boolean) => void;
   pathValid: boolean | null;
   theme: ReturnType<typeof useTheme>["theme"];
+  onDeepScan: () => void;
+  isScanning: boolean;
+  scanError: string | null;
 }> = ({
   mode,
   destDir,
@@ -171,6 +188,9 @@ const DirectoryStep: React.FC<{
   onEditToggle,
   pathValid,
   theme,
+  onDeepScan,
+  isScanning,
+  scanError,
 }) => {
   const detectedPath = getDefaultWoWPath();
   const isDetected = detectedPath !== "NOT_CONFIGURED";
@@ -216,11 +236,41 @@ const DirectoryStep: React.FC<{
               </Color>
             </Box>
           ) : (
-            <Color styles={theme.warning}>
-              <Text>
-                Could not auto-detect WoW path. Please use manual input.
-              </Text>
-            </Color>
+            <Box flexDirection="column">
+              <Color styles={theme.warning}>
+                <Text>
+                  Could not auto-detect WoW path. Please use manual input.
+                </Text>
+              </Color>
+              <Box marginTop={1}>
+                {isScanning ? (
+                  <Box>
+                    <Color styles={theme.brand}>
+                      <SimpleSpinner />
+                    </Color>
+                    <Text>
+                      {" "}
+                      Scanning for WoW installation... (Press Esc to cancel)
+                    </Text>
+                  </Box>
+                ) : (
+                  <Box flexDirection="column">
+                    <Text>
+                      or press{" "}
+                      <Color styles={theme.keyActive}>
+                        <Text bold>S</Text>
+                      </Color>{" "}
+                      to perform a deep scan.
+                    </Text>
+                    {scanError && (
+                      <Color styles={theme.error}>
+                        <Text>Scan failed: {scanError}</Text>
+                      </Color>
+                    )}
+                  </Box>
+                )}
+              </Box>
+            </Box>
           )
         ) : isEditing ? (
           <Box>
@@ -487,6 +537,11 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
+  // Deep Scan State
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scanAbortController = useRef<AbortController | null>(null);
+
   // Wizard state
   const [wizardState, setWizardState] = useState<WizardState>(() => {
     const detectedPath = getDefaultWoWPath();
@@ -513,6 +568,34 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
 
   const updateWizardState = (updates: Partial<WizardState>) => {
     setWizardState((prev) => ({ ...prev, ...updates }));
+  };
+
+  const handleDeepScan = async () => {
+    setIsScanning(true);
+    setScanError(null);
+    scanAbortController.current = new AbortController();
+
+    try {
+      const result = await searchForWoW(
+        os.homedir(),
+        scanAbortController.current.signal,
+      );
+      if (result) {
+        updateWizardState({ destDir: result });
+        setPathValid(true);
+      } else {
+        setScanError("No WoW installation found in deep scan.");
+      }
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === "AbortError") {
+        // Ignore abort
+      } else {
+        setScanError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setIsScanning(false);
+      scanAbortController.current = null;
+    }
   };
 
   const handleComplete = () => {
@@ -562,6 +645,15 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   useInput((input, key) => {
     // Handle escape/backspace for back navigation
     if (key.escape || key.backspace) {
+      if (isScanning && scanAbortController.current) {
+        scanAbortController.current.abort();
+        // State update handled in catch block or explicitly here?
+        // Let's do it here to be responsive
+        setIsScanning(false);
+        flashKey("esc");
+        return;
+      }
+
       // Don't go back if editing directory
       if (step === 2 && dirEditMode) {
         flashKey("esc");
@@ -611,6 +703,17 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             }
           }
           return; // TextInput handles other input
+        }
+
+        if (
+          (input === "s" || input === "S") &&
+          wizardState.destDirMode === "auto"
+        ) {
+          const detected = getDefaultWoWPath();
+          if (detected === "NOT_CONFIGURED" && !isScanning) {
+            handleDeepScan();
+            return;
+          }
         }
 
         if (key.upArrow || key.downArrow || input === "j" || input === "k") {
@@ -851,6 +954,9 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             onEditToggle={setDirEditMode}
             pathValid={pathValid}
             theme={theme}
+            onDeepScan={handleDeepScan}
+            isScanning={isScanning}
+            scanError={scanError}
           />
         )}
         {step === 3 && (
