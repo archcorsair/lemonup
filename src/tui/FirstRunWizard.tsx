@@ -168,6 +168,7 @@ const DirectoryStep: React.FC<{
   isScanning: boolean;
   scanError: string | null;
   scanProgress: { dirs: number; path: string };
+  scanPathInput: ReturnType<typeof useScanPathInput>;
 }> = ({
   mode,
   destDir,
@@ -179,8 +180,16 @@ const DirectoryStep: React.FC<{
   isScanning,
   scanError,
   scanProgress,
+  scanPathInput,
 }) => {
-  const detectedPath = getDefaultWoWPath();
+  const [detectedPath, setDetectedPath] = useState<string>("NOT_CONFIGURED");
+
+  useEffect(() => {
+    if (mode === "auto") {
+      getDefaultWoWPath().then(setDetectedPath);
+    }
+  }, [mode]);
+
   const isDetected = detectedPath !== "NOT_CONFIGURED";
 
   return (
@@ -638,7 +647,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
 
       // Apply wizard settings
       configManager.set("theme", wizardState.theme);
-      configManager.set("destDir", wizardState.destDir || getDefaultWoWPath());
+      configManager.set("destDir", wizardState.destDir);
       configManager.set("maxConcurrent", wizardState.maxConcurrent);
       configManager.set("checkInterval", wizardState.checkInterval * 1000);
       configManager.set("autoCheckEnabled", wizardState.autoCheckEnabled);
@@ -758,11 +767,9 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             wizardState.destDirMode === "auto" ? "manual" : "auto";
           updateWizardState({ destDirMode: newMode });
           if (newMode === "auto") {
-            const detected = getDefaultWoWPath();
-            if (detected !== "NOT_CONFIGURED") {
-              updateWizardState({ destDir: detected });
-              setPathValid(fs.existsSync(detected));
-            }
+            // useEffect will handle async auto-detection when mode changes
+            // Clear destDir to trigger re-detection
+            updateWizardState({ destDir: "" });
           } else {
             setPathValid(null); // Reset validation when switching to manual
           }
@@ -992,6 +999,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             isScanning={isScanning}
             scanError={scanError}
             scanProgress={scanProgress}
+            scanPathInput={scanPathInput}
           />
         )}
         {step === 3 && (
