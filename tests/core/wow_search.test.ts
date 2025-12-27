@@ -76,9 +76,9 @@ describe("WoW Deep Search", () => {
 
     const result = await searchForWoW(root, controller.signal);
     expect(result).toBeNull();
-    
+
     // Should have stopped immediately after the first read (which triggered abort)
-    // Actually the queue shift happens after the signal check in the loop, 
+    // Actually the queue shift happens after the signal check in the loop,
     // so it might do one iteration.
     expect(readdirSpy).toHaveBeenCalledTimes(1);
 

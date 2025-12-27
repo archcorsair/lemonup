@@ -159,7 +159,7 @@ export async function searchForWoW(
     ".git",
     "Library",
     "System",
-    "Applications", // Avoid infinite recursion or redundant scans if we already checked it
+    "Applications",
     "proc",
     "sys",
     "dev",
@@ -171,12 +171,22 @@ export async function searchForWoW(
   const queue: string[] = [root];
   const maxDepth = 10;
   const rootDepth = root.split(path.sep).length;
+  let dirsProcessed = 0;
+  const YIELD_INTERVAL = 10; // Yield every 10 directories
 
   while (queue.length > 0) {
     if (signal?.aborted) return null;
 
     const currentDir = queue.shift();
     if (!currentDir) continue;
+
+    // Yield to event loop periodically
+    dirsProcessed++;
+    if (dirsProcessed % YIELD_INTERVAL === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+      // Check abort again after yielding
+      if (signal?.aborted) return null;
+    }
 
     try {
       const currentDepth = currentDir.split(path.sep).length - rootDepth;
