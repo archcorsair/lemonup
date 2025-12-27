@@ -201,6 +201,46 @@ export function verifyWoWDirectory(addonPath: string): boolean {
   return true;
 }
 
+/**
+ * Quick check of common WoW paths relative to a root directory.
+ * Avoids deep scan by checking likely locations first.
+ */
+export async function quickCheckCommonPaths(
+  rootPath: string,
+): Promise<string | null> {
+  const platform = os.platform();
+  const candidates: string[] = [];
+
+  if (platform === "win32") {
+    candidates.push(
+      "Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+      "Program Files/World of Warcraft/_retail_/Interface/AddOns",
+      "Games/World of Warcraft/_retail_/Interface/AddOns",
+      "World of Warcraft/_retail_/Interface/AddOns",
+    );
+  } else if (platform === "linux") {
+    candidates.push(
+      "Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+      ".wine/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+      ".local/share/Steam/steamapps/common/World of Warcraft/_retail_/Interface/AddOns",
+    );
+  } else if (platform === "darwin") {
+    candidates.push(
+      "Applications/World of Warcraft/_retail_/Interface/AddOns",
+    );
+  }
+
+  for (const candidate of candidates) {
+    const fullPath = path.join(rootPath, candidate);
+    if (verifyWoWDirectory(fullPath)) {
+      logger.logSync("Paths", `Quick check found WoW: ${fullPath}`);
+      return fullPath;
+    }
+  }
+
+  return null;
+}
+
 export async function searchForWoW(
   root: string,
   signal?: AbortSignal,
