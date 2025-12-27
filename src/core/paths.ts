@@ -3,7 +3,40 @@ import os from "node:os";
 import path from "node:path";
 import { logger } from "./logger";
 
-export function getDefaultWoWPath(): string {
+/**
+ * Get available drive letters on Windows using wmic.
+ * Falls back to hardcoded C-G on error.
+ */
+async function getAvailableWindowsDrives(): Promise<string[]> {
+  if (os.platform() !== "win32") return [];
+
+  try {
+    const proc = Bun.spawn(["wmic", "logicaldisk", "get", "name"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const output = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      return ["C", "D", "E", "F", "G"];
+    }
+
+    const drives = output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Z]:$/.test(line))
+      .map((line) => line[0])
+      .filter((d): d is string => d !== undefined);
+
+    return drives.length > 0 ? drives : ["C", "D", "E", "F", "G"];
+  } catch {
+    return ["C", "D", "E", "F", "G"];
+  }
+}
+
+export async function getDefaultWoWPath(): Promise<string> {
   const platform = os.platform();
   const homedir = os.homedir();
 
@@ -14,7 +47,7 @@ export function getDefaultWoWPath(): string {
 
   switch (platform) {
     case "win32": {
-      const winDrives = ["C", "D", "E", "F", "G"];
+      const winDrives = await getAvailableWindowsDrives();
       const winPathTemplates = [
         ":\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns",
         ":\\Program Files\\World of Warcraft\\_retail_\\Interface\\AddOns",
@@ -120,7 +153,17 @@ export function verifyWoWDirectory(addonPath: string): boolean {
     return false;
   }
 
-  const flavorDir = parts.slice(0, -2).join(separator);
+  logger.logSync(
+    "Paths",
+    `Constructing flavor directory from path parts: ${parts.join(" > ")}`,
+  );
+
+  const flavorDir = parts.slice(0, -3).join(separator);
+
+  logger.logSync(
+    "Paths",
+    `Checking for artifacts in flavor directory: ${flavorDir}`,
+  );
 
   const artifacts = [
     "Wow.exe",
@@ -130,15 +173,23 @@ export function verifyWoWDirectory(addonPath: string): boolean {
     "Data",
   ];
 
-  const foundArtifacts = artifacts.filter((artifact) =>
-    pathExists(flavorDir + separator + artifact),
-  );
+  const foundArtifacts: string[] = [];
+  for (const artifact of artifacts) {
+    const artifactPath = flavorDir + separator + artifact;
+    const exists = pathExists(artifactPath);
+    if (exists) {
+      foundArtifacts.push(artifact);
+      logger.logSync("Paths", `  ✓ Found artifact: ${artifact}`);
+    } else {
+      logger.logSync("Paths", `  ✗ Artifact not found: ${artifact}`);
+    }
+  }
 
   // Require at least 2 artifacts for confidence
   if (foundArtifacts.length < 2) {
     logger.logSync(
       "Paths",
-      `Verification failed for ${addonPath}: only found ${foundArtifacts.length} artifact(s): ${foundArtifacts.join(", ")}`,
+      `✓ Verification failed for ${addonPath}: only found ${foundArtifacts.length} artifact(s): ${foundArtifacts.join(", ")}`,
     );
     return false;
   }
