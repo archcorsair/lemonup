@@ -593,13 +593,26 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     scanAbortController.current = new AbortController();
 
     try {
+      const scanRoot = scanPathInput.getSelectedPath();
+
+      // Phase 1: Quick check common paths (no traversal)
+      const quickResult = await quickCheckCommonPaths(scanRoot);
+      if (quickResult) {
+        updateWizardState({ destDir: quickResult });
+        setPathValid(true);
+        setIsScanning(false);
+        return;
+      }
+
+      // Phase 2: Deep scan if quick check fails
       const result = await searchForWoW(
-        os.homedir(),
+        scanRoot,
         scanAbortController.current.signal,
         (dirsScanned, currentPath) => {
           setScanProgress({ dirs: dirsScanned, path: currentPath });
         },
       );
+
       if (result && result !== "NOT_CONFIGURED") {
         updateWizardState({ destDir: result });
         setPathValid(true);
@@ -608,7 +621,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       }
     } catch (e: unknown) {
       if (e instanceof Error && e.name === "AbortError") {
-        // Ignore abort
+        // User cancelled - ignore
       } else {
         setScanError(e instanceof Error ? e.message : String(e));
       }
