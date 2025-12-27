@@ -74,4 +74,43 @@ describe("WoW Auto-Detection Hardening", () => {
 		expect(verifyWoWDirectory(testPath)).toBe(true);
 		spy2.mockRestore();
 	});
+
+	test("rejects Classic and Classic Era paths", () => {
+		const { verifyWoWDirectory } = require("@/core/paths");
+		const classicPath = "/fake/_classic_/Interface/AddOns";
+		const eraPath = "/fake/_classic_era_/Interface/AddOns";
+
+		// Mock artifacts for classic paths to ensure they're still rejected
+		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			// Mock both path and artifacts exist
+			if (p === classicPath || p === eraPath) return true;
+			if (p.endsWith("Wow.exe")) return true;
+			if (p.endsWith("Data")) return true;
+			return false;
+		});
+
+		expect(verifyWoWDirectory(classicPath)).toBe(false);
+		expect(verifyWoWDirectory(eraPath)).toBe(false);
+
+		spy.mockRestore();
+	});
+
+	test("requires _retail_ flavor in path", () => {
+		const { verifyWoWDirectory } = require("@/core/paths");
+		const noFlavorPath = "/fake/Interface/AddOns";
+
+		// Mock artifacts to ensure rejection is flavor-based, not artifact-based
+		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			if (p === noFlavorPath) return true;
+			if (p.endsWith("Wow.exe")) return true;
+			if (p.endsWith("Data")) return true;
+			return false;
+		});
+
+		expect(verifyWoWDirectory(noFlavorPath)).toBe(false);
+
+		spy.mockRestore();
+	});
 });

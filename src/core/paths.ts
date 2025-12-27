@@ -82,6 +82,24 @@ export function verifyWoWDirectory(addonPath: string): boolean {
     return false;
   }
 
+  // Explicit retail-only enforcement
+  const pathLower = addonPath.toLowerCase();
+  if (pathLower.includes("_classic_") || pathLower.includes("_classic_era_")) {
+    logger.logSync(
+      "Paths",
+      `Rejected non-retail path (Classic/Era not supported): ${addonPath}`,
+    );
+    return false;
+  }
+
+  if (!pathLower.includes("_retail_")) {
+    logger.logSync(
+      "Paths",
+      `Rejected path missing _retail_ flavor: ${addonPath}`,
+    );
+    return false;
+  }
+
   const separator = addonPath.includes("\\") ? "\\" : "/";
   const parts = addonPath.split(/[\\/]/);
 
