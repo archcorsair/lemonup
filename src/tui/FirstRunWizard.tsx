@@ -863,6 +863,16 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         if (key.return) {
           flashKey("enter");
 
+          // If in auto mode with no path detected, trigger deep scan on Enter
+          if (
+            wizardState.destDirMode === "auto" &&
+            !wizardState.destDir &&
+            !isScanning
+          ) {
+            handleDeepScan();
+            return;
+          }
+
           const currentPath = wizardState.destDir
             ? wizardState.destDir.trim()
             : "";
