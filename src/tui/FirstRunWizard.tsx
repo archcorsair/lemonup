@@ -267,17 +267,69 @@ const DirectoryStep: React.FC<{
                   </Box>
                 ) : (
                   <Box flexDirection="column">
-                    <Text>
-                      or press{" "}
-                      <Color styles={theme.keyActive}>
-                        <Text bold>S</Text>
-                      </Color>{" "}
-                      to perform a deep scan.
-                    </Text>
+                    <Box>
+                      <Text>
+                        or press{" "}
+                        <Color styles={theme.keyActive}>
+                          <Text bold>S</Text>
+                        </Color>{" "}
+                        to start deep scan
+                      </Text>
+                    </Box>
+
+                    <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                      <Box>
+                        <Color styles={theme.muted}>
+                          <Text>Scan from: </Text>
+                        </Color>
+                        <TextInput
+                          value={scanPathInput.inputValue}
+                          onChange={scanPathInput.setInputValue}
+                          placeholder="Enter path..."
+                        />
+                      </Box>
+
+                      {scanPathInput.suggestions.length > 0 && (
+                        <Box flexDirection="column" marginTop={1}>
+                          <Color styles={theme.muted}>
+                            <Text>Suggestions (↑/↓ to select):</Text>
+                          </Color>
+                          {scanPathInput.suggestions.map((suggestion, idx) => (
+                            <Box key={suggestion}>
+                              <Color
+                                styles={
+                                  idx === scanPathInput.selectedIndex
+                                    ? theme.selection
+                                    : theme.muted
+                                }
+                              >
+                                <Text>
+                                  {idx === scanPathInput.selectedIndex
+                                    ? "› "
+                                    : "  "}
+                                </Text>
+                              </Color>
+                              <Color
+                                styles={
+                                  idx === scanPathInput.selectedIndex
+                                    ? theme.highlight
+                                    : theme.labelInactive
+                                }
+                              >
+                                <Text>{suggestion}</Text>
+                              </Color>
+                            </Box>
+                          ))}
+                        </Box>
+                      )}
+                    </Box>
+
                     {scanError && (
-                      <Color styles={theme.error}>
-                        <Text>Scan failed: {scanError}</Text>
-                      </Color>
+                      <Box marginTop={1}>
+                        <Color styles={theme.error}>
+                          <Text>Scan failed: {scanError}</Text>
+                        </Color>
+                      </Box>
                     )}
                   </Box>
                 )}
