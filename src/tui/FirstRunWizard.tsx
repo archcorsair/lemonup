@@ -695,9 +695,11 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
           (input === "s" || input === "S") &&
           wizardState.destDirMode === "auto"
         ) {
-          const detected = getDefaultWoWPath();
-          if (detected === "NOT_CONFIGURED" && !isScanning) {
+          if (!isScanning) {
+            flashKey("scan");
+
             handleDeepScan();
+
             return;
           }
         }
