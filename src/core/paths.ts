@@ -113,6 +113,71 @@ export function verifyWoWDirectory(addonPath: string): boolean {
   return found;
 }
 
+export async function searchForWoW(
+  root: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const IGNORED_DIRS = new Set([
+    "node_modules",
+    ".git",
+    "Library",
+    "System",
+    "Applications", // Avoid infinite recursion or redundant scans if we already checked it
+    "proc",
+    "sys",
+    "dev",
+    "boot",
+    "snap",
+    "flatpak",
+  ]);
+
+  const queue: string[] = [root];
+  const maxDepth = 10;
+  const rootDepth = root.split(path.sep).length;
+
+  while (queue.length > 0) {
+    if (signal?.aborted) return null;
+
+    const currentDir = queue.shift();
+    if (!currentDir) continue;
+
+    try {
+      const currentDepth = currentDir.split(path.sep).length - rootDepth;
+      if (currentDepth > maxDepth) continue;
+
+      const entries = fs.readdirSync(currentDir);
+
+      // Check for _retail_ folder first in current entries
+      if (entries.includes("_retail_")) {
+        const retailPath = path.join(currentDir, "_retail_");
+        const addonsPath = path.join(retailPath, "Interface", "AddOns");
+        if (verifyWoWDirectory(addonsPath)) {
+          return addonsPath;
+        }
+      }
+
+      // Add subdirectories to queue
+      for (const entry of entries) {
+        if (IGNORED_DIRS.has(entry)) continue;
+
+        const fullPath = path.join(currentDir, entry);
+        try {
+          const stats = fs.statSync(fullPath);
+          if (stats.isDirectory()) {
+            queue.push(fullPath);
+          }
+        } catch {
+          // Skip folders we can't access
+        }
+      }
+    } catch {
+      // Skip folders we can't read
+    }
+  }
+
+  return null;
+}
+
 export function isPathConfigured(pathStr: string): boolean {
   return pathStr !== "NOT_CONFIGURED" && pathStr.length > 0;
 }
