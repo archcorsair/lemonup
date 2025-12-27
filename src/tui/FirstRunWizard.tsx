@@ -815,6 +815,30 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         if (key.upArrow || key.downArrow || input === "j" || input === "k") {
           flashKey("↑/↓");
           setError(null);
+
+          // Navigate scan path suggestions when in auto mode with no detected path
+          if (
+            !dirEditMode &&
+            wizardState.destDirMode === "auto" &&
+            !wizardState.destDir &&
+            !isScanning
+          ) {
+            if (key.downArrow || input === "j") {
+              const maxIndex = scanPathInput.suggestions.length - 1;
+              scanPathInput.selectIndex(
+                Math.min(scanPathInput.selectedIndex + 1, maxIndex),
+              );
+              return;
+            }
+            if (key.upArrow || input === "k") {
+              scanPathInput.selectIndex(
+                Math.max(scanPathInput.selectedIndex - 1, -1),
+              );
+              return;
+            }
+          }
+
+          // Otherwise, switch between auto and manual modes
           const newMode =
             wizardState.destDirMode === "auto" ? "manual" : "auto";
           updateWizardState({ destDirMode: newMode });
