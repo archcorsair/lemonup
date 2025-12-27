@@ -281,7 +281,7 @@ export async function searchForWoW(
   const maxDepth = 10;
   const rootDepth = root.split(path.sep).length;
   let dirsScanned = 0;
-  const YIELD_INTERVAL = 10; // Yield every 10 directories
+  const YIELD_INTERVAL = 50; // Reduced context switches (was 10)
 
   while (queue.length > 0) {
     if (signal?.aborted) return null;
@@ -303,11 +303,14 @@ export async function searchForWoW(
       const currentDepth = currentDir.split(path.sep).length - rootDepth;
       if (currentDepth > maxDepth) continue;
 
-      const entries = fs.readdirSync(currentDir);
+      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
 
       // Check for _retail_ folder first in current entries
-      if (entries.includes("_retail_")) {
-        const retailPath = path.join(currentDir, "_retail_");
+      const retailEntry = entries.find(
+        (e) => e.name === "_retail_" && e.isDirectory(),
+      );
+      if (retailEntry) {
+        const retailPath = path.join(currentDir, retailEntry.name);
         const addonsPath = path.join(retailPath, "Interface", "AddOns");
         if (verifyWoWDirectory(addonsPath)) {
           return addonsPath;
@@ -316,14 +319,17 @@ export async function searchForWoW(
 
       // Add subdirectories to queue
       for (const entry of entries) {
-        if (IGNORED_DIRS.has(entry)) continue;
+        if (!entry.isDirectory()) continue;
+        if (IGNORED_DIRS.has(entry.name)) continue;
 
-        const fullPath = path.join(currentDir, entry);
+        const fullPath = path.join(currentDir, entry.name);
+
         try {
-          const stats = fs.statSync(fullPath);
-          if (stats.isDirectory()) {
-            queue.push(fullPath);
-          }
+          // Avoid symlink loops
+          const stats = fs.lstatSync(fullPath);
+          if (stats.isSymbolicLink()) continue;
+
+          queue.push(fullPath);
         } catch {
           // Skip folders we can't access
         }
