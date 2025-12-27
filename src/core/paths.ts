@@ -15,15 +15,21 @@ export function getDefaultWoWPath(): string {
   switch (platform) {
     case "win32": {
       const winDrives = ["C", "D", "E", "F", "G"];
-      const winSuffix =
-        ":\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns";
+      const winPathTemplates = [
+        ":\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ":\\Program Files\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ":\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ":\\World of Warcraft\\_retail_\\Interface\\AddOns",
+      ];
 
       for (const drive of winDrives) {
-        const p = drive + winSuffix;
-        logger.logSync("Paths", `Checking Windows path: ${p}`);
-        if (verifyWoWDirectory(p)) {
-          logger.logSync("Paths", `Found WoW Retail at: ${p}`);
-          return p;
+        for (const template of winPathTemplates) {
+          const p = drive + template;
+          logger.logSync("Paths", `Checking Windows path: ${p}`);
+          if (verifyWoWDirectory(p)) {
+            logger.logSync("Paths", `Found WoW Retail at: ${p}`);
+            return p;
+          }
         }
       }
       break;

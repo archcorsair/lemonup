@@ -42,4 +42,26 @@ describe("paths", () => {
 		mock.restore();
 		fs.existsSync = originalExistsSync; // Restore manually just in case
 	});
+
+	test("getDefaultWoWPath checks Program Files and Games on Windows", () => {
+		spyOn(os, "platform").mockReturnValue("win32");
+
+		// Mock: Only D:\Games\World of Warcraft exists
+		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			if (p.includes("D:\\Games\\World of Warcraft\\_retail_")) return true;
+			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns")
+				return true;
+			// Need artifacts for verification
+			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Wow.exe") return true;
+			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Data") return true;
+			return false;
+		});
+
+		const result = getDefaultWoWPath();
+		expect(result).toContain("D:\\Games");
+
+		spy.mockRestore();
+		mock.restore();
+	});
 });
