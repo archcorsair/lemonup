@@ -4,17 +4,20 @@ import path from "node:path";
 import { logger } from "./logger";
 
 /**
- * Get available drive letters on Windows using wmic.
+ * Get available drive letters on Windows using PowerShell.
  * Falls back to hardcoded C-G on error.
  */
 async function getAvailableWindowsDrives(): Promise<string[]> {
   if (os.platform() !== "win32") return [];
 
   try {
-    const proc = Bun.spawn(["wmic", "logicaldisk", "get", "name"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const proc = Bun.spawn(
+      ["powershell", "-Command", "(Get-PSDrive -PSProvider FileSystem).Root"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
 
     const output = await new Response(proc.stdout).text();
     const exitCode = await proc.exited;
@@ -23,10 +26,11 @@ async function getAvailableWindowsDrives(): Promise<string[]> {
       return ["C", "D", "E", "F", "G"];
     }
 
+    // Output format: "C:\nD:\nE:\n" -> ["C", "D", "E"]
     const drives = output
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => /^[A-Z]:$/.test(line))
+      .filter((line) => /^[A-Z]:\\$/.test(line))
       .map((line) => line[0])
       .filter((d): d is string => d !== undefined);
 
