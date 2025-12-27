@@ -22,13 +22,21 @@ export function useScanPathInput(): ScanPathInput {
     if (platform === "win32") {
       baseSuggestions.push("C:\\", "D:\\", "E:\\", "F:\\");
     } else if (platform === "linux") {
-      baseSuggestions.push("/", "/home");
+      baseSuggestions.push("/home", "/mnt", "/");
     } else if (platform === "darwin") {
       baseSuggestions.push("/Applications", "/");
     }
 
     setSuggestions(baseSuggestions);
   }, []);
+
+  // Update input value when selecting a suggestion
+  const selectIndex = (index: number) => {
+    setSelectedIndex(index);
+    if (index >= 0 && suggestions[index]) {
+      setInputValue(suggestions[index]);
+    }
+  };
 
   const getSelectedPath = (): string => {
     if (selectedIndex >= 0 && suggestions[selectedIndex]) {
@@ -42,7 +50,7 @@ export function useScanPathInput(): ScanPathInput {
     selectedIndex,
     suggestions,
     setInputValue,
-    selectIndex: setSelectedIndex,
+    selectIndex,
     getSelectedPath,
   };
 }
