@@ -155,17 +155,30 @@ export async function searchForWoW(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const IGNORED_DIRS = new Set([
+    // Development
     "node_modules",
     ".git",
+    // System (macOS)
     "Library",
     "System",
     "Applications",
+    "private",
+    // System (Linux)
     "proc",
     "sys",
     "dev",
     "boot",
     "snap",
     "flatpak",
+    "lost+found",
+    "run",
+    "tmp",
+    // System (Windows)
+    "Windows",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "ProgramData",
+    "AppData",
   ]);
 
   const queue: string[] = [root];

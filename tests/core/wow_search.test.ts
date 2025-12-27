@@ -85,4 +85,30 @@ describe("WoW Deep Search", () => {
     readdirSpy.mockRestore();
     statSpy.mockRestore();
   });
+
+  test("ignores Windows and Linux system directories", async () => {
+    const root = "/home/user";
+    let checkedDirs: string[] = [];
+
+    const spy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
+      checkedDirs.push(p);
+      if (p === "/home/user") {
+        return ["Windows", "tmp", "var", "Games"] as any;
+      }
+      return [] as any;
+    });
+
+    const statSpy = spyOn(fs, "statSync").mockReturnValue({
+      isDirectory: () => true,
+    } as any);
+
+    await searchForWoW(root);
+
+    expect(checkedDirs).toContain("/home/user");
+    expect(checkedDirs).not.toContain("/home/user/Windows");
+    expect(checkedDirs).not.toContain("/home/user/tmp");
+
+    spy.mockRestore();
+    statSpy.mockRestore();
+  });
 });
