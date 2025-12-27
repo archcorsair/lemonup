@@ -6,9 +6,10 @@ import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ConfigManager } from "@/core/config";
-import { getDefaultWoWPath, searchForWoW } from "@/core/paths";
+import { getDefaultWoWPath, quickCheckCommonPaths, searchForWoW } from "@/core/paths";
+import { useScanPathInput } from "./hooks/useScanPathInput";
 import { ControlBar } from "./components/ControlBar";
 import { useTheme } from "./hooks/useTheme";
 import { useAppStore } from "./store/useAppStore";
@@ -546,22 +547,19 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const scanAbortController = useRef<AbortController | null>(null);
 
   // Wizard state
-  const [wizardState, setWizardState] = useState<WizardState>(() => {
-    const detectedPath = getDefaultWoWPath();
-    return {
-      theme: "dark",
-      destDir: detectedPath !== "NOT_CONFIGURED" ? detectedPath : "",
-      destDirMode: "auto",
-      installElvUI: false,
-      installTukui: false,
-      maxConcurrent: 3,
-      checkInterval: 300, // 5 minutes in seconds
-      autoCheckEnabled: true,
-      autoCheckInterval: 60, // 1 hour in minutes
-      backupWTF: true,
-      backupRetention: 5,
-    };
-  });
+  const [wizardState, setWizardState] = useState<WizardState>(() => ({
+    theme: "dark",
+    destDir: "", // Will populate async via useEffect
+    destDirMode: "auto",
+    installElvUI: false,
+    installTukui: false,
+    maxConcurrent: 3,
+    checkInterval: 300, // 5 minutes in seconds
+    autoCheckEnabled: true,
+    autoCheckInterval: 60, // 1 hour in minutes
+    backupWTF: true,
+    backupRetention: 5,
+  }));
 
   // Step-specific state
   const [dirEditMode, setDirEditMode] = useState(false);
@@ -572,6 +570,21 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const updateWizardState = (updates: Partial<WizardState>) => {
     setWizardState((prev) => ({ ...prev, ...updates }));
   };
+
+  // Scan path input hook
+  const scanPathInput = useScanPathInput();
+
+  // Auto-detect WoW path on mount and mode changes
+  useEffect(() => {
+    if (wizardState.destDirMode === "auto" && !wizardState.destDir) {
+      getDefaultWoWPath().then((detected) => {
+        if (detected !== "NOT_CONFIGURED") {
+          updateWizardState({ destDir: detected });
+          setPathValid(true);
+        }
+      });
+    }
+  }, [wizardState.destDirMode]);
 
   const handleDeepScan = async () => {
     setIsScanning(true);
