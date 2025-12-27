@@ -32,6 +32,9 @@ interface AppState {
   // Dev Mode
   devMode: boolean;
 
+  // Onboarding
+  showOnboarding: boolean;
+
   // Actions
   navigate: (screen: Screen) => void;
   setLastMenuSelection: (selection: string) => void;
@@ -44,6 +47,8 @@ interface AppState {
   setBackgroundChecking: (checking: boolean) => void;
   setNextCheckTime: (time: number | null) => void;
   setDevMode: (enabled: boolean) => void;
+  triggerOnboarding: () => void;
+  clearOnboarding: () => void;
 }
 
 let toastId = 0;
@@ -60,6 +65,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   isBackgroundChecking: false,
   nextCheckTime: null,
   devMode: false,
+  showOnboarding: false,
 
   navigate: (screen) => set({ activeScreen: screen }),
   setLastMenuSelection: (selection) => set({ lastMenuSelection: selection }),
@@ -89,4 +95,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setBackgroundChecking: (checking) => set({ isBackgroundChecking: checking }),
   setNextCheckTime: (time) => set({ nextCheckTime: time }),
   setDevMode: (enabled) => set({ devMode: enabled }),
+  triggerOnboarding: () => set({ showOnboarding: true }),
+  clearOnboarding: () => set({ showOnboarding: false }),
 }));

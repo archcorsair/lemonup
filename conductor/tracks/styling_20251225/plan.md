@@ -15,8 +15,9 @@
   - **Step 3:** Commit changes.
   - **Status:** Done. Updated colors.
 
-- [~] Task: User Feedback Loop
+- [x] Task: User Feedback Loop
   - **Description:** Ask user to verify readability.
-  - **Status:** Pending user confirmation.
+  - **Status:** Completed by user.
 
-- [ ] Task: Conductor - User Manual Verification 'Iterative Tuning' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Iterative Tuning' (Protocol in workflow.md)
+  - **Status:** Completed by user.

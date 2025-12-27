@@ -1,0 +1,8 @@
+{
+  "track_id": "refine_wizard_20251226",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2025-12-26T16:15:00Z",
+  "updated_at": "2025-12-26T16:15:00Z",
+  "description": "Refine First Run Wizard visuals, layout, and validation logic."
+}

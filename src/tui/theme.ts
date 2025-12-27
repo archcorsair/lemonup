@@ -56,6 +56,12 @@ export const DARK_THEME = {
   checked: "#7dcfff", // cyan
   unchecked: "#565f89", // comment
   library: "#9d7cd8", // purple
+
+  // Wizard
+  wizardBorder: "#7aa2f7", // blue
+  progressCompleted: "#9ece6a", // green
+  progressCurrent: "#7aa2f7.bold", // blue
+  progressPending: "#565f89", // comment
 } as const;
 
 // Derive the shape of the theme, but widen values to string
@@ -116,6 +122,12 @@ export const LIGHT_THEME: Theme = {
   checked: "#007197", // cyan
   unchecked: "#848cb5", // comment
   library: "#7847bd", // purple
+
+  // Wizard
+  wizardBorder: "#2e7de9", // blue
+  progressCompleted: "#587539", // green
+  progressCurrent: "#007197.bold", // cyan
+  progressPending: "#848cb5", // comment
 };
 
 export const themes = {
