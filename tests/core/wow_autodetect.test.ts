@@ -25,7 +25,7 @@ describe("WoW Auto-Detection Hardening", () => {
     
     test("verifyWoWDirectory should be stricter", () => {
         const { verifyWoWDirectory } = require("@/core/paths");
-        
+
         // Mock a directory that exists but doesn't have Wow.exe in its grandparent
         const spy1 = spyOn(fs, "existsSync").mockImplementation((p: any) => {
             if (typeof p === "string" && p.endsWith("AddOns")) return true;
@@ -44,4 +44,34 @@ describe("WoW Auto-Detection Hardening", () => {
 
         spy2.mockRestore();
     });
+
+	test("verifyWoWDirectory requires at least 2 artifacts", () => {
+		const { verifyWoWDirectory } = require("@/core/paths");
+		const testPath = "/fake/_retail_/Interface/AddOns";
+
+		// Mock: Only 1 artifact present (should fail)
+		const spy1 = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			if (p === testPath) return true;
+			if (p.includes("Interface") && p.endsWith("AddOns")) return true;
+			if (p.endsWith("Wow.exe")) return true; // Only 1 artifact
+			return false;
+		});
+
+		expect(verifyWoWDirectory(testPath)).toBe(false);
+		spy1.mockRestore();
+
+		// Mock: 2 artifacts present (should pass)
+		const spy2 = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			if (p === testPath) return true;
+			if (p.includes("Interface") && p.endsWith("AddOns")) return true;
+			if (p.endsWith("Wow.exe")) return true;
+			if (p.endsWith("Data")) return true; // 2 artifacts
+			return false;
+		});
+
+		expect(verifyWoWDirectory(testPath)).toBe(true);
+		spy2.mockRestore();
+	});
 });

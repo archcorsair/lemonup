@@ -12,7 +12,7 @@ describe("WoW Deep Search", () => {
       if (p === "/home/user") return ["Documents", "Games"] as any;
       if (p === "/home/user/Games") return ["WoW"] as any;
       if (p === "/home/user/Games/WoW") return ["_retail_"] as any;
-      if (p === "/home/user/Games/WoW/_retail_") return ["Interface", "Wow.exe"] as any;
+      if (p === "/home/user/Games/WoW/_retail_") return ["Interface", "Wow.exe", "Data"] as any;
       if (p === "/home/user/Games/WoW/_retail_/Interface") return ["AddOns"] as any;
       return [] as any;
     });
@@ -26,6 +26,7 @@ describe("WoW Deep Search", () => {
     const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
       if (p === target) return true;
       if (p.includes("Wow.exe")) return true;
+      if (p.includes("Data")) return true; // Add second artifact
       return false;
     });
 

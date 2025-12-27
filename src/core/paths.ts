@@ -78,39 +78,52 @@ export function getDefaultWoWPath(): string {
 
 export function verifyWoWDirectory(addonPath: string): boolean {
   if (!pathExists(addonPath)) {
+    logger.logSync("Paths", `Path does not exist: ${addonPath}`);
     return false;
   }
 
-  // addonPath is likely something like .../_retail_/Interface/AddOns
-  // We look for WoW executables in the parent of Interface (the flavor folder)
   const separator = addonPath.includes("\\") ? "\\" : "/";
   const parts = addonPath.split(/[\\/]/);
+
   if (parts.length < 3) {
     logger.logSync("Paths", `Path too short for verification: ${addonPath}`);
     return false;
   }
+
+  // Verify path structure contains Interface/AddOns
+  if (!parts.includes("Interface") || !parts.includes("AddOns")) {
+    logger.logSync("Paths", `Missing Interface/AddOns structure: ${addonPath}`);
+    return false;
+  }
+
   const flavorDir = parts.slice(0, -2).join(separator);
 
   const artifacts = [
     "Wow.exe",
     "Wow-64.exe",
     "World of Warcraft.app",
-    ".build.info", // Common to all installs
+    ".build.info",
     "Data",
   ];
 
-  const found = artifacts.some((artifact) =>
+  const foundArtifacts = artifacts.filter((artifact) =>
     pathExists(flavorDir + separator + artifact),
   );
 
-  if (!found) {
+  // Require at least 2 artifacts for confidence
+  if (foundArtifacts.length < 2) {
     logger.logSync(
       "Paths",
-      `Verification failed for ${addonPath} (no artifacts found in ${flavorDir})`,
+      `Verification failed for ${addonPath}: only found ${foundArtifacts.length} artifact(s): ${foundArtifacts.join(", ")}`,
     );
+    return false;
   }
 
-  return found;
+  logger.logSync(
+    "Paths",
+    `Verified ${addonPath} with ${foundArtifacts.length} artifacts: ${foundArtifacts.join(", ")}`,
+  );
+  return true;
 }
 
 export async function searchForWoW(
