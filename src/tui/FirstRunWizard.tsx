@@ -3,28 +3,15 @@ import os from "node:os";
 import path from "node:path";
 import { Box, Text, useApp, useInput } from "ink";
 import Color from "ink-color-pipe";
+import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { ConfigManager } from "@/core/config";
 import { getDefaultWoWPath, searchForWoW } from "@/core/paths";
 import { ControlBar } from "./components/ControlBar";
 import { useTheme } from "./hooks/useTheme";
 import { useAppStore } from "./store/useAppStore";
-
-const SimpleSpinner = () => {
-  const [frame, setFrame] = useState(0);
-  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setFrame((f) => (f + 1) % frames.length);
-    }, 80);
-    return () => clearInterval(timer);
-  }, []);
-
-  return <Text>{frames[frame]}</Text>;
-};
 
 interface FirstRunWizardProps {
   configManager: ConfigManager;
@@ -177,7 +164,6 @@ const DirectoryStep: React.FC<{
   onEditToggle: (editing: boolean) => void;
   pathValid: boolean | null;
   theme: ReturnType<typeof useTheme>["theme"];
-  onDeepScan: () => void;
   isScanning: boolean;
   scanError: string | null;
 }> = ({
@@ -188,7 +174,6 @@ const DirectoryStep: React.FC<{
   onEditToggle,
   pathValid,
   theme,
-  onDeepScan,
   isScanning,
   scanError,
 }) => {
@@ -246,7 +231,8 @@ const DirectoryStep: React.FC<{
                 {isScanning ? (
                   <Box>
                     <Color styles={theme.brand}>
-                      <SimpleSpinner />
+                      {/* @ts-expect-error ink-spinner types are not fully compatible with React 19 */}
+                      <Spinner type="dots" />
                     </Color>
                     <Text>
                       {" "}
@@ -954,7 +940,6 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             onEditToggle={setDirEditMode}
             pathValid={pathValid}
             theme={theme}
-            onDeepScan={handleDeepScan}
             isScanning={isScanning}
             scanError={scanError}
           />
