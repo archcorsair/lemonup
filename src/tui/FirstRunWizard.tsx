@@ -166,6 +166,7 @@ const DirectoryStep: React.FC<{
   theme: ReturnType<typeof useTheme>["theme"];
   isScanning: boolean;
   scanError: string | null;
+  scanProgress: { dirs: number; path: string };
 }> = ({
   mode,
   destDir,
@@ -176,6 +177,7 @@ const DirectoryStep: React.FC<{
   theme,
   isScanning,
   scanError,
+  scanProgress,
 }) => {
   const detectedPath = getDefaultWoWPath();
   const isDetected = detectedPath !== "NOT_CONFIGURED";
@@ -229,15 +231,29 @@ const DirectoryStep: React.FC<{
               </Color>
               <Box marginTop={1}>
                 {isScanning ? (
-                  <Box>
-                    <Color styles={theme.brand}>
-                      {/* @ts-expect-error ink-spinner types are not fully compatible with React 19 */}
-                      <Spinner type="dots" />
-                    </Color>
-                    <Text>
-                      {" "}
-                      Scanning for WoW installation... (Press Esc to cancel)
-                    </Text>
+                  <Box flexDirection="column">
+                    <Box>
+                      <Color styles={theme.brand}>
+                        {/* @ts-expect-error ink-spinner types are not fully compatible with React 19 */}
+                        <Spinner type="dots" />
+                      </Color>
+                      <Text>
+                        {" "}
+                        Scanning... ({scanProgress.dirs} directories checked)
+                      </Text>
+                    </Box>
+                    {scanProgress.path && (
+                      <Box marginLeft={2}>
+                        <Color styles={theme.muted}>
+                          <Text>{scanProgress.path}</Text>
+                        </Color>
+                      </Box>
+                    )}
+                    <Box marginTop={1}>
+                      <Color styles={theme.muted}>
+                        <Text>(Press Esc to cancel)</Text>
+                      </Color>
+                    </Box>
                   </Box>
                 ) : (
                   <Box flexDirection="column">
@@ -526,6 +542,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   // Deep Scan State
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanProgress, setScanProgress] = useState({ dirs: 0, path: "" });
   const scanAbortController = useRef<AbortController | null>(null);
 
   // Wizard state
@@ -559,14 +576,18 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const handleDeepScan = async () => {
     setIsScanning(true);
     setScanError(null);
+    setScanProgress({ dirs: 0, path: "" });
     scanAbortController.current = new AbortController();
 
     try {
       const result = await searchForWoW(
         os.homedir(),
         scanAbortController.current.signal,
+        (dirsScanned, currentPath) => {
+          setScanProgress({ dirs: dirsScanned, path: currentPath });
+        },
       );
-      if (result) {
+      if (result && result !== "NOT_CONFIGURED") {
         updateWizardState({ destDir: result });
         setPathValid(true);
       } else {
@@ -944,6 +965,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             theme={theme}
             isScanning={isScanning}
             scanError={scanError}
+            scanProgress={scanProgress}
           />
         )}
         {step === 3 && (

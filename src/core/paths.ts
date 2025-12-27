@@ -153,6 +153,7 @@ export function verifyWoWDirectory(addonPath: string): boolean {
 export async function searchForWoW(
   root: string,
   signal?: AbortSignal,
+  onProgress?: (dirsScanned: number, currentPath: string) => void,
 ): Promise<string | null> {
   const IGNORED_DIRS = new Set([
     // Development
@@ -184,7 +185,7 @@ export async function searchForWoW(
   const queue: string[] = [root];
   const maxDepth = 10;
   const rootDepth = root.split(path.sep).length;
-  let dirsProcessed = 0;
+  let dirsScanned = 0;
   const YIELD_INTERVAL = 10; // Yield every 10 directories
 
   while (queue.length > 0) {
@@ -193,9 +194,11 @@ export async function searchForWoW(
     const currentDir = queue.shift();
     if (!currentDir) continue;
 
+    dirsScanned++;
+    onProgress?.(dirsScanned, currentDir);
+
     // Yield to event loop periodically
-    dirsProcessed++;
-    if (dirsProcessed % YIELD_INTERVAL === 0) {
+    if (dirsScanned % YIELD_INTERVAL === 0) {
       await new Promise((resolve) => setImmediate(resolve));
       // Check abort again after yielding
       if (signal?.aborted) return null;

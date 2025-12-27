@@ -111,4 +111,33 @@ describe("WoW Deep Search", () => {
     spy.mockRestore();
     statSpy.mockRestore();
   });
+
+  test("calls progress callback during scan", async () => {
+    const root = "/home/user";
+    let progressCalls = 0;
+
+    const spy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
+      if (p === "/home/user") return ["folder1", "folder2"] as any;
+      return [] as any;
+    });
+
+    const statSpy = spyOn(fs, "statSync").mockReturnValue({
+      isDirectory: () => true,
+    } as any);
+
+    await searchForWoW(
+      root,
+      undefined,
+      (dirsScanned, currentPath) => {
+        progressCalls++;
+        expect(dirsScanned).toBeGreaterThan(0);
+        expect(typeof currentPath).toBe("string");
+      },
+    );
+
+    expect(progressCalls).toBeGreaterThan(0);
+
+    spy.mockRestore();
+    statSpy.mockRestore();
+  });
 });
