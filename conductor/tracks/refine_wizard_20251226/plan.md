@@ -18,7 +18,7 @@
 
 - [ ] Task: Conductor - User Manual Verification 'Theming and Progress Bar Visuals' (Protocol in workflow.md)
 
-## Phase 2: Directory Step Refinement and Bug Fixes
+## Phase 2: Directory Step Refinement and Bug Fixes [checkpoint: a6e0808]
 
 - [x] Task: Relocate Validation Indicator and Improve Editing UI
   - **Description:** Move the validation icon to the left of the path. Replace `[EDITING]` label with a more refined visual cue.
