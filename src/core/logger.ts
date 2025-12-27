@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -34,6 +35,17 @@ export class Logger {
     return new Date().toISOString();
   }
 
+  public logSync(category: string, message: string) {
+    if (!this.enabled) return;
+
+    const logMessage = `[${this.getTimestamp()}] [${category}] ${message}\n`;
+    try {
+      appendFileSync(this.logPath, logMessage);
+    } catch {
+      // Ignore write errors
+    }
+  }
+
   public async log(category: string, message: string) {
     if (!this.enabled) return;
 
@@ -43,6 +55,21 @@ export class Logger {
     } catch {
       // Maybe console.error if we are in a context where that works?
       // In TUI mode console.error might break layout, best to ignore for now.
+    }
+  }
+
+  public errorSync(category: string, message: string, error?: unknown) {
+    if (!this.enabled) return;
+
+    const errorMessage = error
+      ? `: ${error instanceof Error ? error.stack || error.message : String(error)}`
+      : "";
+    const logMessage = `[${this.getTimestamp()}] [${category}] [ERROR] ${message}${errorMessage}\n`;
+
+    try {
+      appendFileSync(this.logPath, logMessage);
+    } catch {
+      // Ignore write errors
     }
   }
 
