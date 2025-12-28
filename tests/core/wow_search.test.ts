@@ -1,143 +1,236 @@
-import { describe, expect, mock, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
-import path from "node:path";
+import type { Dirent } from "node:fs";
 import { searchForWoW } from "@/core/paths";
 
+// Helper to create mock Dirent objects
+function mockDirent(name: string, isDir: boolean): Dirent {
+	return {
+		name,
+		isDirectory: () => isDir,
+		isFile: () => !isDir,
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isFIFO: () => false,
+		isSocket: () => false,
+		isSymbolicLink: () => false,
+		path: "",
+		parentPath: "",
+	} as Dirent;
+}
+
 describe("WoW Deep Search", () => {
-  test("should find WoW Retail in a deep directory structure", async () => {
-    const root = "/home/user";
-    const target = "/home/user/Games/WoW/_retail_/Interface/AddOns";
+	test("should find WoW Retail in a deep directory structure", async () => {
+		const root = "/home/user";
+		const target = "/home/user/Games/WoW/_retail_/Interface/AddOns";
 
-    const spy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
-      if (p === "/home/user") return ["Documents", "Games"] as any;
-      if (p === "/home/user/Games") return ["WoW"] as any;
-      if (p === "/home/user/Games/WoW") return ["_retail_"] as any;
-      if (p === "/home/user/Games/WoW/_retail_") return ["Interface", "Wow.exe", "Data"] as any;
-      if (p === "/home/user/Games/WoW/_retail_/Interface") return ["AddOns"] as any;
-      return [] as any;
-    });
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
-    const statSpy = spyOn(fs, "statSync").mockImplementation((p: any) => {
-      return {
-        isDirectory: () => !p.endsWith("Wow.exe"),
-      } as any;
-    });
+		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
+			if (p === "/home/user")
+				return [mockDirent("Documents", true), mockDirent("Games", true)];
+			if (p === "/home/user/Games") return [mockDirent("WoW", true)];
+			if (p === "/home/user/Games/WoW") return [mockDirent("_retail_", true)];
+			if (p === "/home/user/Games/WoW/_retail_")
+				return [
+					mockDirent("Interface", true),
+					mockDirent("Wow.exe", false),
+					mockDirent("Data", true),
+				];
+			if (p === "/home/user/Games/WoW/_retail_/Interface")
+				return [mockDirent("AddOns", true)];
+			return [];
+		}) as unknown as typeof fs.readdirSync);
 
-    const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
-      if (p === target) return true;
-      if (p.includes("Wow.exe")) return true;
-      if (p.includes("Data")) return true; // Add second artifact
-      return false;
-    });
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+			return {
+				isSymbolicLink: () => false,
+			} as any;
+		});
 
-    const result = await searchForWoW(root);
-    expect(result).toBe(target);
+		const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (p === target) return true;
+			if (p.includes("Wow.exe")) return true;
+			if (p.includes("Data")) return true;
+			return false;
+		});
 
-    spy.mockRestore();
-    statSpy.mockRestore();
-    existsSpy.mockRestore();
-  });
+		const result = await searchForWoW(root);
+		expect(result).toBe(target);
 
-  test("should ignore irrelevant directories", async () => {
-    const root = "/home/user";
-    
-    const readdirSpy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
-      if (p === "/home/user") return ["node_modules", ".git", "Library"] as any;
-      return [] as any;
-    });
+		accessSpy.mockRestore();
+		spy.mockRestore();
+		lstatSpy.mockRestore();
+		existsSpy.mockRestore();
+	});
 
-    const statSpy = spyOn(fs, "statSync").mockImplementation((p: any) => {
-      return { isDirectory: () => true } as any;
-    });
+	test("should ignore irrelevant directories", async () => {
+		const root = "/home/user";
 
-    await searchForWoW(root);
-    
-    // Should NOT have searched inside node_modules or .git
-    expect(readdirSpy).toHaveBeenCalledTimes(1); 
-    expect(readdirSpy).toHaveBeenCalledWith("/home/user");
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
-    readdirSpy.mockRestore();
-    statSpy.mockRestore();
-  });
+		const readdirSpy = spyOn(fs, "readdirSync").mockImplementation(((
+			p: string,
+		) => {
+			if (p === "/home/user")
+				return [
+					mockDirent("node_modules", true),
+					mockDirent(".git", true),
+					mockDirent("Library", true),
+				];
+			return [];
+		}) as unknown as typeof fs.readdirSync);
 
-  test("should be interruptible", async () => {
-    const root = "/home/user";
-    const controller = new AbortController();
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+			return {
+				isSymbolicLink: () => false,
+			} as any;
+		});
 
-    const readdirSpy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
-      // On the first call, we abort
-      controller.abort();
-      return ["folder1", "folder2"] as any;
-    });
+		await searchForWoW(root);
 
-    const statSpy = spyOn(fs, "statSync").mockImplementation((p: any) => {
-      return { isDirectory: () => true } as any;
-    });
+		// Should have only read the root - ignored dirs should not be traversed
+		expect(readdirSpy).toHaveBeenCalledWith("/home/user", {
+			withFileTypes: true,
+		});
+		// All entries are in IGNORED_DIRS so no subdirs should be read
+		expect(readdirSpy).toHaveBeenCalledTimes(1);
 
-    const result = await searchForWoW(root, controller.signal);
-    expect(result).toBeNull();
+		accessSpy.mockRestore();
+		readdirSpy.mockRestore();
+		lstatSpy.mockRestore();
+	});
 
-    // Should have stopped immediately after the first read (which triggered abort)
-    // Actually the queue shift happens after the signal check in the loop,
-    // so it might do one iteration.
-    expect(readdirSpy).toHaveBeenCalledTimes(1);
+	test("should be interruptible", async () => {
+		const root = "/home/user";
+		const controller = new AbortController();
 
-    readdirSpy.mockRestore();
-    statSpy.mockRestore();
-  });
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
-  test("ignores Windows and Linux system directories", async () => {
-    const root = "/home/user";
-    let checkedDirs: string[] = [];
+		const readdirSpy = spyOn(fs, "readdirSync").mockImplementation(((
+			p: string,
+		) => {
+			// Return entries, then abort after first call
+			if (p === "/home/user") {
+				return [mockDirent("folder1", true), mockDirent("folder2", true)];
+			}
+			// Abort on second call
+			controller.abort();
+			return [];
+		}) as unknown as typeof fs.readdirSync);
 
-    const spy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
-      checkedDirs.push(p);
-      if (p === "/home/user") {
-        return ["Windows", "tmp", "var", "Games"] as any;
-      }
-      return [] as any;
-    });
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+			return {
+				isSymbolicLink: () => false,
+			} as any;
+		});
 
-    const statSpy = spyOn(fs, "statSync").mockReturnValue({
-      isDirectory: () => true,
-    } as any);
+		const result = await searchForWoW(root, controller.signal);
+		expect(result).toBeNull();
 
-    await searchForWoW(root);
+		accessSpy.mockRestore();
+		readdirSpy.mockRestore();
+		lstatSpy.mockRestore();
+	});
 
-    expect(checkedDirs).toContain("/home/user");
-    expect(checkedDirs).not.toContain("/home/user/Windows");
-    expect(checkedDirs).not.toContain("/home/user/tmp");
+	test("ignores Windows and Linux system directories", async () => {
+		const root = "/home/user";
+		const checkedDirs: string[] = [];
 
-    spy.mockRestore();
-    statSpy.mockRestore();
-  });
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
-  test("calls progress callback during scan", async () => {
-    const root = "/home/user";
-    let progressCalls = 0;
+		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
+			checkedDirs.push(p);
+			if (p === "/home/user") {
+				return [
+					mockDirent("Windows", true),
+					mockDirent("tmp", true),
+					mockDirent("var", true),
+					mockDirent("Games", true),
+				];
+			}
+			return [];
+		}) as unknown as typeof fs.readdirSync);
 
-    const spy = spyOn(fs, "readdirSync").mockImplementation((p: any) => {
-      if (p === "/home/user") return ["folder1", "folder2"] as any;
-      return [] as any;
-    });
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+			return {
+				isSymbolicLink: () => false,
+			} as any;
+		});
 
-    const statSpy = spyOn(fs, "statSync").mockReturnValue({
-      isDirectory: () => true,
-    } as any);
+		await searchForWoW(root);
 
-    await searchForWoW(
-      root,
-      undefined,
-      (dirsScanned, currentPath) => {
-        progressCalls++;
-        expect(dirsScanned).toBeGreaterThan(0);
-        expect(typeof currentPath).toBe("string");
-      },
-    );
+		expect(checkedDirs).toContain("/home/user");
+		// Windows is in IGNORED_DIRS, tmp is in IGNORED_DIRS, but Games is not
+		expect(checkedDirs).not.toContain("/home/user/Windows");
+		expect(checkedDirs).not.toContain("/home/user/tmp");
+		expect(checkedDirs).toContain("/home/user/Games");
 
-    expect(progressCalls).toBeGreaterThan(0);
+		accessSpy.mockRestore();
+		spy.mockRestore();
+		lstatSpy.mockRestore();
+	});
 
-    spy.mockRestore();
-    statSpy.mockRestore();
-  });
+	test("calls progress callback during scan", async () => {
+		const root = "/home/user";
+		let progressCalls = 0;
+
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
+
+		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
+			if (p === "/home/user")
+				return [mockDirent("folder1", true), mockDirent("folder2", true)];
+			return [];
+		}) as unknown as typeof fs.readdirSync);
+
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+			return {
+				isSymbolicLink: () => false,
+			} as any;
+		});
+
+		await searchForWoW(root, undefined, (dirsScanned, currentPath) => {
+			progressCalls++;
+			expect(dirsScanned).toBeGreaterThan(0);
+			expect(typeof currentPath).toBe("string");
+		});
+
+		expect(progressCalls).toBeGreaterThan(0);
+
+		accessSpy.mockRestore();
+		spy.mockRestore();
+		lstatSpy.mockRestore();
+	});
+
+	test("skips symbolic links to prevent loops", async () => {
+		const root = "/home/user";
+		const checkedDirs: string[] = [];
+
+		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
+
+		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
+			checkedDirs.push(p);
+			if (p === "/home/user") {
+				return [mockDirent("symlink", true), mockDirent("real", true)];
+			}
+			return [];
+		}) as unknown as typeof fs.readdirSync);
+
+		const lstatSpy = spyOn(fs, "lstatSync").mockImplementation((p: any) => {
+			return {
+				isSymbolicLink: () => (p as string).includes("symlink"),
+			} as any;
+		});
+
+		await searchForWoW(root);
+
+		// symlink should be skipped, real should be checked
+		expect(checkedDirs).toContain("/home/user");
+		expect(checkedDirs).not.toContain("/home/user/symlink");
+		expect(checkedDirs).toContain("/home/user/real");
+
+		accessSpy.mockRestore();
+		spy.mockRestore();
+		lstatSpy.mockRestore();
+	});
 });

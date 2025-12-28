@@ -44,10 +44,7 @@ export async function getDefaultWoWPath(): Promise<string> {
   const platform = os.platform();
   const homedir = os.homedir();
 
-  logger.logSync(
-    "Paths",
-    `Attempting auto-detection for platform: ${platform}`,
-  );
+  logger.logSync("Paths", `Auto-detection started (platform: ${platform})`);
 
   switch (platform) {
     case "win32": {
@@ -62,9 +59,8 @@ export async function getDefaultWoWPath(): Promise<string> {
       for (const drive of winDrives) {
         for (const template of winPathTemplates) {
           const p = drive + template;
-          logger.logSync("Paths", `Checking Windows path: ${p}`);
           if (verifyWoWDirectory(p)) {
-            logger.logSync("Paths", `Found WoW Retail at: ${p}`);
+            logger.logSync("Paths", `Auto-detection found: ${p}`);
             return p;
           }
         }
@@ -73,9 +69,8 @@ export async function getDefaultWoWPath(): Promise<string> {
     }
     case "darwin": {
       const p = "/Applications/World of Warcraft/_retail_/Interface/AddOns";
-      logger.logSync("Paths", `Checking macOS path: ${p}`);
       if (verifyWoWDirectory(p)) {
-        logger.logSync("Paths", `Found WoW Retail at: ${p}`);
+        logger.logSync("Paths", `Auto-detection found: ${p}`);
         return p;
       }
       break;
@@ -105,9 +100,8 @@ export async function getDefaultWoWPath(): Promise<string> {
       ];
 
       for (const p of linuxPaths) {
-        logger.logSync("Paths", `Checking Linux path: ${p}`);
         if (verifyWoWDirectory(p)) {
-          logger.logSync("Paths", `Found WoW Retail at: ${p}`);
+          logger.logSync("Paths", `Auto-detection found: ${p}`);
           return p;
         }
       }
@@ -115,31 +109,25 @@ export async function getDefaultWoWPath(): Promise<string> {
     }
   }
 
-  logger.logSync("Paths", "Auto-detection failed to find a valid Retail path");
+  logger.logSync(
+    "Paths",
+    "Auto-detection completed: no WoW installation found",
+  );
   return "NOT_CONFIGURED";
 }
 
 export function verifyWoWDirectory(addonPath: string): boolean {
   if (!pathExists(addonPath)) {
-    logger.logSync("Paths", `Path does not exist: ${addonPath}`);
     return false;
   }
 
   // Explicit retail-only enforcement
   const pathLower = addonPath.toLowerCase();
   if (pathLower.includes("_classic_") || pathLower.includes("_classic_era_")) {
-    logger.logSync(
-      "Paths",
-      `Rejected non-retail path (Classic/Era not supported): ${addonPath}`,
-    );
     return false;
   }
 
   if (!pathLower.includes("_retail_")) {
-    logger.logSync(
-      "Paths",
-      `Rejected path missing _retail_ flavor: ${addonPath}`,
-    );
     return false;
   }
 
@@ -147,60 +135,51 @@ export function verifyWoWDirectory(addonPath: string): boolean {
   const parts = addonPath.split(/[\\/]/);
 
   if (parts.length < 3) {
-    logger.logSync("Paths", `Path too short for verification: ${addonPath}`);
     return false;
   }
 
   // Verify path structure contains Interface/AddOns
   if (!parts.includes("Interface") || !parts.includes("AddOns")) {
-    logger.logSync("Paths", `Missing Interface/AddOns structure: ${addonPath}`);
     return false;
   }
 
-  logger.logSync(
-    "Paths",
-    `Constructing flavor directory from path parts: ${parts.join(" > ")}`,
-  );
+  // wowRoot = World of Warcraft/ (contains Data, .build.info)
+  // flavorDir = World of Warcraft/_retail_/ (contains Wow.exe)
+  // Path structure: .../World of Warcraft/_retail_/Interface/AddOns
+  // slice(0, -3) removes: _retail_, Interface, AddOns → wowRoot
+  // slice(0, -2) removes: Interface, AddOns → flavorDir
+  const wowRoot = parts.slice(0, -3).join(separator);
+  const flavorDir = parts.slice(0, -2).join(separator);
 
-  const flavorDir = parts.slice(0, -3).join(separator);
-
-  logger.logSync(
-    "Paths",
-    `Checking for artifacts in flavor directory: ${flavorDir}`,
-  );
-
-  const artifacts = [
-    "Wow.exe",
-    "Wow-64.exe",
-    "World of Warcraft.app",
-    ".build.info",
-    "Data",
-  ];
+  // Artifacts at WoW root level
+  const rootArtifacts = ["Data", ".build.info"];
+  // Artifacts inside the flavor directory (_retail_)
+  const flavorArtifacts = ["Wow.exe", "Wow-64.exe", "World of Warcraft.app"];
 
   const foundArtifacts: string[] = [];
-  for (const artifact of artifacts) {
-    const artifactPath = flavorDir + separator + artifact;
-    const exists = pathExists(artifactPath);
-    if (exists) {
+
+  for (const artifact of rootArtifacts) {
+    const artifactPath = wowRoot + separator + artifact;
+    if (pathExists(artifactPath)) {
       foundArtifacts.push(artifact);
-      logger.logSync("Paths", `  ✓ Found artifact: ${artifact}`);
-    } else {
-      logger.logSync("Paths", `  ✗ Artifact not found: ${artifact}`);
+    }
+  }
+
+  for (const artifact of flavorArtifacts) {
+    const artifactPath = flavorDir + separator + artifact;
+    if (pathExists(artifactPath)) {
+      foundArtifacts.push(artifact);
     }
   }
 
   // Require at least 2 artifacts for confidence
   if (foundArtifacts.length < 2) {
-    logger.logSync(
-      "Paths",
-      `✓ Verification failed for ${addonPath}: only found ${foundArtifacts.length} artifact(s): ${foundArtifacts.join(", ")}`,
-    );
     return false;
   }
 
   logger.logSync(
     "Paths",
-    `Verified ${addonPath} with ${foundArtifacts.length} artifacts: ${foundArtifacts.join(", ")}`,
+    `Verified WoW path: ${addonPath} (${foundArtifacts.length} artifacts: ${foundArtifacts.join(", ")})`,
   );
   return true;
 }
@@ -229,15 +208,12 @@ export async function quickCheckCommonPaths(
       ".local/share/Steam/steamapps/common/World of Warcraft/_retail_/Interface/AddOns",
     );
   } else if (platform === "darwin") {
-    candidates.push(
-      "Applications/World of Warcraft/_retail_/Interface/AddOns",
-    );
+    candidates.push("Applications/World of Warcraft/_retail_/Interface/AddOns");
   }
 
   for (const candidate of candidates) {
     const fullPath = path.join(rootPath, candidate);
     if (verifyWoWDirectory(fullPath)) {
-      logger.logSync("Paths", `Quick check found WoW: ${fullPath}`);
       return fullPath;
     }
   }
@@ -250,6 +226,16 @@ export async function searchForWoW(
   signal?: AbortSignal,
   onProgress?: (dirsScanned: number, currentPath: string) => void,
 ): Promise<string | null> {
+  // Check if root directory is readable
+  try {
+    fs.accessSync(root, fs.constants.R_OK);
+  } catch {
+    throw new Error(`Cannot read directory: ${root} (permission denied)`);
+  }
+
+  logger.logSync("Scan", `Deep scan started from: ${root}`);
+  const startTime = Date.now();
+
   const IGNORED_DIRS = new Set([
     // Development
     "node_modules",
@@ -284,7 +270,13 @@ export async function searchForWoW(
   const YIELD_INTERVAL = 50; // Reduced context switches (was 10)
 
   while (queue.length > 0) {
-    if (signal?.aborted) return null;
+    if (signal?.aborted) {
+      logger.logSync(
+        "Scan",
+        `Deep scan cancelled after ${dirsScanned} directories (${Date.now() - startTime}ms)`,
+      );
+      return null;
+    }
 
     const currentDir = queue.shift();
     if (!currentDir) continue;
@@ -296,7 +288,13 @@ export async function searchForWoW(
     if (dirsScanned % YIELD_INTERVAL === 0) {
       await new Promise((resolve) => setImmediate(resolve));
       // Check abort again after yielding
-      if (signal?.aborted) return null;
+      if (signal?.aborted) {
+        logger.logSync(
+          "Scan",
+          `Deep scan cancelled after ${dirsScanned} directories (${Date.now() - startTime}ms)`,
+        );
+        return null;
+      }
     }
 
     try {
@@ -313,6 +311,10 @@ export async function searchForWoW(
         const retailPath = path.join(currentDir, retailEntry.name);
         const addonsPath = path.join(retailPath, "Interface", "AddOns");
         if (verifyWoWDirectory(addonsPath)) {
+          logger.logSync(
+            "Scan",
+            `Deep scan found WoW after ${dirsScanned} directories (${Date.now() - startTime}ms): ${addonsPath}`,
+          );
           return addonsPath;
         }
       }
@@ -339,6 +341,10 @@ export async function searchForWoW(
     }
   }
 
+  logger.logSync(
+    "Scan",
+    `Deep scan completed: not found after ${dirsScanned} directories (${Date.now() - startTime}ms)`,
+  );
   return null;
 }
 

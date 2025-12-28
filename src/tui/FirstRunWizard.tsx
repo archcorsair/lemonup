@@ -8,9 +8,13 @@ import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import type { ConfigManager } from "@/core/config";
-import { getDefaultWoWPath, quickCheckCommonPaths, searchForWoW } from "@/core/paths";
-import { useScanPathInput } from "./hooks/useScanPathInput";
+import {
+  getDefaultWoWPath,
+  quickCheckCommonPaths,
+  searchForWoW,
+} from "@/core/paths";
 import { ControlBar } from "./components/ControlBar";
+import { useScanPathInput } from "./hooks/useScanPathInput";
 import { useTheme } from "./hooks/useTheme";
 import { useAppStore } from "./store/useAppStore";
 
@@ -22,7 +26,6 @@ interface FirstRunWizardProps {
 interface WizardState {
   theme: "dark" | "light";
   destDir: string;
-  destDirMode: "auto" | "manual";
   installElvUI: boolean;
   installTukui: boolean;
   maxConcurrent: number;
@@ -84,14 +87,16 @@ const WizardProgress: React.FC<{
         </Color>,
       );
 
-      // Add trailing half-segment (after marker)
-      const trailingColor =
-        i + 1 < currentStep ? theme.progressCompleted : theme.progressPending;
-      elements.push(
-        <Color key={`post-${i}`} styles={trailingColor}>
-          <Text>{"━".repeat(segmentLen)}</Text>
-        </Color>,
-      );
+      // Add trailing half-segment (after marker), except for last step
+      if (i < TOTAL_STEPS - 1) {
+        const trailingColor =
+          i + 1 < currentStep ? theme.progressCompleted : theme.progressPending;
+        elements.push(
+          <Color key={`post-${i}`} styles={trailingColor}>
+            <Text>{"━".repeat(segmentLen)}</Text>
+          </Color>,
+        );
+      }
     }
 
     return elements;
@@ -158,38 +163,38 @@ const ThemeStep: React.FC<{
 
 // Step 2: Directory Selection
 const DirectoryStep: React.FC<{
-  mode: "auto" | "manual";
+  detectedPath: string;
   destDir: string;
   onDirChange: (d: string) => void;
-  isEditing: boolean;
-  onEditToggle: (editing: boolean) => void;
   pathValid: boolean | null;
   theme: ReturnType<typeof useTheme>["theme"];
   isScanning: boolean;
   scanError: string | null;
   scanProgress: { dirs: number; path: string };
   scanPathInput: ReturnType<typeof useScanPathInput>;
+  onStartScan: () => void;
+  // Failure flow state
+  scanSubstep: "choose" | "input";
+  scanOptionIndex: number;
+  // Success flow state
+  successSubstep: "choose" | "input";
+  successOptionIndex: number;
 }> = ({
-  mode,
+  detectedPath,
   destDir,
   onDirChange,
-  isEditing,
-  onEditToggle,
   pathValid,
   theme,
   isScanning,
   scanError,
   scanProgress,
   scanPathInput,
+  onStartScan,
+  scanSubstep,
+  scanOptionIndex,
+  successSubstep,
+  successOptionIndex,
 }) => {
-  const [detectedPath, setDetectedPath] = useState<string>("NOT_CONFIGURED");
-
-  useEffect(() => {
-    if (mode === "auto") {
-      getDefaultWoWPath().then(setDetectedPath);
-    }
-  }, [mode]);
-
   const isDetected = detectedPath !== "NOT_CONFIGURED";
 
   return (
@@ -198,85 +203,207 @@ const DirectoryStep: React.FC<{
         <Text bold>Where is your WoW AddOns folder?</Text>
       </Color>
 
-      <Box flexDirection="column" marginTop={1}>
-        <Box>
-          <Color styles={mode === "auto" ? theme.selection : theme.muted}>
-            <Text>{mode === "auto" ? "› " : "  "}</Text>
-          </Color>
-          <Color
-            styles={mode === "auto" ? theme.highlight : theme.labelInactive}
-          >
-            <Text bold={mode === "auto"}>Auto-detect</Text>
-          </Color>
-        </Box>
-        <Box>
-          <Color styles={mode === "manual" ? theme.selection : theme.muted}>
-            <Text>{mode === "manual" ? "› " : "  "}</Text>
-          </Color>
-          <Color
-            styles={mode === "manual" ? theme.highlight : theme.labelInactive}
-          >
-            <Text bold={mode === "manual"}>Manual input</Text>
-          </Color>
-        </Box>
-      </Box>
-
       <Box marginTop={1} flexDirection="column">
-        {mode === "auto" ? (
-          isDetected ? (
+        {isDetected ? (
+          /* ===== SUCCESS FLOW: Auto-detect succeeded ===== */
+          <Box flexDirection="column">
             <Box>
               <Color styles={theme.success}>
-                <Text>Detected: </Text>
+                <Text>✓ Detected: </Text>
               </Color>
               <Color styles={theme.labelInactive}>
                 <Text>{detectedPath}</Text>
               </Color>
             </Box>
-          ) : (
-            <Box flexDirection="column">
-              <Color styles={theme.warning}>
-                <Text>
-                  Could not auto-detect WoW path. Please use manual input.
-                </Text>
-              </Color>
-              <Box marginTop={1}>
-                {isScanning ? (
+
+            <Box flexDirection="column" marginTop={1}>
+              <Box>
+                <Color
+                  styles={
+                    successOptionIndex === 0 ? theme.selection : theme.muted
+                  }
+                >
+                  <Text>{successOptionIndex === 0 ? "› " : "  "}</Text>
+                </Color>
+                <Color
+                  styles={
+                    successOptionIndex === 0
+                      ? theme.highlight
+                      : theme.labelInactive
+                  }
+                >
+                  <Text bold={successOptionIndex === 0}>Use this path</Text>
+                </Color>
+              </Box>
+              <Box>
+                <Color
+                  styles={
+                    successOptionIndex === 1 ? theme.selection : theme.muted
+                  }
+                >
+                  <Text>{successOptionIndex === 1 ? "› " : "  "}</Text>
+                </Color>
+                <Color
+                  styles={
+                    successOptionIndex === 1
+                      ? theme.highlight
+                      : theme.labelInactive
+                  }
+                >
+                  <Text bold={successOptionIndex === 1}>
+                    Enter different path
+                  </Text>
+                </Color>
+              </Box>
+            </Box>
+
+            {/* Manual input when "Enter different path" selected */}
+            {successSubstep === "input" && (
+              <Box marginTop={1} marginLeft={2} flexDirection="column">
+                <Box>
+                  <Color styles={theme.brand}>
+                    <Text bold>✎ </Text>
+                  </Color>
+                  <TextInput
+                    value={destDir}
+                    onChange={onDirChange}
+                    placeholder="Enter path to WoW AddOns folder..."
+                  />
+                </Box>
+                {destDir && pathValid !== null && (
+                  <Box marginTop={1}>
+                    <Color styles={pathValid ? theme.success : theme.error}>
+                      <Text>
+                        {pathValid ? "✓ Valid path" : "✗ Invalid path"}
+                      </Text>
+                    </Color>
+                  </Box>
+                )}
+                <Box marginTop={1}>
+                  <Color styles={theme.muted}>
+                    <Text>(Press Enter to validate, Esc to go back)</Text>
+                  </Color>
+                </Box>
+              </Box>
+            )}
+          </Box>
+        ) : (
+          /* ===== FAILURE FLOW: Auto-detect failed ===== */
+          <Box flexDirection="column">
+            <Color styles={theme.warning}>
+              <Text>Could not auto-detect WoW path.</Text>
+            </Color>
+
+            <Box marginTop={1}>
+              {isScanning ? (
+                <Box flexDirection="column">
+                  <Box>
+                    <Color styles={theme.brand}>
+                      {/* @ts-expect-error ink-spinner types are not fully compatible with React 19 */}
+                      <Spinner type="dots" />
+                    </Color>
+                    <Text>
+                      {" "}
+                      Scanning... ({scanProgress.dirs} directories checked)
+                    </Text>
+                  </Box>
+                  {scanProgress.path && (
+                    <Box marginLeft={2}>
+                      <Color styles={theme.muted}>
+                        <Text>{scanProgress.path}</Text>
+                      </Color>
+                    </Box>
+                  )}
+                  <Box marginTop={1}>
+                    <Color styles={theme.muted}>
+                      <Text>(Press Esc to cancel)</Text>
+                    </Color>
+                  </Box>
+                </Box>
+              ) : (
+                <Box flexDirection="column">
+                  {/* Option Selection */}
                   <Box flexDirection="column">
                     <Box>
-                      <Color styles={theme.brand}>
-                        {/* @ts-expect-error ink-spinner types are not fully compatible with React 19 */}
-                        <Spinner type="dots" />
+                      <Color
+                        styles={
+                          scanOptionIndex === 0 ? theme.selection : theme.muted
+                        }
+                      >
+                        <Text>{scanOptionIndex === 0 ? "› " : "  "}</Text>
                       </Color>
-                      <Text>
-                        {" "}
-                        Scanning... ({scanProgress.dirs} directories checked)
-                      </Text>
+                      <Color
+                        styles={
+                          scanOptionIndex === 0
+                            ? theme.highlight
+                            : theme.labelInactive
+                        }
+                      >
+                        <Text bold={scanOptionIndex === 0}>Manual input</Text>
+                      </Color>
                     </Box>
-                    {scanProgress.path && (
-                      <Box marginLeft={2}>
+                    <Box>
+                      <Color
+                        styles={
+                          scanOptionIndex === 1 ? theme.selection : theme.muted
+                        }
+                      >
+                        <Text>{scanOptionIndex === 1 ? "› " : "  "}</Text>
+                      </Color>
+                      <Color
+                        styles={
+                          scanOptionIndex === 1
+                            ? theme.highlight
+                            : theme.labelInactive
+                        }
+                      >
+                        <Text bold={scanOptionIndex === 1}>Deep Scan</Text>
+                      </Color>
+                    </Box>
+                    {/* Help hint for Deep Scan */}
+                    {scanOptionIndex === 1 && scanSubstep === "choose" && (
+                      <Box marginLeft={4}>
                         <Color styles={theme.muted}>
-                          <Text>{scanProgress.path}</Text>
+                          <Text>Scan start path can be customized</Text>
                         </Color>
                       </Box>
                     )}
-                    <Box marginTop={1}>
-                      <Color styles={theme.muted}>
-                        <Text>(Press Esc to cancel)</Text>
-                      </Color>
-                    </Box>
                   </Box>
-                ) : (
-                  <Box flexDirection="column">
-                    <Box>
-                      <Text>
-                        or press{" "}
-                        <Color styles={theme.keyActive}>
-                          <Text bold>S</Text>
-                        </Color>{" "}
-                        to start deep scan
-                      </Text>
-                    </Box>
 
+                  {/* Manual input expanded */}
+                  {scanSubstep === "input" && scanOptionIndex === 0 && (
+                    <Box marginTop={1} marginLeft={2} flexDirection="column">
+                      <Box>
+                        <Color styles={theme.brand}>
+                          <Text bold>✎ </Text>
+                        </Color>
+                        <TextInput
+                          value={destDir}
+                          onChange={onDirChange}
+                          placeholder="Enter path to WoW AddOns folder..."
+                        />
+                      </Box>
+                      {destDir && pathValid !== null && (
+                        <Box marginTop={1}>
+                          <Color
+                            styles={pathValid ? theme.success : theme.error}
+                          >
+                            <Text>
+                              {pathValid ? "✓ Valid path" : "✗ Invalid path"}
+                            </Text>
+                          </Color>
+                        </Box>
+                      )}
+                      <Box marginTop={1}>
+                        <Color styles={theme.muted}>
+                          <Text>(Press Enter to validate, Esc to go back)</Text>
+                        </Color>
+                      </Box>
+                    </Box>
+                  )}
+
+                  {/* Deep Scan expanded */}
+                  {scanSubstep === "input" && scanOptionIndex === 1 && (
                     <Box flexDirection="column" marginLeft={2} marginTop={1}>
                       <Box>
                         <Color styles={theme.muted}>
@@ -285,6 +412,7 @@ const DirectoryStep: React.FC<{
                         <TextInput
                           value={scanPathInput.inputValue}
                           onChange={scanPathInput.setInputValue}
+                          onSubmit={onStartScan}
                           placeholder="Enter path..."
                         />
                       </Box>
@@ -322,55 +450,27 @@ const DirectoryStep: React.FC<{
                           ))}
                         </Box>
                       )}
-                    </Box>
 
-                    {scanError && (
                       <Box marginTop={1}>
-                        <Color styles={theme.error}>
-                          <Text>Scan failed: {scanError}</Text>
+                        <Color styles={theme.muted}>
+                          <Text>(Press Enter to scan, Esc to go back)</Text>
                         </Color>
                       </Box>
-                    )}
-                  </Box>
-                )}
-              </Box>
-            </Box>
-          )
-        ) : isEditing ? (
-          <Box>
-            <Color styles={theme.brand}>
-              <Text bold>✎ </Text>
-            </Color>
-            <TextInput
-              value={destDir}
-              onChange={onDirChange}
-              placeholder="Enter path to WoW AddOns folder..."
-              onSubmit={() => onEditToggle(false)}
-            />
-          </Box>
-        ) : (
-          <Box>
-            <Box width={3}>
-              {destDir && pathValid !== null && (
-                <Color styles={pathValid ? theme.success : theme.error}>
-                  <Text bold>{pathValid ? " ✓" : " ✗"}</Text>
-                </Color>
+                    </Box>
+                  )}
+
+                  {scanError && (
+                    <Box marginTop={1}>
+                      <Color styles={theme.error}>
+                        <Text>Scan failed: {scanError}</Text>
+                      </Color>
+                    </Box>
+                  )}
+                </Box>
               )}
             </Box>
-            <Color styles={theme.labelInactive}>
-              <Text>Path: {destDir || "(press Enter to edit)"}</Text>
-            </Color>
           </Box>
         )}
-      </Box>
-
-      <Box marginTop={1}>
-        <Color styles={theme.muted}>
-          <Text>
-            Use ↑/↓ to switch mode.{" "}
-            {mode === "manual" && !isEditing && "Space to edit path."}
-          </Text>
-        </Color>
       </Box>
     </Box>
   );
@@ -610,8 +710,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   // Wizard state
   const [wizardState, setWizardState] = useState<WizardState>(() => ({
     theme: "dark",
-    destDir: "", // Will populate async via useEffect
-    destDirMode: "auto",
+    destDir: "", // Set when user confirms path
     installElvUI: false,
     installTukui: false,
     maxConcurrent: 3,
@@ -628,6 +727,17 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const [addonIndex, setAddonIndex] = useState(0);
   const [settingsIndex, setSettingsIndex] = useState(0);
 
+  // Scan options substep: "choose" = selecting Manual/DeepScan, "input" = entering path/scan
+  const [scanSubstep, setScanSubstep] = useState<"choose" | "input">("choose");
+  const [scanOptionIndex, setScanOptionIndex] = useState(0); // 0 = Manual, 1 = Deep Scan
+
+  // Success flow state (auto-detect succeeded)
+  const [successOptionIndex, setSuccessOptionIndex] = useState(0); // 0 = Use this, 1 = Different
+  const [successSubstep, setSuccessSubstep] = useState<"choose" | "input">(
+    "choose",
+  );
+  const [detectedPath, setDetectedPath] = useState<string>("NOT_CONFIGURED");
+
   const updateWizardState = (updates: Partial<WizardState>) => {
     setWizardState((prev) => ({ ...prev, ...updates }));
   };
@@ -635,17 +745,15 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   // Scan path input hook
   const scanPathInput = useScanPathInput();
 
-  // Auto-detect WoW path on mount and mode changes
+  // Auto-detect WoW path on mount
   useEffect(() => {
-    if (wizardState.destDirMode === "auto" && !wizardState.destDir) {
-      getDefaultWoWPath().then((detected) => {
-        if (detected !== "NOT_CONFIGURED") {
-          updateWizardState({ destDir: detected });
-          setPathValid(true);
-        }
-      });
-    }
-  }, [wizardState.destDirMode]);
+    getDefaultWoWPath().then((detected) => {
+      setDetectedPath(detected);
+      if (detected !== "NOT_CONFIGURED") {
+        setPathValid(true);
+      }
+    });
+  }, []);
 
   const handleDeepScan = async () => {
     setIsScanning(true);
@@ -677,6 +785,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       if (result && result !== "NOT_CONFIGURED") {
         updateWizardState({ destDir: result });
         setPathValid(true);
+        setDetectedPath(result); // Switch UI to success flow
       } else {
         setScanError("No WoW installation found in deep scan.");
       }
@@ -741,20 +850,43 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     if (key.escape || key.backspace) {
       if (isScanning && scanAbortController.current) {
         scanAbortController.current.abort();
-        // State update handled in catch block or explicitly here?
-        // Let's do it here to be responsive
         setIsScanning(false);
         flashKey("esc");
         return;
       }
 
-      // Don't go back if editing directory
-      if (step === 2 && dirEditMode) {
-        flashKey("esc");
-        setError(null);
-        setDirEditMode(false);
-        return;
+      // Step 2: Handle Esc for substep navigation
+      if (step === 2) {
+        // If editing, exit edit mode and reset substep
+        if (dirEditMode) {
+          flashKey("esc");
+          setError(null);
+          setDirEditMode(false);
+          // Reset substep for both flows
+          if (successSubstep === "input") {
+            setSuccessSubstep("choose");
+          }
+          if (scanSubstep === "input") {
+            setScanSubstep("choose");
+          }
+          return;
+        }
+
+        // If in scan input substep (failure flow), go back to choose
+        if (scanSubstep === "input") {
+          flashKey("esc");
+          setScanSubstep("choose");
+          return;
+        }
+
+        // If in success input substep, go back to choose
+        if (successSubstep === "input") {
+          flashKey("esc");
+          setSuccessSubstep("choose");
+          return;
+        }
       }
+
       flashKey("esc");
       goBack();
       return;
@@ -775,135 +907,160 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 2: // Directory
-        if (dirEditMode) {
+      case 2: {
+        // Directory
+        const isDetected = detectedPath !== "NOT_CONFIGURED";
+
+        // ===== SUCCESS FLOW: Auto-detect succeeded =====
+        if (isDetected) {
+          // In text input mode
+          if (dirEditMode) {
+            if (key.return) {
+              flashKey("enter");
+              const currentPath = wizardState.destDir?.trim() || "";
+              const expandedPath = expandPath(currentPath);
+
+              if (expandedPath !== wizardState.destDir) {
+                updateWizardState({ destDir: expandedPath });
+              }
+
+              const isValid = expandedPath
+                ? fs.existsSync(expandedPath)
+                : false;
+
+              if (!expandedPath) {
+                setError("WoW AddOns directory is required to continue.");
+                return;
+              }
+
+              if (!isValid) {
+                setPathValid(false);
+                setError(
+                  "Invalid directory. Please provide a valid WoW AddOns path.",
+                );
+                return;
+              }
+
+              setPathValid(true);
+              setError(null);
+              setDirEditMode(false);
+              goNext();
+            }
+            return; // TextInput handles other keys
+          }
+
+          // Arrow navigation between options
+          if (key.upArrow || key.downArrow || input === "j" || input === "k") {
+            if (successSubstep === "choose") {
+              flashKey("↑/↓");
+              setSuccessOptionIndex((prev) => (prev === 0 ? 1 : 0));
+              return;
+            }
+          }
+
+          // Enter to select option
           if (key.return) {
             flashKey("enter");
-            setDirEditMode(false);
-            // Validate path when done editing
-            if (wizardState.destDir) {
-              const cleaned = wizardState.destDir.trim();
-              const expanded = expandPath(cleaned);
-              if (expanded !== wizardState.destDir) {
-                updateWizardState({ destDir: expanded });
-              }
-              const valid = fs.existsSync(expanded);
-              setPathValid(valid);
-              if (!valid) {
-                setError("Directory not found. Please check the path.");
+            if (successSubstep === "choose") {
+              if (successOptionIndex === 0) {
+                // Use detected path - set destDir and proceed
+                updateWizardState({ destDir: detectedPath });
+                goNext();
               } else {
-                setError(null);
+                // Enter different path - show input
+                setSuccessSubstep("input");
+                setDirEditMode(true);
               }
-            }
-          }
-          return; // TextInput handles other input
-        }
-
-        if (
-          (input === "s" || input === "S") &&
-          wizardState.destDirMode === "auto"
-        ) {
-          if (!isScanning) {
-            flashKey("scan");
-
-            handleDeepScan();
-
-            return;
-          }
-        }
-
-        if (key.upArrow || key.downArrow || input === "j" || input === "k") {
-          flashKey("↑/↓");
-          setError(null);
-
-          // Navigate scan path suggestions when in auto mode with no detected path
-          if (
-            !dirEditMode &&
-            wizardState.destDirMode === "auto" &&
-            !wizardState.destDir &&
-            !isScanning
-          ) {
-            if (key.downArrow || input === "j") {
-              const maxIndex = scanPathInput.suggestions.length - 1;
-              scanPathInput.selectIndex(
-                Math.min(scanPathInput.selectedIndex + 1, maxIndex),
-              );
-              return;
-            }
-            if (key.upArrow || input === "k") {
-              scanPathInput.selectIndex(
-                Math.max(scanPathInput.selectedIndex - 1, -1),
-              );
               return;
             }
           }
-
-          // Otherwise, switch between auto and manual modes
-          const newMode =
-            wizardState.destDirMode === "auto" ? "manual" : "auto";
-          updateWizardState({ destDirMode: newMode });
-          if (newMode === "auto") {
-            // useEffect will handle async auto-detection when mode changes
-            // Clear destDir to trigger re-detection
-            updateWizardState({ destDir: "" });
-          } else {
-            setPathValid(null); // Reset validation when switching to manual
-          }
+          break;
         }
 
-        // Space bar to re-edit path
-        if (input === " ") {
-          flashKey("space");
-          setError(null);
-          setDirEditMode(true);
-          setPathValid(null); // Reset validation
-          return;
-        }
+        // ===== FAILURE FLOW: Auto-detect failed =====
+        if (!isScanning) {
+          // In text input mode (Manual input selected)
+          if (dirEditMode) {
+            if (key.return) {
+              flashKey("enter");
+              const currentPath = wizardState.destDir?.trim() || "";
+              const expandedPath = expandPath(currentPath);
 
-        if (key.return) {
-          flashKey("enter");
+              if (expandedPath !== wizardState.destDir) {
+                updateWizardState({ destDir: expandedPath });
+              }
 
-          // If in auto mode with no path detected, trigger deep scan on Enter
-          if (
-            wizardState.destDirMode === "auto" &&
-            !wizardState.destDir &&
-            !isScanning
-          ) {
-            handleDeepScan();
-            return;
+              const isValid = expandedPath
+                ? fs.existsSync(expandedPath)
+                : false;
+
+              if (!expandedPath) {
+                setError("WoW AddOns directory is required to continue.");
+                return;
+              }
+
+              if (!isValid) {
+                setPathValid(false);
+                setError(
+                  "Invalid directory. Please provide a valid WoW AddOns path.",
+                );
+                return;
+              }
+
+              setPathValid(true);
+              setError(null);
+              setDirEditMode(false);
+              goNext();
+            }
+            return; // TextInput handles other keys
           }
 
-          const currentPath = wizardState.destDir
-            ? wizardState.destDir.trim()
-            : "";
-          const expandedPath = expandPath(currentPath);
+          // Arrow keys
+          if (key.upArrow || key.downArrow || input === "j" || input === "k") {
+            flashKey("↑/↓");
+            setError(null);
 
-          if (expandedPath !== wizardState.destDir) {
-            updateWizardState({ destDir: expandedPath });
+            if (scanSubstep === "choose") {
+              // Navigate between Manual/DeepScan options
+              setScanOptionIndex((prev) => (prev === 0 ? 1 : 0));
+              return;
+            }
+
+            if (scanSubstep === "input" && scanOptionIndex === 1) {
+              // Navigate suggestions in Deep Scan mode
+              if (key.downArrow || input === "j") {
+                const maxIndex = scanPathInput.suggestions.length - 1;
+                scanPathInput.selectIndex(
+                  Math.min(scanPathInput.selectedIndex + 1, maxIndex),
+                );
+              } else {
+                scanPathInput.selectIndex(
+                  Math.max(scanPathInput.selectedIndex - 1, -1),
+                );
+              }
+              return;
+            }
           }
 
-          const isValid = expandedPath ? fs.existsSync(expandedPath) : false;
+          // Enter key
+          if (key.return) {
+            flashKey("enter");
 
-          if (!expandedPath) {
-            setError("WoW AddOns directory is required to continue.");
-            setDirEditMode(true);
-            return;
+            if (scanSubstep === "choose") {
+              // Enter the selected option
+              setScanSubstep("input");
+              if (scanOptionIndex === 0) {
+                // Manual input - show text input
+                setDirEditMode(true);
+              }
+              return;
+            }
+
+            // Deep Scan Enter is handled by TextInput's onSubmit
           }
-
-          if (!isValid) {
-            setPathValid(false);
-            setError(
-              "Invalid directory. Please provide a valid WoW AddOns path.",
-            );
-            setDirEditMode(true);
-            return;
-          }
-
-          setPathValid(true);
-          setError(null);
-          goNext();
         }
         break;
+      }
 
       case 3: // Addons
         if (key.upArrow || input === "k") {
@@ -1075,17 +1232,20 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         {step === 1 && <ThemeStep value={wizardState.theme} theme={theme} />}
         {step === 2 && (
           <DirectoryStep
-            mode={wizardState.destDirMode}
+            detectedPath={detectedPath}
             destDir={wizardState.destDir}
             onDirChange={(d) => updateWizardState({ destDir: d })}
-            isEditing={dirEditMode}
-            onEditToggle={setDirEditMode}
             pathValid={pathValid}
             theme={theme}
             isScanning={isScanning}
             scanError={scanError}
             scanProgress={scanProgress}
             scanPathInput={scanPathInput}
+            onStartScan={handleDeepScan}
+            scanSubstep={scanSubstep}
+            scanOptionIndex={scanOptionIndex}
+            successSubstep={successSubstep}
+            successOptionIndex={successOptionIndex}
           />
         )}
         {step === 3 && (
