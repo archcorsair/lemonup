@@ -4,17 +4,19 @@ import fs from "node:fs";
 import { getDefaultWoWPath } from "@/core/paths";
 
 describe("WoW Auto-Detection Hardening", () => {
-	test("getDefaultWoWPath should detect WoW on D: drive for Windows", () => {
+	test("getDefaultWoWPath should detect WoW on D: drive for Windows", async () => {
 		spyOn(os, "platform").mockReturnValue("win32");
-		
+
 		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
 			if (typeof p === "string" && p.startsWith("D:\\")) return true;
 			return false;
 		});
 
-		expect(getDefaultWoWPath()).toContain("D:\\");
+		const result = await getDefaultWoWPath();
+		expect(result).toContain("D:\\");
 
 		spy.mockRestore();
+		mock.restore();
 	});
 
 	test("getDefaultWoWPath should prioritize _retail_ and ignore others", () => {
