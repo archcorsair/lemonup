@@ -4,7 +4,6 @@ import path from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 import { logger } from "./logger";
-import { getDefaultWoWPath } from "./paths";
 
 // --- Constants ---
 
@@ -207,7 +206,7 @@ export class ConfigManager {
 
   public createDefaultConfig(): void {
     const defaults: Config = {
-      destDir: getDefaultWoWPath(),
+      destDir: "NOT_CONFIGURED", // Will be set by wizard or user
       userAgent:
         "Mozilla/5.0 (SMART-REFRIGERATOR; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/4.0 TV Safari/537.36",
       repositories: [],

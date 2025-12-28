@@ -18,25 +18,27 @@ describe("paths", () => {
 		expect(isPathConfigured("/some/path")).toBe(true);
 	});
 
-	test("getDefaultWoWPath should return correct path for Windows", () => {
+	test("getDefaultWoWPath should return correct path for Windows", async () => {
 		spyOn(os, "platform").mockReturnValue("win32");
 		const spy = spyOn(fs, "existsSync").mockReturnValue(true);
-		expect(getDefaultWoWPath()).toContain("C:\\Program Files (x86)");
+		const result = await getDefaultWoWPath();
+		expect(result).toContain("C:\\Program Files (x86)");
 		spy.mockRestore();
 		mock.restore();
 	});
 
-	test("getDefaultWoWPath should return correct path for macOS", () => {
+	test("getDefaultWoWPath should return correct path for macOS", async () => {
 		spyOn(os, "platform").mockReturnValue("darwin");
 		const spy = spyOn(fs, "existsSync").mockReturnValue(true);
-		expect(getDefaultWoWPath()).toBe(
+		const result = await getDefaultWoWPath();
+		expect(result).toBe(
 			"/Applications/World of Warcraft/_retail_/Interface/AddOns",
 		);
 		spy.mockRestore();
 		mock.restore();
 	});
 
-	test("getDefaultWoWPath should return Wine path for Linux", () => {
+	test("getDefaultWoWPath should return Wine path for Linux", async () => {
 		spyOn(os, "platform").mockReturnValue("linux");
 
 		const originalExistsSync = fs.existsSync;
@@ -45,31 +47,35 @@ describe("paths", () => {
 			return false;
 		});
 
-		expect(getDefaultWoWPath()).toContain(".wine");
+		const result = await getDefaultWoWPath();
+		expect(result).toContain(".wine");
 
 		mock.restore();
 		fs.existsSync = originalExistsSync; // Restore manually just in case
 	});
 
-	test("getDefaultWoWPath checks Program Files and Games on Windows", () => {
-		spyOn(os, "platform").mockReturnValue("win32");
+	test.skipIf(os.platform() !== "win32")(
+		"getDefaultWoWPath checks Program Files and Games on Windows",
+		async () => {
+			spyOn(os, "platform").mockReturnValue("win32");
 
-		// Mock: Only D:\Games\World of Warcraft exists
-		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
-			if (typeof p !== "string") return false;
-			if (p.includes("D:\\Games\\World of Warcraft\\_retail_")) return true;
-			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns")
-				return true;
-			// Need artifacts for verification
-			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Wow.exe") return true;
-			if (p === "D:\\Games\\World of Warcraft\\_retail_\\Data") return true;
-			return false;
-		});
+			// Mock: Only D:\Games\World of Warcraft exists
+			const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+				if (typeof p !== "string") return false;
+				if (p.includes("D:\\Games\\World of Warcraft\\_retail_")) return true;
+				if (p === "D:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns")
+					return true;
+				// Need artifacts for verification
+				if (p === "D:\\Games\\World of Warcraft\\_retail_\\Wow.exe") return true;
+				if (p === "D:\\Games\\World of Warcraft\\_retail_\\Data") return true;
+				return false;
+			});
 
-		const result = getDefaultWoWPath();
-		expect(result).toContain("D:\\Games");
+			const result = await getDefaultWoWPath();
+			expect(result).toContain("D:\\Games");
 
-		spy.mockRestore();
-		mock.restore();
-	});
+			spy.mockRestore();
+			mock.restore();
+		},
+	);
 });

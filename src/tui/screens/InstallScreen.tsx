@@ -83,7 +83,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
     if (!isPathConfigured(config.destDir)) {
       setPendingInstall({ type, url: installUrl });
-      const def = getDefaultWoWPath();
+      const def = await getDefaultWoWPath();
       setDetectedPath(def);
       setMode("config-auto-confirm");
     } else {

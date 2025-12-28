@@ -46,8 +46,8 @@ describe("ConfigManager", () => {
 		manager.createDefaultConfig();
 		const config = manager.get();
 
-		// getDefaultWoWPath returns a path on supported platforms
-		expect(config.destDir).not.toBe("NOT_CONFIGURED");
+		// destDir defaults to NOT_CONFIGURED - wizard or user will set it later
+		expect(config.destDir).toBe("NOT_CONFIGURED");
 		expect(config.checkInterval).toBe(60000 * 5);
 		expect(manager.hasConfigFile).toBe(true);
 
