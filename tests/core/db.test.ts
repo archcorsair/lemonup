@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { type AddonRecord, DatabaseManager } from "@/core/db";
 
-const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-db");
+const TMP_DIR = path.join(os.tmpdir(), `lemonup-tests-db-${process.pid}`);
 
 describe("DatabaseManager", () => {
 	let dbManager: DatabaseManager;
@@ -12,13 +12,15 @@ describe("DatabaseManager", () => {
 	beforeEach(() => {
 		fs.mkdirSync(TMP_DIR, { recursive: true });
 		dbManager = new DatabaseManager(TMP_DIR);
+
+		// Ensure clean state regardless of previous runs or OS-level file locks
+		for (const addon of dbManager.getAll()) {
+			dbManager.removeAddon(addon.folder);
+		}
 	});
 
 	afterEach(() => {
 		dbManager.close();
-		if (fs.existsSync(TMP_DIR)) {
-			fs.rmSync(TMP_DIR, { recursive: true, force: true });
-		}
 	});
 
 	test("should create database and table", () => {
@@ -30,7 +32,7 @@ describe("DatabaseManager", () => {
 	test("should add and get addon", () => {
 		const newAddon: AddonRecord = {
 			name: "TestAddon",
-			folder: "TestAddon",
+			folder: "TestAddon_AddGet",
 			ownedFolders: [],
 			kind: "addon",
 			kindOverride: false,
@@ -50,7 +52,7 @@ describe("DatabaseManager", () => {
 
 		dbManager.addAddon(newAddon);
 
-		const result = dbManager.getByFolder("TestAddon");
+		const result = dbManager.getByFolder("TestAddon_AddGet");
 		expect(result).not.toBeNull();
 		expect(result?.name).toBe("TestAddon");
 		expect(result?.version).toBe("1.0.0");
@@ -66,7 +68,7 @@ describe("DatabaseManager", () => {
 	test("should update addon", () => {
 		const newAddon: AddonRecord = {
 			name: "Test Addon",
-			folder: "TestAddon",
+			folder: "TestAddon_Update",
 			ownedFolders: [],
 			kind: "addon",
 			kindOverride: false,
@@ -85,12 +87,12 @@ describe("DatabaseManager", () => {
 		};
 		dbManager.addAddon(newAddon);
 
-		dbManager.updateAddon("TestAddon", {
+		dbManager.updateAddon("TestAddon_Update", {
 			version: "1.0.1",
 			author: "NewAuthor",
 		});
 
-		const result = dbManager.getByFolder("TestAddon");
+		const result = dbManager.getByFolder("TestAddon_Update");
 		expect(result?.version).toBe("1.0.1");
 		expect(result?.author).toBe("NewAuthor");
 	});
@@ -98,7 +100,7 @@ describe("DatabaseManager", () => {
 	test("should remove addon", () => {
 		const newAddon: AddonRecord = {
 			name: "Test Addon",
-			folder: "TestAddon",
+			folder: "TestAddon_Remove",
 			ownedFolders: [],
 			kind: "addon",
 			kindOverride: false,
@@ -117,9 +119,9 @@ describe("DatabaseManager", () => {
 		};
 		dbManager.addAddon(newAddon);
 
-		dbManager.removeAddon("TestAddon");
+		dbManager.removeAddon("TestAddon_Remove");
 
-		const result = dbManager.getByFolder("TestAddon");
+		const result = dbManager.getByFolder("TestAddon_Remove");
 		expect(result).toBeNull();
 	});
 
@@ -154,7 +156,7 @@ describe("DatabaseManager", () => {
 	test("should store and retrieve ownedFolders", () => {
 		const addon: AddonRecord = {
 			name: "ElvUI",
-			folder: "ElvUI",
+			folder: "ElvUI_OwnedFolders",
 			ownedFolders: ["ElvUI_Options", "ElvUI_Libraries"],
 			kind: "addon",
 			kindOverride: false,
@@ -174,14 +176,14 @@ describe("DatabaseManager", () => {
 
 		dbManager.addAddon(addon);
 
-		const result = dbManager.getByFolder("ElvUI");
+		const result = dbManager.getByFolder("ElvUI_OwnedFolders");
 		expect(result?.ownedFolders).toEqual(["ElvUI_Options", "ElvUI_Libraries"]);
 	});
 
 	test("should store and retrieve dependency arrays", () => {
 		const addon: AddonRecord = {
 			name: "WeakAuras",
-			folder: "WeakAuras",
+			folder: "WeakAuras_DepArrays",
 			ownedFolders: [],
 			kind: "addon",
 			kindOverride: false,
@@ -201,7 +203,7 @@ describe("DatabaseManager", () => {
 
 		dbManager.addAddon(addon);
 
-		const result = dbManager.getByFolder("WeakAuras");
+		const result = dbManager.getByFolder("WeakAuras_DepArrays");
 		expect(result?.requiredDeps).toEqual(["Ace3", "LibStub"]);
 		expect(result?.optionalDeps).toEqual(["Masque"]);
 		expect(result?.embeddedLibs).toEqual(["LibCompress", "LibSerialize"]);
@@ -210,7 +212,7 @@ describe("DatabaseManager", () => {
 	test("should update array fields", () => {
 		const addon: AddonRecord = {
 			name: "TestAddon",
-			folder: "TestAddon",
+			folder: "TestAddon_ArrayUpdate",
 			ownedFolders: [],
 			kind: "addon",
 			kindOverride: false,
@@ -230,14 +232,14 @@ describe("DatabaseManager", () => {
 
 		dbManager.addAddon(addon);
 
-		dbManager.updateAddon("TestAddon", {
+		dbManager.updateAddon("TestAddon_ArrayUpdate", {
 			ownedFolders: ["TestAddon_Core"],
 			requiredDeps: ["Ace3"],
 			kind: "library",
 			kindOverride: true,
 		});
 
-		const result = dbManager.getByFolder("TestAddon");
+		const result = dbManager.getByFolder("TestAddon_ArrayUpdate");
 		expect(result?.ownedFolders).toEqual(["TestAddon_Core"]);
 		expect(result?.requiredDeps).toEqual(["Ace3"]);
 		expect(result?.kind).toBe("library");
@@ -311,7 +313,10 @@ describe("DatabaseManager", () => {
 
 		const dependents = dbManager.getDependents("Ace3");
 		expect(dependents).toHaveLength(2);
-		expect(dependents.map((a) => a.folder).sort()).toEqual(["Plater", "WeakAuras"]);
+		expect(dependents.map((a) => a.folder).sort()).toEqual([
+			"Plater",
+			"WeakAuras",
+		]);
 	});
 
 	test("getRequiredDependents should return only required deps", () => {
@@ -387,7 +392,7 @@ describe("DatabaseManager", () => {
 	test("getOwnerOf should return addon that owns folder", () => {
 		const elvui: AddonRecord = {
 			name: "ElvUI",
-			folder: "ElvUI",
+			folder: "ElvUI_OwnerTest",
 			ownedFolders: ["ElvUI_Options", "ElvUI_Libraries"],
 			kind: "addon",
 			kindOverride: false,
@@ -409,9 +414,9 @@ describe("DatabaseManager", () => {
 
 		const ownerOfOptions = dbManager.getOwnerOf("ElvUI_Options");
 		expect(ownerOfOptions).not.toBeNull();
-		expect(ownerOfOptions?.folder).toBe("ElvUI");
+		expect(ownerOfOptions?.folder).toBe("ElvUI_OwnerTest");
 
-		const ownerOfElvUI = dbManager.getOwnerOf("ElvUI");
+		const ownerOfElvUI = dbManager.getOwnerOf("ElvUI_OwnerTest");
 		expect(ownerOfElvUI).toBeNull();
 
 		const ownerOfNonExistent = dbManager.getOwnerOf("NonExistent");

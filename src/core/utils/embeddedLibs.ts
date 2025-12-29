@@ -49,5 +49,7 @@ export async function detectEmbeddedLibs(addonPath: string): Promise<string[]> {
     }
   }
 
-  return embedded;
+  // Dedupe to avoid duplicate libs when multiple lib directory variants
+  // (e.g. Libs vs libs) point to the same physical folders on case-insensitive filesystems.
+  return Array.from(new Set(embedded));
 }
