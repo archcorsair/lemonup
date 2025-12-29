@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ConfigManager, REPO_TYPE } from "@/core/config";
+import { ConfigManager } from "@/core/config";
 
 const TMP_DIR = path.join(os.tmpdir(), "lemonup-tests-config");
 
@@ -64,38 +64,6 @@ describe("ConfigManager", () => {
 		const config = manager.get();
 		expect(config.destDir).toBe("/tmp/wow");
 		expect(config.debug).toBe(true);
-	});
-
-	test("should update repository", () => {
-		const manager = new ConfigManager({ cwd: TMP_DIR });
-		manager.createDefaultConfig();
-
-		const repo = {
-			name: "test-repo",
-			type: REPO_TYPE.GITHUB,
-			gitRemote: "https://github.com/example/test",
-			branch: "main",
-			folders: ["TestAddon"],
-			installedVersion: null,
-		};
-
-		manager.set("repositories", [repo]);
-
-		manager.updateRepository("test-repo", { installedVersion: "v1.0.0" });
-
-		const config = manager.get();
-		const updatedRepo = config.repositories.find((r) => r.name === "test-repo");
-		expect(updatedRepo?.installedVersion).toBe("v1.0.0");
-	});
-
-	test("should not update non-existent repository", () => {
-		const manager = new ConfigManager({ cwd: TMP_DIR });
-		manager.createDefaultConfig();
-
-		manager.updateRepository("fake-repo", { installedVersion: "v1.0.0" });
-
-		const config = manager.get();
-		expect(config.repositories).toHaveLength(0);
 	});
 
 	test("should respect overrides", () => {

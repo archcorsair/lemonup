@@ -23,6 +23,16 @@ async function main() {
       { permissive: true },
     );
 
+    // Check for unrecognized flags
+    const unknownFlags = args._.filter(
+      (a) => typeof a === "string" && a.startsWith("-"),
+    );
+    if (unknownFlags.length > 0) {
+      console.error(`Unknown flag: ${unknownFlags[0]}`);
+      console.error("Run 'lemonup --help' for usage.");
+      process.exit(1);
+    }
+
     if (args["--version"]) {
       console.log(pkg.version);
       process.exit(0);

@@ -24,12 +24,9 @@ export async function runCLI() {
 
   console.log(`Starting Lemonup v${pkg.version} (CLI Mode)...`);
 
-  const config = manager.getConfig();
-  if (!config.repositories.length) {
-    console.warn(
-      "No repositories found in config. Please verify configuration at:",
-      configManager.path,
-    );
+  const addons = manager.getAllAddons();
+  if (!addons.length) {
+    console.warn("No addons found. Install addons first using the TUI.");
     // Don't exit here, just warn.
   }
 

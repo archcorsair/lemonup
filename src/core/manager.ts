@@ -19,7 +19,6 @@ import { type Config, ConfigManager } from "./config";
 import { type AddonRecord, DatabaseManager } from "./db";
 import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
-import { logger } from "./logger";
 import * as TukUI from "./tukui";
 import * as WoWInterface from "./wowinterface";
 
@@ -56,8 +55,6 @@ export class AddonManager extends EventEmitter {
     this.configManager = configManager || new ConfigManager();
     const configDir = path.dirname(this.configManager.path);
     this.dbManager = new DatabaseManager(configDir);
-
-    this.migrateConfig();
   }
 
   private async executeCommand<T>(command: Command<T>): Promise<T> {
@@ -77,50 +74,6 @@ export class AddonManager extends EventEmitter {
 
   public close() {
     this.dbManager.close();
-  }
-
-  private migrateConfig() {
-    const config = this.configManager.get();
-
-    if (config.migrated_to_db) {
-      return;
-    }
-
-    if (Array.isArray(config.repositories) && config.repositories.length > 0) {
-      logger.log(
-        "Manager",
-        "Migrating repositories from config to database...",
-      );
-      for (const repo of config.repositories) {
-        const folder = repo.folders[0];
-        if (!folder) continue;
-
-        if (this.dbManager.getByFolder(folder)) continue;
-
-        this.dbManager.addAddon({
-          name: repo.name,
-          folder: folder,
-          version: repo.installedVersion,
-          git_commit: null,
-          author: null,
-          interface: null,
-          url: repo.gitRemote || repo.downloadUrl || null,
-          type: repo.type as "github" | "tukui",
-          ownedFolders: [],
-          kind: "addon",
-          kindOverride: false,
-          flavor: "retail",
-          requiredDeps: [],
-          optionalDeps: [],
-          embeddedLibs: [],
-          install_date: new Date().toISOString(),
-          last_updated: new Date().toISOString(),
-        });
-        logger.log("Manager", `Migrated ${repo.name}`);
-      }
-    }
-
-    this.configManager.set("migrated_to_db", true);
   }
 
   public async updateAll(force = false): Promise<UpdateAddonResult[]> {

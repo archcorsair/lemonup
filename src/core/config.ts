@@ -17,15 +17,10 @@ export type RepoType = (typeof REPO_TYPE)[keyof typeof REPO_TYPE];
 
 // --- Zod Schemas ---
 
-export const RepositoryTypeSchema = z.enum([
-  REPO_TYPE.GITHUB,
-  REPO_TYPE.TUKUI,
-  REPO_TYPE.WOWINTERFACE,
-]);
-
-export const RepositorySchema = z.object({
+// Legacy schema - kept for backwards compatibility with old config files
+const RepositorySchema = z.object({
   name: z.string(),
-  type: RepositoryTypeSchema,
+  type: z.enum(["github", "tukui", "wowinterface"]),
   downloadUrl: z.string().optional(),
   gitRemote: z.string().optional(),
   branch: z.string().default("main"),
@@ -43,6 +38,7 @@ export const ConfigSchema = z.object({
     .default(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     ),
+  // Legacy field - kept for backwards compatibility, no longer written to
   repositories: z.array(RepositorySchema).default([]),
   defaultMenuOption: z
     .enum(["update", "install", "manage", "config"])
@@ -62,13 +58,11 @@ export const ConfigSchema = z.object({
   backupWTF: z.boolean().default(true),
   backupRetention: z.number().min(1).default(5),
   debug: z.boolean().default(false),
-  migrated_to_db: z.boolean().optional().default(false),
   showLibs: z.boolean().default(false),
   theme: z.enum(["dark", "light"]).default("dark"),
   terminalProgress: z.boolean().default(true),
 });
 
-export type Repository = z.infer<typeof RepositorySchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
 // --- Configuration Manager ---
@@ -105,7 +99,6 @@ export class ConfigManager {
         backupWTF: { type: "boolean" },
         backupRetention: { type: "number" },
         debug: { type: "boolean" },
-        migrated_to_db: { type: "boolean" },
         showLibs: { type: "boolean" },
         theme: { type: "string" },
         terminalProgress: { type: "boolean" },
@@ -143,7 +136,6 @@ export class ConfigManager {
         backupWTF: true,
         backupRetention: 5,
         debug: false,
-        migrated_to_db: false,
         showLibs: false,
         theme: "dark",
         terminalProgress: true,
@@ -163,37 +155,6 @@ export class ConfigManager {
       return;
     }
     this.store.set(key, value);
-  }
-
-  public updateRepository(repoName: string, updates: Partial<Repository>) {
-    const current = this.get();
-    const repos = [...current.repositories];
-    const index = repos.findIndex((r) => r.name === repoName);
-
-    if (index !== -1) {
-      const updatedRepo = { ...repos[index], ...updates } as Repository;
-      repos[index] = updatedRepo;
-      this.store.set("repositories", repos);
-      logger.log(
-        "Config",
-        `Updated ${repoName} to version ${updatedRepo.installedVersion}`,
-      );
-      console.log(
-        `[Config] Updated ${repoName} to version ${updatedRepo.installedVersion}`,
-      );
-    } else {
-      logger.error("Config", `Keep failed: Repo ${repoName} not found`);
-      console.warn(`[Config] Keep failed: Repo ${repoName} not found`);
-    }
-  }
-
-  public removeRepository(repoName: string) {
-    const current = this.get();
-    const repos = current.repositories.filter((r) => r.name !== repoName);
-    if (repos.length !== current.repositories.length) {
-      this.store.set("repositories", repos);
-      logger.log("Config", `Removed repository: ${repoName}`);
-    }
   }
 
   public get path(): string {
@@ -219,7 +180,6 @@ export class ConfigManager {
       backupWTF: true,
       backupRetention: 5,
       debug: false,
-      migrated_to_db: false,
       showLibs: false,
       theme: "dark",
       terminalProgress: true,
