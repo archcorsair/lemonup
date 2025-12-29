@@ -88,10 +88,7 @@ export class RemoveAddonCommand implements Command<RemoveAddonResult> {
     // 2. Remove main addon from DB (owned folders don't have DB records)
     this.dbManager.removeAddon(this.folder);
 
-    // 3. Remove from Config (sync)
-    this.configManager.removeRepository(this.addonRecord.name);
-
-    // 4. Remove all folders from Disk
+    // 3. Remove all folders from Disk
     const removedFolders: string[] = [];
     try {
       for (const folder of foldersToRemove) {
