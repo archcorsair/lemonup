@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import type { Dirent } from "node:fs";
+import path from "node:path";
 import { searchForWoW } from "@/core/paths";
 
 // Helper to create mock Dirent objects
@@ -21,23 +22,31 @@ function mockDirent(name: string, isDir: boolean): Dirent {
 
 describe("WoW Deep Search", () => {
 	test("should find WoW Retail in a deep directory structure", async () => {
-		const root = "/home/user";
-		const target = "/home/user/Games/WoW/_retail_/Interface/AddOns";
+		const root = path.join("/", "home", "user");
+		const target = path.join(
+			root,
+			"Games",
+			"WoW",
+			"_retail_",
+			"Interface",
+			"AddOns",
+		);
 
 		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
 		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
-			if (p === "/home/user")
+			if (p === root)
 				return [mockDirent("Documents", true), mockDirent("Games", true)];
-			if (p === "/home/user/Games") return [mockDirent("WoW", true)];
-			if (p === "/home/user/Games/WoW") return [mockDirent("_retail_", true)];
-			if (p === "/home/user/Games/WoW/_retail_")
+			if (p === path.join(root, "Games")) return [mockDirent("WoW", true)];
+			if (p === path.join(root, "Games", "WoW"))
+				return [mockDirent("_retail_", true)];
+			if (p === path.join(root, "Games", "WoW", "_retail_"))
 				return [
 					mockDirent("Interface", true),
 					mockDirent("Wow.exe", false),
 					mockDirent("Data", true),
 				];
-			if (p === "/home/user/Games/WoW/_retail_/Interface")
+			if (p === path.join(root, "Games", "WoW", "_retail_", "Interface"))
 				return [mockDirent("AddOns", true)];
 			return [];
 		}) as unknown as typeof fs.readdirSync);
@@ -50,8 +59,8 @@ describe("WoW Deep Search", () => {
 
 		const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
 			if (p === target) return true;
-			if (p.includes("Wow.exe")) return true;
-			if (p.includes("Data")) return true;
+			if ((p as string).includes("Wow.exe")) return true;
+			if ((p as string).includes("Data")) return true;
 			return false;
 		});
 
@@ -65,14 +74,14 @@ describe("WoW Deep Search", () => {
 	});
 
 	test("should ignore irrelevant directories", async () => {
-		const root = "/home/user";
+		const root = path.join("/", "home", "user");
 
 		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
 		const readdirSpy = spyOn(fs, "readdirSync").mockImplementation(((
 			p: string,
 		) => {
-			if (p === "/home/user")
+			if (p === root)
 				return [
 					mockDirent("node_modules", true),
 					mockDirent(".git", true),
@@ -90,7 +99,7 @@ describe("WoW Deep Search", () => {
 		await searchForWoW(root);
 
 		// Should have only read the root - ignored dirs should not be traversed
-		expect(readdirSpy).toHaveBeenCalledWith("/home/user", {
+		expect(readdirSpy).toHaveBeenCalledWith(root, {
 			withFileTypes: true,
 		});
 		// All entries are in IGNORED_DIRS so no subdirs should be read
@@ -134,14 +143,14 @@ describe("WoW Deep Search", () => {
 	});
 
 	test("ignores Windows and Linux system directories", async () => {
-		const root = "/home/user";
+		const root = path.join("/", "home", "user");
 		const checkedDirs: string[] = [];
 
 		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
 		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
 			checkedDirs.push(p);
-			if (p === "/home/user") {
+			if (p === root) {
 				return [
 					mockDirent("Windows", true),
 					mockDirent("tmp", true),
@@ -160,11 +169,11 @@ describe("WoW Deep Search", () => {
 
 		await searchForWoW(root);
 
-		expect(checkedDirs).toContain("/home/user");
+		expect(checkedDirs).toContain(root);
 		// Windows is in IGNORED_DIRS, tmp is in IGNORED_DIRS, but Games is not
-		expect(checkedDirs).not.toContain("/home/user/Windows");
-		expect(checkedDirs).not.toContain("/home/user/tmp");
-		expect(checkedDirs).toContain("/home/user/Games");
+		expect(checkedDirs).not.toContain(path.join(root, "Windows"));
+		expect(checkedDirs).not.toContain(path.join(root, "tmp"));
+		expect(checkedDirs).toContain(path.join(root, "Games"));
 
 		accessSpy.mockRestore();
 		spy.mockRestore();
@@ -203,14 +212,14 @@ describe("WoW Deep Search", () => {
 	});
 
 	test("skips symbolic links to prevent loops", async () => {
-		const root = "/home/user";
+		const root = path.join("/", "home", "user");
 		const checkedDirs: string[] = [];
 
 		const accessSpy = spyOn(fs, "accessSync").mockImplementation(() => {});
 
 		const spy = spyOn(fs, "readdirSync").mockImplementation(((p: string) => {
 			checkedDirs.push(p);
-			if (p === "/home/user") {
+			if (p === root) {
 				return [mockDirent("symlink", true), mockDirent("real", true)];
 			}
 			return [];
@@ -225,9 +234,9 @@ describe("WoW Deep Search", () => {
 		await searchForWoW(root);
 
 		// symlink should be skipped, real should be checked
-		expect(checkedDirs).toContain("/home/user");
-		expect(checkedDirs).not.toContain("/home/user/symlink");
-		expect(checkedDirs).toContain("/home/user/real");
+		expect(checkedDirs).toContain(root);
+		expect(checkedDirs).not.toContain(path.join(root, "symlink"));
+		expect(checkedDirs).toContain(path.join(root, "real"));
 
 		accessSpy.mockRestore();
 		spy.mockRestore();

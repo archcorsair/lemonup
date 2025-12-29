@@ -17,7 +17,8 @@ import type { AddonManager as AddonManagerType } from "@/core/manager";
 // Import AddonManager
 const { AddonManager } = await import("@/core/manager");
 
-const TMP_BASE = path.join(os.tmpdir(), "lemonup-tests-short-hash");
+const BASE_TMP = path.join(os.tmpdir(), "lemonup-tests-short-hash");
+const TMP_BASE = path.join(BASE_TMP, String(process.pid));
 const CONFIG_DIR = path.join(TMP_BASE, "config");
 const DEST_DIR = path.join(TMP_BASE, "AddOns");
 
@@ -32,8 +33,14 @@ describe("AddonManager - Short Hash", () => {
 		);
 
 		// Setup FS
-		if (fs.existsSync(TMP_BASE)) {
-			fs.rmSync(TMP_BASE, { recursive: true, force: true });
+		try {
+			if (fs.existsSync(TMP_BASE)) {
+				fs.rmSync(TMP_BASE, { recursive: true, force: true });
+			}
+		} catch (err: any) {
+			if (err?.code !== "EBUSY") {
+				throw err;
+			}
 		}
 		fs.mkdirSync(CONFIG_DIR, { recursive: true });
 		fs.mkdirSync(DEST_DIR, { recursive: true });

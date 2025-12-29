@@ -17,7 +17,13 @@ describe("Addon Lifecycle", () => {
 	const mockContext: CommandContext = { emit: () => {} };
 
 	beforeEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		try {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		} catch (err: any) {
+			if (err?.code !== "EBUSY") {
+				throw err;
+			}
+		}
 		await fs.mkdir(addonsDir, { recursive: true });
 		await fs.mkdir(configDir, { recursive: true });
 
@@ -28,7 +34,13 @@ describe("Addon Lifecycle", () => {
 
 	afterEach(async () => {
 		dbManager.close();
-		await fs.rm(tempDir, { recursive: true, force: true });
+		try {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		} catch (err: any) {
+			if (err?.code !== "EBUSY") {
+				throw err;
+			}
+		}
 	});
 
 	describe("Deletion blocking with dependencies", () => {

@@ -15,7 +15,13 @@ describe("ScanCommand Relationships", () => {
 	let dbManager: DatabaseManager;
 
 	beforeEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		try {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		} catch (err: any) {
+			if (err?.code !== "EBUSY") {
+				throw err;
+			}
+		}
 		await fs.mkdir(addonsDir, { recursive: true });
 		await fs.mkdir(configDir, { recursive: true });
 
