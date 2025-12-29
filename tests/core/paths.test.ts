@@ -20,10 +20,39 @@ describe("paths", () => {
 
 	test("getDefaultWoWPath should return correct path for Windows", async () => {
 		spyOn(os, "platform").mockReturnValue("win32");
-		const spy = spyOn(fs, "existsSync").mockReturnValue(true);
+
+		// Mock Bun.spawn to throw immediately, triggering fallback to ["C", "D", "E", "F", "G"]
+		// This avoids timeout from real PowerShell call and ensures C: is checked first
+		const originalSpawn = Bun.spawn;
+		Bun.spawn = () => {
+			throw new Error("Mocked spawn failure");
+		};
+
+		// Mock fs.existsSync to only return true for C: drive Program Files (x86) path and artifacts
+		// This prevents matching real installations on other drives (like D:\Games\...)
+		const spy = spyOn(fs, "existsSync").mockImplementation((p: any) => {
+			if (typeof p !== "string") return false;
+			const pathStr = p;
+			// Match the expected path and required artifacts for verification
+			// verifyWoWDirectory checks: AddOns path, Wow.exe/Wow-64.exe, and Data/.build.info
+			if (
+				pathStr === "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns" ||
+				pathStr === "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Wow.exe" ||
+				pathStr === "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Wow-64.exe" ||
+				pathStr === "C:\\Program Files (x86)\\World of Warcraft\\Data" ||
+				pathStr === "C:\\Program Files (x86)\\World of Warcraft\\.build.info"
+			) {
+				return true;
+			}
+			// Return false for all other paths (including real installations)
+			return false;
+		});
+
 		const result = await getDefaultWoWPath();
 		expect(result).toContain("C:\\Program Files (x86)");
+
 		spy.mockRestore();
+		Bun.spawn = originalSpawn;
 		mock.restore();
 	});
 
