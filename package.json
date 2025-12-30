@@ -1,6 +1,6 @@
 {
   "name": "lemonup",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "module": "index.tsx",
   "type": "module",
   "private": true,

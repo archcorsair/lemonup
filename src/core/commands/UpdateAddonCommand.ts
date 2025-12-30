@@ -88,9 +88,15 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
         const addonId = WoWInterface.getAddonIdFromUrl(this.addon.url || "");
         if (!addonId) throw new Error("Invalid WoWInterface URL");
 
-        wowInterfaceDetails = await WoWInterface.getAddonDetails(addonId);
-        if (!wowInterfaceDetails)
-          throw new Error("Failed to fetch details from WoWInterface");
+        const result = await WoWInterface.getAddonDetails(addonId);
+        if (!result.success) {
+          throw new Error(
+            result.error === "not_found"
+              ? "Addon not found on WoWInterface"
+              : "Failed to fetch details from WoWInterface",
+          );
+        }
+        wowInterfaceDetails = result.details;
 
         remoteVersion = wowInterfaceDetails.UIVersion;
         updateAvailable = remoteVersion !== this.addon.version;

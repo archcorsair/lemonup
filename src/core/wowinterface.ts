@@ -9,6 +9,13 @@ export interface WoWInterfaceAddonDetails {
   UIFileName: string;
 }
 
+export type GetAddonDetailsResult =
+  | { success: true; details: WoWInterfaceAddonDetails }
+  | {
+      success: false;
+      error: "not_found" | "network_error" | "invalid_response";
+    };
+
 const API_BASE = "https://api.mmoui.com/v3/game/WOW/filedetails";
 
 export function getAddonIdFromUrl(url: string): string | null {
@@ -22,7 +29,7 @@ export function getAddonIdFromUrl(url: string): string | null {
 
 export async function getAddonDetails(
   id: string,
-): Promise<WoWInterfaceAddonDetails | null> {
+): Promise<GetAddonDetailsResult> {
   const apiUrl = `${API_BASE}/${id}.json`;
   logger.log("WoWInterface", `Fetching details for ID ${id} from ${apiUrl}`);
 
@@ -33,25 +40,34 @@ export async function getAddonDetails(
         "WoWInterface",
         `API request failed: ${response.status} ${response.statusText}`,
       );
-      return null;
+      // 404 means addon not found (discontinued, removed, or invalid ID)
+      if (response.status === 404) {
+        return { success: false, error: "not_found" };
+      }
+      return { success: false, error: "network_error" };
     }
 
     const data = (await response.json()) as unknown;
 
     if (data && typeof data === "object" && "ERROR" in data) {
       const err = data as { ERROR: unknown };
-      logger.error("WoWInterface", `API Error: ${String(err.ERROR)}`);
-      return null;
+      const errMessage = String(err.ERROR);
+      logger.error("WoWInterface", `API Error: ${errMessage}`);
+
+      if (errMessage.includes("No AddOn found")) {
+        return { success: false, error: "not_found" };
+      }
+      return { success: false, error: "invalid_response" };
     }
 
     if (!Array.isArray(data) || data.length === 0) {
       logger.error("WoWInterface", "Invalid API response format");
-      return null;
+      return { success: false, error: "invalid_response" };
     }
 
-    return data[0] as WoWInterfaceAddonDetails;
+    return { success: true, details: data[0] as WoWInterfaceAddonDetails };
   } catch (error) {
     logger.error("WoWInterface", "Failed to fetch addon details", error);
-    return null;
+    return { success: false, error: "network_error" };
   }
 }
