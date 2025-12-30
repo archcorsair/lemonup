@@ -5,6 +5,14 @@ import type React from "react";
 import { useEffect, useState } from "react";
 import type { ConfigManager } from "@/core/config";
 import { logger } from "@/core/logger";
+import type { AddonManager } from "@/core/manager";
+import {
+  analyzeImport,
+  DEFAULT_EXPORT_PATH,
+  exportAddons,
+  type ImportAnalysis,
+  parseImportFile,
+} from "@/core/transfer";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useTheme } from "@/tui/hooks/useTheme";
@@ -14,6 +22,7 @@ import type { Theme } from "@/tui/theme";
 
 interface ScreenProps {
   configManager: ConfigManager;
+  addonManager: AddonManager;
   onBack: () => void;
 }
 
@@ -28,7 +37,9 @@ type Field =
   | "terminalProgress"
   | "themeMode"
   | "debug"
-  | "restartOnboarding";
+  | "restartOnboarding"
+  | "exportAddons"
+  | "importAddons";
 
 const SectionHeader: React.FC<{
   title: string;
@@ -46,11 +57,14 @@ const SectionHeader: React.FC<{
 
 export const ConfigScreen: React.FC<ScreenProps> = ({
   configManager,
+  addonManager,
   onBack,
 }) => {
   const flashKey = useAppStore((state) => state.flashKey);
   const devMode = useAppStore((state) => state.devMode);
   const triggerOnboarding = useAppStore((state) => state.triggerOnboarding);
+  const navigate = useAppStore((state) => state.navigate);
+  const setImportQueue = useAppStore((state) => state.setImportQueue);
   const { theme, themeMode, setTheme } = useTheme();
 
   const [maxConcurrent, setMaxConcurrent] = useState(3);
@@ -68,6 +82,17 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [activeField, setActiveField] = useState<Field>("destDir");
   const [isEditingDestDir, setIsEditingDestDir] = useState(false);
   const { toast, showToast } = useToast();
+
+  // Import/Export state
+  const [exportStatus, setExportStatus] = useState<
+    "idle" | "exporting" | "success" | "error"
+  >("idle");
+  const [importStatus, setImportStatus] = useState<
+    "idle" | "analyzing" | "confirm" | "error"
+  >("idle");
+  const [importAnalysis, setImportAnalysis] = useState<ImportAnalysis | null>(
+    null,
+  );
 
   const getNextInterval = (current: number) => {
     if (current < 60) return Math.min(60, current + 10);
@@ -161,6 +186,8 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "themeMode",
       "debug",
       "restartOnboarding",
+      "exportAddons",
+      "importAddons",
     ];
 
     if (key.upArrow || input === "k") {
@@ -366,6 +393,67 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         triggerOnboarding();
       }
     }
+
+    // Export handler
+    if (activeField === "exportAddons") {
+      if (key.return || input === " ") {
+        flashKey("enter");
+        setExportStatus("exporting");
+        const addons = addonManager.getAllAddons();
+        exportAddons(addons, DEFAULT_EXPORT_PATH).then((result) => {
+          if (result.success) {
+            setExportStatus("success");
+            showToast(
+              `Exported ${result.count} addons to ${DEFAULT_EXPORT_PATH}`,
+              3000,
+            );
+          } else {
+            setExportStatus("error");
+            showToast("Export failed", 2000);
+          }
+          setTimeout(() => setExportStatus("idle"), 3000);
+        });
+      }
+    }
+
+    // Import handler
+    if (activeField === "importAddons" && importStatus === "idle") {
+      if (key.return || input === " ") {
+        flashKey("enter");
+        setImportStatus("analyzing");
+        parseImportFile(DEFAULT_EXPORT_PATH).then((parseResult) => {
+          if (!parseResult.success) {
+            setImportStatus("error");
+            showToast(parseResult.error || "Import failed", 2000);
+            setTimeout(() => setImportStatus("idle"), 3000);
+            return;
+          }
+          const currentAddons = addonManager.getAllAddons();
+          if (!parseResult.data) return; // TypeScript guard (success implies data exists)
+          const analysis = analyzeImport(parseResult.data, currentAddons);
+          setImportAnalysis(analysis);
+          setImportStatus("confirm");
+        });
+      }
+    }
+
+    // Import confirmation handler
+    if (importStatus === "confirm" && importAnalysis) {
+      if (
+        input.toLowerCase() === "y" ||
+        (key.return && importAnalysis.toInstall.length > 0)
+      ) {
+        flashKey("enter");
+        setImportQueue(importAnalysis.toInstall);
+        setImportStatus("idle");
+        setImportAnalysis(null);
+        navigate("install");
+      } else if (input.toLowerCase() === "n" || key.escape) {
+        flashKey("esc");
+        setImportStatus("idle");
+        setImportAnalysis(null);
+      }
+    }
   });
 
   const ConfigOption: React.FC<{
@@ -557,6 +645,90 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
             <Text bold>Press Enter to launch</Text>
           </Color>
         </ConfigOption>
+
+        {/* Import/Export */}
+        <SectionHeader title="Import/Export" theme={theme} />
+        <ConfigOption
+          label="Export Addons"
+          isActive={activeField === "exportAddons"}
+          helpText="Export all addons to ~/lemonup-addons.json"
+        >
+          {exportStatus === "exporting" ? (
+            <Color styles={theme.statusChecking}>
+              <Text bold>Exporting...</Text>
+            </Color>
+          ) : exportStatus === "success" ? (
+            <Color styles={theme.statusSuccess}>
+              <Text bold>Exported!</Text>
+            </Color>
+          ) : exportStatus === "error" ? (
+            <Color styles={theme.statusError}>
+              <Text bold>Failed</Text>
+            </Color>
+          ) : (
+            <Color styles={theme.statusIdle}>
+              <Text bold>Press Enter to export</Text>
+            </Color>
+          )}
+        </ConfigOption>
+        <ConfigOption
+          label="Import Addons"
+          isActive={activeField === "importAddons"}
+          helpText="Import from ~/lemonup-addons.json"
+        >
+          {importStatus === "analyzing" ? (
+            <Color styles={theme.statusChecking}>
+              <Text bold>Analyzing...</Text>
+            </Color>
+          ) : importStatus === "error" ? (
+            <Color styles={theme.statusError}>
+              <Text bold>Failed</Text>
+            </Color>
+          ) : (
+            <Color styles={theme.statusIdle}>
+              <Text bold>Press Enter to import</Text>
+            </Color>
+          )}
+        </ConfigOption>
+
+        {/* Import Confirmation Modal */}
+        {importStatus === "confirm" && importAnalysis && (
+          <Box
+            flexDirection="column"
+            borderColor="cyan"
+            borderStyle="round"
+            padding={1}
+            marginTop={1}
+          >
+            <Text bold>Import Summary</Text>
+            <Box marginTop={1} flexDirection="column">
+              <Color styles={theme.statusSuccess}>
+                <Text>To install: {importAnalysis.toInstall.length}</Text>
+              </Color>
+              {(importAnalysis.alreadyInstalled.length > 0 ||
+                importAnalysis.manualAddons.length > 0) && (
+                <Color styles={theme.statusIdle}>
+                  <Text>
+                    Skipped:{" "}
+                    {importAnalysis.alreadyInstalled.length +
+                      importAnalysis.manualAddons.length}
+                    {importAnalysis.alreadyInstalled.length > 0 &&
+                      ` (${importAnalysis.alreadyInstalled.length} already installed)`}
+                    {importAnalysis.manualAddons.length > 0 &&
+                      ` (${importAnalysis.manualAddons.length} manual)`}
+                  </Text>
+                </Color>
+              )}
+            </Box>
+            <Box marginTop={1}>
+              {importAnalysis.toInstall.length > 0 ? (
+                <Text>Proceed with install? (Y/n)</Text>
+              ) : (
+                <Text>Nothing to install. Press Esc to close.</Text>
+              )}
+            </Box>
+          </Box>
+        )}
       </Box>
 
       <ControlBar
