@@ -175,4 +175,32 @@ describe("Multi-folder addon installation", () => {
     const child = dbManager.getByFolder("Details_DataStorage");
     expect(child).toBeNull();
   });
+
+  it("should handle single-folder addon without ownedFolders", async () => {
+    const addonDir = path.join(addonsDir, "SimpleAddon");
+    await fs.mkdir(addonDir, { recursive: true });
+
+    await fs.writeFile(
+      path.join(addonDir, "SimpleAddon.toc"),
+      `## Interface: 110002
+## Title: Simple Addon
+## Version: 1.0.0`
+    );
+
+    // Scan the single addon
+    const scanCmd = new ScanCommand(dbManager, configManager, ["SimpleAddon"]);
+    await scanCmd.execute({
+      emit: () => {},
+      getConfig: () => ({
+        wowPath: tempDir,
+        flavor: "retail",
+        destDir: addonsDir,
+      }),
+    } as any);
+
+    // Verify: single-folder addon should have empty ownedFolders
+    const addon = dbManager.getByFolder("SimpleAddon");
+    expect(addon).not.toBeNull();
+    expect(addon!.ownedFolders).toEqual([]);
+  });
 });
