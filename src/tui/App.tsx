@@ -217,6 +217,12 @@ const AppContent: React.FC<AppProps> = ({
       const cfg = configManager.get();
       setConfig(cfg);
     }
+
+    // Check if imports were queued during wizard
+    const queue = useAppStore.getState().importQueue;
+    if (queue.length > 0) {
+      navigate("install");
+    }
   };
 
   // Background auto-check for updates
