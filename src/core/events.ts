@@ -15,5 +15,6 @@ export type AddonManagerEvents = {
   "addon:install:complete": [name: string];
   "addon:remove:start": [name: string];
   "addon:remove:complete": [name: string];
+  "install:folder_ownership": [parentFolder: string, ownedFolders: string[]];
   error: [context: string, message: string];
 };
