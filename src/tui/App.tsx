@@ -397,9 +397,10 @@ const AppContent: React.FC<AppProps> = ({
         />
       )}
 
-      {activeScreen === "config" && configManager && (
+      {activeScreen === "config" && configManager && addonManager && (
         <ConfigScreen
           configManager={configManager}
+          addonManager={addonManager}
           onBack={() => {
             setConfig(configManager.get());
             navigate("menu");
