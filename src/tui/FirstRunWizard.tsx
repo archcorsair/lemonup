@@ -13,6 +13,11 @@ import {
   quickCheckCommonPaths,
   searchForWoW,
 } from "@/core/paths";
+import {
+  DEFAULT_EXPORT_PATH,
+  type ExportFile,
+  parseImportFile,
+} from "@/core/transfer";
 import { ControlBar } from "./components/ControlBar";
 import { useScanPathInput } from "./hooks/useScanPathInput";
 import { useTheme } from "./hooks/useTheme";
@@ -34,10 +39,18 @@ interface WizardState {
   autoCheckInterval: number; // minutes
   backupWTF: boolean;
   backupRetention: number;
+  importAddons: boolean; // Whether to import addons after wizard
 }
 
-const TOTAL_STEPS = 5;
-const STEP_NAMES = ["Theme", "Directory", "Addons", "Settings", "Review"];
+const TOTAL_STEPS = 6;
+const STEP_NAMES = [
+  "Theme",
+  "Directory",
+  "Import",
+  "Addons",
+  "Settings",
+  "Review",
+];
 
 const expandPath = (p: string): string => {
   if (p.startsWith("~/") || p === "~") {
@@ -476,7 +489,138 @@ const DirectoryStep: React.FC<{
   );
 };
 
-// Step 3: Addon Selection
+// Step 3: Import from Export
+const ImportStep: React.FC<{
+  exportData: ExportFile | null;
+  exportFileExists: boolean;
+  importSelected: boolean;
+  optionIndex: number;
+  refreshFailed: boolean;
+  theme: ReturnType<typeof useTheme>["theme"];
+}> = ({
+  exportData,
+  exportFileExists,
+  importSelected,
+  optionIndex,
+  refreshFailed,
+  theme,
+}) => {
+  if (!exportFileExists || !exportData) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Color styles={theme.heading}>
+          <Text bold>Import Addons</Text>
+        </Color>
+
+        <Box marginTop={1} flexDirection="column">
+          <Color styles={theme.warning}>
+            <Text>No export file found at:</Text>
+          </Color>
+          <Box marginLeft={2}>
+            <Color styles={theme.labelInactive}>
+              <Text>~/lemonup-addons.json</Text>
+            </Color>
+          </Box>
+        </Box>
+
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>If you've just copied the file, press </Text>
+          </Color>
+          <Color styles={theme.highlight}>
+            <Text bold>[r]</Text>
+          </Color>
+          <Color styles={theme.muted}>
+            <Text> to refresh.</Text>
+          </Color>
+        </Box>
+
+        {refreshFailed && (
+          <Box marginTop={1}>
+            <Color styles={theme.error}>
+              <Text>
+                ✗ File not found. Make sure it exists at the path above.
+              </Text>
+            </Color>
+          </Box>
+        )}
+
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>
+              You can also import addons later from Settings → Import.
+            </Text>
+          </Color>
+        </Box>
+      </Box>
+    );
+  }
+
+  const reinstallableCount = exportData.addons.filter(
+    (a) => a.reinstallable,
+  ).length;
+  const manualCount = exportData.addons.filter((a) => !a.reinstallable).length;
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Color styles={theme.heading}>
+        <Text bold>Import Addons from Previous Installation?</Text>
+      </Color>
+
+      <Box marginTop={1} flexDirection="column">
+        <Color styles={theme.success}>
+          <Text>Found export file with {exportData.addons.length} addons:</Text>
+        </Color>
+        <Box marginLeft={2} flexDirection="column">
+          <Color styles={theme.labelInactive}>
+            <Text>{reinstallableCount} can be reinstalled</Text>
+          </Color>
+          {manualCount > 0 && (
+            <Color styles={theme.muted}>
+              <Text>{manualCount} manual (will be skipped)</Text>
+            </Color>
+          )}
+        </Box>
+      </Box>
+
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Color styles={optionIndex === 0 ? theme.selection : theme.muted}>
+            <Text>{optionIndex === 0 ? "› " : "  "}</Text>
+          </Color>
+          <Color
+            styles={optionIndex === 0 ? theme.highlight : theme.labelInactive}
+          >
+            <Text bold={optionIndex === 0}>Yes, import these addons</Text>
+          </Color>
+          {importSelected && optionIndex === 0 && (
+            <Color styles={theme.success}>
+              <Text> ✓</Text>
+            </Color>
+          )}
+        </Box>
+        <Box>
+          <Color styles={optionIndex === 1 ? theme.selection : theme.muted}>
+            <Text>{optionIndex === 1 ? "› " : "  "}</Text>
+          </Color>
+          <Color
+            styles={optionIndex === 1 ? theme.highlight : theme.labelInactive}
+          >
+            <Text bold={optionIndex === 1}>No, start fresh</Text>
+          </Color>
+        </Box>
+      </Box>
+
+      <Box marginTop={1}>
+        <Color styles={theme.muted}>
+          <Text>Use ↑/↓ to select, Enter to confirm.</Text>
+        </Color>
+      </Box>
+    </Box>
+  );
+};
+
+// Step 4: Addon Selection
 const AddonsStep: React.FC<{
   installElvUI: boolean;
   installTukui: boolean;
@@ -626,11 +770,12 @@ const SettingsStep: React.FC<{
   );
 };
 
-// Step 5: Review
+// Step 6: Review
 const ReviewStep: React.FC<{
   state: WizardState;
+  exportData: ExportFile | null;
   theme: ReturnType<typeof useTheme>["theme"];
-}> = ({ state, theme }) => {
+}> = ({ state, exportData, theme }) => {
   const formatAutoInterval = (mins: number) => {
     if (mins < 60) return `${mins}m`;
     const hrs = Math.floor(mins / 60);
@@ -641,9 +786,19 @@ const ReviewStep: React.FC<{
   if (state.installElvUI) addons.push("ElvUI");
   if (state.installTukui) addons.push("Tukui");
 
+  // Calculate import count
+  const importCount =
+    state.importAddons && exportData
+      ? exportData.addons.filter((a) => a.reinstallable).length
+      : 0;
+
   const items = [
     { label: "Theme", value: state.theme === "dark" ? "Dark" : "Light" },
     { label: "AddOns Directory", value: state.destDir || "(not set)" },
+    {
+      label: "Import",
+      value: state.importAddons ? `Yes (${importCount} addons)` : "No",
+    },
     { label: "Install", value: addons.length > 0 ? addons.join(", ") : "None" },
     { label: "Max Downloads", value: `${state.maxConcurrent} concurrent` },
     {
@@ -697,6 +852,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const { exit } = useApp();
   const { theme, setTheme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
+  const setImportQueue = useAppStore((state) => state.setImportQueue);
 
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -719,7 +875,14 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     autoCheckInterval: 60, // 1 hour in minutes
     backupWTF: true,
     backupRetention: 5,
+    importAddons: false,
   }));
+
+  // Import step state
+  const [exportFileExists, setExportFileExists] = useState(false);
+  const [exportData, setExportData] = useState<ExportFile | null>(null);
+  const [importOptionIndex, setImportOptionIndex] = useState(0); // 0 = Import, 1 = Skip
+  const [importRefreshFailed, setImportRefreshFailed] = useState(false);
 
   // Step-specific state
   const [dirEditMode, setDirEditMode] = useState(false);
@@ -753,6 +916,20 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         setPathValid(true);
       }
     });
+  }, []);
+
+  // Check for existing export file on mount
+  useEffect(() => {
+    const checkExportFile = async () => {
+      if (fs.existsSync(DEFAULT_EXPORT_PATH)) {
+        const result = await parseImportFile(DEFAULT_EXPORT_PATH);
+        if (result.success && result.data) {
+          setExportFileExists(true);
+          setExportData(result.data);
+        }
+      }
+    };
+    checkExportFile();
   }, []);
 
   const handleDeepScan = async () => {
@@ -818,6 +995,14 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       );
       configManager.set("backupWTF", wizardState.backupWTF);
       configManager.set("backupRetention", wizardState.backupRetention);
+
+      // Queue imports if selected
+      if (wizardState.importAddons && exportData) {
+        const toImport = exportData.addons.filter((a) => a.reinstallable);
+        if (toImport.length > 0) {
+          setImportQueue(toImport);
+        }
+      }
 
       // TODO: If ElvUI/Tukui selected, queue installation after wizard
 
@@ -1062,7 +1247,57 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         break;
       }
 
-      case 3: // Addons
+      case 3: // Import
+        // Refresh check with 'r' key
+        if (input === "r") {
+          flashKey("r");
+          // Re-check for export file
+          if (fs.existsSync(DEFAULT_EXPORT_PATH)) {
+            parseImportFile(DEFAULT_EXPORT_PATH).then((result) => {
+              if (result.success && result.data) {
+                setExportFileExists(true);
+                setExportData(result.data);
+                setImportRefreshFailed(false);
+              } else {
+                setImportRefreshFailed(true);
+              }
+            });
+          } else {
+            setImportRefreshFailed(true);
+          }
+          break;
+        }
+
+        // If no export file, just proceed on Enter
+        if (!exportFileExists) {
+          if (key.return) {
+            flashKey("enter");
+            goNext();
+          }
+          break;
+        }
+
+        // Arrow navigation
+        if (key.upArrow || key.downArrow || input === "j" || input === "k") {
+          flashKey("↑/↓");
+          setImportOptionIndex((prev) => (prev === 0 ? 1 : 0));
+        }
+
+        // Enter to confirm selection
+        if (key.return) {
+          flashKey("enter");
+          if (importOptionIndex === 0) {
+            // Import selected
+            updateWizardState({ importAddons: true });
+          } else {
+            // Skip import
+            updateWizardState({ importAddons: false });
+          }
+          goNext();
+        }
+        break;
+
+      case 4: // Addons
         if (key.upArrow || input === "k") {
           flashKey("↑/↓");
           setAddonIndex(addonIndex === 0 ? 1 : 0);
@@ -1085,7 +1320,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 4: // Settings
+      case 5: // Settings
         if (key.upArrow || input === "k") {
           flashKey("↑/↓");
           setSettingsIndex(Math.max(0, settingsIndex - 1));
@@ -1112,7 +1347,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 5: // Review
+      case 6: // Review
         if (key.return) {
           flashKey("enter");
           handleComplete();
@@ -1190,11 +1425,18 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       case 2:
         controls.push({ key: "↑/↓", label: "switch mode" });
         break;
-      case 3:
+      case 3: // Import
+        if (exportFileExists) {
+          controls.push({ key: "↑/↓", label: "select" });
+        } else {
+          controls.push({ key: "r", label: "refresh" });
+        }
+        break;
+      case 4: // Addons
         controls.push({ key: "↑/↓", label: "nav" });
         controls.push({ key: "space", label: "toggle" });
         break;
-      case 4:
+      case 5: // Settings
         controls.push({ key: "↑/↓", label: "nav" });
         controls.push({ key: "←/→", label: "adjust" });
         controls.push({ key: "space", label: "toggle" });
@@ -1249,6 +1491,16 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
           />
         )}
         {step === 3 && (
+          <ImportStep
+            exportData={exportData}
+            exportFileExists={exportFileExists}
+            importSelected={wizardState.importAddons}
+            optionIndex={importOptionIndex}
+            refreshFailed={importRefreshFailed}
+            theme={theme}
+          />
+        )}
+        {step === 4 && (
           <AddonsStep
             installElvUI={wizardState.installElvUI}
             installTukui={wizardState.installTukui}
@@ -1256,14 +1508,20 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             theme={theme}
           />
         )}
-        {step === 4 && (
+        {step === 5 && (
           <SettingsStep
             state={wizardState}
             selectedIndex={settingsIndex}
             theme={theme}
           />
         )}
-        {step === 5 && <ReviewStep state={wizardState} theme={theme} />}
+        {step === 6 && (
+          <ReviewStep
+            state={wizardState}
+            exportData={exportData}
+            theme={theme}
+          />
+        )}
       </Box>
 
       {error && (

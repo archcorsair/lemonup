@@ -217,6 +217,12 @@ const AppContent: React.FC<AppProps> = ({
       const cfg = configManager.get();
       setConfig(cfg);
     }
+
+    // Check if imports were queued during wizard
+    const queue = useAppStore.getState().importQueue;
+    if (queue.length > 0) {
+      navigate("install");
+    }
   };
 
   // Background auto-check for updates
@@ -397,9 +403,10 @@ const AppContent: React.FC<AppProps> = ({
         />
       )}
 
-      {activeScreen === "config" && configManager && (
+      {activeScreen === "config" && configManager && addonManager && (
         <ConfigScreen
           configManager={configManager}
+          addonManager={addonManager}
           onBack={() => {
             setConfig(configManager.get());
             navigate("menu");

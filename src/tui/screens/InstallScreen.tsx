@@ -3,10 +3,11 @@ import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Config } from "@/core/config";
 import type { AddonManager } from "@/core/manager";
 import { getDefaultWoWPath, isPathConfigured, pathExists } from "@/core/paths";
+import type { ExportedAddon } from "@/core/transfer";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useTheme } from "@/tui/hooks/useTheme";
@@ -25,7 +26,9 @@ type Mode =
   | "result"
   | "config-auto-confirm"
   | "config-manual-input"
-  | "confirm-reinstall";
+  | "confirm-reinstall"
+  | "batch-installing"
+  | "batch-result";
 
 export const InstallScreen: React.FC<InstallScreenProps> = ({
   config: initialConfig,
@@ -34,6 +37,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 }) => {
   const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
+  const importQueue = useAppStore((state) => state.importQueue);
+  const clearImportQueue = useAppStore((state) => state.clearImportQueue);
   const [config, setConfig] = useState(initialConfig);
   const [mode, setMode] = useState<Mode>("select");
   const [selection, setSelection] = useState(0);
@@ -52,6 +57,15 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
     "success",
   );
 
+  // Batch import state
+  type AddonStatus = "pending" | "installing" | "success" | "failed";
+  type BatchAddon = {
+    addon: ExportedAddon;
+    status: AddonStatus;
+    error?: string;
+  };
+  const [batchAddons, setBatchAddons] = useState<BatchAddon[]>([]);
+
   const OPTIONS = [
     { label: "Install from URL", action: "url", section: "General" },
     { label: "Install ElvUI", action: "elvui", section: "TukUI" },
@@ -61,6 +75,85 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   useEffect(() => {
     setConfig(addonManager.getConfig());
   }, [addonManager]);
+
+  // Process batch install from import queue with concurrency
+  const processBatchInstall = useCallback(
+    async (queue: ExportedAddon[]) => {
+      clearImportQueue();
+
+      // Initialize all addons as pending
+      const initialBatch: BatchAddon[] = queue.map((addon) => ({
+        addon,
+        status: "pending" as AddonStatus,
+      }));
+      setBatchAddons(initialBatch);
+      setMode("batch-installing");
+
+      const maxConcurrent = config.maxConcurrent ?? 3;
+      let currentIndex = 0;
+      const results = [...initialBatch];
+
+      const updateAddonStatus = (
+        index: number,
+        status: AddonStatus,
+        error?: string,
+      ) => {
+        results[index] = { ...results[index], status, error } as BatchAddon;
+        setBatchAddons([...results]);
+      };
+
+      const installAddon = async (index: number): Promise<void> => {
+        const item = results[index];
+        if (!item) return;
+
+        const addon = item.addon;
+        updateAddonStatus(index, "installing");
+
+        try {
+          if (addon.type === "github" || addon.type === "wowinterface") {
+            if (!addon.url) throw new Error("No URL available");
+            await addonManager.installFromUrl(addon.url);
+          } else if (addon.type === "tukui") {
+            const subFolders = addon.ownedFolders ?? [];
+            await addonManager.installTukUI("latest", addon.folder, subFolders);
+          }
+          updateAddonStatus(index, "success");
+        } catch (e) {
+          updateAddonStatus(
+            index,
+            "failed",
+            e instanceof Error ? e.message : String(e),
+          );
+        }
+      };
+
+      // Process with concurrency limit
+      const workers: Promise<void>[] = [];
+
+      const startNext = async (): Promise<void> => {
+        while (currentIndex < queue.length) {
+          const index = currentIndex++;
+          await installAddon(index);
+        }
+      };
+
+      // Start up to maxConcurrent workers
+      for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
+        workers.push(startNext());
+      }
+
+      await Promise.all(workers);
+      setMode("batch-result");
+    },
+    [addonManager, clearImportQueue, config.maxConcurrent],
+  );
+
+  // Detect import queue and start batch install
+  useEffect(() => {
+    if (importQueue.length > 0 && mode === "select") {
+      processBatchInstall([...importQueue]);
+    }
+  }, [importQueue, mode, processBatchInstall]);
 
   const checkConfigAndInstall = async (
     type: "url" | "elvui" | "tukui",
@@ -156,7 +249,16 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   };
 
   useInput(async (input, key) => {
-    if (mode === "installing") return;
+    if (mode === "installing" || mode === "batch-installing") return;
+
+    if (mode === "batch-result") {
+      if (key.return || key.escape || input === "q") {
+        flashKey("enter");
+        setMode("select");
+        setBatchAddons([]);
+      }
+      return;
+    }
 
     if (mode === "result") {
       if (key.return || key.escape || input === "q") {
@@ -363,6 +465,75 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
           <Color styles={theme.muted}>
             <Text>Press Enter to continue</Text>
           </Color>
+        </Box>
+      )}
+
+      {(mode === "batch-installing" || mode === "batch-result") && (
+        <Box flexDirection="column">
+          {mode === "batch-installing" && (
+            <Color styles={theme.busy}>
+              <Text bold>Installing addons from import...</Text>
+            </Color>
+          )}
+          {mode === "batch-result" && (
+            <Color styles={theme.statusSuccess}>
+              <Text bold>
+                Import Complete - Installed:{" "}
+                {batchAddons.filter((a) => a.status === "success").length}/
+                {batchAddons.length}
+              </Text>
+            </Color>
+          )}
+          <Box marginTop={1} flexDirection="column">
+            {batchAddons.map((item) => (
+              <Box key={item.addon.folder} gap={1}>
+                {item.status === "pending" && (
+                  <Color styles={theme.muted}>
+                    <Text>○</Text>
+                  </Color>
+                )}
+                {item.status === "installing" && (
+                  <Color styles={theme.statusChecking}>
+                    {/* @ts-expect-error: Spinner types mismatch */}
+                    <Spinner type="dots" />
+                  </Color>
+                )}
+                {item.status === "success" && (
+                  <Color styles={theme.statusSuccess}>
+                    <Text>✔</Text>
+                  </Color>
+                )}
+                {item.status === "failed" && (
+                  <Color styles={theme.statusError}>
+                    <Text>✘</Text>
+                  </Color>
+                )}
+                <Color
+                  styles={
+                    item.status === "installing"
+                      ? theme.highlight
+                      : item.status === "success"
+                        ? theme.statusSuccess
+                        : item.status === "failed"
+                          ? theme.statusError
+                          : theme.muted
+                  }
+                >
+                  <Text>
+                    {item.addon.name}
+                    {item.error && ` - ${item.error}`}
+                  </Text>
+                </Color>
+              </Box>
+            ))}
+          </Box>
+          {mode === "batch-result" && (
+            <Box marginTop={1}>
+              <Color styles={theme.muted}>
+                <Text>Press Enter to continue</Text>
+              </Color>
+            </Box>
+          )}
         </Box>
       )}
 
