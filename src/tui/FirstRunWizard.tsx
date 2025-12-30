@@ -15,6 +15,7 @@ import {
 } from "@/core/paths";
 import {
   DEFAULT_EXPORT_PATH,
+  type ExportedAddon,
   type ExportFile,
   parseImportFile,
 } from "@/core/transfer";
@@ -996,15 +997,39 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       configManager.set("backupWTF", wizardState.backupWTF);
       configManager.set("backupRetention", wizardState.backupRetention);
 
-      // Queue imports if selected
-      if (wizardState.importAddons && exportData) {
-        const toImport = exportData.addons.filter((a) => a.reinstallable);
-        if (toImport.length > 0) {
-          setImportQueue(toImport);
-        }
+      // Queue TukUI addons if selected
+      const tukuiAddons: ExportedAddon[] = [];
+      if (wizardState.installElvUI) {
+        tukuiAddons.push({
+          name: "ElvUI",
+          folder: "ElvUI",
+          type: "tukui",
+          url: "latest",
+          ownedFolders: ["ElvUI_Options", "ElvUI_Libraries"],
+          reinstallable: true,
+        });
+      }
+      if (wizardState.installTukui) {
+        tukuiAddons.push({
+          name: "Tukui",
+          folder: "Tukui",
+          type: "tukui",
+          url: "latest",
+          ownedFolders: [],
+          reinstallable: true,
+        });
       }
 
-      // TODO: If ElvUI/Tukui selected, queue installation after wizard
+      // Queue imports if selected (combine with TukUI addons)
+      const importAddons =
+        wizardState.importAddons && exportData
+          ? exportData.addons.filter((a) => a.reinstallable)
+          : [];
+
+      const allAddons = [...tukuiAddons, ...importAddons];
+      if (allAddons.length > 0) {
+        setImportQueue(allAddons);
+      }
 
       onComplete();
     } catch (e) {
