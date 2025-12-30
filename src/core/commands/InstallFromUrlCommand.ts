@@ -261,18 +261,18 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
       throw new Error("No folders provided to determineParentFolder");
     }
 
-    // Single folder case - no ambiguity
-    if (folders.length === 1) {
-      return folders[0]!;
+    const [first] = folders;
+    if (folders.length === 1 && first) {
+      return first;
     }
 
-    // Strategy 1: Exact match with target name (case-insensitive)
+    // Exact match with target name (case-insensitive)
     const exactMatch = folders.find(
       (f) => f.toLowerCase() === targetName.toLowerCase(),
     );
     if (exactMatch) return exactMatch;
 
-    // Strategy 2: WoWInterface UIName match
+    // WoWInterface UIName match
     if (wowInterfaceDetails) {
       const uiNameMatch = folders.find(
         (f) => f.toLowerCase() === wowInterfaceDetails.UIName.toLowerCase(),
@@ -280,29 +280,32 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
       if (uiNameMatch) return uiNameMatch;
     }
 
-    // Strategy 3: Shortest prefix that matches most other folders
+    // Shortest prefix that matches most other folders
     const sorted = [...folders].sort((a, b) => a.length - b.length);
-    const shortest = sorted[0]!;
+    const [shortest] = sorted;
+    if (!shortest) {
+      throw new Error("Unexpected empty sorted array");
+    }
     const prefixCount = sorted.filter((n) => n.startsWith(shortest)).length;
     // If shortest is prefix for at least 50% of items, assume it's parent
     if (prefixCount / sorted.length >= 0.5) {
       return shortest;
     }
 
-    // Strategy 4: Target name similarity (substring match)
+    // Target name similarity (substring match)
     if (targetName) {
       const candidates = folders.filter(
         (name) =>
           targetName.toLowerCase().includes(name.toLowerCase()) ||
           name.toLowerCase().includes(targetName.toLowerCase()),
       );
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => a.length - b.length);
-        return candidates[0]!;
+      const [firstCandidate] = candidates.sort((a, b) => a.length - b.length);
+      if (firstCandidate) {
+        return firstCandidate;
       }
     }
 
-    // Fallback: shortest folder name
+    // Fallback to shortest folder name
     return shortest;
   }
 }
