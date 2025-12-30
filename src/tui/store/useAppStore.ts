@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ExportedAddon } from "@/core/transfer";
 import { type Theme, themes } from "@/tui/theme";
 
 export type Screen = "menu" | "update" | "manage" | "config" | "install";
@@ -35,6 +36,9 @@ interface AppState {
   // Onboarding
   showOnboarding: boolean;
 
+  // Import Queue State
+  importQueue: ExportedAddon[];
+
   // Actions
   navigate: (screen: Screen) => void;
   setLastMenuSelection: (selection: string) => void;
@@ -49,6 +53,8 @@ interface AppState {
   setDevMode: (enabled: boolean) => void;
   triggerOnboarding: () => void;
   clearOnboarding: () => void;
+  setImportQueue: (addons: ExportedAddon[]) => void;
+  clearImportQueue: () => void;
 }
 
 let toastId = 0;
@@ -66,6 +72,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   nextCheckTime: null,
   devMode: false,
   showOnboarding: false,
+  importQueue: [],
 
   navigate: (screen) => set({ activeScreen: screen }),
   setLastMenuSelection: (selection) => set({ lastMenuSelection: selection }),
@@ -97,4 +104,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDevMode: (enabled) => set({ devMode: enabled }),
   triggerOnboarding: () => set({ showOnboarding: true }),
   clearOnboarding: () => set({ showOnboarding: false }),
+  setImportQueue: (addons) => set({ importQueue: addons }),
+  clearImportQueue: () => set({ importQueue: [] }),
 }));
