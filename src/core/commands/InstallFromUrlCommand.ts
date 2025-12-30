@@ -86,13 +86,24 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
         }
 
         context.emit("addon:install:downloading", this.url);
-        const details = await WoWInterface.getAddonDetails(addonId);
-        if (!details) {
-          throw new Error(
-            "Failed to fetch addon details from WoWInterface API",
-          );
+        const result = await WoWInterface.getAddonDetails(addonId);
+        if (!result.success) {
+          switch (result.error) {
+            case "not_found":
+              throw new Error(
+                "Addon not found on WoWInterface. It may have been removed, discontinued, or the URL may be incorrect.",
+              );
+            case "network_error":
+              throw new Error(
+                "Failed to connect to WoWInterface API. Please check your internet connection.",
+              );
+            case "invalid_response":
+              throw new Error(
+                "Received unexpected response from WoWInterface API.",
+              );
+          }
         }
-        wowInterfaceDetails = details;
+        wowInterfaceDetails = result.details;
 
         const zipPath = path.join(tempDir, "addon.zip");
         await fs.mkdir(tempDir, { recursive: true });

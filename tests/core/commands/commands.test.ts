@@ -129,7 +129,10 @@ describe("Commands", () => {
 				UIFileName: "clique.zip",
 			};
 
-			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue(mockDetails);
+			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue({
+				success: true,
+				details: mockDetails,
+			});
 			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {
 				const folderPath = path.join(dest, "Clique");
 				fs.mkdirSync(folderPath, { recursive: true });
@@ -319,7 +322,10 @@ describe("Commands", () => {
 				UIFileName: "wowaddon.zip",
 			};
 
-			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue(mockDetails);
+			spyOn(WoWInterface, "getAddonDetails").mockResolvedValue({
+				success: true,
+				details: mockDetails,
+			});
 			spyOn(Downloader, "download").mockResolvedValue(true);
 			spyOn(Downloader, "unzip").mockImplementation(async (_zip, dest) => {
 				const folderPath = path.join(dest, folder);

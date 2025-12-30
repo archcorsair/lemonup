@@ -172,18 +172,24 @@ export class AddonManager extends EventEmitter {
         };
       }
 
-      const details = await WoWInterface.getAddonDetails(addonId);
-      if (!details) {
+      const result = await WoWInterface.getAddonDetails(addonId);
+      if (!result.success) {
         return {
           updateAvailable: false,
           remoteVersion: "",
-          error: "Failed to fetch WoWInterface details",
+          error:
+            result.error === "not_found"
+              ? "Addon not found on WoWInterface"
+              : "Failed to fetch WoWInterface details",
         };
       }
 
       // Simple string comparison for now, assuming UIVersion changes on update
-      const isUpdate = details.UIVersion !== addon.version;
-      return { updateAvailable: isUpdate, remoteVersion: details.UIVersion };
+      const isUpdate = result.details.UIVersion !== addon.version;
+      return {
+        updateAvailable: isUpdate,
+        remoteVersion: result.details.UIVersion,
+      };
     }
 
     return { updateAvailable: false, remoteVersion: "" };
