@@ -36,8 +36,15 @@ interface WizardState {
   backupRetention: number;
 }
 
-const TOTAL_STEPS = 5;
-const STEP_NAMES = ["Theme", "Directory", "Addons", "Settings", "Review"];
+const TOTAL_STEPS = 6;
+const STEP_NAMES = [
+  "Theme",
+  "Directory",
+  "Import",
+  "Addons",
+  "Settings",
+  "Review",
+];
 
 const expandPath = (p: string): string => {
   if (p.startsWith("~/") || p === "~") {
