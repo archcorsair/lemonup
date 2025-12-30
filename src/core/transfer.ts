@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { z } from "zod";
 import type { AddonRecord } from "./db";
+import { logger } from "./logger";
 
 export const ExportedAddonSchema = z.object({
   name: z.string(),
@@ -46,9 +47,13 @@ export async function exportAddons(
     };
 
     await Bun.write(outputPath, JSON.stringify(exportFile, null, 2));
-
+    logger.log(
+      "Transfer",
+      `Exported ${exported.length} addons to ${outputPath}`,
+    );
     return { success: true, count: exported.length };
-  } catch (e) {
+  } catch (e: unknown) {
+    logger.error("Transfer", `Failed to export addons: ${String(e)}`);
     return {
       success: false,
       count: 0,
@@ -70,16 +75,19 @@ export async function parseImportFile(
     const validated = ExportFileSchema.parse(parsed);
 
     return { success: true, data: validated };
-  } catch (e) {
+  } catch (e: unknown) {
     if (e instanceof SyntaxError) {
+      logger.error("Transfer", "Failed to parse JSON");
       return { success: false, error: "Failed to parse JSON" };
     }
     if (e instanceof z.ZodError) {
+      logger.error("Transfer", "Invalid format");
       return {
         success: false,
         error: `Invalid format: ${e.issues[0]?.message}`,
       };
     }
+    logger.error("Transfer", `Failed to parse import file: ${String(e)}`);
     return {
       success: false,
       error: e instanceof Error ? e.message : String(e),
@@ -115,5 +123,9 @@ export function analyzeImport(
     }
   }
 
+  logger.log(
+    "Transfer",
+    `Analyzed import: ${toInstall.length} to install, ${alreadyInstalled.length} already installed, ${manualAddons.length} manual addons`,
+  );
   return { toInstall, alreadyInstalled, manualAddons };
 }
