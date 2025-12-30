@@ -58,15 +58,13 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   );
 
   // Batch import state
-  const [batchProgress, setBatchProgress] = useState({
-    current: 0,
-    total: 0,
-    currentAddon: "",
-  });
-  const [batchResults, setBatchResults] = useState<{
-    succeeded: string[];
-    failed: Array<{ name: string; error: string }>;
-  }>({ succeeded: [], failed: [] });
+  type AddonStatus = "pending" | "installing" | "success" | "failed";
+  type BatchAddon = {
+    addon: ExportedAddon;
+    status: AddonStatus;
+    error?: string;
+  };
+  const [batchAddons, setBatchAddons] = useState<BatchAddon[]>([]);
 
   const OPTIONS = [
     { label: "Install from URL", action: "url", section: "General" },
@@ -78,27 +76,38 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
     setConfig(addonManager.getConfig());
   }, [addonManager]);
 
-  // Process batch install from import queue
+  // Process batch install from import queue with concurrency
   const processBatchInstall = useCallback(
     async (queue: ExportedAddon[]) => {
       clearImportQueue();
 
+      // Initialize all addons as pending
+      const initialBatch: BatchAddon[] = queue.map((addon) => ({
+        addon,
+        status: "pending" as AddonStatus,
+      }));
+      setBatchAddons(initialBatch);
       setMode("batch-installing");
-      setBatchProgress({ current: 0, total: queue.length, currentAddon: "" });
-      setBatchResults({ succeeded: [], failed: [] });
 
-      const succeeded: string[] = [];
-      const failed: Array<{ name: string; error: string }> = [];
+      const maxConcurrent = config.maxConcurrent ?? 3;
+      let currentIndex = 0;
+      const results = [...initialBatch];
 
-      for (let i = 0; i < queue.length; i++) {
-        const addon = queue[i];
-        if (!addon) continue;
+      const updateAddonStatus = (
+        index: number,
+        status: AddonStatus,
+        error?: string,
+      ) => {
+        results[index] = { ...results[index], status, error } as BatchAddon;
+        setBatchAddons([...results]);
+      };
 
-        setBatchProgress({
-          current: i + 1,
-          total: queue.length,
-          currentAddon: addon.name,
-        });
+      const installAddon = async (index: number): Promise<void> => {
+        const item = results[index];
+        if (!item) return;
+
+        const addon = item.addon;
+        updateAddonStatus(index, "installing");
 
         try {
           if (addon.type === "github" || addon.type === "wowinterface") {
@@ -108,19 +117,35 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
             const subFolders = addon.ownedFolders ?? [];
             await addonManager.installTukUI("latest", addon.folder, subFolders);
           }
-          succeeded.push(addon.name);
+          updateAddonStatus(index, "success");
         } catch (e) {
-          failed.push({
-            name: addon.name,
-            error: e instanceof Error ? e.message : String(e),
-          });
+          updateAddonStatus(
+            index,
+            "failed",
+            e instanceof Error ? e.message : String(e),
+          );
         }
+      };
+
+      // Process with concurrency limit
+      const workers: Promise<void>[] = [];
+
+      const startNext = async (): Promise<void> => {
+        while (currentIndex < queue.length) {
+          const index = currentIndex++;
+          await installAddon(index);
+        }
+      };
+
+      // Start up to maxConcurrent workers
+      for (let i = 0; i < Math.min(maxConcurrent, queue.length); i++) {
+        workers.push(startNext());
       }
 
-      setBatchResults({ succeeded, failed });
+      await Promise.all(workers);
       setMode("batch-result");
     },
-    [addonManager, clearImportQueue],
+    [addonManager, clearImportQueue, config.maxConcurrent],
   );
 
   // Detect import queue and start batch install
@@ -230,7 +255,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
       if (key.return || key.escape || input === "q") {
         flashKey("enter");
         setMode("select");
-        setBatchResults({ succeeded: [], failed: [] });
+        setBatchAddons([]);
       }
       return;
     }
@@ -443,56 +468,72 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
         </Box>
       )}
 
-      {mode === "batch-installing" && (
+      {(mode === "batch-installing" || mode === "batch-result") && (
         <Box flexDirection="column">
-          <Color styles={theme.busy}>
-            <Text>
-              {/* @ts-expect-error: Spinner types mismatch */}
-              <Spinner type="dots" /> Installing addons from import...
-            </Text>
-          </Color>
-          <Box marginTop={1}>
-            <Text>
-              Progress: {batchProgress.current}/{batchProgress.total}
-            </Text>
-          </Box>
-          {batchProgress.currentAddon && (
-            <Color styles={theme.statusChecking}>
-              <Text>Current: {batchProgress.currentAddon}</Text>
+          {mode === "batch-installing" && (
+            <Color styles={theme.busy}>
+              <Text bold>Installing addons from import...</Text>
             </Color>
           )}
-        </Box>
-      )}
-
-      {mode === "batch-result" && (
-        <Box flexDirection="column">
-          <Text bold>Import Complete</Text>
-          <Box marginTop={1} flexDirection="column">
-            {batchResults.succeeded.length > 0 && (
-              <Color styles={theme.statusSuccess}>
-                <Text>Installed: {batchResults.succeeded.length}</Text>
-              </Color>
-            )}
-            {batchResults.failed.length > 0 && (
-              <Box flexDirection="column">
-                <Color styles={theme.statusError}>
-                  <Text>Failed: {batchResults.failed.length}</Text>
-                </Color>
-                {batchResults.failed.map((f) => (
-                  <Color key={f.name} styles={theme.statusIdle}>
-                    <Text>
-                      {"  "}- {f.name}: {f.error}
-                    </Text>
-                  </Color>
-                ))}
-              </Box>
-            )}
-          </Box>
-          <Box marginTop={1}>
-            <Color styles={theme.muted}>
-              <Text>Press Enter to continue</Text>
+          {mode === "batch-result" && (
+            <Color styles={theme.statusSuccess}>
+              <Text bold>
+                Import Complete - Installed:{" "}
+                {batchAddons.filter((a) => a.status === "success").length}/
+                {batchAddons.length}
+              </Text>
             </Color>
+          )}
+          <Box marginTop={1} flexDirection="column">
+            {batchAddons.map((item) => (
+              <Box key={item.addon.folder} gap={1}>
+                {item.status === "pending" && (
+                  <Color styles={theme.muted}>
+                    <Text>○</Text>
+                  </Color>
+                )}
+                {item.status === "installing" && (
+                  <Color styles={theme.statusChecking}>
+                    {/* @ts-expect-error: Spinner types mismatch */}
+                    <Spinner type="dots" />
+                  </Color>
+                )}
+                {item.status === "success" && (
+                  <Color styles={theme.statusSuccess}>
+                    <Text>✔</Text>
+                  </Color>
+                )}
+                {item.status === "failed" && (
+                  <Color styles={theme.statusError}>
+                    <Text>✘</Text>
+                  </Color>
+                )}
+                <Color
+                  styles={
+                    item.status === "installing"
+                      ? theme.highlight
+                      : item.status === "success"
+                        ? theme.statusSuccess
+                        : item.status === "failed"
+                          ? theme.statusError
+                          : theme.muted
+                  }
+                >
+                  <Text>
+                    {item.addon.name}
+                    {item.error && ` - ${item.error}`}
+                  </Text>
+                </Color>
+              </Box>
+            ))}
           </Box>
+          {mode === "batch-result" && (
+            <Box marginTop={1}>
+              <Color styles={theme.muted}>
+                <Text>Press Enter to continue</Text>
+              </Color>
+            </Box>
+          )}
         </Box>
       )}
 
