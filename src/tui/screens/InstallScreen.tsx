@@ -3,10 +3,11 @@ import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Config } from "@/core/config";
 import type { AddonManager } from "@/core/manager";
 import { getDefaultWoWPath, isPathConfigured, pathExists } from "@/core/paths";
+import type { ExportedAddon } from "@/core/transfer";
 import { ControlBar } from "@/tui/components/ControlBar";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
 import { useTheme } from "@/tui/hooks/useTheme";
@@ -25,7 +26,9 @@ type Mode =
   | "result"
   | "config-auto-confirm"
   | "config-manual-input"
-  | "confirm-reinstall";
+  | "confirm-reinstall"
+  | "batch-installing"
+  | "batch-result";
 
 export const InstallScreen: React.FC<InstallScreenProps> = ({
   config: initialConfig,
@@ -34,6 +37,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 }) => {
   const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
+  const importQueue = useAppStore((state) => state.importQueue);
+  const clearImportQueue = useAppStore((state) => state.clearImportQueue);
   const [config, setConfig] = useState(initialConfig);
   const [mode, setMode] = useState<Mode>("select");
   const [selection, setSelection] = useState(0);
@@ -52,6 +57,17 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
     "success",
   );
 
+  // Batch import state
+  const [batchProgress, setBatchProgress] = useState({
+    current: 0,
+    total: 0,
+    currentAddon: "",
+  });
+  const [batchResults, setBatchResults] = useState<{
+    succeeded: string[];
+    failed: Array<{ name: string; error: string }>;
+  }>({ succeeded: [], failed: [] });
+
   const OPTIONS = [
     { label: "Install from URL", action: "url", section: "General" },
     { label: "Install ElvUI", action: "elvui", section: "TukUI" },
@@ -61,6 +77,58 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   useEffect(() => {
     setConfig(addonManager.getConfig());
   }, [addonManager]);
+
+  // Process batch install from import queue
+  const processBatchInstall = useCallback(
+    async (queue: ExportedAddon[]) => {
+      clearImportQueue();
+
+      setMode("batch-installing");
+      setBatchProgress({ current: 0, total: queue.length, currentAddon: "" });
+      setBatchResults({ succeeded: [], failed: [] });
+
+      const succeeded: string[] = [];
+      const failed: Array<{ name: string; error: string }> = [];
+
+      for (let i = 0; i < queue.length; i++) {
+        const addon = queue[i];
+        if (!addon) continue;
+
+        setBatchProgress({
+          current: i + 1,
+          total: queue.length,
+          currentAddon: addon.name,
+        });
+
+        try {
+          if (addon.type === "github" || addon.type === "wowinterface") {
+            if (!addon.url) throw new Error("No URL available");
+            await addonManager.installFromUrl(addon.url);
+          } else if (addon.type === "tukui") {
+            const subFolders = addon.ownedFolders ?? [];
+            await addonManager.installTukUI("latest", addon.folder, subFolders);
+          }
+          succeeded.push(addon.name);
+        } catch (e) {
+          failed.push({
+            name: addon.name,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      setBatchResults({ succeeded, failed });
+      setMode("batch-result");
+    },
+    [addonManager, clearImportQueue],
+  );
+
+  // Detect import queue and start batch install
+  useEffect(() => {
+    if (importQueue.length > 0 && mode === "select") {
+      processBatchInstall([...importQueue]);
+    }
+  }, [importQueue, mode, processBatchInstall]);
 
   const checkConfigAndInstall = async (
     type: "url" | "elvui" | "tukui",
@@ -156,7 +224,16 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
   };
 
   useInput(async (input, key) => {
-    if (mode === "installing") return;
+    if (mode === "installing" || mode === "batch-installing") return;
+
+    if (mode === "batch-result") {
+      if (key.return || key.escape || input === "q") {
+        flashKey("enter");
+        setMode("select");
+        setBatchResults({ succeeded: [], failed: [] });
+      }
+      return;
+    }
 
     if (mode === "result") {
       if (key.return || key.escape || input === "q") {
@@ -363,6 +440,59 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
           <Color styles={theme.muted}>
             <Text>Press Enter to continue</Text>
           </Color>
+        </Box>
+      )}
+
+      {mode === "batch-installing" && (
+        <Box flexDirection="column">
+          <Color styles={theme.busy}>
+            <Text>
+              {/* @ts-expect-error: Spinner types mismatch */}
+              <Spinner type="dots" /> Installing addons from import...
+            </Text>
+          </Color>
+          <Box marginTop={1}>
+            <Text>
+              Progress: {batchProgress.current}/{batchProgress.total}
+            </Text>
+          </Box>
+          {batchProgress.currentAddon && (
+            <Color styles={theme.statusChecking}>
+              <Text>Current: {batchProgress.currentAddon}</Text>
+            </Color>
+          )}
+        </Box>
+      )}
+
+      {mode === "batch-result" && (
+        <Box flexDirection="column">
+          <Text bold>Import Complete</Text>
+          <Box marginTop={1} flexDirection="column">
+            {batchResults.succeeded.length > 0 && (
+              <Color styles={theme.statusSuccess}>
+                <Text>Installed: {batchResults.succeeded.length}</Text>
+              </Color>
+            )}
+            {batchResults.failed.length > 0 && (
+              <Box flexDirection="column">
+                <Color styles={theme.statusError}>
+                  <Text>Failed: {batchResults.failed.length}</Text>
+                </Color>
+                {batchResults.failed.map((f) => (
+                  <Color key={f.name} styles={theme.statusIdle}>
+                    <Text>
+                      {"  "}- {f.name}: {f.error}
+                    </Text>
+                  </Color>
+                ))}
+              </Box>
+            )}
+          </Box>
+          <Box marginTop={1}>
+            <Color styles={theme.muted}>
+              <Text>Press Enter to continue</Text>
+            </Color>
+          </Box>
         </Box>
       )}
 
