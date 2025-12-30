@@ -13,6 +13,11 @@ import {
   quickCheckCommonPaths,
   searchForWoW,
 } from "@/core/paths";
+import {
+  DEFAULT_EXPORT_PATH,
+  type ExportFile,
+  parseImportFile,
+} from "@/core/transfer";
 import { ControlBar } from "./components/ControlBar";
 import { useScanPathInput } from "./hooks/useScanPathInput";
 import { useTheme } from "./hooks/useTheme";
@@ -34,6 +39,7 @@ interface WizardState {
   autoCheckInterval: number; // minutes
   backupWTF: boolean;
   backupRetention: number;
+  importAddons: boolean; // Whether to import addons after wizard
 }
 
 const TOTAL_STEPS = 6;
@@ -726,7 +732,13 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     autoCheckInterval: 60, // 1 hour in minutes
     backupWTF: true,
     backupRetention: 5,
+    importAddons: false,
   }));
+
+  // Import step state
+  const [exportFileExists, setExportFileExists] = useState(false);
+  const [exportData, setExportData] = useState<ExportFile | null>(null);
+  const [importOptionIndex, setImportOptionIndex] = useState(0); // 0 = Import, 1 = Skip
 
   // Step-specific state
   const [dirEditMode, setDirEditMode] = useState(false);
@@ -760,6 +772,20 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         setPathValid(true);
       }
     });
+  }, []);
+
+  // Check for existing export file on mount
+  useEffect(() => {
+    const checkExportFile = async () => {
+      if (fs.existsSync(DEFAULT_EXPORT_PATH)) {
+        const result = await parseImportFile(DEFAULT_EXPORT_PATH);
+        if (result.success && result.data) {
+          setExportFileExists(true);
+          setExportData(result.data);
+        }
+      }
+    };
+    checkExportFile();
   }, []);
 
   const handleDeepScan = async () => {
