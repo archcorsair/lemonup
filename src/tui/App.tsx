@@ -218,7 +218,7 @@ const AppContent: React.FC<AppProps> = ({
       setConfig(cfg);
     }
 
-    // Check if imports were queued during wizard
+    // Check if addons were queued during wizard (ElvUI/TukUI or imports)
     const queue = useAppStore.getState().importQueue;
     if (queue.length > 0) {
       navigate("install");
@@ -318,6 +318,12 @@ const AppContent: React.FC<AppProps> = ({
     if (configManager) {
       const cfg = configManager.get();
       setConfig(cfg);
+    }
+
+    // Check if addons were queued during wizard (ElvUI/TukUI or imports)
+    const queue = useAppStore.getState().importQueue;
+    if (queue.length > 0) {
+      navigate("install");
     }
   };
 

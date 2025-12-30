@@ -8,6 +8,7 @@ import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import type { ConfigManager } from "@/core/config";
+import { logger } from "@/core/logger";
 import {
   getDefaultWoWPath,
   quickCheckCommonPaths,
@@ -981,8 +982,16 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
 
   const handleComplete = () => {
     try {
+      // Preserve debug logging state (may have been enabled via existing config)
+      const wasDebugEnabled = logger.isEnabled();
+
       // Create config with wizard values
       configManager.createDefaultConfig();
+
+      // Restore debug logging if it was previously enabled
+      if (wasDebugEnabled) {
+        configManager.set("debug", true);
+      }
 
       // Apply wizard settings
       configManager.set("theme", wizardState.theme);

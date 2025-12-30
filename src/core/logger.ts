@@ -23,6 +23,10 @@ export class Logger {
     this.enabled = enabled;
   }
 
+  public isEnabled(): boolean {
+    return this.enabled;
+  }
+
   public setLogPath(logPath: string) {
     this.logPath = logPath;
   }
