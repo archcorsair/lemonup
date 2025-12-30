@@ -495,8 +495,16 @@ const ImportStep: React.FC<{
   exportFileExists: boolean;
   importSelected: boolean;
   optionIndex: number;
+  refreshFailed: boolean;
   theme: ReturnType<typeof useTheme>["theme"];
-}> = ({ exportData, exportFileExists, importSelected, optionIndex, theme }) => {
+}> = ({
+  exportData,
+  exportFileExists,
+  importSelected,
+  optionIndex,
+  refreshFailed,
+  theme,
+}) => {
   if (!exportFileExists || !exportData) {
     return (
       <Box flexDirection="column" gap={1}>
@@ -526,6 +534,16 @@ const ImportStep: React.FC<{
             <Text> to refresh.</Text>
           </Color>
         </Box>
+
+        {refreshFailed && (
+          <Box marginTop={1}>
+            <Color styles={theme.error}>
+              <Text>
+                ✗ File not found. Make sure it exists at the path above.
+              </Text>
+            </Color>
+          </Box>
+        )}
 
         <Box marginTop={1}>
           <Color styles={theme.muted}>
@@ -864,6 +882,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const [exportFileExists, setExportFileExists] = useState(false);
   const [exportData, setExportData] = useState<ExportFile | null>(null);
   const [importOptionIndex, setImportOptionIndex] = useState(0); // 0 = Import, 1 = Skip
+  const [importRefreshFailed, setImportRefreshFailed] = useState(false);
 
   // Step-specific state
   const [dirEditMode, setDirEditMode] = useState(false);
@@ -1238,8 +1257,13 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
               if (result.success && result.data) {
                 setExportFileExists(true);
                 setExportData(result.data);
+                setImportRefreshFailed(false);
+              } else {
+                setImportRefreshFailed(true);
               }
             });
+          } else {
+            setImportRefreshFailed(true);
           }
           break;
         }
@@ -1472,6 +1496,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             exportFileExists={exportFileExists}
             importSelected={wizardState.importAddons}
             optionIndex={importOptionIndex}
+            refreshFailed={importRefreshFailed}
             theme={theme}
           />
         )}
