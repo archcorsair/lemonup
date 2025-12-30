@@ -398,8 +398,12 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     if (activeField === "exportAddons") {
       if (key.return || input === " ") {
         flashKey("enter");
-        setExportStatus("exporting");
         const addons = addonManager.getAllAddons();
+        if (addons.length === 0) {
+          showToast("No addons to export", 2000);
+          return;
+        }
+        setExportStatus("exporting");
         exportAddons(addons, DEFAULT_EXPORT_PATH).then((result) => {
           if (result.success) {
             setExportStatus("success");
