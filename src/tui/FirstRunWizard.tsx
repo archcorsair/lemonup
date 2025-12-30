@@ -503,9 +503,37 @@ const ImportStep: React.FC<{
         <Color styles={theme.heading}>
           <Text bold>Import Addons</Text>
         </Color>
-        <Color styles={theme.muted}>
-          <Text>No export file found. Press Enter to continue.</Text>
-        </Color>
+
+        <Box marginTop={1} flexDirection="column">
+          <Color styles={theme.warning}>
+            <Text>No export file found at:</Text>
+          </Color>
+          <Box marginLeft={2}>
+            <Color styles={theme.labelInactive}>
+              <Text>~/lemonup-addons.json</Text>
+            </Color>
+          </Box>
+        </Box>
+
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>If you've just copied the file, press </Text>
+          </Color>
+          <Color styles={theme.highlight}>
+            <Text bold>[r]</Text>
+          </Color>
+          <Color styles={theme.muted}>
+            <Text> to refresh.</Text>
+          </Color>
+        </Box>
+
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>
+              You can also import addons later from Settings → Import.
+            </Text>
+          </Color>
+        </Box>
       </Box>
     );
   }
@@ -1201,7 +1229,22 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       }
 
       case 3: // Import
-        // If no export file, just proceed
+        // Refresh check with 'r' key
+        if (input === "r") {
+          flashKey("r");
+          // Re-check for export file
+          if (fs.existsSync(DEFAULT_EXPORT_PATH)) {
+            parseImportFile(DEFAULT_EXPORT_PATH).then((result) => {
+              if (result.success && result.data) {
+                setExportFileExists(true);
+                setExportData(result.data);
+              }
+            });
+          }
+          break;
+        }
+
+        // If no export file, just proceed on Enter
         if (!exportFileExists) {
           if (key.return) {
             flashKey("enter");
@@ -1361,6 +1404,8 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       case 3: // Import
         if (exportFileExists) {
           controls.push({ key: "↑/↓", label: "select" });
+        } else {
+          controls.push({ key: "r", label: "refresh" });
         }
         break;
       case 4: // Addons
