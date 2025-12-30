@@ -49,7 +49,7 @@ const STEP_NAMES = [
   "Theme",
   "Directory",
   "Import",
-  "Addons",
+  "TukUI",
   "Settings",
   "Review",
 ];
