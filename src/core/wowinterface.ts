@@ -40,6 +40,10 @@ export async function getAddonDetails(
         "WoWInterface",
         `API request failed: ${response.status} ${response.statusText}`,
       );
+      // 404 means addon not found (discontinued, removed, or invalid ID)
+      if (response.status === 404) {
+        return { success: false, error: "not_found" };
+      }
       return { success: false, error: "network_error" };
     }
 
