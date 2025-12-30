@@ -3,6 +3,9 @@ import {
   ExportFileSchema,
   ExportedAddonSchema,
   exportAddons,
+  parseImportFile,
+  analyzeImport,
+  type ExportFile,
 } from "@/core/transfer";
 import type { AddonRecord } from "@/core/db";
 
@@ -102,5 +105,104 @@ describe("exportAddons", () => {
 
     const file = await Bun.file(tmpPath).json();
     expect(file.addons[0].reinstallable).toBe(false);
+  });
+});
+
+describe("parseImportFile", () => {
+  test("parses valid export file", async () => {
+    const tmpPath = `/tmp/test-import-${Date.now()}.json`;
+    const validFile = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      addons: [
+        {
+          name: "Test",
+          folder: "Test",
+          type: "github",
+          url: "https://github.com/test/test",
+          reinstallable: true,
+        },
+      ],
+    };
+    await Bun.write(tmpPath, JSON.stringify(validFile));
+
+    const result = await parseImportFile(tmpPath);
+    expect(result.success).toBe(true);
+    expect(result.data?.addons.length).toBe(1);
+  });
+
+  test("fails on invalid JSON", async () => {
+    const tmpPath = `/tmp/test-invalid-${Date.now()}.json`;
+    await Bun.write(tmpPath, "not json");
+
+    const result = await parseImportFile(tmpPath);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("parse");
+  });
+
+  test("fails on missing file", async () => {
+    const result = await parseImportFile("/nonexistent/path.json");
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("analyzeImport", () => {
+  test("categorizes addons correctly", () => {
+    const exportData: ExportFile = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      addons: [
+        {
+          name: "New",
+          folder: "NewAddon",
+          type: "github",
+          url: "https://...",
+          reinstallable: true,
+        },
+        {
+          name: "Existing",
+          folder: "ExistingAddon",
+          type: "tukui",
+          url: "https://...",
+          reinstallable: true,
+        },
+        {
+          name: "Manual",
+          folder: "ManualAddon",
+          type: "manual",
+          url: null,
+          reinstallable: false,
+        },
+      ],
+    };
+
+    const currentAddons: AddonRecord[] = [
+      {
+        name: "Existing",
+        folder: "ExistingAddon",
+        type: "tukui",
+        url: "https://...",
+        ownedFolders: [],
+        kind: "addon",
+        kindOverride: false,
+        flavor: "retail",
+        version: "1.0",
+        git_commit: null,
+        author: null,
+        interface: null,
+        requiredDeps: [],
+        optionalDeps: [],
+        embeddedLibs: [],
+        install_date: "2024-01-01",
+        last_updated: "2024-01-01",
+      },
+    ];
+
+    const analysis = analyzeImport(exportData, currentAddons);
+
+    expect(analysis.toInstall.length).toBe(1);
+    expect(analysis.toInstall[0]?.folder).toBe("NewAddon");
+    expect(analysis.alreadyInstalled.length).toBe(1);
+    expect(analysis.manualAddons.length).toBe(1);
   });
 });

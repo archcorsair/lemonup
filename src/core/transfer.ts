@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import { z } from "zod";
 import type { AddonRecord } from "./db";
@@ -54,4 +55,65 @@ export async function exportAddons(
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+export async function parseImportFile(
+  filePath: string,
+): Promise<{ success: boolean; data?: ExportFile; error?: string }> {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: `File not found: ${filePath}` };
+    }
+
+    const content = await Bun.file(filePath).text();
+    const parsed = JSON.parse(content);
+    const validated = ExportFileSchema.parse(parsed);
+
+    return { success: true, data: validated };
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      return { success: false, error: "Failed to parse JSON" };
+    }
+    if (e instanceof z.ZodError) {
+      return {
+        success: false,
+        error: `Invalid format: ${e.issues[0]?.message}`,
+      };
+    }
+    return {
+      success: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+export interface ImportAnalysis {
+  toInstall: ExportedAddon[];
+  alreadyInstalled: ExportedAddon[];
+  manualAddons: ExportedAddon[];
+}
+
+export function analyzeImport(
+  exportData: ExportFile,
+  currentAddons: AddonRecord[],
+): ImportAnalysis {
+  const installedFolders = new Set(
+    currentAddons.map((a) => a.folder.toLowerCase()),
+  );
+
+  const toInstall: ExportedAddon[] = [];
+  const alreadyInstalled: ExportedAddon[] = [];
+  const manualAddons: ExportedAddon[] = [];
+
+  for (const addon of exportData.addons) {
+    if (!addon.reinstallable) {
+      manualAddons.push(addon);
+    } else if (installedFolders.has(addon.folder.toLowerCase())) {
+      alreadyInstalled.push(addon);
+    } else {
+      toInstall.push(addon);
+    }
+  }
+
+  return { toInstall, alreadyInstalled, manualAddons };
 }
