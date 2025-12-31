@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Text } from "ink";
 import { render } from "ink-testing-library";
-import { useTerminalSize } from "@/tui/components/VirtualList/useTerminalSize";
+import { useTerminalSize } from "ink-virtual-list";
 
 const TestComponent = () => {
   const { rows, columns } = useTerminalSize();
