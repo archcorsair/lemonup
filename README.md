@@ -16,12 +16,12 @@ way to handle your addons without leaving the terminal.
 
 ## Compatibility
 
-| Platform Support           | Content Sources          |
-| :------------------------- | :----------------------- |
-| ✅ **Retail**              | ✅ **GitHub**            |
-| ⏳ **Classic / Era** (WIP) | ✅ **TukUI** (ElvUI)     |
-| 📋 **Cata** (Planned)      | ✅ **WoWInterface**      |
-|                            | 📋 **Wago.io** (Planned) |
+| Platform Support               | Content Sources          |
+| :-------------------------     | :----------------------- |
+| ✅ **Retail**                  | ✅ **GitHub**            |
+| 📋 **Classic / Era** (Planned) | ✅ **TukUI** (ElvUI)     |
+| 📋 **Cata** (Planned)          | ✅ **WoWInterface**      |
+|                                | 📋 **Wago.io** (Planned) |
 
 ### Supported Architectures
 
@@ -31,14 +31,14 @@ way to handle your addons without leaving the terminal.
 
 ## Features
 
-- **🎨 Interactive TUI:** A beautiful, terminal-native user interface with fluid
+- **Interactive TUI:** A beautiful, terminal-native user interface with fluid
   animations and responsive layout.
-- **📦 Multi-Source Support:** Seamlessly install and update addons directly
+- **Multi-Source Support:** Seamlessly install and update addons directly
   from **GitHub**, **TukUI**, and **WoWInterface**.
-- **🔄 Smart Updates & Dependencies:** Git-based version tracking ensures
+- **Smart Updates & Dependencies:** Git-based version tracking ensures
   pinpoint accuracy, while robust library handling keeps your dependencies in
   check.
-- **🚀 Intelligent Setup:** Intelligent WoW installation detection and a guided
+- **Intelligent Setup:** Intelligent WoW installation detection and a guided
   first-run wizard to get you started in seconds.
 - **⌨️ Keyboard Driven:** Full **Vim-style** navigation (`h/j/k/l`) and
   intuitive shortcuts for all actions.
