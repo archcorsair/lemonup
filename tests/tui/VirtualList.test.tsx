@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Text } from "ink";
 import { render } from "ink-testing-library";
-import { VirtualList } from "@/tui/components/VirtualList";
+import { VirtualList } from "ink-virtual-list";
 
 describe("VirtualList", () => {
   const items = ["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
