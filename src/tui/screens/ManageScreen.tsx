@@ -6,7 +6,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import pLimit from "p-limit";
 import type React from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { BackupManager } from "@/core/backup";
 import type { Config } from "@/core/config";
 import type { AddonManager, UpdateResult } from "@/core/manager";
@@ -57,6 +57,37 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
   const [updateProgress, setUpdateProgress] = useState<
     Record<string, RepoStatus>
   >({});
+
+  // Track when each addon started checking (for minimum display duration)
+  const [checkStartTimes, setCheckStartTimes] = useState<
+    Record<string, number>
+  >({});
+  const MIN_CHECK_DISPLAY_MS = 1000;
+
+  // Force re-render when minimum display time elapses
+  useEffect(() => {
+    const entries = Object.entries(checkStartTimes);
+    if (entries.length === 0) return;
+
+    const now = Date.now();
+    const timeouts: NodeJS.Timeout[] = [];
+
+    for (const [folder, startTime] of entries) {
+      const remaining = startTime + MIN_CHECK_DISPLAY_MS - now;
+      if (remaining > 0) {
+        const timeout = setTimeout(() => {
+          setCheckStartTimes((prev) => {
+            const next = { ...prev };
+            delete next[folder];
+            return next;
+          });
+        }, remaining);
+        timeouts.push(timeout);
+      }
+    }
+
+    return () => timeouts.forEach(clearTimeout);
+  }, [checkStartTimes]);
 
   // Confirmations
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -586,6 +617,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
       }
     }
 
+    if (input === "U") {
+      flashKey("U");
+      const allFolders = visibleAddons
+        .filter((a) => !a.isChild)
+        .map((a) => a.record.folder);
+      runUpdates(allFolders);
+    }
+
     if (input === "c") {
       flashKey("c");
       if (selectedIds.size > 0) {
@@ -765,11 +804,38 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             let status: RepoStatus = "idle";
             let result: UpdateResult | undefined;
 
+            // Track when checking starts for minimum display duration
+            const checkStartTime = checkStartTimes[addon.folder];
+            const now = Date.now();
+            const isInMinDisplayPeriod =
+              checkStartTime && now - checkStartTime < MIN_CHECK_DISPLAY_MS;
+
             if (isUpdating) {
               status = updateProgress[addon.folder] || "checking";
-            } else if (isLoading || isFetching) status = "checking";
-            else if (error) status = "error";
-            else if (data) status = "done";
+            } else if (isLoading || isFetching) {
+              status = "checking";
+              // Record start time when check begins
+              if (!checkStartTime) {
+                setCheckStartTimes((prev) => ({
+                  ...prev,
+                  [addon.folder]: now,
+                }));
+              }
+            } else if (isInMinDisplayPeriod) {
+              // Keep showing "checking" until minimum time passes
+              status = "checking";
+            } else {
+              // Clear start time and show actual status
+              if (checkStartTime) {
+                setCheckStartTimes((prev) => {
+                  const next = { ...prev };
+                  delete next[addon.folder];
+                  return next;
+                });
+              }
+              if (error) status = "error";
+              else if (data) status = "done";
+            }
 
             if (status === "done" && data) {
               if (data.updateAvailable) {
@@ -879,6 +945,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
                 { key: "↑/↓", label: "nav" },
                 { key: "space", label: "select" },
                 { key: "u", label: "update" },
+                { key: "U", label: "update all" },
                 { key: "c", label: "check" },
                 { key: "1-4", label: "sort" },
                 { key: "m", label: "menu" },
@@ -893,6 +960,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
           { key: "/", label: "Search/Filter" },
           { key: "Space", label: "Select/Deselect" },
           { key: "u", label: "Update Selected" },
+          { key: "U", label: "Update All" },
           { key: "c", label: "Check Updates" },
           { key: "l", label: "Toggle Libs" },
           { key: "t", label: "Toggle Kind" },

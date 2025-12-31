@@ -11,7 +11,6 @@ import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
-import { UpdateScreen } from "./screens/UpdateScreen";
 import { useAppStore } from "./store/useAppStore";
 
 const queryClient = new QueryClient({
@@ -367,20 +366,6 @@ const AppContent: React.FC<AppProps> = ({
             setLastMenuSelection(option);
             // @ts-expect-error: Screen type is broad
             navigate(option);
-          }}
-        />
-      )}
-
-      {activeScreen === "update" && config && addonManager && (
-        <UpdateScreen
-          config={config}
-          addonManager={addonManager}
-          force={force}
-          dryRun={dryRun}
-          testMode={testMode}
-          onBack={() => {
-            setConfig(addonManager.getConfig());
-            navigate("menu");
           }}
         />
       )}

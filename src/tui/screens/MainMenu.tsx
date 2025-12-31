@@ -15,7 +15,6 @@ interface MainMenuProps {
   onSelect: (option: string) => void;
 }
 const OPTIONS = [
-  { id: "update", label: "Update All" },
   { id: "install", label: "Install Addon" },
   { id: "manage", label: "Manage Addons" },
   { id: "config", label: "Config" },
@@ -60,7 +59,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         if (selected.id === "config") {
           showToast("Why would you even want that?", 2000);
         } else {
-          const newDefault = selected.id as "update" | "manage" | "config";
+          const newDefault = selected.id as "install" | "manage" | "config";
           configManager.set("defaultMenuOption", newDefault);
           setDefaultOption(newDefault);
           showToast("Default Updated", 2000);
@@ -72,9 +71,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       setTheme(nextTheme);
       configManager.set("theme", nextTheme);
       showToast(`Theme: ${nextTheme}`, 1000);
-    } else if (input === "u") {
-      flashKey("u");
-      onSelect("update");
     } else if (input === "i") {
       flashKey("i");
       onSelect("install");
