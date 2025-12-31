@@ -14,7 +14,7 @@ Warcraft. Built with [Bun](https://bun.com) and
 [Ink](https://github.com/vadimdemedes/ink), it provides a modern and efficient
 way to handle your addons without leaving the terminal.
 
-## 🕹️ Compatibility
+## Compatibility
 
 | Platform Support           | Content Sources          |
 | :------------------------- | :----------------------- |
@@ -29,7 +29,7 @@ way to handle your addons without leaving the terminal.
 - **Linux:** x64
 - **macOS:** Apple Silicon (arm64), Intel (x64)
 
-## ✨ Key Features
+## Features
 
 - **🎨 Interactive TUI:** A beautiful, terminal-native user interface with fluid
   animations and responsive layout.
