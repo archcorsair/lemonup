@@ -9,157 +9,76 @@
 
 ---
 
-**LemonUp** is a terminal-based addon manager for World of Warcraft built with [Bun](https://bun.com) and [Ink](https://github.com/vadimdemedes/ink). It simplifies the process of installing, updating, and managing your addons directly from your terminal with a modern, interactive interface.
-## ⚠️ Active Development
-<p><strong>🚧 This project is under active development and isn't production ready, use at your own risk! 🚧</strong></p>
+**LemonUp** is a high-performance, terminal-first addon manager for World of
+Warcraft. Built with [Bun](https://bun.com) and
+[Ink](https://github.com/vadimdemedes/ink), it provides a modern and efficient
+way to handle your addons without leaving the terminal.
 
-**Supported Addon Sources**
+## 🕹️ Compatibility
 
-| Platform      | Support Status |
-|---------------|----------------|
-| GitHub        | ✅ Supported   |
-| WowInterface  | ✅ Supported   |
-| TukUI         | ✅ Supported   |
-| Wago.io       | 📋 Planned     |
-| WowAce        | ❌ Unsupported |
-| CurseForge    | ❌ Unsupported |
+| Platform Support           | Content Sources          |
+| :------------------------- | :----------------------- |
+| ✅ **Retail**              | ✅ **GitHub**            |
+| ⏳ **Classic / Era** (WIP) | ✅ **TukUI** (ElvUI)     |
+| 📋 **Cata** (Planned)      | ✅ **WoWInterface**      |
+|                            | 📋 **Wago.io** (Planned) |
 
-**Supported Game Flavors**
+### Supported Architectures
 
-| Flavor        | Support Status |
-|---------------|----------------|
-| Retail        | ✅ Supported   |
-| Classic       | ⏳ WIP         |
-| Other         | ⏳ WIP         |
+- **Windows:** x64
+- **Linux:** x64
+- **macOS:** Apple Silicon (arm64), Intel (x64)
 
-## ✨ Features
+## ✨ Key Features
 
-- **🚀 Fast & Lightweight:** Built on the blazing-fast Bun runtime.
-- **🖥️ Beautiful TUI:** Interactive terminal user interface powered by Ink.
-- **📦 Multi-Source Support:**
-  - Install directly from **GitHub** repositories.
-  - Install/Update **TukUI** & **ElvUI** seamlessly.
-  - Support for **WoWInterface** addons.
-- **🎨 Theming:** Dark and light themes inspired by [tokyonight](https://github.com/folke/tokyonight.nvim).
-  - Custom themes coming soon.
-- **⌨️ Keyboard Driven:** Vim-style navigation (j/k) and shortcuts for all actions.
-- **🔍 Search & Filter:** Fuzzy search addons by name or author.
-- **📚 Library Management:** Track addon dependencies separately, toggle visibility.
-- **🛡️ Secure & Safe:**
-  - Robust path traversal protection for zip extraction.
-  - Automatic **WTF folder backups** before updates.
-- **🔄 Smart Updates:** Checks for updates using Git commit hashes for accuracy.
-- **⚡ Parallel Processing:** Updates multiple addons concurrently.
+- **🎨 Interactive TUI:** A beautiful, terminal-native user interface with fluid
+  animations and responsive layout.
+- **📦 Multi-Source Support:** Seamlessly install and update addons directly
+  from **GitHub**, **TukUI**, and **WoWInterface**.
+- **🔄 Smart Updates & Dependencies:** Git-based version tracking ensures
+  pinpoint accuracy, while robust library handling keeps your dependencies in
+  check.
+- **🚀 Intelligent Setup:** Intelligent WoW installation detection and a guided
+  first-run wizard to get you started in seconds.
+- **⌨️ Keyboard Driven:** Full **Vim-style** navigation (`h/j/k/l`) and
+  intuitive shortcuts for all actions.
 
-## Getting Started
+## 📦 Install
 
-The easiest way to start using LemonUp is by heading over to the [getting started page](https://lemonup.org/getting-started.html)
+### Binary Releases
 
-## Install
-### Available builds
-- Linux (x64)
-    - 🗒️ Note: Remember to run `chmod +x ./lemonup`
-- MacOS Apple Silicon (arm64)
-- MacOS (x64)
-- Windows (x64)
+Download the latest pre-built binaries from the
+[**Releases**](https://github.com/archcorsair/lemonup/releases) page.
 
-Download from [releases](https://github.com/archcorsair/lemonup/releases)
-  
-### Homebrew
-```bash
-brew tap archcorsair/lemonup
-brew install lemonup
-```
-or simply
+### Package Managers
+
+#### Homebrew (macOS & Linux)
+
 ```bash
 brew install archcorsair/lemonup/lemonup
 ```
 
-### Linux Packages Managers (paru, yum, etc)
-🔜 Coming Soon
-
-### Windows Package Managers (scoop, winget)
-🔜 Coming Soon
-
-## 🔧 Building
-
-**Prerequisites:** Ensure you have [Bun](https://bun.com) installed.
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/archcorsair/lemonup.git
-   cd lemonup
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   bun install
-   ```
-
-3. **Build the executable:**
-   ```bash
-   bun run build
-   ```
-   This will generate a standalone `lemonup` executable for your current operating system in the project root.
-
-## 🚀 Usage
-
-You can run the built executable directly:
+#### Scoop (Windows)
 
 ```bash
-./lemonup
+scoop bucket add lemon-bucket https://github.com/archcorsair/lemon-bucket
+scoop install lemonup
 ```
 
-Or run via Bun during development:
+## 📖 Documentation
 
-```bash
-bun run start
-```
+For detailed installation guides, configuration options, and usage instructions,
+please visit our official documentation website:
 
-### CLI Arguments
-
-- `--cli`: Run in non-interactive CLI mode.
-- `--force`, `-f`: Force re-installation/update of addons.
-- `--version`, `-v`: Show version information.
-
-## 🔧 Configuration
-
-On first run, LemonUp will guide you through a setup wizard to locate your WoW installation.
-
-You can access the **Settings** menu at any time to configure:
-- WoW Addon Directory Path
-- Max Concurrent Downloads
-- Update Check Interval
-- Auto-backup WTF Folder
-- Backup Retention Policy
-- Nerd Font Support
-- Theme (Dark/Light)
-- Debug Logging
-
-## ⌨️ Keyboard Shortcuts
-
-LemonUp supports vim-style navigation (`h`/`j`/`k`/`l`) throughout the interface.
-
-| Screen | Key | Action |
-|--------|-----|--------|
-| All | `↑`/`↓` or `j`/`k` | Navigate |
-| All | `esc` | Back/Cancel |
-| Main Menu | `t` | Toggle theme |
-| Main Menu | `space` | Set default option |
-| Manage | `/` | Search addons |
-| Manage | `1`-`4` | Sort by column |
-| Manage | `space` | Select addon |
-| Manage | `l` | Toggle libraries |
-| Manage | `u` | Update selected |
-| Manage | `c` | Check for updates |
-| Manage | `d` | Delete selected |
-| Manage | `b` | Backup WTF folder |
+[**lemonup.org**](https://lemonup.org)
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please run the pre-commit checks before submitting a PR:
+Contributions are welcome! Please see our
+[contribution guidelines](https://lemonup.org/contributing) on the docs site.
 
 ```bash
+bun install
 bun run typecheck
 bun test
 ```
