@@ -190,12 +190,16 @@ function VirtualListInner<T>(
     viewportOffset + visibleCount,
   );
 
-  // Default overflow renderers
+  // Default overflow renderers (paddingLeft aligns with list content)
   const defaultOverflowTop = (count: number) => (
-    <Text dimColor>▲ {count} more</Text>
+    <Box paddingLeft={2}>
+      <Text dimColor>▲ {count} more</Text>
+    </Box>
   );
   const defaultOverflowBottom = (count: number) => (
-    <Text dimColor>▼ {count} more</Text>
+    <Box paddingLeft={2}>
+      <Text dimColor>▼ {count} more</Text>
+    </Box>
   );
 
   const topIndicator = renderOverflowTop ?? defaultOverflowTop;
