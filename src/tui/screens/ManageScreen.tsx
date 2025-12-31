@@ -14,6 +14,8 @@ import { ControlBar } from "@/tui/components/ControlBar";
 import { HelpPanel } from "@/tui/components/HelpPanel";
 import { type RepoStatus, RepositoryRow } from "@/tui/components/RepositoryRow";
 import { ScreenTitle } from "@/tui/components/ScreenTitle";
+import { useTerminalSize, VirtualList } from "@/tui/components/VirtualList";
+import { MANAGE_SCREEN_RESERVED } from "@/tui/constants/layout";
 import { useAddonManagerEvent } from "@/tui/hooks/useAddonManager";
 import { useTheme } from "@/tui/hooks/useTheme";
 import { useToast } from "@/tui/hooks/useToast";
@@ -38,6 +40,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
   const flashKey = useAppStore((state) => state.flashKey);
   const { theme } = useTheme();
   const { toast, showToast } = useToast();
+  const { rows: terminalRows } = useTerminalSize();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
@@ -700,52 +703,55 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
         </Box>
       </Box>
 
-      <Box flexDirection="column">
-        {visibleAddons.length === 0 ? (
-          searchQuery.length > 0 ? (
-            <Box
-              flexDirection="column"
-              alignItems="center"
-              justifyContent="center"
-              paddingY={5}
-              width="100%"
-            >
-              <Text color="yellow" bold italic>
-                "By the Light! No results found for '{searchQuery}'"
+      {visibleAddons.length === 0 ? (
+        searchQuery.length > 0 ? (
+          <Box
+            flexDirection="column"
+            alignItems="center"
+            justifyContent="center"
+            paddingY={5}
+            width="100%"
+          >
+            <Text color="yellow" bold italic>
+              "By the Light! No results found for '{searchQuery}'"
+            </Text>
+            <Box marginTop={1}>
+              <Text color="gray">
+                Try adjusting your search criteria or clear the search.
               </Text>
-              <Box marginTop={1}>
-                <Text color="gray">
-                  Try adjusting your search criteria or clear the search.
-                </Text>
-              </Box>
             </Box>
-          ) : (
-            <Box
-              flexDirection="column"
-              alignItems="center"
-              justifyContent="center"
-              paddingY={5}
-              width="100%"
-            >
-              <Text color="yellow" bold italic>
-                "Lok-tar ogar! ...Wait, where is everyone?"
-              </Text>
-              <Box marginTop={1}>
-                <Text color="gray">
-                  Your inventory is empty. No addons found in your bags.
-                </Text>
-              </Box>
-              <Box marginTop={1}>
-                <Text color="cyan">
-                  Visit the 'Install Addon' section to start your collection!
-                </Text>
-              </Box>
-            </Box>
-          )
+          </Box>
         ) : (
-          visibleAddons.map((item, idx) => {
+          <Box
+            flexDirection="column"
+            alignItems="center"
+            justifyContent="center"
+            paddingY={5}
+            width="100%"
+          >
+            <Text color="yellow" bold italic>
+              "Lok-tar ogar! ...Wait, where is everyone?"
+            </Text>
+            <Box marginTop={1}>
+              <Text color="gray">
+                Your inventory is empty. No addons found in your bags.
+              </Text>
+            </Box>
+            <Box marginTop={1}>
+              <Text color="cyan">
+                Visit the 'Install Addon' section to start your collection!
+              </Text>
+            </Box>
+          </Box>
+        )
+      ) : (
+        <VirtualList
+          items={visibleAddons}
+          selectedIndex={selectedIndex}
+          keyExtractor={(item) => item.record.folder}
+          height={terminalRows - MANAGE_SCREEN_RESERVED}
+          renderItem={({ item, index: idx, isSelected }) => {
             const addon = item.record;
-            const isSelected = selectedIndex === idx;
             const isChecked = selectedIds.has(addon.folder);
 
             const query = queries[idx];
@@ -792,7 +798,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
             return (
               <RepositoryRow
-                key={addon.folder}
                 repo={addon}
                 status={status}
                 result={result}
@@ -804,9 +809,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
                 showLibs={showLibs}
               />
             );
-          })
-        )}
-      </Box>
+          }}
+        />
+      )}
 
       <ControlBar
         message={
