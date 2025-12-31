@@ -10,11 +10,12 @@ describe("VirtualList", () => {
     const { lastFrame } = render(
       <VirtualList
         items={items}
-        height={3}
+        height={5}
         renderItem={({ item }) => <Text>{item}</Text>}
       />,
     );
 
+    // height=5 with indicators (2 lines reserved) = 3 items visible
     const frame = lastFrame() ?? "";
     expect(frame).toContain("Item 1");
     expect(frame).toContain("Item 2");
@@ -27,11 +28,12 @@ describe("VirtualList", () => {
     const { lastFrame } = render(
       <VirtualList
         items={items}
-        height={3}
+        height={5}
         renderItem={({ item }) => <Text>{item}</Text>}
       />,
     );
 
+    // height=5 with indicators = 3 items visible, 2 hidden below
     const frame = lastFrame() ?? "";
     expect(frame).toContain("▼");
     expect(frame).toContain("2 more");
@@ -192,7 +194,7 @@ describe("VirtualList edge cases", () => {
     const { lastFrame } = render(
       <VirtualList
         items={items}
-        height={3}
+        height={5}
         selectedIndex={4}
         renderOverflowTop={(n) => <Text>↑ {n} hidden</Text>}
         renderOverflowBottom={(n) => <Text>↓ {n} hidden</Text>}
@@ -201,6 +203,7 @@ describe("VirtualList edge cases", () => {
     );
 
     const frame = lastFrame() ?? "";
+    // height=5 with indicators = 3 items visible
     // selectedIndex=4 scrolls viewport to show items 3,4,5 (indices 2,3,4)
     // with 2 items hidden above (indices 0,1) and 0 below
     expect(frame).toContain("↑ 2 hidden");

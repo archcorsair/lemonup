@@ -70,9 +70,13 @@ function VirtualListInner<T>(
   const staticItemHeight =
     typeof itemHeight === "number" ? itemHeight : DEFAULT_ITEM_HEIGHT;
 
+  // Reserve space for overflow indicators within the height budget
+  // This ensures total output (items + indicators) stays within height
+  const indicatorLines = showOverflowIndicators ? 2 : 0;
+  const availableHeight = Math.max(0, resolvedHeight - indicatorLines);
+
   // Calculate how many items fit in viewport
-  // height represents the number of visible items, overflow indicators are additional
-  const visibleCount = Math.floor(resolvedHeight / staticItemHeight);
+  const visibleCount = Math.floor(availableHeight / staticItemHeight);
 
   // Clamp selectedIndex to valid range
   const clampedSelectedIndex = Math.max(
