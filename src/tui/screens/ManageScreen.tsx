@@ -586,6 +586,14 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
       }
     }
 
+    if (input === "U") {
+      flashKey("U");
+      const allFolders = visibleAddons
+        .filter((a) => !a.isChild)
+        .map((a) => a.record.folder);
+      runUpdates(allFolders);
+    }
+
     if (input === "c") {
       flashKey("c");
       if (selectedIds.size > 0) {
@@ -879,6 +887,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
                 { key: "↑/↓", label: "nav" },
                 { key: "space", label: "select" },
                 { key: "u", label: "update" },
+                { key: "U", label: "update all" },
                 { key: "c", label: "check" },
                 { key: "1-4", label: "sort" },
                 { key: "m", label: "menu" },
@@ -893,6 +902,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
           { key: "/", label: "Search/Filter" },
           { key: "Space", label: "Select/Deselect" },
           { key: "u", label: "Update Selected" },
+          { key: "U", label: "Update All" },
           { key: "c", label: "Check Updates" },
           { key: "l", label: "Toggle Libs" },
           { key: "t", label: "Toggle Kind" },

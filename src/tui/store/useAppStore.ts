@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { ExportedAddon } from "@/core/transfer";
 import { type Theme, themes } from "@/tui/theme";
 
-export type Screen = "menu" | "update" | "manage" | "config" | "install";
+export type Screen = "menu" | "manage" | "config" | "install";
 
 interface Toast {
   message: string;
