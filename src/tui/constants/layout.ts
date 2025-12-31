@@ -28,7 +28,7 @@ export const LAYOUT = {
   OVERFLOW_INDICATORS: 2,
 } as const;
 
-/** Total chrome lines for ManageScreen (= 17) */
+/** Total chrome lines for ManageScreen (= 19) */
 export const MANAGE_SCREEN_RESERVED =
   LAYOUT.BORDER +
   LAYOUT.HEADER +
@@ -36,13 +36,15 @@ export const MANAGE_SCREEN_RESERVED =
   LAYOUT.COLUMN_HEADERS +
   LAYOUT.CONTROL_BAR +
   LAYOUT.PADDING +
-  LAYOUT.GAP;
+  LAYOUT.GAP +
+  LAYOUT.OVERFLOW_INDICATORS;
 
-/** Chrome lines for screens without column headers (= 14) */
+/** Chrome lines for screens without column headers (= 16) */
 export const SIMPLE_SCREEN_RESERVED =
   LAYOUT.BORDER +
   LAYOUT.HEADER +
   LAYOUT.SCREEN_TITLE +
   LAYOUT.CONTROL_BAR +
   LAYOUT.PADDING +
-  LAYOUT.GAP;
+  LAYOUT.GAP +
+  LAYOUT.OVERFLOW_INDICATORS;
