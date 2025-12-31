@@ -107,3 +107,103 @@ describe("VirtualList", () => {
     expect(frame).toContain("Beta");
   });
 });
+
+describe("VirtualList edge cases", () => {
+  test("handles empty items array", () => {
+    const { lastFrame } = render(
+      <VirtualList
+        items={[]}
+        height={5}
+        renderItem={({ item }) => <Text>{item}</Text>}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("▼");
+    expect(frame).not.toContain("▲");
+  });
+
+  test("handles single item", () => {
+    const { lastFrame } = render(
+      <VirtualList
+        items={["Only one"]}
+        height={5}
+        renderItem={({ item }) => <Text>{item}</Text>}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Only one");
+    expect(frame).not.toContain("▼");
+  });
+
+  test("clamps selectedIndex to valid range", () => {
+    const { lastFrame } = render(
+      <VirtualList
+        items={["A", "B", "C"]}
+        height={5}
+        selectedIndex={100}
+        renderItem={({ item, isSelected }) => (
+          <Text>{isSelected ? `[${item}]` : item}</Text>
+        )}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    // Should clamp to last item
+    expect(frame).toContain("[C]");
+  });
+
+  test("handles negative selectedIndex", () => {
+    const { lastFrame } = render(
+      <VirtualList
+        items={["A", "B", "C"]}
+        height={5}
+        selectedIndex={-5}
+        renderItem={({ item, isSelected }) => (
+          <Text>{isSelected ? `[${item}]` : item}</Text>
+        )}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    // Should clamp to first item
+    expect(frame).toContain("[A]");
+  });
+
+  test("hides overflow indicators when disabled", () => {
+    const items = ["1", "2", "3", "4", "5"];
+    const { lastFrame } = render(
+      <VirtualList
+        items={items}
+        height={2}
+        showOverflowIndicators={false}
+        renderItem={({ item }) => <Text>{item}</Text>}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("▼");
+    expect(frame).not.toContain("▲");
+  });
+
+  test("uses custom overflow renderers", () => {
+    const items = ["1", "2", "3", "4", "5"];
+    const { lastFrame } = render(
+      <VirtualList
+        items={items}
+        height={3}
+        selectedIndex={4}
+        renderOverflowTop={(n) => <Text>↑ {n} hidden</Text>}
+        renderOverflowBottom={(n) => <Text>↓ {n} hidden</Text>}
+        renderItem={({ item }) => <Text>{item}</Text>}
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    // selectedIndex=4 scrolls viewport to show items 3,4,5 (indices 2,3,4)
+    // with 2 items hidden above (indices 0,1) and 0 below
+    expect(frame).toContain("↑ 2 hidden");
+    expect(frame).not.toContain("↓");
+  });
+});
