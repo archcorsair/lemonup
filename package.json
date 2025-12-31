@@ -1,6 +1,6 @@
 {
   "name": "lemonup",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "module": "index.tsx",
   "type": "module",
   "private": true,
@@ -22,6 +22,7 @@
     "@types/ink-text-input": "^2.0.5",
     "@types/node": "^25.0.3",
     "@types/react": "^19.2.7",
+    "ink-testing-library": "^4.0.0",
     "lefthook": "^2.0.13",
     "react-devtools-core": "^7.0.1"
   },
