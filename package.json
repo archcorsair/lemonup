@@ -40,6 +40,7 @@
     "ink-color-pipe": "^5.0.0",
     "ink-gradient": "^3.0.0",
     "ink-spinner": "^5.0.0",
+    "ink-stepper": "^0.1.1",
     "ink-text-input": "^6.0.0",
     "ink-virtual-list": "^0.1.0",
     "p-limit": "^7.2.0",

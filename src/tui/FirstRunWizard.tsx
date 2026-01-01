@@ -4,6 +4,12 @@ import path from "node:path";
 import { Box, Text, useApp, useInput } from "ink";
 import Color from "ink-color-pipe";
 import Spinner from "ink-spinner";
+import {
+  type ProgressContext,
+  Step,
+  type StepContext,
+  Stepper,
+} from "ink-stepper";
 import TextInput from "ink-text-input";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
@@ -44,16 +50,6 @@ interface WizardState {
   importAddons: boolean; // Whether to import addons after wizard
 }
 
-const TOTAL_STEPS = 6;
-const STEP_NAMES = [
-  "Theme",
-  "Directory",
-  "Import",
-  "TukUI",
-  "Settings",
-  "Review",
-];
-
 const expandPath = (p: string): string => {
   if (p.startsWith("~/") || p === "~") {
     return path.join(os.homedir(), p.slice(1));
@@ -61,11 +57,12 @@ const expandPath = (p: string): string => {
   return p;
 };
 
-// Progress bar component
+// Progress bar component adapted for ink-stepper's ProgressContext
 const WizardProgress: React.FC<{
-  currentStep: number;
+  progressContext: ProgressContext;
   theme: ReturnType<typeof useTheme>["theme"];
-}> = ({ currentStep, theme }) => {
+}> = ({ progressContext, theme }) => {
+  const { steps } = progressContext;
   const segmentWidth = 12;
   const halfSegment = Math.floor(segmentWidth / 2);
 
@@ -73,11 +70,14 @@ const WizardProgress: React.FC<{
   const renderProgressBar = () => {
     const elements: React.ReactNode[] = [];
 
-    for (let i = 0; i < TOTAL_STEPS; i++) {
-      const isCompleted = i + 1 < currentStep;
-      const isCurrent = i + 1 === currentStep;
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
+      const isCompleted = step.completed;
+      const isCurrent = step.current;
       const segmentColor =
-        i < currentStep ? theme.progressCompleted : theme.progressPending;
+        isCompleted || isCurrent
+          ? theme.progressCompleted
+          : theme.progressPending;
 
       // Adjust segment length if marker is wider (checked state)
       const segmentLen = isCompleted ? halfSegment - 1 : halfSegment;
@@ -103,9 +103,10 @@ const WizardProgress: React.FC<{
       );
 
       // Add trailing half-segment (after marker), except for last step
-      if (i < TOTAL_STEPS - 1) {
-        const trailingColor =
-          i + 1 < currentStep ? theme.progressCompleted : theme.progressPending;
+      if (i < steps.length - 1) {
+        const trailingColor = isCompleted
+          ? theme.progressCompleted
+          : theme.progressPending;
         elements.push(
           <Color key={`post-${i}`} styles={trailingColor}>
             <Text>{"━".repeat(segmentLen)}</Text>
@@ -124,17 +125,20 @@ const WizardProgress: React.FC<{
 
       {/* Labels row - evenly spaced under markers */}
       <Box>
-        {STEP_NAMES.map((name, idx) => {
-          const stepColor =
-            idx + 1 === currentStep
-              ? theme.progressCurrent
-              : idx + 1 < currentStep
-                ? theme.progressCompleted
-                : theme.progressPending;
+        {steps.map((step) => {
+          const stepColor = step.current
+            ? theme.progressCurrent
+            : step.completed
+              ? theme.progressCompleted
+              : theme.progressPending;
           return (
-            <Box key={name} width={segmentWidth + 1} justifyContent="center">
+            <Box
+              key={step.name}
+              width={segmentWidth + 1}
+              justifyContent="center"
+            >
               <Color styles={stepColor}>
-                <Text bold={idx + 1 === currentStep}>{name}</Text>
+                <Text bold={step.current}>{step.name}</Text>
               </Color>
             </Box>
           );
@@ -856,6 +860,10 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
   const flashKey = useAppStore((state) => state.flashKey);
   const setImportQueue = useAppStore((state) => state.setImportQueue);
 
+  // Ref to hold the current StepContext from ink-stepper
+  const stepContextRef = useRef<StepContext | null>(null);
+
+  // Local step state for keyboard handling (synced with stepper)
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
@@ -1046,21 +1054,21 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     }
   };
 
+  const TOTAL_STEPS = 6;
+
+  // Navigation helpers that use ink-stepper's StepContext
+  // Note: Local step state is synced via captureContext on re-render
   const goNext = () => {
     setError(null);
-    if (step < TOTAL_STEPS) {
-      setStep(step + 1);
-    } else {
-      handleComplete();
-    }
+    stepContextRef.current?.goNext();
   };
 
   const goBack = () => {
     setError(null);
-    if (step > 1) {
-      setStep(step - 1);
-    } else {
+    if (stepContextRef.current?.isFirst) {
       exit();
+    } else {
+      stepContextRef.current?.goBack();
     }
   };
 
@@ -1484,6 +1492,16 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     return controls;
   };
 
+  // Helper to capture stepContext for navigation calls
+  const captureContext = (ctx: StepContext) => {
+    stepContextRef.current = ctx;
+  };
+
+  // Handle step changes from ink-stepper (step is 0-indexed, we use 1-indexed)
+  const handleStepChange = (newStep: number) => {
+    setStep(newStep + 1);
+  };
+
   return (
     <Box
       flexDirection="column"
@@ -1502,61 +1520,97 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         </Color>
       </Box>
 
-      <WizardProgress currentStep={step} theme={theme} />
-
-      <Box flexDirection="column" minHeight={10} paddingX={1}>
-        {step === 1 && <ThemeStep value={wizardState.theme} theme={theme} />}
-        {step === 2 && (
-          <DirectoryStep
-            detectedPath={detectedPath}
-            destDir={wizardState.destDir}
-            onDirChange={(d) => updateWizardState({ destDir: d })}
-            pathValid={pathValid}
-            theme={theme}
-            isScanning={isScanning}
-            scanError={scanError}
-            scanProgress={scanProgress}
-            scanPathInput={scanPathInput}
-            onStartScan={handleDeepScan}
-            scanSubstep={scanSubstep}
-            scanOptionIndex={scanOptionIndex}
-            successSubstep={successSubstep}
-            successOptionIndex={successOptionIndex}
-          />
+      <Stepper
+        onComplete={handleComplete}
+        onCancel={exit}
+        onStepChange={handleStepChange}
+        keyboardNav={false}
+        renderProgress={(progressContext) => (
+          <WizardProgress progressContext={progressContext} theme={theme} />
         )}
-        {step === 3 && (
-          <ImportStep
-            exportData={exportData}
-            exportFileExists={exportFileExists}
-            importSelected={wizardState.importAddons}
-            optionIndex={importOptionIndex}
-            refreshFailed={importRefreshFailed}
-            theme={theme}
-          />
-        )}
-        {step === 4 && (
-          <AddonsStep
-            installElvUI={wizardState.installElvUI}
-            installTukui={wizardState.installTukui}
-            selectedIndex={addonIndex}
-            theme={theme}
-          />
-        )}
-        {step === 5 && (
-          <SettingsStep
-            state={wizardState}
-            selectedIndex={settingsIndex}
-            theme={theme}
-          />
-        )}
-        {step === 6 && (
-          <ReviewStep
-            state={wizardState}
-            exportData={exportData}
-            theme={theme}
-          />
-        )}
-      </Box>
+      >
+        <Step name="Theme">
+          {(ctx) => {
+            captureContext(ctx);
+            return <ThemeStep value={wizardState.theme} theme={theme} />;
+          }}
+        </Step>
+        <Step name="Directory">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <DirectoryStep
+                detectedPath={detectedPath}
+                destDir={wizardState.destDir}
+                onDirChange={(d) => updateWizardState({ destDir: d })}
+                pathValid={pathValid}
+                theme={theme}
+                isScanning={isScanning}
+                scanError={scanError}
+                scanProgress={scanProgress}
+                scanPathInput={scanPathInput}
+                onStartScan={handleDeepScan}
+                scanSubstep={scanSubstep}
+                scanOptionIndex={scanOptionIndex}
+                successSubstep={successSubstep}
+                successOptionIndex={successOptionIndex}
+              />
+            );
+          }}
+        </Step>
+        <Step name="Import">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <ImportStep
+                exportData={exportData}
+                exportFileExists={exportFileExists}
+                importSelected={wizardState.importAddons}
+                optionIndex={importOptionIndex}
+                refreshFailed={importRefreshFailed}
+                theme={theme}
+              />
+            );
+          }}
+        </Step>
+        <Step name="TukUI">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <AddonsStep
+                installElvUI={wizardState.installElvUI}
+                installTukui={wizardState.installTukui}
+                selectedIndex={addonIndex}
+                theme={theme}
+              />
+            );
+          }}
+        </Step>
+        <Step name="Settings">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <SettingsStep
+                state={wizardState}
+                selectedIndex={settingsIndex}
+                theme={theme}
+              />
+            );
+          }}
+        </Step>
+        <Step name="Review">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <ReviewStep
+                state={wizardState}
+                exportData={exportData}
+                theme={theme}
+              />
+            );
+          }}
+        </Step>
+      </Stepper>
 
       {error && (
         <Box marginTop={1}>
