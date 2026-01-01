@@ -9,6 +9,8 @@
 
 ---
 
+[![Built with Bun](https://img.shields.io/badge/Built_with-Bun-fbf0df?logo=bun&labelColor=212121)](https://bun.sh)
+
 **LemonUp** is a high-performance, terminal-first addon manager for World of
 Warcraft. Built with [Bun](https://bun.com) and
 [Ink](https://github.com/vadimdemedes/ink), it provides a modern and efficient
