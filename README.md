@@ -10,6 +10,7 @@
 ---
 
 [![Built with Bun](https://img.shields.io/badge/Built_with-Bun-fbf0df?logo=bun&labelColor=212121)](https://bun.sh)
+[![Test](https://github.com/archcorsair/lemonup/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/archcorsair/lemonup/actions/workflows/test.yml)
 
 **LemonUp** is a high-performance, terminal-first addon manager for World of
 Warcraft. Built with [Bun](https://bun.com) and
