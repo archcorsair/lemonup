@@ -48,6 +48,14 @@ export interface WagoSearchResponse {
 }
 
 export type WagoStability = "stable" | "beta" | "alpha";
+
+export type GetAddonDetailsResult =
+  | { success: true; addon: WagoAddonSummary }
+  | {
+      success: false;
+      error: "not_found" | "network_error" | "invalid_response" | "no_api_key";
+    };
+
 export type WagoGameVersion =
   | "retail"
   | "classic"
@@ -60,6 +68,38 @@ export type WagoGameVersion =
 
 const API_BASE = "https://addons.wago.io";
 const GAME_DATA_PATH = "/api/data/game";
+const EXTERNAL_PATH = "/api/external";
+
+// --- Helper Functions ---
+
+function getHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: "application/json",
+  };
+}
+
+function isValidSearchResponse(data: unknown): data is WagoSearchResponse {
+  if (!data || typeof data !== "object") {
+    return false;
+  }
+  const obj = data as Record<string, unknown>;
+  return "data" in obj && Array.isArray(obj.data);
+}
+
+function isValidAddonResponse(data: unknown): data is WagoAddonSummary {
+  if (!data || typeof data !== "object") {
+    return false;
+  }
+  const obj = data as Record<string, unknown>;
+  return (
+    typeof obj.id === "string" &&
+    typeof obj.display_name === "string" &&
+    typeof obj.summary === "string" &&
+    "releases" in obj &&
+    typeof obj.releases === "object"
+  );
+}
 
 // --- API Functions ---
 
@@ -94,5 +134,91 @@ export async function getGameData(): Promise<WagoGameData | null> {
   } catch (error) {
     logger.error("Wago", "Failed to fetch game data", error);
     return null;
+  }
+}
+
+export async function searchAddons(
+  query: string,
+  gameVersion: WagoGameVersion,
+  apiKey?: string,
+  stability?: WagoStability,
+): Promise<WagoSearchResponse | null> {
+  if (!apiKey) {
+    logger.error("Wago", "API key required for search");
+    return null;
+  }
+
+  const params = new URLSearchParams({
+    query,
+    game_version: gameVersion,
+  });
+  if (stability) {
+    params.set("stability", stability);
+  }
+
+  const url = `${API_BASE}${EXTERNAL_PATH}/addons/_search?${params}`;
+  logger.log("Wago", `Searching: ${url}`);
+
+  try {
+    const response = await fetch(url, {
+      headers: getHeaders(apiKey),
+    });
+
+    if (!response.ok) {
+      logger.error("Wago", `Search failed: ${response.status}`);
+      return null;
+    }
+
+    const data = (await response.json()) as unknown;
+
+    if (!isValidSearchResponse(data)) {
+      logger.error("Wago", "Invalid search response format");
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    logger.error("Wago", "Search request failed", error);
+    return null;
+  }
+}
+
+export async function getAddonDetails(
+  addonId: string,
+  apiKey?: string,
+  gameVersion?: WagoGameVersion,
+): Promise<GetAddonDetailsResult> {
+  if (!apiKey) {
+    return { success: false, error: "no_api_key" };
+  }
+
+  const params = gameVersion ? `?game_version=${gameVersion}` : "";
+  const url = `${API_BASE}${EXTERNAL_PATH}/addons/${addonId}${params}`;
+  logger.log("Wago", `Fetching addon details: ${url}`);
+
+  try {
+    const response = await fetch(url, {
+      headers: getHeaders(apiKey),
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return { success: false, error: "not_found" };
+      }
+      logger.error("Wago", `Details request failed: ${response.status}`);
+      return { success: false, error: "network_error" };
+    }
+
+    const data = (await response.json()) as unknown;
+
+    if (!isValidAddonResponse(data)) {
+      logger.error("Wago", "Invalid addon response format");
+      return { success: false, error: "invalid_response" };
+    }
+
+    return { success: true, addon: data };
+  } catch (error) {
+    logger.error("Wago", "Failed to fetch addon details", error);
+    return { success: false, error: "network_error" };
   }
 }
