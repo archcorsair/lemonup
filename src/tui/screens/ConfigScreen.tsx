@@ -37,6 +37,7 @@ type Field =
   | "terminalProgress"
   | "themeMode"
   | "debug"
+  | "wagoApiKey"
   | "restartOnboarding"
   | "exportAddons"
   | "importAddons";
@@ -77,6 +78,8 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [backupRetention, setBackupRetention] = useState(5);
   const [terminalProgress, setTerminalProgress] = useState(true);
   const [debug, setDebug] = useState(false);
+  const [wagoApiKey, setWagoApiKey] = useState("");
+  const [isEditingWagoApiKey, setIsEditingWagoApiKey] = useState(false);
   const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
   const [activeField, setActiveField] = useState<Field>("destDir");
@@ -154,6 +157,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     setBackupRetention(cfg.backupRetention);
     setTerminalProgress(cfg.terminalProgress);
     setDebug(cfg.debug);
+    setWagoApiKey(cfg.wagoApiKey);
   }, [configManager]);
 
   useInput((input, key) => {
@@ -174,6 +178,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       return;
     }
 
+    // If editing wagoApiKey, trap all input except Enter/Escape
+    if (isEditingWagoApiKey) {
+      if (key.return) {
+        flashKey("enter");
+        configManager.set("wagoApiKey", wagoApiKey);
+        setIsEditingWagoApiKey(false);
+        showToast("Saved!", 1000);
+      } else if (key.escape) {
+        flashKey("esc");
+        // Revert changes
+        const cfg = configManager.get();
+        setWagoApiKey(cfg.wagoApiKey);
+        setIsEditingWagoApiKey(false);
+      }
+      return;
+    }
+
     const fields: Field[] = [
       "destDir",
       "maxConcurrent",
@@ -185,6 +206,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "terminalProgress",
       "themeMode",
       "debug",
+      "wagoApiKey",
       "restartOnboarding",
       "exportAddons",
       "importAddons",
@@ -385,6 +407,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         configManager.set("debug", !debug);
         showToast("Saved!", 1000);
       }
+    }
+
+    if (activeField === "wagoApiKey" && (key.return || input === " ")) {
+      flashKey("enter");
+      setIsEditingWagoApiKey(true);
     }
 
     if (activeField === "restartOnboarding") {
@@ -640,6 +667,43 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
             )}
           </Box>
         </ConfigOption>
+
+        {/* API Keys */}
+        <SectionHeader title="API Keys" theme={theme} />
+        <ConfigOption
+          label="Wago API Key"
+          isActive={activeField === "wagoApiKey"}
+          helpText={
+            isEditingWagoApiKey
+              ? "Press Enter to save, Esc to cancel."
+              : "Press Enter or Space to edit. Required for Wago.io addons."
+          }
+        >
+          {isEditingWagoApiKey ? (
+            <Box>
+              <Color styles={theme.statusChecking}>
+                <Text bold>[EDITING]</Text>
+              </Color>
+              <Box marginLeft={1}>
+                <TextInput
+                  value={wagoApiKey}
+                  onChange={setWagoApiKey}
+                  onSubmit={() => {}}
+                  mask="*"
+                />
+              </Box>
+            </Box>
+          ) : (
+            <Color styles={wagoApiKey ? theme.statusSuccess : theme.statusIdle}>
+              <Text bold>
+                {wagoApiKey
+                  ? "*".repeat(Math.min(wagoApiKey.length, 16))
+                  : "Not Configured"}
+              </Text>
+            </Color>
+          )}
+        </ConfigOption>
+
         <ConfigOption
           label="Restart Onboarding"
           isActive={activeField === "restartOnboarding"}
