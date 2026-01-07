@@ -151,6 +151,15 @@ export class ConfigManager {
       return fallback;
     }
     const config = { ...result.data, ...this.overrides };
+
+    // Only use env var if stored value is empty
+    if (!config.wagoApiKey) {
+      const envKey = process.env.WAGO_API_KEY;
+      if (envKey) {
+        config.wagoApiKey = envKey;
+      }
+    }
+
     logger.setEnabled(config.debug || false);
     return config;
   }

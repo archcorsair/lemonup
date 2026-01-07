@@ -27,4 +27,37 @@ describe("ConfigManager - Wago API Key", () => {
 		const config = configManager.get();
 		expect(config.wagoApiKey).toBe("my-secret-key");
 	});
+
+	describe("Wago API Key from environment", () => {
+		it("should use WAGO_API_KEY env var when config is empty", () => {
+			const originalEnv = process.env.WAGO_API_KEY;
+			process.env.WAGO_API_KEY = "env-api-key";
+
+			const manager = new ConfigManager({ cwd: tempDir });
+			const config = manager.get();
+			expect(config.wagoApiKey).toBe("env-api-key");
+
+			if (originalEnv !== undefined) {
+				process.env.WAGO_API_KEY = originalEnv;
+			} else {
+				delete process.env.WAGO_API_KEY;
+			}
+		});
+
+		it("should prefer stored config over env var", () => {
+			const originalEnv = process.env.WAGO_API_KEY;
+			process.env.WAGO_API_KEY = "env-api-key";
+
+			const manager = new ConfigManager({ cwd: tempDir });
+			manager.set("wagoApiKey", "stored-api-key");
+			const config = manager.get();
+			expect(config.wagoApiKey).toBe("stored-api-key");
+
+			if (originalEnv !== undefined) {
+				process.env.WAGO_API_KEY = originalEnv;
+			} else {
+				delete process.env.WAGO_API_KEY;
+			}
+		});
+	});
 });
