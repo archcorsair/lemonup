@@ -77,7 +77,20 @@ export async function getGameData(): Promise<WagoGameData | null> {
       return null;
     }
 
-    return (await response.json()) as WagoGameData;
+    const data = (await response.json()) as unknown;
+
+    // Basic structural validation
+    if (
+      !data ||
+      typeof data !== "object" ||
+      !("stability_values" in data) ||
+      !Array.isArray((data as Record<string, unknown>).stability_values)
+    ) {
+      logger.error("Wago", "Invalid game data response format");
+      return null;
+    }
+
+    return data as WagoGameData;
   } catch (error) {
     logger.error("Wago", "Failed to fetch game data", error);
     return null;
