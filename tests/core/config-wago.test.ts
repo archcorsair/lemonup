@@ -59,5 +59,32 @@ describe("ConfigManager - Wago API Key", () => {
 				delete process.env.WAGO_API_KEY;
 			}
 		});
+
+		it("should use WAGO_API_KEY env var even when config fails Zod validation", () => {
+			const originalEnv = process.env.WAGO_API_KEY;
+			process.env.WAGO_API_KEY = "env-api-key-fallback";
+
+			// Write config that passes conf's loose schema but fails Zod's strict validation
+			// defaultMenuOption "invalid" passes conf (it's a string) but fails Zod enum
+			const configPath = path.join(tempDir, "config.json");
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					destDir: "/some/path",
+					defaultMenuOption: "invalid_menu_option",
+					wagoApiKey: "",
+				}),
+			);
+
+			const manager = new ConfigManager({ cwd: tempDir });
+			const config = manager.get();
+			expect(config.wagoApiKey).toBe("env-api-key-fallback");
+
+			if (originalEnv !== undefined) {
+				process.env.WAGO_API_KEY = originalEnv;
+			} else {
+				delete process.env.WAGO_API_KEY;
+			}
+		});
 	});
 });

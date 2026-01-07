@@ -148,6 +148,15 @@ export class ConfigManager {
         ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
+
+      // Apply env var fallback for wagoApiKey in fallback path too
+      if (!fallback.wagoApiKey) {
+        const envKey = process.env.WAGO_API_KEY;
+        if (envKey) {
+          fallback.wagoApiKey = envKey;
+        }
+      }
+
       return fallback;
     }
     const config = { ...result.data, ...this.overrides };
