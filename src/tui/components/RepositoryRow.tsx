@@ -59,6 +59,10 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
       <Color styles={theme.repoWowi}>
         <Text>[WoWI]</Text>
       </Color>
+    ) : repo.type === "wago" ? (
+      <Color styles={theme.repoWago}>
+        <Text>[Wago]</Text>
+      </Color>
     ) : repo.type === "manual" ? (
       <Color styles={theme.repoManual}>
         <Text>[Manual]</Text>
@@ -112,7 +116,11 @@ export const RepositoryRow: React.FC<RepositoryRowProps> = ({
           <Text>↓</Text>
         </Color>
       );
-      if (repo.type === "tukui" || repo.type === "wowinterface") {
+      if (
+        repo.type === "tukui" ||
+        repo.type === "wowinterface" ||
+        repo.type === "wago"
+      ) {
         statusText = (
           <Color styles={theme.statusWorking}>
             <Text wrap="truncate-end">Downloading Zip...</Text>
