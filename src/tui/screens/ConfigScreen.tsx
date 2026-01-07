@@ -80,6 +80,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [debug, setDebug] = useState(false);
   const [wagoApiKey, setWagoApiKey] = useState("");
   const [isEditingWagoApiKey, setIsEditingWagoApiKey] = useState(false);
+  const [isWagoKeyFromEnv, setIsWagoKeyFromEnv] = useState(false);
   const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
   const [activeField, setActiveField] = useState<Field>("destDir");
@@ -158,6 +159,10 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     setTerminalProgress(cfg.terminalProgress);
     setDebug(cfg.debug);
     setWagoApiKey(cfg.wagoApiKey);
+
+    // Detect if wago key is from env var
+    const envKey = process.env.WAGO_API_KEY;
+    setIsWagoKeyFromEnv(!!envKey && cfg.wagoApiKey === envKey);
   }, [configManager]);
 
   useInput((input, key) => {
@@ -410,8 +415,10 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     }
 
     if (activeField === "wagoApiKey" && (key.return || input === " ")) {
-      flashKey("enter");
-      setIsEditingWagoApiKey(true);
+      if (!isWagoKeyFromEnv) {
+        flashKey("enter");
+        setIsEditingWagoApiKey(true);
+      }
     }
 
     if (activeField === "restartOnboarding") {
@@ -657,12 +664,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           label="Wago API Key"
           isActive={activeField === "wagoApiKey"}
           helpText={
-            isEditingWagoApiKey
-              ? "Press Enter to save, Esc to cancel."
-              : "Press Enter or Space to edit. Required for Wago.io addons."
+            isWagoKeyFromEnv
+              ? "Key detected from WAGO_API_KEY environment variable."
+              : isEditingWagoApiKey
+                ? "Press Enter to save, Esc to cancel."
+                : wagoApiKey
+                  ? "Press Enter or Space to edit."
+                  : "Press Enter to edit, or set WAGO_API_KEY env var."
           }
         >
-          {isEditingWagoApiKey ? (
+          {isWagoKeyFromEnv ? (
+            <Color styles={theme.statusSuccess}>
+              <Text bold>
+                From env WAGO_API_KEY (...
+                {wagoApiKey.substring(wagoApiKey.length - 4)})
+              </Text>
+            </Color>
+          ) : isEditingWagoApiKey ? (
             <Box>
               <Color styles={theme.statusChecking}>
                 <Text bold>[EDITING]</Text>
