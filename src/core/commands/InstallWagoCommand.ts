@@ -47,10 +47,10 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
     }
 
     // Extract addon ID from URL if needed
-    let addonId = this.addonIdOrUrl;
+    let addonId = this.addonIdOrUrl.trim();
     if (this.addonIdOrUrl.includes("wago.io")) {
       const parsed = Wago.getAddonIdFromUrl(this.addonIdOrUrl);
-      if (!parsed) {
+      if (!parsed || parsed.trim() === "") {
         return {
           success: false,
           installedAddons: [],
@@ -58,6 +58,14 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
         };
       }
       addonId = parsed;
+    }
+
+    if (!addonId) {
+      return {
+        success: false,
+        installedAddons: [],
+        error: "Addon ID is required",
+      };
     }
 
     const tempDir = path.join(
@@ -103,6 +111,22 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
       const downloadUrl = Wago.getDownloadUrl(addon, effectiveStability);
       if (!downloadUrl) {
         throw new Error(`No download URL for ${effectiveStability} release`);
+      }
+
+      // Validate download URL is from Wago domain (security check)
+      try {
+        const urlObj = new URL(downloadUrl);
+        if (!urlObj.hostname.endsWith("wago.io")) {
+          throw new Error("Invalid download URL domain");
+        }
+      } catch (urlError) {
+        if (
+          urlError instanceof Error &&
+          urlError.message === "Invalid download URL domain"
+        ) {
+          throw urlError;
+        }
+        throw new Error("Invalid download URL format");
       }
 
       context.emit("addon:install:downloading", addon.display_name);
