@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { InstallWagoCommand } from "@/core/commands/InstallWagoCommand";
+import { UpdateAddonCommand } from "@/core/commands/UpdateAddonCommand";
 import type { CommandContext } from "@/core/commands/types";
 import { ConfigManager } from "@/core/config";
 import { DatabaseManager } from "@/core/db";
@@ -68,4 +69,87 @@ describe("Wago Integration", () => {
 			expect(record?.type).toBe("wago");
 		}
 	});
+
+	it.skipIf(!apiKey)(
+		"should update a Wago addon when new version available",
+		async () => {
+			// First install the addon
+			const installCmd = new InstallWagoCommand(
+				dbManager,
+				configManager,
+				"clique",
+			);
+			const installResult = await installCmd.execute(context);
+			expect(installResult.success).toBe(true);
+
+			const installedFolder = installResult.installedAddons[0];
+			expect(installedFolder).toBeDefined();
+			if (!installedFolder) return;
+
+			// Get the current record and simulate an old version
+			const record = dbManager.getByFolder(installedFolder);
+			expect(record).not.toBeNull();
+			if (!record) return;
+
+			const currentVersion = record.version;
+			dbManager.updateAddon(installedFolder, { version: "0.0.0-old" });
+
+			// Verify the version was changed
+			const oldRecord = dbManager.getByFolder(installedFolder);
+			expect(oldRecord?.version).toBe("0.0.0-old");
+
+			// Now run update
+			emittedEvents = [];
+			const updateCmd = new UpdateAddonCommand(
+				dbManager,
+				configManager,
+				oldRecord!,
+			);
+			const updateResult = await updateCmd.execute(context);
+
+			expect(updateResult.success).toBe(true);
+			expect(updateResult.updated).toBe(true);
+
+			// Verify version was updated back
+			const updatedRecord = dbManager.getByFolder(installedFolder);
+			expect(updatedRecord?.version).toBe(currentVersion);
+
+			// Verify addon files still exist
+			expect(fs.existsSync(path.join(destDir, installedFolder))).toBe(true);
+		},
+	);
+
+	it.skipIf(!apiKey)(
+		"should detect no update needed when version matches",
+		async () => {
+			// First install the addon
+			const installCmd = new InstallWagoCommand(
+				dbManager,
+				configManager,
+				"clique",
+			);
+			const installResult = await installCmd.execute(context);
+			expect(installResult.success).toBe(true);
+
+			const installedFolder = installResult.installedAddons[0];
+			expect(installedFolder).toBeDefined();
+			if (!installedFolder) return;
+
+			const record = dbManager.getByFolder(installedFolder);
+			expect(record).not.toBeNull();
+			if (!record) return;
+
+			// Run update without changing version - should report no update
+			emittedEvents = [];
+			const updateCmd = new UpdateAddonCommand(
+				dbManager,
+				configManager,
+				record,
+			);
+			const updateResult = await updateCmd.execute(context);
+
+			expect(updateResult.success).toBe(true);
+			expect(updateResult.updated).toBe(false);
+		},
+	);
 });

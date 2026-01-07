@@ -274,7 +274,8 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
           throw new Error("Download failed");
         }
 
-        await Bun.write(zipPath, downloadResponse);
+        const zipData = await downloadResponse.arrayBuffer();
+        await Bun.write(zipPath, zipData);
 
         context.emit("addon:install:extracting", folder);
         const extractPath = path.join(tempDir, "extract");
