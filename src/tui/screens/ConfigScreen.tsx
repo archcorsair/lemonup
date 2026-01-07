@@ -37,6 +37,7 @@ type Field =
   | "terminalProgress"
   | "themeMode"
   | "debug"
+  | "wagoApiKey"
   | "restartOnboarding"
   | "exportAddons"
   | "importAddons";
@@ -77,6 +78,9 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
   const [backupRetention, setBackupRetention] = useState(5);
   const [terminalProgress, setTerminalProgress] = useState(true);
   const [debug, setDebug] = useState(false);
+  const [wagoApiKey, setWagoApiKey] = useState("");
+  const [isEditingWagoApiKey, setIsEditingWagoApiKey] = useState(false);
+  const [isWagoKeyFromEnv, setIsWagoKeyFromEnv] = useState(false);
   const [commandHelp, setCommandHelp] = useState<string | null>(null);
 
   const [activeField, setActiveField] = useState<Field>("destDir");
@@ -154,6 +158,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
     setBackupRetention(cfg.backupRetention);
     setTerminalProgress(cfg.terminalProgress);
     setDebug(cfg.debug);
+    setWagoApiKey(cfg.wagoApiKey);
+
+    // Detect if wago key is from env var
+    const envKey = process.env.WAGO_API_KEY;
+    setIsWagoKeyFromEnv(!!envKey && cfg.wagoApiKey === envKey);
   }, [configManager]);
 
   useInput((input, key) => {
@@ -174,6 +183,23 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       return;
     }
 
+    // If editing wagoApiKey, trap all input except Enter/Escape
+    if (isEditingWagoApiKey) {
+      if (key.return) {
+        flashKey("enter");
+        configManager.set("wagoApiKey", wagoApiKey);
+        setIsEditingWagoApiKey(false);
+        showToast("Saved!", 1000);
+      } else if (key.escape) {
+        flashKey("esc");
+        // Revert changes
+        const cfg = configManager.get();
+        setWagoApiKey(cfg.wagoApiKey);
+        setIsEditingWagoApiKey(false);
+      }
+      return;
+    }
+
     const fields: Field[] = [
       "destDir",
       "maxConcurrent",
@@ -184,10 +210,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "nerdFonts",
       "terminalProgress",
       "themeMode",
-      "debug",
-      "restartOnboarding",
+      "wagoApiKey",
       "exportAddons",
       "importAddons",
+      "debug",
+      "restartOnboarding",
     ];
 
     if (key.upArrow || input === "k") {
@@ -384,6 +411,13 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
         setDebug(!debug);
         configManager.set("debug", !debug);
         showToast("Saved!", 1000);
+      }
+    }
+
+    if (activeField === "wagoApiKey" && (key.return || input === " ")) {
+      if (!isWagoKeyFromEnv) {
+        flashKey("enter");
+        setIsEditingWagoApiKey(true);
       }
     }
 
@@ -624,30 +658,50 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           </Color>
         </ConfigOption>
 
-        {/* Advanced */}
-        <SectionHeader title="Advanced" theme={theme} />
-        <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
-          <Box>
-            <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
-              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
-            </Color>
-            {debug && (
-              <Box marginLeft={2}>
-                <Color styles={theme.statusIdle}>
-                  <Text>({logger.getLogPath()})</Text>
-                </Color>
-              </Box>
-            )}
-          </Box>
-        </ConfigOption>
+        {/* API Keys */}
+        <SectionHeader title="API Keys" theme={theme} />
         <ConfigOption
-          label="Restart Onboarding"
-          isActive={activeField === "restartOnboarding"}
-          helpText="Press Enter or Space to restart the setup wizard."
+          label="Wago API Key"
+          isActive={activeField === "wagoApiKey"}
+          helpText={
+            isWagoKeyFromEnv
+              ? "Key detected from WAGO_API_KEY environment variable."
+              : isEditingWagoApiKey
+                ? "Press Enter to save, Esc to cancel."
+                : wagoApiKey
+                  ? "Press Enter or Space to edit."
+                  : "Press Enter to edit, or set WAGO_API_KEY env var."
+          }
         >
-          <Color styles={theme.statusIdle}>
-            <Text bold>Press Enter to launch</Text>
-          </Color>
+          {isWagoKeyFromEnv ? (
+            <Color styles={theme.statusSuccess}>
+              <Text bold>
+                From env WAGO_API_KEY (...
+                {wagoApiKey.substring(wagoApiKey.length - 4)})
+              </Text>
+            </Color>
+          ) : isEditingWagoApiKey ? (
+            <Box>
+              <Color styles={theme.statusChecking}>
+                <Text bold>[EDITING]</Text>
+              </Color>
+              <Box marginLeft={1}>
+                <TextInput
+                  value={wagoApiKey}
+                  onChange={setWagoApiKey}
+                  onSubmit={() => {}}
+                />
+              </Box>
+            </Box>
+          ) : (
+            <Color styles={wagoApiKey ? theme.statusSuccess : theme.statusIdle}>
+              <Text bold>
+                {wagoApiKey
+                  ? `${"*".repeat(Math.min(wagoApiKey.length - 6, 10))}${wagoApiKey.substring(wagoApiKey.length - 6, wagoApiKey.length)}`
+                  : "Not Configured"}
+              </Text>
+            </Color>
+          )}
         </ConfigOption>
 
         {/* Import/Export */}
@@ -693,6 +747,33 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               <Text bold>Press Enter to import</Text>
             </Color>
           )}
+        </ConfigOption>
+
+        {/* Advanced */}
+        <SectionHeader title="Advanced" theme={theme} />
+        <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
+          <Box>
+            <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
+              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
+            </Color>
+            {debug && (
+              <Box marginLeft={2}>
+                <Color styles={theme.statusIdle}>
+                  <Text>({logger.getLogPath()})</Text>
+                </Color>
+              </Box>
+            )}
+          </Box>
+        </ConfigOption>
+
+        <ConfigOption
+          label="Restart Onboarding"
+          isActive={activeField === "restartOnboarding"}
+          helpText="Press Enter or Space to restart the setup wizard."
+        >
+          <Color styles={theme.statusIdle}>
+            <Text bold>Press Enter to launch</Text>
+          </Color>
         </ConfigOption>
 
         {/* Import Confirmation Modal */}

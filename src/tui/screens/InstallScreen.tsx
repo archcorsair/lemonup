@@ -540,7 +540,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
       <ControlBar
         message={
           mode === "url-input" ? (
-            <Text>Enter URL (GitHub/WoWInterface)</Text>
+            <Text>Enter URL (GitHub/WoWInterface/Wago)</Text>
           ) : undefined
         }
         controls={[

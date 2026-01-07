@@ -33,6 +33,7 @@ export const DARK_THEME = {
   // Repository Types
   repoTukui: "#bb9af7", // magenta
   repoWowi: "#ff9e64", // orange
+  repoWago: "#7dcfff", // cyan
   repoManual: "#565f89", // comment
   repoGit: "#7aa2f7", // blue
 
@@ -99,6 +100,7 @@ export const LIGHT_THEME: Theme = {
   // Repository Types
   repoTukui: "#9854f1", // pink
   repoWowi: "#b15c00", // orange
+  repoWago: "#007197", // cyan
   repoManual: "#848cb5", // comment
   repoGit: "#2e7de9", // blue
 

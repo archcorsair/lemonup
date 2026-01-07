@@ -7,7 +7,7 @@ import { logger } from "./logger";
 export const ExportedAddonSchema = z.object({
   name: z.string(),
   folder: z.string(),
-  type: z.enum(["github", "tukui", "wowinterface", "manual"]),
+  type: z.enum(["github", "tukui", "wowinterface", "manual", "wago"]),
   url: z.string().nullable(),
   ownedFolders: z.array(z.string()).optional(),
   reinstallable: z.boolean(),

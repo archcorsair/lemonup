@@ -11,6 +11,7 @@ export const REPO_TYPE = {
   GITHUB: "github",
   TUKUI: "tukui",
   WOWINTERFACE: "wowinterface",
+  WAGO: "wago",
 } as const;
 
 export type RepoType = (typeof REPO_TYPE)[keyof typeof REPO_TYPE];
@@ -61,6 +62,10 @@ export const ConfigSchema = z.object({
   showLibs: z.boolean().default(false),
   theme: z.enum(["dark", "light"]).default("dark"),
   terminalProgress: z.boolean().default(true),
+  wagoApiKey: z
+    .string()
+    .describe("Wago.io API key for addon downloads")
+    .default(""),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -102,6 +107,7 @@ export class ConfigManager {
         showLibs: { type: "boolean" },
         theme: { type: "string" },
         terminalProgress: { type: "boolean" },
+        wagoApiKey: { type: "string" },
       } as const,
 
       cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -139,12 +145,31 @@ export class ConfigManager {
         showLibs: false,
         theme: "dark",
         terminalProgress: true,
+        wagoApiKey: "",
         ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
+
+      // Apply env var fallback for wagoApiKey in fallback path too
+      if (!fallback.wagoApiKey) {
+        const envKey = process.env.WAGO_API_KEY;
+        if (envKey) {
+          fallback.wagoApiKey = envKey;
+        }
+      }
+
       return fallback;
     }
     const config = { ...result.data, ...this.overrides };
+
+    // Only use env var if stored value is empty
+    if (!config.wagoApiKey) {
+      const envKey = process.env.WAGO_API_KEY;
+      if (envKey) {
+        config.wagoApiKey = envKey;
+      }
+    }
+
     logger.setEnabled(config.debug || false);
     return config;
   }
@@ -183,6 +208,7 @@ export class ConfigManager {
       showLibs: false,
       theme: "dark",
       terminalProgress: true,
+      wagoApiKey: "",
     };
     this.store.set(defaults);
   }

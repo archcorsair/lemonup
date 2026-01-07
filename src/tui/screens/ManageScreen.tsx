@@ -232,6 +232,37 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     })),
   });
 
+  // Track check start times outside of render to avoid setState during render
+  useEffect(() => {
+    const now = Date.now();
+    for (let i = 0; i < visibleAddons.length; i++) {
+      const item = visibleAddons[i];
+      if (!item) continue;
+      const folder = item.record.folder;
+      const query = queries[i];
+      if (!query) continue;
+
+      const isFetching = query.isLoading || query.isFetching;
+      const hasStartTime = checkStartTimes[folder] !== undefined;
+
+      if (isFetching && !hasStartTime) {
+        // Query started fetching, record start time
+        setCheckStartTimes((prev) => ({ ...prev, [folder]: now }));
+      } else if (!isFetching && hasStartTime) {
+        // Query stopped fetching, clear start time after min display period
+        const startTime = checkStartTimes[folder] ?? 0;
+        const elapsed = now - startTime;
+        if (elapsed >= MIN_CHECK_DISPLAY_MS) {
+          setCheckStartTimes((prev) => {
+            const next = { ...prev };
+            delete next[folder];
+            return next;
+          });
+        }
+      }
+    }
+  }, [queries, visibleAddons, checkStartTimes]);
+
   useAddonManagerEvent(
     addonManager,
     "addon:update-check:start",
@@ -814,25 +845,10 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
               status = updateProgress[addon.folder] || "checking";
             } else if (isLoading || isFetching) {
               status = "checking";
-              // Record start time when check begins
-              if (!checkStartTime) {
-                setCheckStartTimes((prev) => ({
-                  ...prev,
-                  [addon.folder]: now,
-                }));
-              }
             } else if (isInMinDisplayPeriod) {
               // Keep showing "checking" until minimum time passes
               status = "checking";
             } else {
-              // Clear start time and show actual status
-              if (checkStartTime) {
-                setCheckStartTimes((prev) => {
-                  const next = { ...prev };
-                  delete next[addon.folder];
-                  return next;
-                });
-              }
               if (error) status = "error";
               else if (data) status = "done";
             }
