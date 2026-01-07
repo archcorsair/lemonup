@@ -22,7 +22,7 @@ export const AddonRecordSchema = z.object({
   author: z.string().nullable(),
   interface: z.string().nullable(),
   url: z.string().nullable(),
-  type: z.enum(["github", "tukui", "manual", "wowinterface"]),
+  type: z.enum(["github", "tukui", "manual", "wowinterface", "wago"]),
   requiredDeps: z.array(z.string()).default([]),
   optionalDeps: z.array(z.string()).default([]),
   embeddedLibs: z.array(z.string()).default([]),

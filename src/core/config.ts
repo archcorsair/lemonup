@@ -11,6 +11,7 @@ export const REPO_TYPE = {
   GITHUB: "github",
   TUKUI: "tukui",
   WOWINTERFACE: "wowinterface",
+  WAGO: "wago",
 } as const;
 
 export type RepoType = (typeof REPO_TYPE)[keyof typeof REPO_TYPE];
