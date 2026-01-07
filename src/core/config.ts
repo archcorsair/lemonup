@@ -61,6 +61,10 @@ export const ConfigSchema = z.object({
   showLibs: z.boolean().default(false),
   theme: z.enum(["dark", "light"]).default("dark"),
   terminalProgress: z.boolean().default(true),
+  wagoApiKey: z
+    .string()
+    .describe("Wago.io API key for addon downloads")
+    .default(""),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -102,6 +106,7 @@ export class ConfigManager {
         showLibs: { type: "boolean" },
         theme: { type: "string" },
         terminalProgress: { type: "boolean" },
+        wagoApiKey: { type: "string" },
       } as const,
 
       cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -139,6 +144,7 @@ export class ConfigManager {
         showLibs: false,
         theme: "dark",
         terminalProgress: true,
+        wagoApiKey: "",
         ...(raw as object),
         ...this.overrides,
       } as unknown as Config;
@@ -183,6 +189,7 @@ export class ConfigManager {
       showLibs: false,
       theme: "dark",
       terminalProgress: true,
+      wagoApiKey: "",
     };
     this.store.set(defaults);
   }
