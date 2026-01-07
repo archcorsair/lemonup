@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { InstallWagoCommand } from "@/core/commands/InstallWagoCommand";
 import { ScanCommand } from "@/core/commands/ScanCommand";
 import type { Command, CommandContext } from "@/core/commands/types";
 import { type ConfigManager, REPO_TYPE } from "@/core/config";
@@ -56,7 +57,13 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
       }
 
       if (isWago) {
-        throw new Error("Wago addons will be supported soon!");
+        // Delegate to InstallWagoCommand for Wago URLs
+        const wagoCmd = new InstallWagoCommand(
+          this.dbManager,
+          this.configManager,
+          this.url,
+        );
+        return wagoCmd.execute(context);
       }
 
       if (!isGitHub && !isWoWInterface) {
