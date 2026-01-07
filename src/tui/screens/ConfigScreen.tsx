@@ -672,7 +672,6 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
                   value={wagoApiKey}
                   onChange={setWagoApiKey}
                   onSubmit={() => {}}
-                  mask="*"
                 />
               </Box>
             </Box>
@@ -680,7 +679,7 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
             <Color styles={wagoApiKey ? theme.statusSuccess : theme.statusIdle}>
               <Text bold>
                 {wagoApiKey
-                  ? "*".repeat(Math.min(wagoApiKey.length, 16))
+                  ? `${"*".repeat(Math.min(wagoApiKey.length - 6, 10))}${wagoApiKey.substring(wagoApiKey.length - 6, wagoApiKey.length)}`
                   : "Not Configured"}
               </Text>
             </Color>
