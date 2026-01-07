@@ -216,6 +216,289 @@ describe("Wago API", () => {
 		});
 	});
 
+	describe("getDownloadUrl", () => {
+		it("should extract download_link from stable release", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: {
+						label: "1.0.0",
+						logical_timestamp: 123,
+						created_at: "2024-01-01",
+						download_link: "https://download.example.com/stable",
+					},
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getDownloadUrl(addon, "stable");
+			expect(result).toBe("https://download.example.com/stable");
+		});
+
+		it("should fallback to link when download_link is missing", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: {
+						label: "1.0.0",
+						logical_timestamp: 123,
+						created_at: "2024-01-01",
+						link: "https://download.example.com/fallback",
+					},
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getDownloadUrl(addon, "stable");
+			expect(result).toBe("https://download.example.com/fallback");
+		});
+
+		it("should return null when no release exists for stability", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getDownloadUrl(addon, "stable");
+			expect(result).toBeNull();
+		});
+
+		it("should use stable as default stability", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: {
+						label: "1.0.0",
+						logical_timestamp: 123,
+						created_at: "2024-01-01",
+						download_link: "https://download.example.com/stable",
+					},
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getDownloadUrl(addon);
+			expect(result).toBe("https://download.example.com/stable");
+		});
+	});
+
+	describe("getVersion", () => {
+		it("should extract version label from release", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: {
+						label: "2.5.0",
+						logical_timestamp: 123,
+						created_at: "2024-01-01",
+					},
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getVersion(addon, "stable");
+			expect(result).toBe("2.5.0");
+		});
+
+		it("should return null when no release exists", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getVersion(addon, "stable");
+			expect(result).toBeNull();
+		});
+
+		it("should use stable as default stability", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: {
+						label: "3.0.0",
+						logical_timestamp: 123,
+						created_at: "2024-01-01",
+					},
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getVersion(addon);
+			expect(result).toBe("3.0.0");
+		});
+	});
+
+	describe("getBestAvailableStability", () => {
+		it("should prefer stable when available", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					stable: { label: "1.0.0", logical_timestamp: 123, created_at: "2024-01-01" },
+					beta: { label: "1.1.0-beta", logical_timestamp: 124, created_at: "2024-01-02" },
+					alpha: { label: "1.2.0-alpha", logical_timestamp: 125, created_at: "2024-01-03" },
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getBestAvailableStability(addon);
+			expect(result).toBe("stable");
+		});
+
+		it("should fallback to beta when stable is not available", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					beta: { label: "1.1.0-beta", logical_timestamp: 124, created_at: "2024-01-02" },
+					alpha: { label: "1.2.0-alpha", logical_timestamp: 125, created_at: "2024-01-03" },
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getBestAvailableStability(addon);
+			expect(result).toBe("beta");
+		});
+
+		it("should fallback to alpha when stable and beta are not available", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {
+					alpha: { label: "1.2.0-alpha", logical_timestamp: 125, created_at: "2024-01-03" },
+				},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getBestAvailableStability(addon);
+			expect(result).toBe("alpha");
+		});
+
+		it("should return null when no releases are available", () => {
+			const addon: Wago.WagoAddonSummary = {
+				id: "clique",
+				display_name: "Clique",
+				summary: "",
+				thumbnail_image: null,
+				categories: [],
+				releases: {},
+				owner: "author",
+				authors: [],
+				like_count: 0,
+				download_count: 0,
+				website_url: "",
+			};
+
+			const result = Wago.getBestAvailableStability(addon);
+			expect(result).toBeNull();
+		});
+	});
+
+	describe("getAddonIdFromUrl", () => {
+		it("should extract addon ID from wago.io URL", () => {
+			expect(Wago.getAddonIdFromUrl("https://addons.wago.io/addons/clique")).toBe("clique");
+			expect(Wago.getAddonIdFromUrl("https://wago.io/addons/details-123")).toBe("details-123");
+			expect(Wago.getAddonIdFromUrl("https://addons.wago.io/addons/my-addon/versions")).toBe("my-addon");
+		});
+
+		it("should handle addon IDs with underscores", () => {
+			expect(Wago.getAddonIdFromUrl("https://addons.wago.io/addons/my_addon")).toBe("my_addon");
+		});
+
+		it("should return null for invalid URLs", () => {
+			expect(Wago.getAddonIdFromUrl("https://example.com")).toBeNull();
+			expect(Wago.getAddonIdFromUrl("not-a-url")).toBeNull();
+		});
+
+		it("should return null for non-wago domains", () => {
+			expect(Wago.getAddonIdFromUrl("https://github.com/addons/clique")).toBeNull();
+		});
+
+		it("should return null for wago.io URLs without addon path", () => {
+			expect(Wago.getAddonIdFromUrl("https://wago.io/")).toBeNull();
+			expect(Wago.getAddonIdFromUrl("https://wago.io/other-path")).toBeNull();
+		});
+	});
+
 	describe("getGameData", () => {
 		it("should fetch and return game data", async () => {
 			const mockResponse = {

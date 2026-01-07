@@ -101,6 +101,67 @@ function isValidAddonResponse(data: unknown): data is WagoAddonSummary {
   );
 }
 
+// --- Utility Functions ---
+
+/**
+ * Extracts the download URL from an addon's release.
+ * Handles API field drift: download_link vs link
+ */
+export function getDownloadUrl(
+  addon: WagoAddonSummary,
+  stability: WagoStability = "stable",
+): string | null {
+  const release = addon.releases[stability];
+  if (!release) {
+    return null;
+  }
+  // Handle field drift: download_link vs link
+  return release.download_link ?? release.link ?? null;
+}
+
+/**
+ * Extracts the version label from an addon's release.
+ */
+export function getVersion(
+  addon: WagoAddonSummary,
+  stability: WagoStability = "stable",
+): string | null {
+  const release = addon.releases[stability];
+  return release?.label ?? null;
+}
+
+/**
+ * Gets the best available stability channel for an addon.
+ * Prefers stable > beta > alpha
+ */
+export function getBestAvailableStability(
+  addon: WagoAddonSummary,
+): WagoStability | null {
+  if (addon.releases.stable) return "stable";
+  if (addon.releases.beta) return "beta";
+  if (addon.releases.alpha) return "alpha";
+  return null;
+}
+
+/**
+ * Extracts addon ID from a Wago URL.
+ * Supports: https://addons.wago.io/addons/<id>
+ *           https://wago.io/addons/<id>
+ */
+export function getAddonIdFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.endsWith("wago.io")) {
+      return null;
+    }
+    // Match /addons/<id> where id can contain alphanumerics, hyphens, and underscores
+    const match = parsed.pathname.match(/\/addons\/([a-zA-Z0-9_-]+)/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // --- API Functions ---
 
 export async function getGameData(): Promise<WagoGameData | null> {
