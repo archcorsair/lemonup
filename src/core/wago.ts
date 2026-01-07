@@ -36,8 +36,8 @@ export interface WagoAddonSummary {
     beta?: WagoRelease;
     alpha?: WagoRelease;
   };
-  owner: string;
-  authors: string[];
+  owner?: string;
+  authors?: string[];
   like_count: number;
   download_count: number;
   website_url: string;
@@ -96,8 +96,8 @@ function isValidAddonResponse(data: unknown): data is WagoAddonSummary {
     typeof obj.id === "string" &&
     typeof obj.display_name === "string" &&
     typeof obj.summary === "string" &&
-    "releases" in obj &&
-    typeof obj.releases === "object"
+    // API returns either "releases" or "recent_release"
+    ("releases" in obj || "recent_release" in obj)
   );
 }
 
@@ -270,14 +270,36 @@ export async function getAddonDetails(
       return { success: false, error: "network_error" };
     }
 
-    const data = (await response.json()) as unknown;
+    const rawData = (await response.json()) as unknown;
+
+    // Handle both direct addon response and wrapped { data: addon } format
+    let data = rawData;
+    if (
+      rawData &&
+      typeof rawData === "object" &&
+      "data" in rawData &&
+      typeof (rawData as Record<string, unknown>).data === "object"
+    ) {
+      data = (rawData as Record<string, unknown>).data;
+    }
 
     if (!isValidAddonResponse(data)) {
-      logger.error("Wago", "Invalid addon response format");
+      logger.error(
+        "Wago",
+        `Invalid addon response format. Keys: ${rawData && typeof rawData === "object" ? Object.keys(rawData as object).join(", ") : typeof rawData}`,
+      );
       return { success: false, error: "invalid_response" };
     }
 
-    return { success: true, addon: data };
+    // Normalize recent_release to releases format
+    const addon = data as WagoAddonSummary & {
+      recent_release?: WagoAddonSummary["releases"];
+    };
+    if (!addon.releases && addon.recent_release) {
+      addon.releases = addon.recent_release;
+    }
+
+    return { success: true, addon };
   } catch (error) {
     logger.error("Wago", "Failed to fetch addon details", error);
     return { success: false, error: "network_error" };

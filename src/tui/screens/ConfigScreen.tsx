@@ -205,11 +205,11 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
       "nerdFonts",
       "terminalProgress",
       "themeMode",
-      "debug",
       "wagoApiKey",
-      "restartOnboarding",
       "exportAddons",
       "importAddons",
+      "debug",
+      "restartOnboarding",
     ];
 
     if (key.upArrow || input === "k") {
@@ -651,23 +651,6 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
           </Color>
         </ConfigOption>
 
-        {/* Advanced */}
-        <SectionHeader title="Advanced" theme={theme} />
-        <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
-          <Box>
-            <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
-              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
-            </Color>
-            {debug && (
-              <Box marginLeft={2}>
-                <Color styles={theme.statusIdle}>
-                  <Text>({logger.getLogPath()})</Text>
-                </Color>
-              </Box>
-            )}
-          </Box>
-        </ConfigOption>
-
         {/* API Keys */}
         <SectionHeader title="API Keys" theme={theme} />
         <ConfigOption
@@ -702,16 +685,6 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               </Text>
             </Color>
           )}
-        </ConfigOption>
-
-        <ConfigOption
-          label="Restart Onboarding"
-          isActive={activeField === "restartOnboarding"}
-          helpText="Press Enter or Space to restart the setup wizard."
-        >
-          <Color styles={theme.statusIdle}>
-            <Text bold>Press Enter to launch</Text>
-          </Color>
         </ConfigOption>
 
         {/* Import/Export */}
@@ -757,6 +730,33 @@ export const ConfigScreen: React.FC<ScreenProps> = ({
               <Text bold>Press Enter to import</Text>
             </Color>
           )}
+        </ConfigOption>
+
+        {/* Advanced */}
+        <SectionHeader title="Advanced" theme={theme} />
+        <ConfigOption label="Debug Logging" isActive={activeField === "debug"}>
+          <Box>
+            <Color styles={debug ? theme.statusSuccess : theme.statusIdle}>
+              <Text bold>{debug ? "Enabled" : "Disabled"}</Text>
+            </Color>
+            {debug && (
+              <Box marginLeft={2}>
+                <Color styles={theme.statusIdle}>
+                  <Text>({logger.getLogPath()})</Text>
+                </Color>
+              </Box>
+            )}
+          </Box>
+        </ConfigOption>
+
+        <ConfigOption
+          label="Restart Onboarding"
+          isActive={activeField === "restartOnboarding"}
+          helpText="Press Enter or Space to restart the setup wizard."
+        >
+          <Color styles={theme.statusIdle}>
+            <Text bold>Press Enter to launch</Text>
+          </Color>
         </ConfigOption>
 
         {/* Import Confirmation Modal */}

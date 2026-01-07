@@ -200,11 +200,12 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
 
       // Update addon record with Wago metadata
       const version = Wago.getVersion(addon, effectiveStability);
+      const author = addon.owner ?? addon.authors?.[0] ?? "";
       this.dbManager.updateAddon(parentFolder, {
         url: `https://addons.wago.io/addons/${addonId}`,
         type: REPO_TYPE.WAGO,
         version: version || effectiveStability,
-        author: addon.owner,
+        author,
         last_updated: new Date().toISOString(),
         ownedFolders,
       });
