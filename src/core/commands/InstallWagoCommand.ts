@@ -147,8 +147,8 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
         throw new Error(`Download failed: ${downloadResponse.status}`);
       }
 
-      await Bun.write(zipPath, downloadResponse);
-
+      const zipData = await downloadResponse.arrayBuffer();
+      await Bun.write(zipPath, zipData);
       context.emit("addon:install:extracting", addon.display_name);
       await Downloader.unzip(zipPath, tempDir);
       await fs.unlink(zipPath);

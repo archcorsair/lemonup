@@ -1,36 +1,72 @@
+import { z } from "zod";
 import { logger } from "@/core/logger";
 
-// --- Types ---
+// --- Zod Schemas ---
 
-export interface WagoGameData {
-  stability_values: string[];
-  patches: Record<string, string[]>;
-  toc_suffixes: Record<string, string[]>;
-  live_patches: Record<string, string>;
-}
+const WagoReleaseSchema = z
+  .object({
+    label: z.string(),
+    logical_timestamp: z.number().optional(),
+    created_at: z.string().optional(),
+    download_link: z.string().optional(),
+    link: z.string().optional(),
+    supported_patches: z.array(z.string()).optional(),
+  })
+  .loose();
 
-export interface WagoRelease {
-  label: string;
-  logical_timestamp: number;
-  created_at: string;
-  download_link?: string;
-  link?: string;
-  supported_patches?: string[];
-  [key: string]: unknown; // Handle supported_<flavor>_patches dynamically
-}
+const WagoReleasesSchema = z.object({
+  stable: WagoReleaseSchema.optional(),
+  beta: WagoReleaseSchema.optional(),
+  alpha: WagoReleaseSchema.optional(),
+});
 
-export interface WagoCategory {
-  id: number;
-  display_name: string;
-  icon: string;
-}
+const WagoCategorySchema = z.object({
+  id: z.number(),
+  display_name: z.string(),
+  icon: z.string(),
+});
+
+const WagoAddonSummarySchema = z
+  .object({
+    id: z.string(),
+    display_name: z.string(),
+    summary: z.string(),
+    thumbnail_image: z.string().nullable(),
+    categories: z.array(WagoCategorySchema).optional(),
+    releases: WagoReleasesSchema.optional(),
+    recent_release: WagoReleasesSchema.optional(),
+    owner: z.string().optional(),
+    authors: z.array(z.string()).optional(),
+    like_count: z.number().optional(),
+    download_count: z.number().optional(),
+    website_url: z.string().optional(),
+  })
+  .loose();
+
+const WagoSearchResponseSchema = z.object({
+  data: z.array(WagoAddonSummarySchema),
+});
+
+const WagoGameDataSchema = z.object({
+  stability_values: z.array(z.string()),
+  patches: z.record(z.string(), z.array(z.string())),
+  toc_suffixes: z.record(z.string(), z.array(z.string())),
+  live_patches: z.record(z.string(), z.string()),
+});
+
+// --- Types (derived from Zod schemas) ---
+
+export type WagoRelease = z.infer<typeof WagoReleaseSchema>;
+export type WagoCategory = z.infer<typeof WagoCategorySchema>;
+export type WagoGameData = z.infer<typeof WagoGameDataSchema>;
+export type WagoSearchResponse = z.infer<typeof WagoSearchResponseSchema>;
 
 export interface WagoAddonSummary {
   id: string;
   display_name: string;
   summary: string;
   thumbnail_image: string | null;
-  categories: WagoCategory[];
+  categories?: WagoCategory[];
   releases: {
     stable?: WagoRelease;
     beta?: WagoRelease;
@@ -38,13 +74,9 @@ export interface WagoAddonSummary {
   };
   owner?: string;
   authors?: string[];
-  like_count: number;
-  download_count: number;
-  website_url: string;
-}
-
-export interface WagoSearchResponse {
-  data: WagoAddonSummary[];
+  like_count?: number;
+  download_count?: number;
+  website_url?: string;
 }
 
 export type WagoStability = "stable" | "beta" | "alpha";
@@ -77,28 +109,6 @@ function getHeaders(apiKey: string): Record<string, string> {
     Authorization: `Bearer ${apiKey}`,
     Accept: "application/json",
   };
-}
-
-function isValidSearchResponse(data: unknown): data is WagoSearchResponse {
-  if (!data || typeof data !== "object") {
-    return false;
-  }
-  const obj = data as Record<string, unknown>;
-  return "data" in obj && Array.isArray(obj.data);
-}
-
-function isValidAddonResponse(data: unknown): data is WagoAddonSummary {
-  if (!data || typeof data !== "object") {
-    return false;
-  }
-  const obj = data as Record<string, unknown>;
-  return (
-    typeof obj.id === "string" &&
-    typeof obj.display_name === "string" &&
-    typeof obj.summary === "string" &&
-    // API returns either "releases" or "recent_release"
-    ("releases" in obj || "recent_release" in obj)
-  );
 }
 
 // --- Utility Functions ---
@@ -178,20 +188,15 @@ export async function getGameData(): Promise<WagoGameData | null> {
       return null;
     }
 
-    const data = (await response.json()) as unknown;
+    const json = await response.json();
+    const result = WagoGameDataSchema.safeParse(json);
 
-    // Basic structural validation
-    if (
-      !data ||
-      typeof data !== "object" ||
-      !("stability_values" in data) ||
-      !Array.isArray((data as Record<string, unknown>).stability_values)
-    ) {
+    if (!result.success) {
       logger.error("Wago", "Invalid game data response format");
       return null;
     }
 
-    return data as WagoGameData;
+    return result.data;
   } catch (error) {
     logger.error("Wago", "Failed to fetch game data", error);
     return null;
@@ -230,19 +235,25 @@ export async function searchAddons(
       return null;
     }
 
-    const data = (await response.json()) as unknown;
+    const json = await response.json();
+    const result = WagoSearchResponseSchema.safeParse(json);
 
-    if (!isValidSearchResponse(data)) {
+    if (!result.success) {
       logger.error("Wago", "Invalid search response format");
       return null;
     }
 
-    return data;
+    return result.data;
   } catch (error) {
     logger.error("Wago", "Search request failed", error);
     return null;
   }
 }
+
+// Schema for wrapped response format
+const WagoWrappedResponseSchema = z.object({
+  data: WagoAddonSummarySchema,
+});
 
 export async function getAddonDetails(
   addonId: string,
@@ -270,34 +281,29 @@ export async function getAddonDetails(
       return { success: false, error: "network_error" };
     }
 
-    const rawData = (await response.json()) as unknown;
+    const json = await response.json();
 
-    // Handle both direct addon response and wrapped { data: addon } format
-    let data = rawData;
-    if (
-      rawData &&
-      typeof rawData === "object" &&
-      "data" in rawData &&
-      typeof (rawData as Record<string, unknown>).data === "object"
-    ) {
-      data = (rawData as Record<string, unknown>).data;
-    }
+    // Try wrapped format first, then direct format
+    const wrappedResult = WagoWrappedResponseSchema.safeParse(json);
+    const directResult = WagoAddonSummarySchema.safeParse(json);
 
-    if (!isValidAddonResponse(data)) {
-      logger.error(
-        "Wago",
-        `Invalid addon response format. Keys: ${rawData && typeof rawData === "object" ? Object.keys(rawData as object).join(", ") : typeof rawData}`,
-      );
+    const parsed = wrappedResult.success
+      ? wrappedResult.data.data
+      : directResult.success
+        ? directResult.data
+        : null;
+
+    if (!parsed) {
+      logger.error("Wago", "Invalid addon response format");
       return { success: false, error: "invalid_response" };
     }
 
-    // Normalize recent_release to releases format
-    const addon = data as WagoAddonSummary & {
-      recent_release?: WagoAddonSummary["releases"];
+    // Normalize: ensure releases exists (from recent_release if needed)
+    const addon: WagoAddonSummary = {
+      ...parsed,
+      releases: parsed.releases ??
+        parsed.recent_release ?? { stable: undefined },
     };
-    if (!addon.releases && addon.recent_release) {
-      addon.releases = addon.recent_release;
-    }
 
     return { success: true, addon };
   } catch (error) {
