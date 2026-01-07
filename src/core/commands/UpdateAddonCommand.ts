@@ -7,6 +7,7 @@ import * as Downloader from "@/core/downloader";
 import * as GitClient from "@/core/git";
 import { logger } from "@/core/logger";
 import * as TukUI from "@/core/tukui";
+import * as Wago from "@/core/wago";
 import * as WoWInterface from "@/core/wowinterface";
 import { ScanCommand } from "./ScanCommand";
 import type { Command, CommandContext } from "./types";
@@ -53,6 +54,7 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
     let wowInterfaceDetails: WoWInterface.WoWInterfaceAddonDetails | null =
       null;
     let tukuiDetails: TukUI.TukUIAddon | null = null;
+    let wagoDetails: Wago.WagoAddonSummary | null = null;
 
     if (this.addon.type === "github") {
       try {
@@ -117,6 +119,43 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
           updateAvailable = remoteVersion !== this.addon.version;
         } else {
           throw new Error(`Could not find addon details for ${name} on TukUI`);
+        }
+      } catch (err) {
+        return {
+          repoName: name,
+          success: false,
+          updated: false,
+          error: String(err),
+        };
+      }
+    } else if (this.addon.type === "wago") {
+      try {
+        const config = this.configManager.get();
+        if (!config.wagoApiKey) {
+          throw new Error("Wago API key not configured");
+        }
+
+        const addonId = Wago.getAddonIdFromUrl(this.addon.url || "");
+        if (!addonId) {
+          throw new Error("Invalid Wago URL");
+        }
+
+        const result = await Wago.getAddonDetails(addonId, config.wagoApiKey);
+        if (!result.success) {
+          throw new Error(
+            result.error === "not_found"
+              ? "Addon not found on Wago"
+              : "Failed to fetch details from Wago",
+          );
+        }
+        wagoDetails = result.addon;
+
+        const stability = Wago.getBestAvailableStability(wagoDetails);
+        if (stability) {
+          remoteVersion = Wago.getVersion(wagoDetails, stability) || "unknown";
+          updateAvailable = remoteVersion !== this.addon.version;
+        } else {
+          throw new Error("No releases available for addon");
         }
       } catch (err) {
         return {
@@ -194,6 +233,56 @@ export class UpdateAddonCommand implements Command<UpdateAddonResult> {
           throw new Error("Git Clone failed");
         }
         extractRoot = tempDir;
+      } else if (this.addon.type === "wago" && wagoDetails !== null) {
+        const config = this.configManager.get();
+        const stability = Wago.getBestAvailableStability(wagoDetails);
+        const downloadUrl = stability
+          ? Wago.getDownloadUrl(wagoDetails, stability)
+          : null;
+
+        if (!downloadUrl) {
+          throw new Error("No download URL available");
+        }
+
+        // Validate download URL domain (security check)
+        try {
+          const urlObj = new URL(downloadUrl);
+          if (!urlObj.hostname.endsWith("wago.io")) {
+            throw new Error("Invalid download URL domain");
+          }
+        } catch (urlError) {
+          if (
+            urlError instanceof Error &&
+            urlError.message === "Invalid download URL domain"
+          ) {
+            throw urlError;
+          }
+          throw new Error("Invalid download URL format");
+        }
+
+        context.emit("addon:install:downloading", folder);
+        const zipPath = path.join(tempDir, "addon.zip");
+
+        const downloadResponse = await fetch(downloadUrl, {
+          headers: {
+            Authorization: `Bearer ${config.wagoApiKey}`,
+            Accept: "application/octet-stream",
+          },
+        });
+
+        if (!downloadResponse.ok) {
+          throw new Error("Download failed");
+        }
+
+        await Bun.write(zipPath, downloadResponse);
+
+        context.emit("addon:install:extracting", folder);
+        const extractPath = path.join(tempDir, "extract");
+        await fs.mkdir(extractPath, { recursive: true });
+        if (!(await Downloader.unzip(zipPath, extractPath))) {
+          throw new Error("Unzip failed");
+        }
+        extractRoot = extractPath;
       }
 
       // Scan for all valid addon folders in the extracted content
