@@ -22,7 +22,13 @@ interface WagoSearchScreenProps {
   onBack: () => void;
 }
 
-type Mode = "search" | "filters" | "details" | "installing" | "result";
+type Mode =
+  | "search"
+  | "filters"
+  | "details"
+  | "confirm-reinstall"
+  | "installing"
+  | "result";
 
 const GAME_VERSIONS = [
   "retail",
@@ -64,6 +70,10 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
   >("idle");
   const [installError, setInstallError] = useState<string | null>(null);
   const [installedName, setInstalledName] = useState<string>("");
+  const [pendingInstall, setPendingInstall] = useState<{
+    addon: WagoAddonSummary;
+    stability: WagoStability;
+  } | null>(null);
 
   const showToast = useAppStore((state) => state.showToast);
 
@@ -86,12 +96,13 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
 
   const hasApiKey = Boolean(config.wagoApiKey);
 
-  const handleInstall = useCallback(
+  const doInstall = useCallback(
     async (addon: WagoAddonSummary, installStability: WagoStability) => {
       setMode("installing");
       setInstallStatus("installing");
       setInstallError(null);
       setInstalledName(addon.display_name);
+      setPendingInstall(null);
 
       try {
         const result = await addonManager.installWago(
@@ -114,6 +125,21 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
       setMode("result");
     },
     [addonManager, showToast],
+  );
+
+  const handleInstall = useCallback(
+    (addon: WagoAddonSummary, installStability: WagoStability) => {
+      // Check if addon is already installed
+      const isInstalled = addonManager.isAlreadyInstalled(addon.display_name);
+      if (isInstalled) {
+        setPendingInstall({ addon, stability: installStability });
+        setMode("confirm-reinstall");
+        return;
+      }
+
+      doInstall(addon, installStability);
+    },
+    [addonManager, doInstall],
   );
 
   useInput((input, key) => {
@@ -139,6 +165,22 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
         setSelectedAddon(null);
         setInstallStatus("idle");
         setInstallError(null);
+      }
+      return;
+    }
+
+    // Handle confirm-reinstall mode
+    if (mode === "confirm-reinstall") {
+      if (input.toLowerCase() === "y" && pendingInstall) {
+        flashKey("enter");
+        doInstall(pendingInstall.addon, pendingInstall.stability);
+        return;
+      }
+      if (input.toLowerCase() === "n" || key.escape) {
+        flashKey("esc");
+        setPendingInstall(null);
+        setMode("search");
+        return;
       }
       return;
     }
@@ -444,6 +486,30 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
         </Box>
       )}
 
+      {/* Confirm reinstall */}
+      {mode === "confirm-reinstall" && pendingInstall && (
+        <Box
+          flexDirection="column"
+          borderColor="red"
+          borderStyle="round"
+          padding={1}
+          marginX={1}
+        >
+          <Color styles={theme.statusWarning}>
+            <Text bold>Addon Already Installed</Text>
+          </Color>
+          <Box marginTop={1}>
+            <Text>
+              "{pendingInstall.addon.display_name}" appears to be already
+              installed.
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text>Do you want to reinstall and overwrite it? (y/N)</Text>
+          </Box>
+        </Box>
+      )}
+
       {/* Installing state */}
       {mode === "installing" && (
         <Box flexDirection="column" alignItems="center" paddingY={2}>
@@ -491,24 +557,29 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
             ? []
             : mode === "result"
               ? [{ key: "enter", label: "continue" }]
-              : showFilters
+              : mode === "confirm-reinstall"
                 ? [
-                    { key: "h/l", label: "change" },
-                    { key: "tab", label: "switch" },
-                    { key: "f", label: "close filters" },
+                    { key: "y", label: "reinstall" },
+                    { key: "n", label: "cancel" },
                   ]
-                : mode === "details"
+                : showFilters
                   ? [
-                      { key: "enter", label: "install" },
-                      { key: "esc", label: "back" },
+                      { key: "h/l", label: "change" },
+                      { key: "tab", label: "switch" },
+                      { key: "f", label: "close filters" },
                     ]
-                  : [
-                      { key: "j/k", label: "nav" },
-                      { key: "enter", label: "details" },
-                      { key: "i", label: "install" },
-                      { key: "f", label: "filters" },
-                      { key: "esc", label: "back" },
-                    ]
+                  : mode === "details"
+                    ? [
+                        { key: "enter", label: "install" },
+                        { key: "esc", label: "back" },
+                      ]
+                    : [
+                        { key: "j/k", label: "nav" },
+                        { key: "enter", label: "details" },
+                        { key: "i", label: "install" },
+                        { key: "f", label: "filters" },
+                        { key: "esc", label: "back" },
+                      ]
         }
       />
     </Box>
