@@ -48,3 +48,6 @@ export const SIMPLE_SCREEN_RESERVED =
   LAYOUT.PADDING +
   LAYOUT.GAP +
   LAYOUT.OVERFLOW_INDICATORS;
+
+/** Chrome lines for WagoSearchScreen */
+export const WAGO_SEARCH_RESERVED = 17;
