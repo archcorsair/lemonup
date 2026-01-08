@@ -37,6 +37,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 }) => {
   const { theme } = useTheme();
   const flashKey = useAppStore((state) => state.flashKey);
+  const navigate = useAppStore((state) => state.navigate);
   const importQueue = useAppStore((state) => state.importQueue);
   const clearImportQueue = useAppStore((state) => state.clearImportQueue);
   const [config, setConfig] = useState(initialConfig);
@@ -68,6 +69,7 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
 
   const OPTIONS = [
     { label: "Install from URL", action: "url", section: "General" },
+    { label: "Search Wago", action: "wagoSearch", section: "Wago" },
     { label: "Install ElvUI", action: "elvui", section: "TukUI" },
     { label: "Install TukUI", action: "tukui", section: "TukUI" },
   ];
@@ -327,6 +329,8 @@ export const InstallScreen: React.FC<InstallScreenProps> = ({
         const action = OPTIONS[selection]?.action;
         if (action === "url") {
           setMode("url-input");
+        } else if (action === "wagoSearch") {
+          navigate("wagoSearch");
         } else if (action === "elvui") {
           await checkConfigAndInstall("elvui");
         } else if (action === "tukui") {
