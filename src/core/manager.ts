@@ -6,6 +6,10 @@ import {
 } from "./commands/InstallFromUrlCommand";
 import { InstallTukUICommand } from "./commands/InstallTukUICommand";
 import {
+  InstallWagoCommand,
+  type InstallWagoResult,
+} from "./commands/InstallWagoCommand";
+import {
   RemoveAddonCommand,
   type RemoveAddonResult,
 } from "./commands/RemoveAddonCommand";
@@ -20,6 +24,7 @@ import { type AddonRecord, DatabaseManager } from "./db";
 import type { AddonManagerEvents } from "./events";
 import * as GitClient from "./git";
 import * as TukUI from "./tukui";
+import type { WagoStability } from "./wago";
 import * as WoWInterface from "./wowinterface";
 
 export interface UpdateResult {
@@ -228,6 +233,19 @@ export class AddonManager extends EventEmitter {
       url,
       addonFolder,
       subFolders,
+    );
+    return await this.executeCommand(command);
+  }
+
+  public async installWago(
+    addonIdOrUrl: string,
+    stability: WagoStability = "stable",
+  ): Promise<InstallWagoResult> {
+    const command = new InstallWagoCommand(
+      this.dbManager,
+      this.configManager,
+      addonIdOrUrl,
+      stability,
     );
     return await this.executeCommand(command);
   }
