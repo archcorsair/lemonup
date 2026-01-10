@@ -263,7 +263,7 @@ const AppContent: React.FC<AppProps> = ({
   useAddonManagerEvent(
     addonManager,
     "autocheck:progress",
-    (_, __, addonName) => {
+    (_, __, _addonName) => {
       // We don't need index/total here as progressBar tracks it internally or we just advance
       // But progressBar.advance() doesn't take args in current impl?
       // Let's check useProgressBar usage in previous loop. It just called advance().
@@ -292,7 +292,7 @@ const AppContent: React.FC<AppProps> = ({
     }
   });
 
-  useAddonManagerEvent(addonManager, "error", (context, message) => {
+  useAddonManagerEvent(addonManager, "error", (context, _message) => {
     if (context.startsWith("Auto-check")) {
       progressBar.warn();
     }

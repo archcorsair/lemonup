@@ -72,7 +72,8 @@ const WizardProgress: React.FC<{
     const elements: React.ReactNode[] = [];
 
     for (let i = 0; i < steps.length; i++) {
-      const step = steps[i]!;
+      const step = steps[i];
+      if (!step) continue;
       const isCompleted = step.completed;
       const isCurrent = step.current;
       const segmentColor =

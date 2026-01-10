@@ -367,11 +367,6 @@ export class AddonManager extends EventEmitter {
       }
 
       const apiKey = config.wagoApiKey;
-      // If no API key, we can't check Wago properly?
-      // Actually Wago public API might work without key for public addons?
-      // getAddonDetails requires key in current implementation?
-      // src/core/wago.ts: if (!apiKey) return { success: false, error: "no_api_key" };
-      // So yes, key is required.
       if (!apiKey) {
         return {
           updateAvailable: false,

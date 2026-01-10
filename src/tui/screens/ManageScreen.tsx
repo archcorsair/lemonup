@@ -7,7 +7,7 @@ import TextInput from "ink-text-input";
 import { useTerminalSize, VirtualList } from "ink-virtual-list";
 import pLimit from "p-limit";
 import type React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { BackupManager } from "@/core/backup";
 import type { Config } from "@/core/config";
 import type { AddonManager, UpdateResult } from "@/core/manager";
@@ -286,7 +286,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     addonManager,
     "autocheck:progress",
     useCallback(
-      (_, __, addonName) => {
+      (_, __, _addonName) => {
         // Invalidate query to refresh UI when background check updates an addon
         // Finding folder by name might be tricky if name != folder, but usually close.
         // Actually, we should probably emit folder in the event or invalidate all?
