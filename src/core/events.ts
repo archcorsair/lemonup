@@ -17,4 +17,7 @@ export type AddonManagerEvents = {
   "addon:remove:complete": [name: string];
   "install:folder_ownership": [parentFolder: string, ownedFolders: string[]];
   error: [context: string, message: string];
+  "autocheck:start": [total: number];
+  "autocheck:progress": [current: number, total: number, addon: string];
+  "autocheck:complete": [updatesFound: number];
 };
