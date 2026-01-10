@@ -25,8 +25,11 @@ describe("InstallWagoCommand", () => {
 	let dbManager: DatabaseManager;
 	let context: CommandContext;
 	let emittedEvents: Array<{ event: string; args: unknown[] }>;
+	let originalEnvKey: string | undefined;
 
 	beforeEach(() => {
+		originalEnvKey = process.env.WAGO_API_KEY;
+		delete process.env.WAGO_API_KEY;
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lemonup-wago-test-"));
 		configDir = path.join(tempDir, "config");
 		destDir = path.join(tempDir, "addons");
@@ -48,6 +51,11 @@ describe("InstallWagoCommand", () => {
 	});
 
 	afterEach(() => {
+		if (originalEnvKey !== undefined) {
+			process.env.WAGO_API_KEY = originalEnvKey;
+		} else {
+			delete process.env.WAGO_API_KEY;
+		}
 		mock.restore();
 		dbManager.close();
 		fs.rmSync(tempDir, { recursive: true, force: true });

@@ -7,13 +7,21 @@ import { ConfigManager } from "@/core/config";
 describe("ConfigManager - Wago API Key", () => {
 	let tempDir: string;
 	let configManager: ConfigManager;
+	let originalEnvKey: string | undefined;
 
 	beforeEach(() => {
+		originalEnvKey = process.env.WAGO_API_KEY;
+		delete process.env.WAGO_API_KEY;
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lemonup-config-test-"));
 		configManager = new ConfigManager({ cwd: tempDir });
 	});
 
 	afterEach(() => {
+		if (originalEnvKey !== undefined) {
+			process.env.WAGO_API_KEY = originalEnvKey;
+		} else {
+			delete process.env.WAGO_API_KEY;
+		}
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 

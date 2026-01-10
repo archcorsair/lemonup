@@ -7,6 +7,7 @@ import { useTheme } from "@/tui/hooks/useTheme";
 interface WagoResultRowProps {
   addon: WagoAddonSummary;
   isSelected: boolean;
+  isInstalled: boolean;
 }
 
 function formatDownloads(count: number | undefined): string {
@@ -24,18 +25,18 @@ function truncate(str: string, max: number): string {
 export const WagoResultRow: React.FC<WagoResultRowProps> = ({
   addon,
   isSelected,
+  isInstalled,
 }) => {
   const { theme } = useTheme();
 
-  const version =
-    addon.releases?.stable?.label ??
-    addon.releases?.beta?.label ??
-    addon.releases?.alpha?.label ??
-    "-";
-
   const author = addon.owner ?? addon.authors?.[0] ?? "-";
   const downloads = formatDownloads(addon.download_count);
-  const summary = truncate(addon.summary, 40);
+
+  const nameColor = isSelected
+    ? theme.highlight
+    : isInstalled
+      ? theme.success
+      : undefined;
 
   return (
     <Box>
@@ -45,40 +46,30 @@ export const WagoResultRow: React.FC<WagoResultRowProps> = ({
         </Color>
       </Box>
 
-      {/* Name */}
-      <Box width={24} flexShrink={0}>
-        <Color styles={isSelected ? theme.highlight : undefined}>
+      <Box width={30} flexShrink={0}>
+        <Color styles={nameColor}>
           <Text bold={isSelected} wrap="truncate-end">
+            {isInstalled ? "✔ " : ""}
             {addon.display_name}
           </Text>
         </Color>
       </Box>
 
-      {/* Author */}
       <Box width={14} flexShrink={0}>
         <Color styles={theme.muted}>
           <Text wrap="truncate-end">{truncate(author, 12)}</Text>
         </Color>
       </Box>
 
-      {/* Downloads */}
       <Box width={8} flexShrink={0} justifyContent="flex-end">
         <Color styles={theme.version}>
           <Text>{downloads}</Text>
         </Color>
       </Box>
 
-      {/* Version */}
-      <Box width={10} flexShrink={0} justifyContent="flex-end">
-        <Color styles={theme.version}>
-          <Text>{truncate(version, 8)}</Text>
-        </Color>
-      </Box>
-
-      {/* Summary snippet */}
-      <Box flexGrow={1} marginLeft={2}>
+      <Box flexGrow={1} marginLeft={2} minWidth={0}>
         <Color styles={theme.muted}>
-          <Text wrap="truncate-end">{summary}</Text>
+          <Text wrap="truncate-end">{addon.summary}</Text>
         </Color>
       </Box>
     </Box>

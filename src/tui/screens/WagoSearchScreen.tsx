@@ -4,7 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { useTerminalSize, VirtualList } from "ink-virtual-list";
 import type React from "react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { Config } from "@/core/config";
 import type { AddonManager } from "@/core/manager";
 import type { WagoAddonSummary, WagoStability } from "@/core/wago";
@@ -59,6 +59,12 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
   const [mode, setMode] = useState<Mode>("search");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
+  const [isSearching, setIsSearching] = useState(true);
+  const [sortConfig, setSortConfig] = useState<{
+    key: "name" | "author" | "downloads";
+    direction: "asc" | "desc";
+  }>({ key: "downloads", direction: "desc" });
+
   const [filterFocus, setFilterFocus] = useState<"gameVersion" | "stability">(
     "gameVersion",
   );
@@ -89,12 +95,51 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
     setStability,
   } = useWagoSearch({ apiKey: config.wagoApiKey });
 
+  const sortedResults = useMemo(() => {
+    return [...results].sort((a, b) => {
+      let res = 0;
+      switch (sortConfig.key) {
+        case "name":
+          res = a.display_name.localeCompare(b.display_name);
+          break;
+        case "author": {
+          const authA = a.owner ?? a.authors?.[0] ?? "";
+          const authB = b.owner ?? b.authors?.[0] ?? "";
+          res = authA.localeCompare(authB);
+          break;
+        }
+        case "downloads":
+          res = (a.download_count ?? 0) - (b.download_count ?? 0);
+          break;
+      }
+      return sortConfig.direction === "asc" ? res : -res;
+    });
+  }, [results, sortConfig]);
+
   const listHeight = Math.max(
     1,
     terminalRows - WAGO_SEARCH_RESERVED - (showFilters ? 2 : 0),
   );
 
   const hasApiKey = Boolean(config.wagoApiKey);
+
+  const isInstalled = useCallback(
+    (addon: WagoAddonSummary) => {
+      // Check by Wago URL ID
+      const wagoUrl = `https://addons.wago.io/addons/${addon.id}`;
+      if (addonManager.isAlreadyInstalled(wagoUrl)) return true;
+
+      // Fallback: Check by Name (Fuzzy/Exact)
+      const installed = addonManager.getAllAddons();
+      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+      const target = normalize(addon.display_name);
+
+      return installed.some(
+        (a) => normalize(a.name) === target || normalize(a.folder) === target,
+      );
+    },
+    [addonManager],
+  );
 
   const doInstall = useCallback(
     async (addon: WagoAddonSummary, installStability: WagoStability) => {
@@ -130,8 +175,7 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
   const handleInstall = useCallback(
     (addon: WagoAddonSummary, installStability: WagoStability) => {
       // Check if addon is already installed
-      const isInstalled = addonManager.isAlreadyInstalled(addon.display_name);
-      if (isInstalled) {
+      if (isInstalled(addon)) {
         setPendingInstall({ addon, stability: installStability });
         setMode("confirm-reinstall");
         return;
@@ -139,7 +183,7 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
 
       doInstall(addon, installStability);
     },
-    [addonManager, doInstall],
+    [doInstall, isInstalled],
   );
 
   useInput((input, key) => {
@@ -248,52 +292,98 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
     }
 
     // Handle search mode
-    if (key.escape) {
-      flashKey("esc");
-      onBack();
-      return;
-    }
-
-    if (input === "f") {
-      flashKey("f");
-      setShowFilters(true);
-      return;
-    }
-
-    if (key.upArrow || input === "k") {
-      flashKey("k");
-      setSelectedIndex((i) => Math.max(0, i - 1));
-      return;
-    }
-
-    if (key.downArrow || input === "j") {
-      flashKey("j");
-      setSelectedIndex((i) => Math.min(results.length - 1, i + 1));
-      return;
-    }
-
-    if (key.return && results[selectedIndex]) {
-      flashKey("enter");
-      const addon = results[selectedIndex];
-      if (addon) {
-        setSelectedAddon(addon);
-        setMode("details");
+    if (mode === "search") {
+      if (isSearching) {
+        // Edit Mode
+        if (key.escape || key.return) {
+          flashKey(key.escape ? "esc" : "enter");
+          setIsSearching(false);
+          return;
+        }
+        if (key.upArrow || key.downArrow) {
+          flashKey(key.upArrow ? "up" : "down");
+          setIsSearching(false);
+          if (key.upArrow) setSelectedIndex((i) => Math.max(0, i - 1));
+          if (key.downArrow)
+            setSelectedIndex((i) => Math.min(sortedResults.length - 1, i + 1));
+          return;
+        }
+        return;
       }
-      return;
-    }
 
-    if (input === "i" && results[selectedIndex]) {
-      flashKey("i");
-      const addon = results[selectedIndex];
-      if (addon) {
-        handleInstall(addon, stability);
+      // Nav Mode
+      if (input === "/") {
+        flashKey("/");
+        setIsSearching(true);
+        return;
       }
-      return;
+
+      if (key.escape) {
+        flashKey("esc");
+        onBack();
+        return;
+      }
+
+      // Sorting
+      if (["1", "2", "3"].includes(input)) {
+        const map: Record<string, "name" | "author" | "downloads"> = {
+          "1": "name",
+          "2": "author",
+          "3": "downloads",
+        };
+        const k = map[input];
+        if (k) {
+          flashKey(input);
+          setSortConfig((prev) => ({
+            key: k,
+            direction:
+              prev.key === k && prev.direction === "asc" ? "desc" : "asc",
+          }));
+        }
+        return;
+      }
+
+      if (input === "f") {
+        flashKey("f");
+        setShowFilters(true);
+        return;
+      }
+
+      if (key.upArrow || input === "k") {
+        flashKey("k");
+        setSelectedIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+
+      if (key.downArrow || input === "j") {
+        flashKey("j");
+        setSelectedIndex((i) => Math.min(sortedResults.length - 1, i + 1));
+        return;
+      }
+
+      if (key.return && sortedResults[selectedIndex]) {
+        flashKey("enter");
+        const addon = sortedResults[selectedIndex];
+        if (addon) {
+          setSelectedAddon(addon);
+          setMode("details");
+        }
+        return;
+      }
+
+      if (input === "i" && sortedResults[selectedIndex]) {
+        flashKey("i");
+        const addon = sortedResults[selectedIndex];
+        if (addon) {
+          handleInstall(addon, stability);
+        }
+        return;
+      }
     }
   });
 
   // Reset selection when results change
-  if (selectedIndex >= results.length && results.length > 0) {
+  if (selectedIndex >= sortedResults.length && sortedResults.length > 0) {
     setSelectedIndex(0);
   }
 
@@ -340,12 +430,20 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
           value={query}
           onChange={setQuery}
           placeholder="type to search..."
+          focus={mode === "search" && !showFilters && isSearching}
         />
         {isLoading && (
           <Box marginLeft={2}>
             <Color styles={theme.busy}>
               {/* @ts-expect-error: Spinner types mismatch */}
               <Spinner type="dots" />
+            </Color>
+          </Box>
+        )}
+        {!isSearching && !showFilters && mode === "search" && (
+          <Box marginLeft={2}>
+            <Color styles={theme.muted}>
+              <Text>Press / to search</Text>
             </Color>
           </Box>
         )}
@@ -395,27 +493,43 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
       )}
 
       {/* Column headers */}
-      {results.length > 0 && (
+      {sortedResults.length > 0 && (
         <Box paddingX={1}>
           <Box width={2} />
-          <Box width={24}>
+          <Box width={30}>
             <Color styles={theme.muted}>
-              <Text>Name</Text>
+              <Text bold={sortConfig.key === "name"}>
+                Name{" "}
+                {sortConfig.key === "name"
+                  ? sortConfig.direction === "asc"
+                    ? "▲"
+                    : "▼"
+                  : ""}
+              </Text>
             </Color>
           </Box>
           <Box width={14}>
             <Color styles={theme.muted}>
-              <Text>Author</Text>
+              <Text bold={sortConfig.key === "author"}>
+                Author{" "}
+                {sortConfig.key === "author"
+                  ? sortConfig.direction === "asc"
+                    ? "▲"
+                    : "▼"
+                  : ""}
+              </Text>
             </Color>
           </Box>
           <Box width={8} justifyContent="flex-end">
             <Color styles={theme.muted}>
-              <Text>DLs</Text>
-            </Color>
-          </Box>
-          <Box width={10} justifyContent="flex-end">
-            <Color styles={theme.muted}>
-              <Text>Version</Text>
+              <Text bold={sortConfig.key === "downloads"}>
+                DLs{" "}
+                {sortConfig.key === "downloads"
+                  ? sortConfig.direction === "asc"
+                    ? "▲"
+                    : "▼"
+                  : ""}
+              </Text>
             </Color>
           </Box>
           <Box marginLeft={2}>
@@ -427,14 +541,18 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
       )}
 
       {/* Results list */}
-      {results.length > 0 ? (
+      {sortedResults.length > 0 ? (
         <VirtualList
-          items={results}
+          items={sortedResults}
           selectedIndex={selectedIndex}
           height={listHeight}
           keyExtractor={(item) => item.id}
           renderItem={({ item, index }) => (
-            <WagoResultRow addon={item} isSelected={index === selectedIndex} />
+            <WagoResultRow
+              addon={item}
+              isSelected={index === selectedIndex}
+              isInstalled={isInstalled(item)}
+            />
           )}
         />
       ) : query && !isLoading && !error ? (
@@ -573,13 +691,21 @@ export const WagoSearchScreen: React.FC<WagoSearchScreenProps> = ({
                         { key: "enter", label: "install" },
                         { key: "esc", label: "back" },
                       ]
-                    : [
-                        { key: "j/k", label: "nav" },
-                        { key: "enter", label: "details" },
-                        { key: "i", label: "install" },
-                        { key: "f", label: "filters" },
-                        { key: "esc", label: "back" },
-                      ]
+                    : isSearching
+                      ? [
+                          { key: "esc", label: "stop editing" },
+                          { key: "enter", label: "stop editing" },
+                          { key: "↑/↓", label: "nav" },
+                        ]
+                      : [
+                          { key: "/", label: "search" },
+                          { key: "j/k", label: "nav" },
+                          { key: "enter", label: "details" },
+                          { key: "i", label: "install" },
+                          { key: "f", label: "filters" },
+                          { key: "1-3", label: "sort" },
+                          { key: "esc", label: "back" },
+                        ]
         }
       />
     </Box>

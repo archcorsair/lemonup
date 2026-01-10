@@ -1,11 +1,5 @@
-import { AsyncDebouncer } from "@tanstack/pacer";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
 import {
   searchAddons as defaultSearchAddons,
   type WagoAddonSummary,
@@ -41,92 +35,87 @@ interface UseWagoSearchReturn {
   refetch: () => void;
 }
 
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
 export function useWagoSearch(
   options: UseWagoSearchOptions,
 ): UseWagoSearchReturn {
   const { debounceMs = 400, apiKey, searchFn = defaultSearchAddons } = options;
 
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<WagoAddonSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [gameVersion, setGameVersion] = useState<WagoGameVersion>("retail");
   const [stability, setStability] = useState<WagoStability>("stable");
 
-  // Create AsyncDebouncer instance with TanStack Pacer
-  const debouncer = useMemo(
-    () =>
-      new AsyncDebouncer(
-        async (
-          searchQuery: string,
-          version: WagoGameVersion,
-          stab: WagoStability,
-          key: string | undefined,
-        ) => {
-          if (!key) {
-            setError("Wago API key not configured");
-            setResults([]);
-            return null;
-          }
+  const debouncedQuery = useDebounce(query, debounceMs);
 
-          if (!searchQuery.trim()) {
-            setResults([]);
-            setError(null);
-            return null;
-          }
+  const {
+    data: results = [],
+    isFetching,
+    error: queryError,
+    refetch: queryRefetch,
+  } = useQuery({
+    queryKey: ["wago", "search", debouncedQuery, gameVersion, stability],
+    queryFn: async () => {
+      if (!apiKey) {
+        throw new Error("Wago API key not configured");
+      }
+      if (!debouncedQuery.trim()) {
+        return [];
+      }
 
-          setError(null);
+      const response = await searchFn(
+        debouncedQuery,
+        gameVersion,
+        apiKey,
+        stability,
+      );
 
-          const response = await searchFn(searchQuery, version, key, stab);
+      if (!response) {
+        throw new Error("Search failed");
+      }
 
-          if (response) {
-            // Map API response to WagoAddonSummary with required releases field
-            const mappedResults = response.data.map((addon) => ({
-              ...addon,
-              releases: addon.releases ?? { stable: undefined },
-            })) as WagoAddonSummary[];
-            setResults(mappedResults);
-            return mappedResults;
-          }
-
-          setError("Search failed");
-          setResults([]);
-          return null;
-        },
-        {
-          wait: debounceMs,
-          onError: (err) => {
-            setError(err instanceof Error ? err.message : "Search failed");
-            setResults([]);
-          },
-        },
-      ),
-    [debounceMs, searchFn],
-  );
-
-  // Subscribe to store state changes for loading indicator
-  const debouncerState = useSyncExternalStore(
-    (callback) => debouncer.store.subscribe(callback),
-    () => debouncer.store.state,
-  );
-
-  const isLoading = debouncerState.isExecuting || debouncerState.isPending;
-
-  // Trigger search when query or filters change
-  useEffect(() => {
-    debouncer.maybeExecute(query, gameVersion, stability, apiKey);
-  }, [query, gameVersion, stability, apiKey, debouncer]);
+      return response.data.map((addon) => ({
+        ...addon,
+        releases: addon.releases ?? { stable: undefined },
+      })) as WagoAddonSummary[];
+    },
+    enabled: !!debouncedQuery.trim() && !!apiKey,
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  });
 
   const refetch = useCallback(() => {
-    if (query.trim()) {
-      debouncer.maybeExecute(query, gameVersion, stability, apiKey);
-    }
-  }, [query, gameVersion, stability, apiKey, debouncer]);
+    queryRefetch();
+  }, [queryRefetch]);
+
+  const finalResults = !debouncedQuery.trim() ? [] : results;
+
+  let error: string | null = null;
+  if (!apiKey) {
+    if (query.trim()) error = "Wago API key not configured";
+  } else if (queryError) {
+    error = queryError instanceof Error ? queryError.message : "Search failed";
+  }
 
   return {
     query,
     setQuery,
-    results,
-    isLoading,
+    results: finalResults,
+    isLoading: isFetching,
     error,
     gameVersion,
     setGameVersion,
