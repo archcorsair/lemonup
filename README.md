@@ -25,6 +25,7 @@ way to handle your addons without leaving the terminal.
 | 📋 **Classic / Era** (Planned) | ✅ **TukUI** (ElvUI)     |
 | 📋 **Cata** (Planned)          | ✅ **WoWInterface**      |
 |                                | ✅ **Wago.io**           |
+|                                | 📋 **WeakAuras** (Planned) |
 
 ### Supported Architectures
 
@@ -37,7 +38,7 @@ way to handle your addons without leaving the terminal.
 - **Interactive TUI:** A beautiful, terminal-native user interface with fluid
   animations and responsive layout.
 - **Multi-Source Support:** Seamlessly install and update addons directly
-  from **GitHub**, **TukUI**, and **WoWInterface**.
+  from **GitHub**, **TukUI**, **WoWInterface**, and **Wago.io**.
 - **Smart Updates & Dependencies:** Git-based version tracking ensures
   pinpoint accuracy, while robust library handling keeps your dependencies in
   check.
@@ -45,6 +46,9 @@ way to handle your addons without leaving the terminal.
   first-run wizard to get you started in seconds.
 - **⌨️ Keyboard Driven:** Full **Vim-style** navigation (`h/j/k/l`) and
   intuitive shortcuts for all actions.
+- **Wago.io Integration:** Bring your own API key to search and install addons
+  directly from Wago.io within the app.
+- **WeakAuras Management:** Coming soon.
 
 ## 📦 Install
 
