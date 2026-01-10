@@ -58,36 +58,11 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     Record<string, RepoStatus>
   >({});
 
-  // Track when each addon started checking (for minimum display duration)
-  const [checkStartTimes, setCheckStartTimes] = useState<
-    Record<string, number>
-  >({});
-  const MIN_CHECK_DISPLAY_MS = 1000;
+  // Removed checkStartTimes and MIN_CHECK_DISPLAY_MS
 
-  // Force re-render when minimum display time elapses
-  useEffect(() => {
-    const entries = Object.entries(checkStartTimes);
-    if (entries.length === 0) return;
-
-    const now = Date.now();
-    const timeouts: NodeJS.Timeout[] = [];
-
-    for (const [folder, startTime] of entries) {
-      const remaining = startTime + MIN_CHECK_DISPLAY_MS - now;
-      if (remaining > 0) {
-        const timeout = setTimeout(() => {
-          setCheckStartTimes((prev) => {
-            const next = { ...prev };
-            delete next[folder];
-            return next;
-          });
-        }, remaining);
-        timeouts.push(timeout);
-      }
-    }
-
-    return () => timeouts.forEach(clearTimeout);
-  }, [checkStartTimes]);
+  // Confirmations
+  // Removed: checkStartTimes / flicker mitigation logic no longer needed with passive mode.
+  // The UI simply reflects DB state.
 
   // Confirmations
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -218,6 +193,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     queries: visibleAddons.map((item) => ({
       queryKey: ["addon", item.record.folder],
       queryFn: async () => {
+        // Pure passive read. No network requests.
         const freshAddon = addonManager.getAddon(item.record.folder);
         if (!freshAddon)
           return {
@@ -225,45 +201,52 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             remoteVersion: "",
             error: "Addon not found in DB",
             checkedVersion: null,
+            cached: true,
           };
 
-        const res = await addonManager.checkUpdate(freshAddon);
-        return { ...res, checkedVersion: freshAddon.version };
+        // We manually construct the status object based on DB state
+        const config = addonManager.getConfig();
+        const lastChecked = freshAddon.last_checked
+          ? new Date(freshAddon.last_checked).getTime()
+          : 0;
+        const isStale = Date.now() - lastChecked > config.checkInterval;
+
+        let updateAvailable = false;
+        if (freshAddon.remote_version) {
+          if (freshAddon.type === "github") {
+            const localHash = freshAddon.git_commit || freshAddon.version;
+            if (!localHash) {
+              updateAvailable = true;
+            } else {
+              updateAvailable = localHash !== freshAddon.remote_version;
+              if (
+                freshAddon.remote_version.startsWith(localHash) ||
+                localHash.startsWith(freshAddon.remote_version)
+              ) {
+                updateAvailable = false;
+              }
+            }
+          } else {
+            updateAvailable = freshAddon.version !== freshAddon.remote_version;
+          }
+        }
+
+        return {
+          updateAvailable,
+          remoteVersion: freshAddon.remote_version || "",
+          checkedVersion: freshAddon.version,
+          cached: true, // Always cached in passive mode
+          isStale,
+        };
       },
-      staleTime: config.checkInterval,
+      // Refetch when window focuses or network reconnects? Maybe.
+      // But mainly we rely on invalidation from events.
+      staleTime: Infinity,
     })),
   });
 
   // Track check start times outside of render to avoid setState during render
-  useEffect(() => {
-    const now = Date.now();
-    for (let i = 0; i < visibleAddons.length; i++) {
-      const item = visibleAddons[i];
-      if (!item) continue;
-      const folder = item.record.folder;
-      const query = queries[i];
-      if (!query) continue;
-
-      const isFetching = query.isLoading || query.isFetching;
-      const hasStartTime = checkStartTimes[folder] !== undefined;
-
-      if (isFetching && !hasStartTime) {
-        // Query started fetching, record start time
-        setCheckStartTimes((prev) => ({ ...prev, [folder]: now }));
-      } else if (!isFetching && hasStartTime) {
-        // Query stopped fetching, clear start time after min display period
-        const startTime = checkStartTimes[folder] ?? 0;
-        const elapsed = now - startTime;
-        if (elapsed >= MIN_CHECK_DISPLAY_MS) {
-          setCheckStartTimes((prev) => {
-            const next = { ...prev };
-            delete next[folder];
-            return next;
-          });
-        }
-      }
-    }
-  }, [queries, visibleAddons, checkStartTimes]);
+  // REMOVED: No longer tracking start times for passive mode.
 
   useAddonManagerEvent(
     addonManager,
@@ -271,6 +254,70 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     useCallback((folder) => {
       setUpdateProgress((prev) => ({ ...prev, [folder]: "checking" }));
     }, []),
+  );
+
+  useAddonManagerEvent(
+    addonManager,
+    "autocheck:progress",
+    useCallback(
+      (_, __, _addonName) => {
+        // Invalidate query to refresh UI when background check updates an addon
+        // Finding folder by name might be tricky if name != folder, but usually close.
+        // Actually, we should probably emit folder in the event or invalidate all?
+        // Invalidating all "addon" queries is safest and cheap since they are local DB reads.
+        queryClient.invalidateQueries({ queryKey: ["addon"] });
+      },
+      [queryClient],
+    ),
+  );
+
+  useAddonManagerEvent(
+    addonManager,
+    "addon:update-check:complete",
+    useCallback(
+      (folder) => {
+        // Also invalidate specific folder on manual check complete
+        setUpdateProgress((prev) => {
+          const next = { ...prev };
+          delete next[folder];
+          return next;
+        });
+        queryClient.invalidateQueries({ queryKey: ["addon", folder] });
+      },
+      [queryClient],
+    ),
+  );
+
+  useAddonManagerEvent(
+    addonManager,
+    "autocheck:progress",
+    useCallback(
+      (_, __, addonName) => {
+        // Invalidate query to refresh UI when background check updates an addon
+        // Finding folder by name might be tricky if name != folder, but usually close.
+        // Actually, we should probably emit folder in the event or invalidate all?
+        // Invalidating all "addon" queries is safest and cheap since they are local DB reads.
+        queryClient.invalidateQueries({ queryKey: ["addon"] });
+      },
+      [queryClient],
+    ),
+  );
+
+  useAddonManagerEvent(
+    addonManager,
+    "addon:update-check:complete",
+    useCallback(
+      (folder) => {
+        // Also invalidate specific folder on manual check complete
+        setUpdateProgress((prev) => {
+          const next = { ...prev };
+          delete next[folder];
+          return next;
+        });
+        queryClient.invalidateQueries({ queryKey: ["addon", folder] });
+      },
+      [queryClient],
+    ),
   );
 
   useAddonManagerEvent(
@@ -828,7 +875,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
             const query = queries[idx];
             if (!query) return null;
-            let { data } = query;
+            const { data } = query;
             const { isLoading, isFetching, error } = query;
 
             const isUpdating =
@@ -838,30 +885,13 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             let status: RepoStatus = "idle";
             let result: UpdateResult | undefined;
 
-            // Track when checking starts for minimum display duration
-            const checkStartTime = checkStartTimes[addon.folder];
-            const now = Date.now();
-            const isInMinDisplayPeriod =
-              checkStartTime && now - checkStartTime < MIN_CHECK_DISPLAY_MS;
-
             // Synchronous check for cached status to avoid flicker
-            const cachedStatus = addonManager.getCachedUpdateStatus(addon);
+            // const cachedStatus = addonManager.getCachedUpdateStatus(addon);
 
             if (isUpdating) {
               status = updateProgress[addon.folder] || "checking";
-            } else if (cachedStatus) {
-              // If we have a synchronous cache hit, use it immediately
-              // This bypasses the isLoading/isFetching flicker from React Query
-              status = "done";
-              data = {
-                ...cachedStatus,
-                error: undefined,
-                checkedVersion: addon.version,
-              };
             } else if (isLoading || isFetching) {
-              status = "checking";
-            } else if (isInMinDisplayPeriod && !data?.cached) {
-              // Keep showing "checking" until minimum time passes
+              // Should be fast since it's local DB read
               status = "checking";
             } else {
               if (error) status = "error";
