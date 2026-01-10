@@ -58,12 +58,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     Record<string, RepoStatus>
   >({});
 
-  // Removed checkStartTimes and MIN_CHECK_DISPLAY_MS
-
-  // Confirmations
-  // Removed: checkStartTimes / flicker mitigation logic no longer needed with passive mode.
-  // The UI simply reflects DB state.
-
   // Confirmations
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<string[]>([]);
