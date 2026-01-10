@@ -229,9 +229,10 @@ describe("Commands", () => {
 				interface: null,
 				url: null,
 				install_date: new Date().toISOString(),
-				last_updated: new Date().toISOString(),
-			});
-
+				    last_updated: new Date().toISOString(),
+				    last_checked: null,
+				    remote_version: null,
+				   });
 			const command = new RemoveAddonCommand(dbManager, configManager, folder, false);
 			const result = await command.execute(mockContext);
 

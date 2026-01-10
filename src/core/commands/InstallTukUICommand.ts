@@ -83,6 +83,8 @@ export class InstallTukUICommand implements Command<boolean> {
         author: details?.author || null,
         ownedFolders: this.subFolders,
         last_updated: new Date().toISOString(),
+        last_checked: new Date().toISOString(),
+        remote_version: details?.version || "unknown",
         git_commit: null,
       });
 

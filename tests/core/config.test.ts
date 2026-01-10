@@ -104,4 +104,17 @@ describe("ConfigManager", () => {
 		// Invalid should throw or be ignored (depending on Zod implementation details, conf might just throw)
 		// We'll trust Zod validation here but verify the success path primarily.
 	});
+
+	test("should persist lastGlobalCheck", () => {
+		const manager = new ConfigManager({ cwd: TMP_DIR });
+		manager.createDefaultConfig();
+
+		// Default
+		expect(manager.get().lastGlobalCheck).toBe(0);
+
+		// Update
+		const now = Date.now();
+		manager.set("lastGlobalCheck", now);
+		expect(manager.get().lastGlobalCheck).toBe(now);
+	});
 });

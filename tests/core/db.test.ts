@@ -48,6 +48,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(newAddon);
@@ -84,6 +86,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 		dbManager.addAddon(newAddon);
 
@@ -116,6 +120,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 		dbManager.addAddon(newAddon);
 
@@ -144,6 +150,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: "",
 			last_updated: "",
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(addon);
@@ -172,6 +180,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(addon);
@@ -199,6 +209,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: ["LibCompress", "LibSerialize"],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(addon);
@@ -228,6 +240,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(addon);
@@ -265,6 +279,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		const weakAuras: AddonRecord = {
@@ -285,6 +301,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		const plater: AddonRecord = {
@@ -305,6 +323,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(ace3);
@@ -338,6 +358,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		const weakAuras: AddonRecord = {
@@ -358,6 +380,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		const plater: AddonRecord = {
@@ -378,6 +402,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(ace3);
@@ -408,6 +434,8 @@ describe("DatabaseManager", () => {
 			embeddedLibs: [],
 			install_date: new Date().toISOString(),
 			last_updated: new Date().toISOString(),
+			last_checked: null,
+			remote_version: null,
 		};
 
 		dbManager.addAddon(elvui);

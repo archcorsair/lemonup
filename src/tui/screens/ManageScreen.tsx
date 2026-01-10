@@ -192,6 +192,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             embeddedLibs: [],
             install_date: addon.install_date,
             last_updated: addon.last_updated,
+            last_checked: null,
+            remote_version: null,
           };
           result.push({
             record: childRecord,
@@ -826,7 +828,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
 
             const query = queries[idx];
             if (!query) return null;
-            const { data, isLoading, isFetching, error } = query;
+            let { data } = query;
+            const { isLoading, isFetching, error } = query;
 
             const isUpdating =
               updateMutation.isPending &&
@@ -841,11 +844,23 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             const isInMinDisplayPeriod =
               checkStartTime && now - checkStartTime < MIN_CHECK_DISPLAY_MS;
 
+            // Synchronous check for cached status to avoid flicker
+            const cachedStatus = addonManager.getCachedUpdateStatus(addon);
+
             if (isUpdating) {
               status = updateProgress[addon.folder] || "checking";
+            } else if (cachedStatus) {
+              // If we have a synchronous cache hit, use it immediately
+              // This bypasses the isLoading/isFetching flicker from React Query
+              status = "done";
+              data = {
+                ...cachedStatus,
+                error: undefined,
+                checkedVersion: addon.version,
+              };
             } else if (isLoading || isFetching) {
               status = "checking";
-            } else if (isInMinDisplayPeriod) {
+            } else if (isInMinDisplayPeriod && !data?.cached) {
               // Keep showing "checking" until minimum time passes
               status = "checking";
             } else {

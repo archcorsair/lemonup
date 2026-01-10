@@ -66,6 +66,7 @@ export const ConfigSchema = z.object({
     .string()
     .describe("Wago.io API key for addon downloads")
     .default(""),
+  lastGlobalCheck: z.number().default(0),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -108,6 +109,7 @@ export class ConfigManager {
         theme: { type: "string" },
         terminalProgress: { type: "boolean" },
         wagoApiKey: { type: "string" },
+        lastGlobalCheck: { type: "number" },
       } as const,
 
       cwd: options.cwd || path.join(os.homedir(), ".config", "lemonup"),
@@ -209,6 +211,7 @@ export class ConfigManager {
       theme: "dark",
       terminalProgress: true,
       wagoApiKey: "",
+      lastGlobalCheck: 0,
     };
     this.store.set(defaults);
   }

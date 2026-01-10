@@ -28,6 +28,8 @@ export const AddonRecordSchema = z.object({
   embeddedLibs: z.array(z.string()).default([]),
   install_date: z.string(),
   last_updated: z.string(),
+  last_checked: z.string().nullable().default(null),
+  remote_version: z.string().nullable().default(null),
 });
 
 export type AddonRecord = z.infer<typeof AddonRecordSchema>;
@@ -56,6 +58,8 @@ export class DatabaseManager {
     // Old schemas (V1/V2) had parent field - check for it and reset if found
     if (version === 0) {
       this.migrateToV1();
+    } else if (version === 1) {
+      this.migrateToV2();
     } else {
       // Check if this is old schema with parent column
       const hasParent = this.db
@@ -77,7 +81,7 @@ export class DatabaseManager {
   }
 
   private migrateToV1() {
-    logger.log("Database", "Migrating to Schema V1...");
+    logger.log("Database", "Initializing Schema V2 (Fresh Install)...");
 
     this.db.transaction(() => {
       this.db.run(`
@@ -99,7 +103,9 @@ export class DatabaseManager {
 					optional_deps TEXT NOT NULL DEFAULT '[]',
 					embedded_libs TEXT NOT NULL DEFAULT '[]',
 					install_date TEXT NOT NULL,
-					last_updated TEXT NOT NULL
+					last_updated TEXT NOT NULL,
+          last_checked TEXT,
+          remote_version TEXT
 				);
 			`);
 
@@ -107,10 +113,20 @@ export class DatabaseManager {
 				CREATE UNIQUE INDEX IF NOT EXISTS idx_addons_folder ON addons(folder);
 			`);
 
-      this.db.run("PRAGMA user_version = 1");
+      this.db.run("PRAGMA user_version = 2");
     })();
 
-    logger.log("Database", "Migration to Schema V1 complete");
+    logger.log("Database", "Schema V2 initialization complete");
+  }
+
+  private migrateToV2() {
+    logger.log("Database", "Migrating Schema V1 -> V2...");
+    this.db.transaction(() => {
+      this.db.run("ALTER TABLE addons ADD COLUMN last_checked TEXT");
+      this.db.run("ALTER TABLE addons ADD COLUMN remote_version TEXT");
+      this.db.run("PRAGMA user_version = 2");
+    })();
+    logger.log("Database", "Migration to Schema V2 complete");
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: SQLite query results have dynamic schema
@@ -124,6 +140,8 @@ export class DatabaseManager {
       requiredDeps: row.required_deps ? JSON.parse(row.required_deps) : [],
       optionalDeps: row.optional_deps ? JSON.parse(row.optional_deps) : [],
       embeddedLibs: row.embedded_libs ? JSON.parse(row.embedded_libs) : [],
+      last_checked: row.last_checked || null,
+      remote_version: row.remote_version || null,
     };
   }
 
@@ -150,13 +168,13 @@ export class DatabaseManager {
 				name, folder, owned_folders, kind, kind_override, flavor,
 				version, git_commit, author, interface, url, type,
 				required_deps, optional_deps, embedded_libs,
-				install_date, last_updated
+				install_date, last_updated, last_checked, remote_version
 			)
 			VALUES (
 				$name, $folder, $owned_folders, $kind, $kind_override, $flavor,
 				$version, $git_commit, $author, $interface, $url, $type,
 				$required_deps, $optional_deps, $embedded_libs,
-				$install_date, $last_updated
+				$install_date, $last_updated, $last_checked, $remote_version
 			)
 		`);
 
@@ -178,6 +196,8 @@ export class DatabaseManager {
       $embedded_libs: JSON.stringify(data.embeddedLibs),
       $install_date: data.install_date,
       $last_updated: data.last_updated,
+      $last_checked: data.last_checked,
+      $remote_version: data.remote_version,
     });
   }
 
@@ -196,6 +216,8 @@ export class DatabaseManager {
       requiredDeps: "required_deps",
       optionalDeps: "optional_deps",
       embeddedLibs: "embedded_libs",
+      last_checked: "last_checked",
+      remote_version: "remote_version",
     };
 
     const setClause = keys

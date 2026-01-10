@@ -227,21 +227,29 @@ const AppContent: React.FC<AppProps> = ({
 
   // Background auto-check for updates
   useEffect(() => {
-    if (!addonManager || !config?.autoCheckEnabled) {
+    if (!addonManager || !config?.autoCheckEnabled || !configManager) {
       setNextCheckTime(null);
       return;
     }
 
+    let timeoutId: NodeJS.Timeout;
+    let isActive = true;
+
     const scheduleNextCheck = (delayMs: number) => {
+      if (!isActive) return;
       setNextCheckTime(Date.now() + delayMs);
+      timeoutId = setTimeout(runCheckLoop, delayMs);
     };
 
-    const checkForUpdates = async () => {
+    const runCheckLoop = async () => {
+      // Re-read config to get latest interval/timestamp
+      const currentConfig = configManager.get();
       const addons = addonManager
         .getAllAddons()
         .filter((a) => a.type !== "manual");
+
       if (addons.length === 0) {
-        scheduleNextCheck(config.autoCheckInterval);
+        scheduleNextCheck(currentConfig.autoCheckInterval);
         return;
       }
 
@@ -254,6 +262,7 @@ const AppContent: React.FC<AppProps> = ({
 
       try {
         for (const addon of addons) {
+          if (!isActive) break;
           try {
             const result = await addonManager.checkUpdate(addon);
             if (result.updateAvailable) updateCount++;
@@ -263,48 +272,75 @@ const AppContent: React.FC<AppProps> = ({
           await progressBar.advance();
         }
 
-        await progressBar.complete();
+        if (isActive) {
+          await progressBar.complete();
 
-        if (updateCount > 0) {
-          setPendingUpdates(updateCount);
-          showToast(
-            `${updateCount} update${updateCount > 1 ? "s" : ""} available`,
-            5000,
-          );
+          if (updateCount > 0) {
+            setPendingUpdates(updateCount);
+            showToast(
+              `${updateCount} update${updateCount > 1 ? "s" : ""} available`,
+              5000,
+            );
+          }
+
+          // Update lastGlobalCheck timestamp
+          configManager.set("lastGlobalCheck", Date.now());
+          // Update local config state to reflect change
+          setConfig(configManager.get());
         }
       } finally {
-        // Ensure spinner shows for at least MIN_SPINNER_DURATION
-        const elapsed = Date.now() - startTime;
-        const remaining = MIN_SPINNER_DURATION - elapsed;
+        if (isActive) {
+          // Ensure spinner shows for at least MIN_SPINNER_DURATION
+          const elapsed = Date.now() - startTime;
+          const remaining = MIN_SPINNER_DURATION - elapsed;
 
-        if (remaining > 0) {
-          await new Promise((resolve) => setTimeout(resolve, remaining));
+          if (remaining > 0) {
+            await new Promise((resolve) => setTimeout(resolve, remaining));
+          }
+
+          setBackgroundChecking(false);
+          // Schedule next check
+          scheduleNextCheck(currentConfig.autoCheckInterval);
         }
-
-        setBackgroundChecking(false);
-        // Schedule next check
-        scheduleNextCheck(config.autoCheckInterval);
       }
     };
 
-    // Set initial next check time (5 seconds from now)
-    scheduleNextCheck(5000);
+    // Calculate initial delay on mount
+    const currentConfig = configManager.get();
+    const lastCheck = currentConfig.lastGlobalCheck || 0;
+    const now = Date.now();
+    // Use the prop value to satisfy linter dependency check
+    const interval = config.autoCheckInterval;
+    const timeSinceLast = now - lastCheck;
+    const MIN_STARTUP_DELAY = 5000;
 
-    // Initial check after a short delay (5 seconds)
-    const initialTimeout = setTimeout(checkForUpdates, 5000);
+    let initialDelay = MIN_STARTUP_DELAY;
 
-    // Recurring checks at the configured interval
-    const interval = setInterval(checkForUpdates, config.autoCheckInterval);
+    if (lastCheck > 0 && timeSinceLast < interval) {
+      // Not due yet. Wait remaining time.
+      const remaining = interval - timeSinceLast;
+      // If remaining is very small, enforce min startup delay?
+      // Or if user restarts 59m into 1h interval, wait 1m?
+      // Requirement: "user can circumvent... by closing... triggering global check"
+      // So we must NOT check immediately if not due.
+      // But we still want to wait 5s before doing *anything* to let app settle.
+      initialDelay = Math.max(MIN_STARTUP_DELAY, remaining);
+    }
+    // If overdue (or never checked), default to 5s startup delay.
+
+    scheduleNextCheck(initialDelay);
 
     return () => {
-      clearTimeout(initialTimeout);
-      clearInterval(interval);
+      isActive = false;
+      clearTimeout(timeoutId);
       setNextCheckTime(null);
     };
   }, [
     addonManager,
+    configManager,
     config?.autoCheckEnabled,
     config?.autoCheckInterval,
+    // config.lastGlobalCheck omitted to prevent loop when we update it
     setPendingUpdates,
     setBackgroundChecking,
     setNextCheckTime,
