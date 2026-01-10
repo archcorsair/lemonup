@@ -192,6 +192,8 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             embeddedLibs: [],
             install_date: addon.install_date,
             last_updated: addon.last_updated,
+            last_checked: null,
+            remote_version: null,
           };
           result.push({
             record: childRecord,
@@ -845,7 +847,7 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
               status = updateProgress[addon.folder] || "checking";
             } else if (isLoading || isFetching) {
               status = "checking";
-            } else if (isInMinDisplayPeriod) {
+            } else if (isInMinDisplayPeriod && !data?.cached) {
               // Keep showing "checking" until minimum time passes
               status = "checking";
             } else {

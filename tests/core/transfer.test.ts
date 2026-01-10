@@ -63,6 +63,8 @@ describe("exportAddons", () => {
         embeddedLibs: [],
         install_date: "2024-01-01",
         last_updated: "2024-01-01",
+        last_checked: null,
+        remote_version: null,
       },
     ];
 
@@ -97,6 +99,8 @@ describe("exportAddons", () => {
         embeddedLibs: [],
         install_date: "2024-01-01",
         last_updated: "2024-01-01",
+        last_checked: null,
+        remote_version: null,
       },
     ];
 
@@ -195,6 +199,8 @@ describe("analyzeImport", () => {
         embeddedLibs: [],
         install_date: "2024-01-01",
         last_updated: "2024-01-01",
+        last_checked: null,
+        remote_version: null,
       },
     ];
 

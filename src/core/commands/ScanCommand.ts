@@ -220,6 +220,8 @@ export class ScanCommand implements Command<number> {
             embeddedLibs: embeddedLibs,
             install_date: new Date().toISOString(),
             last_updated: new Date().toISOString(),
+            last_checked: null,
+            remote_version: null,
           });
           count++;
         }

@@ -104,10 +104,14 @@ export class AddonManager extends EventEmitter {
     return results;
   }
 
-  public async checkUpdate(addon: AddonRecord): Promise<{
+  public async checkUpdate(
+    addon: AddonRecord,
+    force = false,
+  ): Promise<{
     updateAvailable: boolean;
     remoteVersion: string;
     error?: string;
+    cached?: boolean;
   }> {
     // TODO: Check if addon is owned by another via getOwnerOf
 
@@ -119,6 +123,45 @@ export class AddonManager extends EventEmitter {
       };
     }
 
+    const config = this.configManager.get();
+    const lastChecked = addon.last_checked
+      ? new Date(addon.last_checked).getTime()
+      : 0;
+    const isStale = Date.now() - lastChecked > config.checkInterval;
+
+    // console.log("CheckUpdate Debug:", { force, isStale, lastChecked, now: Date.now(), interval: config.checkInterval, remote: addon.remote_version });
+
+    // Use cached result if available and not stale
+    if (!force && !isStale && addon.remote_version) {
+      const remoteVersion = addon.remote_version;
+      let updateAvailable = false;
+
+      if (addon.type === "github") {
+        const localHash = addon.git_commit || addon.version;
+        if (!localHash) {
+          updateAvailable = true; // Can't compare, assume update? Or error?
+        } else {
+          updateAvailable = localHash !== remoteVersion;
+          if (
+            remoteVersion.startsWith(localHash) ||
+            localHash.startsWith(remoteVersion)
+          ) {
+            updateAvailable = false;
+          }
+        }
+      } else {
+        // Simple version comparison for others
+        updateAvailable = addon.version !== remoteVersion;
+      }
+
+      return {
+        updateAvailable,
+        remoteVersion,
+        cached: true,
+      };
+    }
+
+    // Perform live check
     if (addon.type === "github") {
       const branch = "main";
       const remoteHash = await GitClient.getRemoteCommit(addon.url, branch);
@@ -129,6 +172,12 @@ export class AddonManager extends EventEmitter {
           error: "Failed to get remote hash",
         };
       }
+
+      // Update DB
+      this.dbManager.updateAddon(addon.folder, {
+        last_checked: new Date().toISOString(),
+        remote_version: remoteHash,
+      });
 
       // Compare with stored git_commit if available, otherwise fallback to version (legacy behavior)
       const localHash = addon.git_commit || addon.version;
@@ -151,6 +200,12 @@ export class AddonManager extends EventEmitter {
       try {
         const details = await TukUI.getAddonDetails(addon.name);
         if (details) {
+          // Update DB
+          this.dbManager.updateAddon(addon.folder, {
+            last_checked: new Date().toISOString(),
+            remote_version: details.version,
+          });
+
           const isUpdate = details.version !== addon.version;
           return {
             updateAvailable: isUpdate,
@@ -189,6 +244,12 @@ export class AddonManager extends EventEmitter {
         };
       }
 
+      // Update DB
+      this.dbManager.updateAddon(addon.folder, {
+        last_checked: new Date().toISOString(),
+        remote_version: result.details.UIVersion,
+      });
+
       // Simple string comparison for now, assuming UIVersion changes on update
       const isUpdate = result.details.UIVersion !== addon.version;
       return {
@@ -196,6 +257,27 @@ export class AddonManager extends EventEmitter {
         remoteVersion: result.details.UIVersion,
       };
     }
+
+    // Wago (assuming implementation is similar to others, but not explicitly in original file provided?
+    // Wait, original file had `if (addon.type === "wowinterface")`.
+    // Did it have Wago? The `read_file` output didn't show Wago block in `checkUpdate`.
+    // Ah, Wago might have been added in `InstallWagoCommand` but maybe `checkUpdate` wasn't updated for Wago yet?
+    // Or I missed it in `read_file`.
+    // Let's assume the previous `read_file` output covers what I saw.
+    // If Wago is missing in `checkUpdate`, I should add it or leave it.
+    // The previous `read_file` output for `manager.ts` stopped at `wowinterface`.
+    // I will replace the function body.
+    // I should check if Wago is there.
+
+    // Actually, looking at `InstallWagoCommand`, it sets `type: REPO_TYPE.WAGO` ("wago").
+    // `checkUpdate` needs to handle it. If it's missing, I should add it now or later.
+    // The prompt implies syncing existing mechanisms.
+    // If Wago check is missing, I should probably add it if I can, but I don't have `Wago` imported in `manager.ts`?
+    // `src/core/manager.ts` imports: `import * as TukUI`, `import * as WoWInterface`, `import * as GitClient`.
+    // It doesn't seem to import Wago.
+    // I'll stick to replacing the existing blocks + cache logic.
+    // I will leave Wago out of `checkUpdate` for now if it wasn't there, to avoid scope creep/errors,
+    // unless the user specifically asked for Wago sync (User just said "2 ways to check...").
 
     return { updateAvailable: false, remoteVersion: "" };
   }

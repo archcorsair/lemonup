@@ -100,6 +100,8 @@ describe("Multi-folder addon installation", () => {
       embeddedLibs: [],
       install_date: new Date().toISOString(),
       last_updated: new Date().toISOString(),
+      last_checked: null,
+      remote_version: null,
     });
 
     // Verify: parent addon should have owned folders
