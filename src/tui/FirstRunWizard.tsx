@@ -48,6 +48,7 @@ interface WizardState {
   backupWTF: boolean;
   backupRetention: number;
   importAddons: boolean; // Whether to import addons after wizard
+  wagoApiKey: string;
 }
 
 const expandPath = (p: string): string => {
@@ -626,6 +627,119 @@ const ImportStep: React.FC<{
   );
 };
 
+// Step: Wago API Key (Optional)
+const WagoKeyStep: React.FC<{
+  wagoApiKey: string;
+  onKeyChange: (key: string) => void;
+  isEditing: boolean;
+  envKeyDetected: boolean;
+  optionIndex: number;
+  theme: ReturnType<typeof useTheme>["theme"];
+}> = ({
+  wagoApiKey,
+  onKeyChange,
+  isEditing,
+  envKeyDetected,
+  optionIndex,
+  theme,
+}) => {
+  if (envKeyDetected) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Color styles={theme.heading}>
+          <Text bold>Wago.io API Key (Optional)</Text>
+        </Color>
+        <Box marginTop={1}>
+          <Color styles={theme.success}>
+            <Text>
+              ✓ API key detected from WAGO_API_KEY environment variable
+            </Text>
+          </Color>
+        </Box>
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>Press Enter to continue.</Text>
+          </Color>
+        </Box>
+      </Box>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Color styles={theme.heading}>
+        <Text bold>Wago.io API Key (Optional)</Text>
+      </Color>
+
+      <Box marginTop={1} flexDirection="column">
+        <Color styles={theme.muted}>
+          <Text>Wago.io requires an API key to search and install addons.</Text>
+        </Color>
+        <Box marginTop={1}>
+          <Color styles={theme.muted}>
+            <Text>Get your key at: </Text>
+          </Color>
+          <Color styles={theme.highlight}>
+            <Text bold>https://addons.wago.io/patreon</Text>
+          </Color>
+        </Box>
+      </Box>
+
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Color styles={optionIndex === 0 ? theme.selection : theme.muted}>
+            <Text>{optionIndex === 0 ? "› " : "  "}</Text>
+          </Color>
+          <Color
+            styles={optionIndex === 0 ? theme.highlight : theme.labelInactive}
+          >
+            <Text bold={optionIndex === 0}>Enter API key now</Text>
+          </Color>
+        </Box>
+        <Box>
+          <Color styles={optionIndex === 1 ? theme.selection : theme.muted}>
+            <Text>{optionIndex === 1 ? "› " : "  "}</Text>
+          </Color>
+          <Color
+            styles={optionIndex === 1 ? theme.highlight : theme.labelInactive}
+          >
+            <Text bold={optionIndex === 1}>Skip for now</Text>
+          </Color>
+        </Box>
+      </Box>
+
+      {isEditing && (
+        <Box marginTop={1} marginLeft={2} flexDirection="column">
+          <Box>
+            <Color styles={theme.brand}>
+              <Text bold>✎ </Text>
+            </Color>
+            <TextInput
+              value={wagoApiKey}
+              onChange={onKeyChange}
+              placeholder="Paste your Wago API key..."
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Color styles={theme.muted}>
+              <Text>(Press Enter to save, Esc to go back)</Text>
+            </Color>
+          </Box>
+        </Box>
+      )}
+
+      <Box marginTop={1}>
+        <Color styles={theme.muted}>
+          <Text>
+            You can also configure this later in Settings or set the
+            WAGO_API_KEY environment variable.
+          </Text>
+        </Color>
+      </Box>
+    </Box>
+  );
+};
+
 // Step 4: Addon Selection
 const AddonsStep: React.FC<{
   installElvUI: boolean;
@@ -776,12 +890,13 @@ const SettingsStep: React.FC<{
   );
 };
 
-// Step 6: Review
+// Step 7: Review
 const ReviewStep: React.FC<{
   state: WizardState;
   exportData: ExportFile | null;
+  envWagoKeyDetected: boolean;
   theme: ReturnType<typeof useTheme>["theme"];
-}> = ({ state, exportData, theme }) => {
+}> = ({ state, exportData, envWagoKeyDetected, theme }) => {
   const formatAutoInterval = (mins: number) => {
     if (mins < 60) return `${mins}m`;
     const hrs = Math.floor(mins / 60);
@@ -804,6 +919,14 @@ const ReviewStep: React.FC<{
     {
       label: "Import",
       value: state.importAddons ? `Yes (${importCount} addons)` : "No",
+    },
+    {
+      label: "Wago API Key",
+      value: envWagoKeyDetected
+        ? "From env var"
+        : state.wagoApiKey
+          ? "Configured"
+          : "Not set",
     },
     { label: "Install", value: addons.length > 0 ? addons.join(", ") : "None" },
     { label: "Max Downloads", value: `${state.maxConcurrent} concurrent` },
@@ -886,6 +1009,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     backupWTF: true,
     backupRetention: 5,
     importAddons: false,
+    wagoApiKey: "",
   }));
 
   // Import step state
@@ -910,6 +1034,11 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     "choose",
   );
   const [detectedPath, setDetectedPath] = useState<string>("NOT_CONFIGURED");
+
+  // Wago API key step state
+  const [wagoKeyOptionIndex, setWagoKeyOptionIndex] = useState(0); // 0 = Enter key, 1 = Skip
+  const [isEditingWagoKey, setIsEditingWagoKey] = useState(false);
+  const [envWagoKeyDetected, setEnvWagoKeyDetected] = useState(false);
 
   const updateWizardState = (updates: Partial<WizardState>) => {
     setWizardState((prev) => ({ ...prev, ...updates }));
@@ -940,6 +1069,15 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       }
     };
     checkExportFile();
+  }, []);
+
+  // Check for WAGO_API_KEY env var on mount
+  useEffect(() => {
+    const envKey = process.env.WAGO_API_KEY;
+    if (envKey) {
+      setEnvWagoKeyDetected(true);
+      setWizardState((prev) => ({ ...prev, wagoApiKey: envKey }));
+    }
   }, []);
 
   const handleDeepScan = async () => {
@@ -1014,6 +1152,11 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
       configManager.set("backupWTF", wizardState.backupWTF);
       configManager.set("backupRetention", wizardState.backupRetention);
 
+      // Save Wago API key if provided (and not from env var)
+      if (wizardState.wagoApiKey && !envWagoKeyDetected) {
+        configManager.set("wagoApiKey", wizardState.wagoApiKey);
+      }
+
       // Queue TukUI addons if selected
       const tukuiAddons: ExportedAddon[] = [];
       if (wizardState.installElvUI) {
@@ -1054,7 +1197,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
     }
   };
 
-  const TOTAL_STEPS = 6;
+  const TOTAL_STEPS = 7;
 
   // Navigation helpers that use ink-stepper's StepContext
   // Note: Local step state is synced via captureContext on re-render
@@ -1339,7 +1482,47 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 4: // Addons
+      case 4: // Wago API Key
+        // If env key detected, just proceed on Enter
+        if (envWagoKeyDetected) {
+          if (key.return) {
+            flashKey("enter");
+            goNext();
+          }
+          break;
+        }
+
+        // If editing, handle text input
+        if (isEditingWagoKey) {
+          if (key.return) {
+            flashKey("enter");
+            setIsEditingWagoKey(false);
+            goNext();
+          } else if (key.escape) {
+            flashKey("esc");
+            setIsEditingWagoKey(false);
+          }
+          return; // TextInput handles other keys
+        }
+
+        // Arrow navigation
+        if (key.upArrow || key.downArrow || input === "j" || input === "k") {
+          flashKey("↑/↓");
+          setWagoKeyOptionIndex((prev) => (prev === 0 ? 1 : 0));
+        }
+
+        // Enter to select
+        if (key.return) {
+          flashKey("enter");
+          if (wagoKeyOptionIndex === 0) {
+            setIsEditingWagoKey(true);
+          } else {
+            goNext();
+          }
+        }
+        break;
+
+      case 5: // Addons
         if (key.upArrow || input === "k") {
           flashKey("↑/↓");
           setAddonIndex(addonIndex === 0 ? 1 : 0);
@@ -1362,7 +1545,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 5: // Settings
+      case 6: // Settings
         if (key.upArrow || input === "k") {
           flashKey("↑/↓");
           setSettingsIndex(Math.max(0, settingsIndex - 1));
@@ -1389,7 +1572,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
         }
         break;
 
-      case 6: // Review
+      case 7: // Review
         if (key.return) {
           flashKey("enter");
           handleComplete();
@@ -1474,11 +1657,16 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
           controls.push({ key: "r", label: "refresh" });
         }
         break;
-      case 4: // Addons
+      case 4: // Wago API Key
+        if (!envWagoKeyDetected && !isEditingWagoKey) {
+          controls.push({ key: "↑/↓", label: "select" });
+        }
+        break;
+      case 5: // Addons
         controls.push({ key: "↑/↓", label: "nav" });
         controls.push({ key: "space", label: "toggle" });
         break;
-      case 5: // Settings
+      case 6: // Settings
         controls.push({ key: "↑/↓", label: "nav" });
         controls.push({ key: "←/→", label: "adjust" });
         controls.push({ key: "space", label: "toggle" });
@@ -1573,6 +1761,21 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
             );
           }}
         </Step>
+        <Step name="Wago">
+          {(ctx) => {
+            captureContext(ctx);
+            return (
+              <WagoKeyStep
+                wagoApiKey={wizardState.wagoApiKey}
+                onKeyChange={(k) => updateWizardState({ wagoApiKey: k })}
+                isEditing={isEditingWagoKey}
+                envKeyDetected={envWagoKeyDetected}
+                optionIndex={wagoKeyOptionIndex}
+                theme={theme}
+              />
+            );
+          }}
+        </Step>
         <Step name="TukUI">
           {(ctx) => {
             captureContext(ctx);
@@ -1605,6 +1808,7 @@ export const FirstRunWizard: React.FC<FirstRunWizardProps> = ({
               <ReviewStep
                 state={wizardState}
                 exportData={exportData}
+                envWagoKeyDetected={envWagoKeyDetected}
                 theme={theme}
               />
             );

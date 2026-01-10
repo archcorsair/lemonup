@@ -1,6 +1,6 @@
 {
   "name": "lemonup",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "module": "index.tsx",
   "type": "module",
   "private": true,
@@ -30,6 +30,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@tanstack/pacer": "^0.17.1",
     "@tanstack/react-query": "^5.90.12",
     "adm-zip": "^0.5.16",
     "arg": "^5.0.2",

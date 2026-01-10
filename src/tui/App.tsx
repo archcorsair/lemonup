@@ -11,6 +11,7 @@ import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
 import { MainMenu } from "./screens/MainMenu";
 import { ManageScreen } from "./screens/ManageScreen";
+import { WagoSearchScreen } from "./screens/WagoSearchScreen";
 import { useAppStore } from "./store/useAppStore";
 
 const queryClient = new QueryClient({
@@ -401,6 +402,17 @@ const AppContent: React.FC<AppProps> = ({
           onBack={() => {
             setConfig(configManager.get());
             navigate("menu");
+          }}
+        />
+      )}
+
+      {activeScreen === "wagoSearch" && config && addonManager && (
+        <WagoSearchScreen
+          config={config}
+          addonManager={addonManager}
+          onBack={() => {
+            setConfig(addonManager.getConfig());
+            navigate("install");
           }}
         />
       )}
