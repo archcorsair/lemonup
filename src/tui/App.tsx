@@ -6,6 +6,7 @@ import { type Config, ConfigManager } from "@/core/config";
 import { AddonManager } from "@/core/manager";
 import { Header } from "./components/Header";
 import { FirstRunWizard } from "./FirstRunWizard";
+import { useAddonManagerEvent } from "./hooks/useAddonManager";
 import { useProgressBar } from "./hooks/useProgressBar";
 import { ConfigScreen } from "./screens/ConfigScreen";
 import { InstallScreen } from "./screens/InstallScreen";
@@ -225,128 +226,53 @@ const AppContent: React.FC<AppProps> = ({
     }
   };
 
-  // Background auto-check for updates
+  // Initialize auto-check loop
   useEffect(() => {
-    if (!addonManager || !config?.autoCheckEnabled || !configManager) {
-      setNextCheckTime(null);
-      return;
-    }
-
-    let timeoutId: NodeJS.Timeout;
-    let isActive = true;
-
-    const scheduleNextCheck = (delayMs: number) => {
-      if (!isActive) return;
-      setNextCheckTime(Date.now() + delayMs);
-      timeoutId = setTimeout(runCheckLoop, delayMs);
-    };
-
-    const runCheckLoop = async () => {
-      // Re-read config to get latest interval/timestamp
-      const currentConfig = configManager.get();
-      const addons = addonManager
-        .getAllAddons()
-        .filter((a) => a.type !== "manual");
-
-      if (addons.length === 0) {
-        scheduleNextCheck(currentConfig.autoCheckInterval);
-        return;
-      }
-
-      const startTime = Date.now();
-      const MIN_SPINNER_DURATION = 2000;
-
-      setBackgroundChecking(true);
-      progressBar.start(addons.length);
-      let updateCount = 0;
-
-      try {
-        for (const addon of addons) {
-          if (!isActive) break;
-          try {
-            const result = await addonManager.checkUpdate(addon);
-            if (result.updateAvailable) updateCount++;
-          } catch {
-            await progressBar.warn();
-          }
-          await progressBar.advance();
-        }
-
-        if (isActive) {
-          await progressBar.complete();
-
-          if (updateCount > 0) {
-            setPendingUpdates(updateCount);
-            showToast(
-              `${updateCount} update${updateCount > 1 ? "s" : ""} available`,
-              5000,
-            );
-          }
-
-          // Update lastGlobalCheck timestamp
-          configManager.set("lastGlobalCheck", Date.now());
-          // Update local config state to reflect change
-          setConfig(configManager.get());
-        }
-      } finally {
-        if (isActive) {
-          // Ensure spinner shows for at least MIN_SPINNER_DURATION
-          const elapsed = Date.now() - startTime;
-          const remaining = MIN_SPINNER_DURATION - elapsed;
-
-          if (remaining > 0) {
-            await new Promise((resolve) => setTimeout(resolve, remaining));
-          }
-
-          setBackgroundChecking(false);
-          // Schedule next check
-          scheduleNextCheck(currentConfig.autoCheckInterval);
-        }
-      }
-    };
-
-    // Calculate initial delay on mount
-    const currentConfig = configManager.get();
-    const lastCheck = currentConfig.lastGlobalCheck || 0;
-    const now = Date.now();
-    // Use the prop value to satisfy linter dependency check
-    const interval = config.autoCheckInterval;
-    const timeSinceLast = now - lastCheck;
-    const MIN_STARTUP_DELAY = 5000;
-
-    let initialDelay = MIN_STARTUP_DELAY;
-
-    if (lastCheck > 0 && timeSinceLast < interval) {
-      // Not due yet. Wait remaining time.
-      const remaining = interval - timeSinceLast;
-      // If remaining is very small, enforce min startup delay?
-      // Or if user restarts 59m into 1h interval, wait 1m?
-      // Requirement: "user can circumvent... by closing... triggering global check"
-      // So we must NOT check immediately if not due.
-      // But we still want to wait 5s before doing *anything* to let app settle.
-      initialDelay = Math.max(MIN_STARTUP_DELAY, remaining);
-    }
-    // If overdue (or never checked), default to 5s startup delay.
-
-    scheduleNextCheck(initialDelay);
-
+    if (!addonManager) return;
+    addonManager.startAutoCheckLoop();
     return () => {
-      isActive = false;
-      clearTimeout(timeoutId);
-      setNextCheckTime(null);
+      addonManager.stopAutoCheckLoop();
     };
-  }, [
+  }, [addonManager]);
+
+  // Listen for auto-check events
+  useAddonManagerEvent(addonManager, "autocheck:start", (total) => {
+    setBackgroundChecking(true);
+    progressBar.start(total);
+  });
+
+  useAddonManagerEvent(
     addonManager,
-    configManager,
-    config?.autoCheckEnabled,
-    config?.autoCheckInterval,
-    // config.lastGlobalCheck omitted to prevent loop when we update it
-    setPendingUpdates,
-    setBackgroundChecking,
-    setNextCheckTime,
-    showToast,
-    progressBar,
-  ]);
+    "autocheck:progress",
+    (_, __, addonName) => {
+      // We don't need index/total here as progressBar tracks it internally or we just advance
+      // But progressBar.advance() doesn't take args in current impl?
+      // Let's check useProgressBar usage in previous loop. It just called advance().
+      progressBar.advance();
+    },
+  );
+
+  useAddonManagerEvent(addonManager, "autocheck:complete", (updatesFound) => {
+    progressBar.complete();
+    setBackgroundChecking(false);
+    if (updatesFound > 0) {
+      setPendingUpdates(updatesFound);
+      showToast(
+        `${updatesFound} update${updatesFound > 1 ? "s" : ""} available`,
+        5000,
+      );
+    }
+    // Re-read config to get the updated lastGlobalCheck time
+    if (configManager) {
+      setConfig(configManager.get());
+    }
+  });
+
+  useAddonManagerEvent(addonManager, "error", (context, message) => {
+    if (context.startsWith("Auto-check")) {
+      progressBar.warn();
+    }
+  });
 
   // Handle store-triggered onboarding (from ConfigScreen)
   const handleOnboardingComplete = () => {
