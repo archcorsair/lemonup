@@ -207,6 +207,8 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
           type: REPO_TYPE.GITHUB,
           git_commit: installedHash,
           last_updated: new Date().toISOString(),
+          last_checked: new Date().toISOString(),
+          remote_version: installedHash,
           ownedFolders,
         });
       } else if (repoType === "wowinterface" && wowInterfaceDetails !== null) {
@@ -216,6 +218,8 @@ export class InstallFromUrlCommand implements Command<InstallFromUrlResult> {
           version: wowInterfaceDetails.UIVersion,
           author: wowInterfaceDetails.UIAuthorName,
           last_updated: new Date().toISOString(),
+          last_checked: new Date().toISOString(),
+          remote_version: wowInterfaceDetails.UIVersion,
           ownedFolders,
         });
       }

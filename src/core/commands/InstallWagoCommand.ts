@@ -207,6 +207,8 @@ export class InstallWagoCommand implements Command<InstallWagoResult> {
         version: version || effectiveStability,
         author,
         last_updated: new Date().toISOString(),
+        last_checked: new Date().toISOString(),
+        remote_version: version || effectiveStability,
         ownedFolders,
       });
 
