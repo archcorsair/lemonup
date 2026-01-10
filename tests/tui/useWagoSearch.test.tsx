@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Text } from "ink";
 import { render } from "ink-testing-library";
 import { useEffect, useState } from "react";
@@ -74,6 +75,26 @@ function TestHarness({
   );
 }
 
+function createWrapper() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        gcTime: 0,
+      },
+    },
+  });
+
+  return ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+}
+
+function renderWithClient(ui: React.ReactElement) {
+  const Wrapper = createWrapper();
+  return render(<Wrapper>{ui}</Wrapper>);
+}
+
 describe("useWagoSearch", () => {
   beforeEach(() => {
     mockSearchAddons.mockClear();
@@ -82,7 +103,7 @@ describe("useWagoSearch", () => {
 
   describe("initialization", () => {
     test("initializes with empty state", async () => {
-      const { lastFrame } = render(<TestHarness apiKey="test-key" />);
+      const { lastFrame } = renderWithClient(<TestHarness apiKey="test-key" />);
 
       // Wait for debounce to settle
       await new Promise((r) => setTimeout(r, 600));
@@ -97,7 +118,7 @@ describe("useWagoSearch", () => {
     });
 
     test("initializes with custom debounce time", async () => {
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey="test-key" debounceMs={200} />,
       );
 
@@ -111,7 +132,7 @@ describe("useWagoSearch", () => {
 
   describe("API key validation", () => {
     test("sets error when no API key provided and query is set", async () => {
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey={undefined} initialQuery="test" />,
       );
 
@@ -128,7 +149,7 @@ describe("useWagoSearch", () => {
 
   describe("query handling", () => {
     test("clears results when query is empty", async () => {
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey="test-key" initialQuery="" />,
       );
 
@@ -140,7 +161,7 @@ describe("useWagoSearch", () => {
     });
 
     test("trims whitespace-only query", async () => {
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey="test-key" initialQuery="   " />,
       );
 
@@ -165,7 +186,7 @@ describe("useWagoSearch", () => {
         ],
       });
 
-      render(<TestHarness apiKey="test-key" initialQuery="test" />);
+      renderWithClient(<TestHarness apiKey="test-key" initialQuery="test" />);
 
       await new Promise((r) => setTimeout(r, 600));
 
@@ -195,7 +216,7 @@ describe("useWagoSearch", () => {
         ],
       });
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey="test-key" initialQuery="elvui" />,
       );
 
@@ -209,7 +230,7 @@ describe("useWagoSearch", () => {
     test("sets error when search returns null", async () => {
       mockSearchAddons.mockResolvedValueOnce(null);
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithClient(
         <TestHarness apiKey="test-key" initialQuery="test" />,
       );
 
@@ -225,7 +246,7 @@ describe("useWagoSearch", () => {
     test("uses provided game version", async () => {
       mockSearchAddons.mockResolvedValue({ data: [] });
 
-      render(
+      renderWithClient(
         <TestHarness
           apiKey="test-key"
           initialQuery="test"
@@ -244,7 +265,7 @@ describe("useWagoSearch", () => {
     test("uses provided stability", async () => {
       mockSearchAddons.mockResolvedValue({ data: [] });
 
-      render(
+      renderWithClient(
         <TestHarness
           apiKey="test-key"
           initialQuery="test"
@@ -265,7 +286,7 @@ describe("useWagoSearch", () => {
     test("exposes all required state and methods", () => {
       let capturedState: ReturnType<typeof useWagoSearch> | undefined;
 
-      render(
+      renderWithClient(
         <TestHarness
           apiKey="test-key"
           onStateChange={(state) => {
