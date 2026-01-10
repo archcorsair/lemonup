@@ -230,10 +230,29 @@ const AppContent: React.FC<AppProps> = ({
   useEffect(() => {
     if (!addonManager) return;
     addonManager.startAutoCheckLoop();
+
+    // Set initial next check time based on config and last check
+    if (config && config.lastGlobalCheck > 0) {
+      const now = Date.now();
+      const interval = config.autoCheckInterval;
+      const timeSinceLast = now - config.lastGlobalCheck;
+
+      if (timeSinceLast < interval) {
+        setNextCheckTime(config.lastGlobalCheck + interval);
+      } else {
+        // Overdue, will check soon (5s delay)
+        setNextCheckTime(now + 5000);
+      }
+    } else if (config) {
+      // Never checked, will check soon
+      setNextCheckTime(Date.now() + 5000);
+    }
+
     return () => {
       addonManager.stopAutoCheckLoop();
+      setNextCheckTime(null);
     };
-  }, [addonManager]);
+  }, [addonManager, config, setNextCheckTime]);
 
   // Listen for auto-check events
   useAddonManagerEvent(addonManager, "autocheck:start", (total) => {
@@ -265,6 +284,11 @@ const AppContent: React.FC<AppProps> = ({
     // Re-read config to get the updated lastGlobalCheck time
     if (configManager) {
       setConfig(configManager.get());
+    }
+
+    // Update next check time for dev mode display
+    if (config?.autoCheckInterval) {
+      setNextCheckTime(Date.now() + config.autoCheckInterval);
     }
   });
 
