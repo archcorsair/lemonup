@@ -24,7 +24,7 @@ way to handle your addons without leaving the terminal.
 | ✅ **Retail**                  | ✅ **GitHub**            |
 | 📋 **Classic / Era** (Planned) | ✅ **TukUI** (ElvUI)     |
 | 📋 **Cata** (Planned)          | ✅ **WoWInterface**      |
-|                                | 📋 **Wago.io** (Planned) |
+|                                | ✅ **Wago.io**           |
 
 ### Supported Architectures
 
