@@ -54,12 +54,96 @@ export interface AddonManager {
 export class AddonManager extends EventEmitter {
   private configManager: ConfigManager;
   private dbManager: DatabaseManager;
+  private autoCheckTimer: NodeJS.Timeout | null = null;
+  private isAutoChecking = false;
 
   constructor(configManager?: ConfigManager) {
     super();
     this.configManager = configManager || new ConfigManager();
     const configDir = path.dirname(this.configManager.path);
     this.dbManager = new DatabaseManager(configDir);
+  }
+
+  public startAutoCheckLoop() {
+    this.stopAutoCheckLoop();
+
+    const config = this.configManager.get();
+    if (!config.autoCheckEnabled) return;
+
+    const scheduleNext = (delay: number) => {
+      this.autoCheckTimer = setTimeout(() => {
+        this.runGlobalCheck().finally(() => {
+          // Re-read config in case interval changed
+          const currentConfig = this.configManager.get();
+          if (currentConfig.autoCheckEnabled) {
+            scheduleNext(currentConfig.autoCheckInterval);
+          }
+        });
+      }, delay);
+    };
+
+    const lastCheck = config.lastGlobalCheck || 0;
+    const now = Date.now();
+    const interval = config.autoCheckInterval;
+    const timeSinceLast = now - lastCheck;
+    const MIN_STARTUP_DELAY = 5000;
+
+    let initialDelay = MIN_STARTUP_DELAY;
+
+    if (lastCheck > 0 && timeSinceLast < interval) {
+      const remaining = interval - timeSinceLast;
+      initialDelay = Math.max(MIN_STARTUP_DELAY, remaining);
+    }
+
+    scheduleNext(initialDelay);
+  }
+
+  public stopAutoCheckLoop() {
+    if (this.autoCheckTimer) {
+      clearTimeout(this.autoCheckTimer);
+      this.autoCheckTimer = null;
+    }
+  }
+
+  private async runGlobalCheck() {
+    if (this.isAutoChecking) return;
+    this.isAutoChecking = true;
+
+    try {
+      const addons = this.dbManager.getAll().filter((a) => a.type !== "manual");
+
+      if (addons.length === 0) return;
+
+      this.emit("autocheck:start", addons.length);
+      let updatesFound = 0;
+
+      for (let i = 0; i < addons.length; i++) {
+        const addon = addons[i];
+        if (!addon) continue;
+
+        try {
+          const result = await this.checkUpdate(addon);
+          if (result.updateAvailable) {
+            updatesFound++;
+          }
+        } catch (error) {
+          this.emit(
+            "error",
+            `Auto-check failed for ${addon.name}`,
+            String(error),
+          );
+        }
+
+        this.emit("autocheck:progress", i + 1, addons.length, addon.name);
+      }
+
+      this.configManager.set("lastGlobalCheck", Date.now());
+      this.emit("autocheck:complete", updatesFound);
+    } catch (error) {
+      this.emit("error", "Global check failed", String(error));
+    } finally {
+      this.isAutoChecking = false;
+    }
   }
 
   private async executeCommand<T>(command: Command<T>): Promise<T> {
@@ -78,6 +162,7 @@ export class AddonManager extends EventEmitter {
   }
 
   public close() {
+    this.stopAutoCheckLoop();
     this.dbManager.close();
   }
 
@@ -282,11 +367,6 @@ export class AddonManager extends EventEmitter {
       }
 
       const apiKey = config.wagoApiKey;
-      // If no API key, we can't check Wago properly?
-      // Actually Wago public API might work without key for public addons?
-      // getAddonDetails requires key in current implementation?
-      // src/core/wago.ts: if (!apiKey) return { success: false, error: "no_api_key" };
-      // So yes, key is required.
       if (!apiKey) {
         return {
           updateAvailable: false,
