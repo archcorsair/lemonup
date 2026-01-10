@@ -187,7 +187,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     queries: visibleAddons.map((item) => ({
       queryKey: ["addon", item.record.folder],
       queryFn: async () => {
-        // Pure passive read. No network requests.
         const freshAddon = addonManager.getAddon(item.record.folder);
         if (!freshAddon)
           return {
@@ -198,7 +197,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             cached: true,
           };
 
-        // We manually construct the status object based on DB state
         const config = addonManager.getConfig();
         const lastChecked = freshAddon.last_checked
           ? new Date(freshAddon.last_checked).getTime()
@@ -229,18 +227,13 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
           updateAvailable,
           remoteVersion: freshAddon.remote_version || "",
           checkedVersion: freshAddon.version,
-          cached: true, // Always cached in passive mode
+          cached: true,
           isStale,
         };
       },
-      // Refetch when window focuses or network reconnects? Maybe.
-      // But mainly we rely on invalidation from events.
       staleTime: Infinity,
     })),
   });
-
-  // Track check start times outside of render to avoid setState during render
-  // REMOVED: No longer tracking start times for passive mode.
 
   useAddonManagerEvent(
     addonManager,
@@ -253,16 +246,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
   useAddonManagerEvent(
     addonManager,
     "autocheck:progress",
-    useCallback(
-      (_, __, _addonName) => {
-        // Invalidate query to refresh UI when background check updates an addon
-        // Finding folder by name might be tricky if name != folder, but usually close.
-        // Actually, we should probably emit folder in the event or invalidate all?
-        // Invalidating all "addon" queries is safest and cheap since they are local DB reads.
-        queryClient.invalidateQueries({ queryKey: ["addon"] });
-      },
-      [queryClient],
-    ),
+    useCallback(() => {
+      queryClient.invalidateQueries({ queryKey: ["addon"] });
+    }, [queryClient]),
   );
 
   useAddonManagerEvent(
@@ -270,39 +256,6 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
     "addon:update-check:complete",
     useCallback(
       (folder) => {
-        // Also invalidate specific folder on manual check complete
-        setUpdateProgress((prev) => {
-          const next = { ...prev };
-          delete next[folder];
-          return next;
-        });
-        queryClient.invalidateQueries({ queryKey: ["addon", folder] });
-      },
-      [queryClient],
-    ),
-  );
-
-  useAddonManagerEvent(
-    addonManager,
-    "autocheck:progress",
-    useCallback(
-      (_, __, _addonName) => {
-        // Invalidate query to refresh UI when background check updates an addon
-        // Finding folder by name might be tricky if name != folder, but usually close.
-        // Actually, we should probably emit folder in the event or invalidate all?
-        // Invalidating all "addon" queries is safest and cheap since they are local DB reads.
-        queryClient.invalidateQueries({ queryKey: ["addon"] });
-      },
-      [queryClient],
-    ),
-  );
-
-  useAddonManagerEvent(
-    addonManager,
-    "addon:update-check:complete",
-    useCallback(
-      (folder) => {
-        // Also invalidate specific folder on manual check complete
         setUpdateProgress((prev) => {
           const next = { ...prev };
           delete next[folder];
@@ -879,13 +832,9 @@ export const ManageScreen: React.FC<ManageScreenProps> = ({
             let status: RepoStatus = "idle";
             let result: UpdateResult | undefined;
 
-            // Synchronous check for cached status to avoid flicker
-            // const cachedStatus = addonManager.getCachedUpdateStatus(addon);
-
             if (isUpdating) {
               status = updateProgress[addon.folder] || "checking";
             } else if (isLoading || isFetching) {
-              // Should be fast since it's local DB read
               status = "checking";
             } else {
               if (error) status = "error";
