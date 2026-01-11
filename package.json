@@ -15,13 +15,13 @@
     "clean": "rm -rf lemonup *.bun-build .*.bun-build"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.10",
+    "@biomejs/biome": "^2.3.11",
     "@types/adm-zip": "^0.5.7",
     "@types/bun": "latest",
     "@types/ink-spinner": "^3.0.5",
     "@types/ink-text-input": "^2.0.5",
-    "@types/node": "^25.0.3",
-    "@types/react": "^19.2.7",
+    "@types/node": "^25.0.6",
+    "@types/react": "^19.2.8",
     "ink-testing-library": "^4.0.0",
     "lefthook": "^2.0.13",
     "react-devtools-core": "^7.0.1"
@@ -30,7 +30,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.90.12",
+    "@tanstack/react-query": "^5.90.16",
     "adm-zip": "^0.5.16",
     "arg": "^5.0.2",
     "conf": "^15.0.2",
@@ -45,7 +45,7 @@
     "ink-virtual-list": "^0.1.0",
     "p-limit": "^7.2.0",
     "react": "^19.2.3",
-    "zod": "^4.2.1",
+    "zod": "^4.3.5",
     "zustand": "^5.0.9"
   }
 }
