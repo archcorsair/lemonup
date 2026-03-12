@@ -1,0 +1,131 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    GitHub,
+    Tukui,
+    WowInterface,
+    Wago,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameFlavor {
+    Retail,
+    Classic,
+    Cata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddonKind {
+    Addon,
+    Library,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedFolder {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddonRecord {
+    pub id: Option<i64>,
+    pub name: String,
+    pub folder: String,
+    pub owned_folders: Vec<OwnedFolder>,
+    pub kind: AddonKind,
+    pub kind_override: bool,
+    pub flavor: GameFlavor,
+    pub version: Option<String>,
+    pub git_commit: Option<String>,
+    pub author: Option<String>,
+    pub interface: Option<String>,
+    pub source: SourceKind,
+    pub source_url: Option<String>,
+    pub required_deps: Vec<String>,
+    pub optional_deps: Vec<String>,
+    pub embedded_libs: Vec<String>,
+    pub installed_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub last_checked_at: Option<OffsetDateTime>,
+    pub remote_version: Option<String>,
+}
+
+impl AddonRecord {
+    pub fn new(name: impl Into<String>, folder: impl Into<String>, source: SourceKind) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            id: None,
+            name: name.into(),
+            folder: folder.into(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            kind_override: false,
+            flavor: GameFlavor::Retail,
+            version: None,
+            git_commit: None,
+            author: None,
+            interface: None,
+            source,
+            source_url: None,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+            installed_at: now,
+            updated_at: now,
+            last_checked_at: None,
+            remote_version: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstallSource {
+    Url {
+        url: String,
+    },
+    Tukui {
+        channel: String,
+        folder: String,
+    },
+    Wago {
+        slug: String,
+        stability: Option<String>,
+    },
+    ExistingFolder {
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallPlan {
+    pub source: InstallSource,
+    pub destination: PathBuf,
+    pub target_folders: Vec<String>,
+    pub overwrite_existing: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateStatus {
+    UpToDate,
+    UpdateAvailable,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCheck {
+    pub addon_name: String,
+    pub status: UpdateStatus,
+    pub remote_version: Option<String>,
+    pub checked_at: OffsetDateTime,
+    pub message: Option<String>,
+}
