@@ -5,28 +5,37 @@ mod event;
 mod onboarding;
 mod tui;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
-use lemonup_core::{AppPaths, ConfigLoad, ConfigStore, StateDatabase};
+use lemonup_core::{
+    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, LemonupError, StateDatabase,
+    validate_addons_path,
+};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::app::App;
+use crate::app::{App, AppRuntime};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let paths = AppPaths::discover()?;
+    let cli = Cli::parse();
+    let runtime = AppRuntime::new(
+        cli.profile.clone(),
+        cli.addon_dir.clone(),
+        load_guarded_addon_dir(&cli.profile)?,
+    );
+    let paths = AppPaths::discover(cli.profile)?;
     paths.ensure()?;
 
     configure_tracing();
 
-    let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Tui) {
-        Commands::Tui => run_tui(paths).await?,
-        Commands::Update { force, dry_run } => run_update(paths, force, dry_run)?,
+        Commands::Tui => run_tui(paths, runtime).await?,
+        Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run)?,
     }
 
     Ok(())
@@ -44,10 +53,10 @@ fn configure_tracing() {
         .init();
 }
 
-async fn run_tui(paths: AppPaths) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::bootstrap(paths, runtime)?;
     let mut tui = Tui::enter()?;
     let events = EventHandler::new(Duration::from_millis(250));
-    let mut app = App::bootstrap(paths)?;
     let result = app.run(tui.terminal_mut(), events).await;
     tui.exit()?;
     result?;
@@ -56,6 +65,7 @@ async fn run_tui(paths: AppPaths) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_update(
     paths: AppPaths,
+    runtime: AppRuntime,
     force: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -64,19 +74,43 @@ fn run_update(
     let database = StateDatabase::open(paths.state_db_file)?;
     let installed = database.list_addons()?;
 
-    match config_state {
-        ConfigLoad::Missing(path) => {
-            println!(
-                "config missing at {}. run `lemonup tui` to initialize v2 first.",
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let effective_addon_dir = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone());
+
+    if let Some(path) = &effective_addon_dir {
+        if runtime.is_guarded_path(path) {
+            return Err(Box::new(LemonupError::InvalidArgument(format!(
+                "profile '{}' refuses to target the default profile addon directory: {}",
+                runtime.profile_name,
                 path.display()
+            ))));
+        }
+
+        validate_addons_path(path).map_err(|error| {
+            Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+        })?;
+    }
+
+    match config_state {
+        ConfigLoad::Missing(path) if runtime.addon_dir_override.is_none() => {
+            println!(
+                "config missing at {}. run `lemonup tui --profile {}` to initialize v2 first.",
+                path.display(),
+                runtime.profile_name
             );
         }
-        ConfigLoad::Loaded(config) => {
+        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             println!(
-                "update foundation ready: {} tracked addons, addon_dir={}, force={}, dry_run={}",
+                "update foundation ready: profile={}, tracked addons={}, addon_dir={}, force={}, dry_run={}",
+                runtime.profile_name,
                 installed.len(),
-                config
-                    .addon_dir
+                effective_addon_dir
                     .as_ref()
                     .map(|value| value.display().to_string())
                     .unwrap_or_else(|| "<unconfigured>".to_string()),
@@ -87,4 +121,17 @@ fn run_update(
     }
 
     Ok(())
+}
+
+fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {
+    if profile == DEFAULT_PROFILE {
+        return Ok(None);
+    }
+
+    let default_paths = AppPaths::discover(DEFAULT_PROFILE)?;
+    let config_store = ConfigStore::new(default_paths.config_file);
+    match config_store.load()? {
+        ConfigLoad::Missing(_) => Ok(None),
+        ConfigLoad::Loaded(config) => Ok(config.addon_dir),
+    }
 }

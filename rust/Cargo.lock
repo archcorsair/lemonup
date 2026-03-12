@@ -717,6 +717,7 @@ dependencies = [
  "crossterm",
  "lemonup-core",
  "ratatui",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

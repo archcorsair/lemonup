@@ -65,6 +65,14 @@ impl OnboardingState {
         }
     }
 
+    pub fn with_input(input: String) -> Self {
+        let mut next = Self::new();
+        next.phase = OnboardingPhase::Ready;
+        next.input = input;
+        next.selected_suggestion = None;
+        next
+    }
+
     pub fn begin_quick_check(&self) -> Self {
         let mut next = self.clone();
         next.phase = OnboardingPhase::QuickChecking;
@@ -250,6 +258,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{FoundAction, OnboardingPhase, OnboardingState};
+
+    #[test]
+    fn with_input_prefills_without_suggestion_selection() {
+        let state = OnboardingState::with_input("D:\\Sandbox\\Interface\\AddOns".to_string());
+        assert_eq!(state.phase, OnboardingPhase::Ready);
+        assert_eq!(state.input, "D:\\Sandbox\\Interface\\AddOns");
+        assert_eq!(state.selected_suggestion, None);
+    }
 
     #[test]
     fn suggestion_navigation_updates_input() {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use lemonup_core::{
-    AppConfig, AppPaths, ConfigLoad, ConfigStore, StateDatabase, detect_known_addons_path,
-    search_for_wow, validate_addons_path,
+    AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, StateDatabase,
+    detect_known_addons_path, paths_match, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -23,7 +23,7 @@ use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
 
-const BASE_STATUS: &str = "q quit | 1 onboarding | 2 manage | 3 install | 4 config | 5 wago";
+const STATUS_COMMANDS: &str = "q quit | 1 onboarding | 2 manage | 3 install | 4 config | 5 wago";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -32,6 +32,41 @@ pub enum Screen {
     Install,
     Config,
     WagoSearch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppRuntime {
+    pub profile_name: String,
+    pub addon_dir_override: Option<PathBuf>,
+    pub guarded_addon_dir: Option<PathBuf>,
+}
+
+impl AppRuntime {
+    pub fn new(
+        profile_name: String,
+        addon_dir_override: Option<PathBuf>,
+        guarded_addon_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            profile_name,
+            addon_dir_override,
+            guarded_addon_dir,
+        }
+    }
+
+    pub fn is_default_profile(&self) -> bool {
+        self.profile_name == DEFAULT_PROFILE
+    }
+
+    pub fn is_guarded_path(&self, candidate: &Path) -> bool {
+        if self.is_default_profile() {
+            return false;
+        }
+
+        self.guarded_addon_dir
+            .as_ref()
+            .is_some_and(|guarded| paths_match(candidate, guarded))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +143,8 @@ pub struct App {
     status_line: String,
     config_present: bool,
     config_store: ConfigStore,
+    runtime: AppRuntime,
+    effective_addon_dir: Option<PathBuf>,
     manage: ManageState,
     onboarding: OnboardingState,
     onboarding_events_tx: mpsc::UnboundedSender<OnboardingTaskEvent>,
@@ -116,31 +153,72 @@ pub struct App {
 }
 
 impl App {
-    pub fn bootstrap(paths: AppPaths) -> lemonup_core::Result<Self> {
+    pub fn bootstrap(paths: AppPaths, runtime: AppRuntime) -> lemonup_core::Result<Self> {
         let config_store = ConfigStore::new(paths.config_file);
         let config_state = config_store.load()?;
         let database = StateDatabase::open(paths.state_db_file)?;
         let addon_count = database.list_addons()?.len();
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
-        let active_screen = if config_present {
-            Screen::Manage
-        } else {
-            Screen::Onboarding
+        let configured_addon_dir = match &config_state {
+            ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+            ConfigLoad::Missing(_) => None,
         };
+        let validated_override = match runtime.addon_dir_override.as_ref() {
+            Some(path) => {
+                if runtime.is_guarded_path(path) {
+                    return Err(lemonup_core::LemonupError::InvalidArgument(format!(
+                        "invalid --addon-dir for profile '{}': {} | reason: this matches the default profile AddOns directory | hint: omit --addon-dir to use the Location Finder, or pass a valid sandbox _retail_\\Interface\\AddOns path",
+                        runtime.profile_name,
+                        path.display()
+                    )));
+                }
+
+                validate_addons_path(path).map_err(|error| {
+                    lemonup_core::LemonupError::InvalidArgument(format!(
+                        "invalid --addon-dir for profile '{}': {} | reason: {} | hint: omit --addon-dir to use the Location Finder, or pass a valid _retail_\\Interface\\AddOns path",
+                        runtime.profile_name,
+                        path.display(),
+                        error
+                    ))
+                })?;
+
+                Some(path.clone())
+            }
+            None => None,
+        };
+        let effective_addon_dir = validated_override.or(configured_addon_dir.clone());
+
+        let onboarding = runtime
+            .addon_dir_override
+            .as_ref()
+            .map(|path| OnboardingState::with_input(path.display().to_string()))
+            .unwrap_or_else(OnboardingState::new);
+
+        let active_screen = match effective_addon_dir.as_ref() {
+            Some(path) if validate_addons_path(path).is_ok() && !runtime.is_guarded_path(path) => {
+                Screen::Manage
+            }
+            _ => Screen::Onboarding,
+        };
+
         let (onboarding_events_tx, onboarding_events_rx) = mpsc::unbounded_channel();
 
-        Ok(Self {
+        let mut app = Self {
             active_screen,
             quit_requested: false,
-            status_line: BASE_STATUS.to_string(),
+            status_line: String::new(),
             config_present,
             config_store,
+            runtime,
+            effective_addon_dir,
             manage: ManageState::new(addon_count),
-            onboarding: OnboardingState::new(),
+            onboarding,
             onboarding_events_tx,
             onboarding_events_rx,
             active_onboarding_cancel: None,
-        })
+        };
+        app.status_line = app.initial_status_line();
+        Ok(app)
     }
 
     pub async fn run(
@@ -166,6 +244,26 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn initial_status_line(&self) -> String {
+        match self.active_screen {
+            Screen::Manage => {
+                if self.runtime.addon_dir_override.is_some() {
+                    self.with_base_status("using addon-dir override")
+                } else {
+                    self.base_status_line()
+                }
+            }
+            Screen::Onboarding => match &self.onboarding.phase {
+                OnboardingPhase::Error(message) => {
+                    self.with_base_status(&format!("location finder blocked: {message}"))
+                }
+                OnboardingPhase::Ready => self.location_finder_status(),
+                _ => self.with_base_status("location finder"),
+            },
+            _ => self.base_status_line(),
+        }
     }
 
     fn process_background_events(&mut self) {
@@ -226,7 +324,9 @@ impl App {
             },
             OnboardingPhase::Found(_) => match key.code {
                 KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingFoundActionNext],
-                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::OnboardingFoundActionPrevious],
+                KeyCode::Up | KeyCode::Char('k') => {
+                    vec![AppMessage::OnboardingFoundActionPrevious]
+                }
                 KeyCode::Enter => vec![AppMessage::OnboardingFoundConfirm],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 _ => vec![],
@@ -273,7 +373,7 @@ impl App {
                     vec![
                         AppAction::SetOnboardingState(self.onboarding.begin_quick_check()),
                         AppAction::SetStatus(
-                            "checking common install locations | q quit".to_string(),
+                            self.with_base_status("checking common install locations"),
                         ),
                         AppAction::StartOnboardingQuickCheck,
                     ]
@@ -285,37 +385,35 @@ impl App {
             AppMessage::Navigate(screen) => {
                 vec![
                     AppAction::SetScreen(screen),
-                    AppAction::SetStatus(BASE_STATUS.to_string()),
+                    AppAction::SetStatus(self.base_status_for_screen(screen)),
                 ]
             }
-            AppMessage::TerminalResized { width, height } => vec![AppAction::SetStatus(format!(
-                "terminal resized to {width}x{height} | {BASE_STATUS}"
-            ))],
+            AppMessage::TerminalResized { width, height } => vec![AppAction::SetStatus(
+                self.with_base_status(&format!("terminal resized to {width}x{height}")),
+            )],
             AppMessage::ManageSelectionNext => {
                 let selection = self.manage.next_selection();
                 vec![
                     AppAction::SetManageSelection(selection),
-                    AppAction::SetStatus(format!("manage selection moved | {BASE_STATUS}")),
+                    AppAction::SetStatus(self.with_base_status("manage selection moved")),
                 ]
             }
             AppMessage::ManageSelectionPrevious => {
                 let selection = self.manage.previous_selection();
                 vec![
                     AppAction::SetManageSelection(selection),
-                    AppAction::SetStatus(format!("manage selection moved | {BASE_STATUS}")),
+                    AppAction::SetStatus(self.with_base_status("manage selection moved")),
                 ]
             }
             AppMessage::OnboardingBeginEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.begin_editing()),
-                AppAction::SetStatus(
-                    "editing path | enter validate | d deep scan | esc stop editing".to_string(),
-                ),
+                AppAction::SetStatus(self.with_base_status(
+                    "editing path | enter validate | d deep scan | esc stop editing",
+                )),
             ],
             AppMessage::OnboardingStopEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.stop_editing()),
-                AppAction::SetStatus(
-                    "location finder | enter validate | d deep scan | e edit path".to_string(),
-                ),
+                AppAction::SetStatus(self.location_finder_status()),
             ],
             AppMessage::OnboardingInputChar(character) => {
                 vec![AppAction::SetOnboardingState(
@@ -327,20 +425,32 @@ impl App {
             }
             AppMessage::OnboardingValidateInput => {
                 let current_path = PathBuf::from(self.onboarding.input.trim());
+                if self.is_guarded_path(&current_path) {
+                    return vec![
+                        AppAction::SetOnboardingState(self.onboarding.error(
+                            "this profile cannot target the default profile AddOns directory",
+                        )),
+                        AppAction::SetStatus(
+                            self.with_base_status(
+                                "blocked default target | choose another location",
+                            ),
+                        ),
+                    ];
+                }
+
                 match validate_addons_path(&current_path) {
                     Ok(()) => {
-                        let next_state = self.onboarding.found(current_path.clone());
+                        let next_state = self.onboarding_found_state(current_path.clone());
                         vec![
                             AppAction::SetOnboardingState(next_state),
-                            AppAction::SetStatus(
-                                "found WoW installation | enter confirm selected action"
-                                    .to_string(),
-                            ),
+                            AppAction::SetStatus(self.found_status_for_path(&current_path)),
                         ]
                     }
                     Err(error) => vec![
                         AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                        AppAction::SetStatus(format!("validation failed: {error}")),
+                        AppAction::SetStatus(
+                            self.with_base_status(&format!("validation failed: {error}")),
+                        ),
                     ],
                 }
             }
@@ -348,7 +458,7 @@ impl App {
                 let root = PathBuf::from(self.onboarding.input.trim());
                 vec![
                     AppAction::SetOnboardingState(self.onboarding.start_deep_scan()),
-                    AppAction::SetStatus("deep scan running | esc cancel".to_string()),
+                    AppAction::SetStatus(self.with_base_status("deep scan running | esc cancel")),
                     AppAction::StartOnboardingDeepScan(root),
                 ]
             }
@@ -357,44 +467,32 @@ impl App {
                     vec![
                         AppAction::CancelOnboardingScan,
                         AppAction::SetOnboardingState(self.onboarding.cancelled()),
-                        AppAction::SetStatus(
-                            "deep scan cancelled | enter validate | d deep scan | e edit path"
-                                .to_string(),
-                        ),
+                        AppAction::SetStatus(self.with_base_status(
+                            "deep scan cancelled | enter validate | d deep scan | e edit path",
+                        )),
                     ]
                 } else {
                     vec![
                         AppAction::SetOnboardingState(self.onboarding.clear_status_to_ready()),
-                        AppAction::SetStatus(
-                            "location finder | enter validate | d deep scan | e edit path"
-                                .to_string(),
-                        ),
+                        AppAction::SetStatus(self.location_finder_status()),
                     ]
                 }
             }
             AppMessage::OnboardingSuggestionNext => vec![
                 AppAction::SetOnboardingState(self.onboarding.next_suggestion()),
-                AppAction::SetStatus(
-                    "location finder | enter validate | d deep scan | e edit path".to_string(),
-                ),
+                AppAction::SetStatus(self.location_finder_status()),
             ],
             AppMessage::OnboardingSuggestionPrevious => vec![
                 AppAction::SetOnboardingState(self.onboarding.previous_suggestion()),
-                AppAction::SetStatus(
-                    "location finder | enter validate | d deep scan | e edit path".to_string(),
-                ),
+                AppAction::SetStatus(self.location_finder_status()),
             ],
             AppMessage::OnboardingFoundActionNext => vec![
                 AppAction::SetOnboardingState(self.onboarding.next_found_action()),
-                AppAction::SetStatus(
-                    "found WoW installation | select action with j/k, enter confirm".to_string(),
-                ),
+                AppAction::SetStatus(self.found_status_for_input()),
             ],
             AppMessage::OnboardingFoundActionPrevious => vec![
                 AppAction::SetOnboardingState(self.onboarding.previous_found_action()),
-                AppAction::SetStatus(
-                    "found WoW installation | select action with j/k, enter confirm".to_string(),
-                ),
+                AppAction::SetStatus(self.found_status_for_input()),
             ],
             AppMessage::OnboardingFoundConfirm => match self.onboarding.selected_found_action() {
                 FoundAction::UseThisPath => vec![AppAction::SaveAddonDir(PathBuf::from(
@@ -402,33 +500,27 @@ impl App {
                 ))],
                 FoundAction::ScanAnotherLocation => vec![
                     AppAction::SetOnboardingState(self.onboarding.ready()),
-                    AppAction::SetStatus(
-                        "choose another root | enter validate | d deep scan | e edit path"
-                            .to_string(),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        "choose another root | enter validate | d deep scan | e edit path",
+                    )),
                 ],
                 FoundAction::EditPathManually => vec![
                     AppAction::SetOnboardingState(self.onboarding.begin_editing()),
-                    AppAction::SetStatus(
-                        "editing found path | enter validate | d deep scan | esc stop editing"
-                            .to_string(),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        "editing found path | enter validate | d deep scan | esc stop editing",
+                    )),
                 ],
             },
             AppMessage::OnboardingTaskEvent(event) => match event {
                 OnboardingTaskEvent::QuickCheckFinished(Some(path)) => vec![
-                    AppAction::SetOnboardingState(self.onboarding.found(path)),
-                    AppAction::SetStatus(
-                        "found WoW installation | select action with j/k, enter confirm"
-                            .to_string(),
-                    ),
+                    AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
+                    AppAction::SetStatus(self.found_status_for_path(&path)),
                 ],
                 OnboardingTaskEvent::QuickCheckFinished(None) => vec![
                     AppAction::SetOnboardingState(self.onboarding.ready()),
-                    AppAction::SetStatus(
-                        "no install found yet | enter validate | d deep scan | e edit path"
-                            .to_string(),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        "no install found yet | enter validate | d deep scan | e edit path",
+                    )),
                 ],
                 OnboardingTaskEvent::DeepScanProgress(progress) => {
                     vec![AppAction::SetOnboardingState(
@@ -436,25 +528,23 @@ impl App {
                     )]
                 }
                 OnboardingTaskEvent::DeepScanFinished(Ok(Some(path))) => vec![
-                    AppAction::SetOnboardingState(self.onboarding.found(path)),
-                    AppAction::SetStatus(
-                        "found WoW installation | select action with j/k, enter confirm"
-                            .to_string(),
-                    ),
+                    AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
+                    AppAction::SetStatus(self.found_status_for_path(&path)),
                 ],
                 OnboardingTaskEvent::DeepScanFinished(Ok(None)) => vec![
                     AppAction::SetOnboardingState(
                         self.onboarding
                             .error("no WoW installation found from this root".to_string()),
                     ),
-                    AppAction::SetStatus(
-                        "deep scan finished with no result | e edit path | d scan again"
-                            .to_string(),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        "deep scan finished with no result | e edit path | d scan again",
+                    )),
                 ],
                 OnboardingTaskEvent::DeepScanFinished(Err(error)) => vec![
                     AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                    AppAction::SetStatus(format!("deep scan failed: {error}")),
+                    AppAction::SetStatus(
+                        self.with_base_status(&format!("deep scan failed: {error}")),
+                    ),
                 ],
             },
         }
@@ -515,6 +605,17 @@ impl App {
                 self.active_onboarding_cancel = None;
             }
             AppAction::SaveAddonDir(path) => {
+                if self.is_guarded_path(&path) {
+                    self.onboarding = self
+                        .onboarding
+                        .error("this profile cannot target the default profile AddOns directory");
+                    self.status_line = self.with_base_status(
+                        "refused to save default target into non-default profile",
+                    );
+                    self.active_screen = Screen::Onboarding;
+                    return;
+                }
+
                 let mut config = match self.config_store.load() {
                     Ok(ConfigLoad::Loaded(config)) => config,
                     _ => AppConfig::new_unconfigured(),
@@ -524,13 +625,15 @@ impl App {
                 match self.config_store.write_new_config(&config) {
                     Ok(()) => {
                         self.config_present = true;
+                        self.effective_addon_dir = Some(path.clone());
                         self.active_screen = Screen::Manage;
-                        self.status_line =
-                            format!("saved addon directory {} | {BASE_STATUS}", path.display());
+                        self.status_line = self
+                            .with_base_status(&format!("saved addon directory {}", path.display()));
                     }
                     Err(error) => {
                         self.onboarding = self.onboarding.error(error.to_string());
-                        self.status_line = format!("failed to save config: {error}");
+                        self.status_line =
+                            self.with_base_status(&format!("failed to save config: {error}"));
                     }
                 }
             }
@@ -541,13 +644,13 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(5),
                 Constraint::Min(10),
                 Constraint::Length(3),
             ])
             .split(frame.area());
 
-        let header = Paragraph::new(Line::from(vec![
+        let mut header_lines = vec![Line::from(vec![
             Span::styled(
                 "LemonUp v2",
                 Style::default()
@@ -555,8 +658,24 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  Rust + Ratatui foundation"),
-        ]))
-        .block(Block::default().borders(Borders::ALL).title("Header"));
+        ])];
+        header_lines.push(Line::from(format!(
+            "Profile: {}",
+            self.runtime.profile_name
+        )));
+        header_lines.push(Line::from(format!(
+            "Target: {}",
+            self.rendered_target_path()
+        )));
+        if let Some(warning) = self.profile_warning() {
+            header_lines.push(Line::from(Span::styled(
+                warning,
+                Style::default().fg(Color::Red),
+            )));
+        }
+
+        let header = Paragraph::new(header_lines)
+            .block(Block::default().borders(Borders::ALL).title("Header"));
 
         let footer = Paragraph::new(self.status_line.clone())
             .block(Block::default().borders(Borders::ALL).title("Status"));
@@ -595,6 +714,12 @@ impl App {
                 lines.push(Line::from(
                     "j/k choose suggestion | enter validate | d deep scan | e edit",
                 ));
+                if let Some(warning) = self.profile_warning() {
+                    lines.push(Line::from(Span::styled(
+                        warning,
+                        Style::default().fg(Color::Red),
+                    )));
+                }
                 for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
                     let prefix = if self.onboarding.selected_suggestion == Some(index) {
                         "›"
@@ -616,6 +741,12 @@ impl App {
                 lines.push(Line::from("Found a retail WoW AddOns folder."));
                 lines.push(Line::from(found.path.clone()));
                 lines.push(Line::from("Verified using install artifacts."));
+                if self.is_guarded_path(Path::new(&found.path)) {
+                    lines.push(Line::from(Span::styled(
+                        "Warning: this matches the default profile target; use a sandbox path instead.",
+                        Style::default().fg(Color::Red),
+                    )));
+                }
                 lines.push(Line::from(""));
 
                 for (index, label) in [
@@ -712,6 +843,80 @@ impl App {
         ])
         .block(Block::default().borders(Borders::ALL).title("Wago"))
     }
+
+    fn base_status_line(&self) -> String {
+        format!(
+            "profile {} | {}",
+            self.runtime.profile_name, STATUS_COMMANDS
+        )
+    }
+
+    fn with_base_status(&self, message: &str) -> String {
+        format!("{message} | {}", self.base_status_line())
+    }
+
+    fn base_status_for_screen(&self, screen: Screen) -> String {
+        match screen {
+            Screen::Onboarding => self.location_finder_status(),
+            _ => self.base_status_line(),
+        }
+    }
+
+    fn location_finder_status(&self) -> String {
+        self.with_base_status("location finder | enter validate | d deep scan | e edit path")
+    }
+
+    fn rendered_target_path(&self) -> String {
+        self.effective_addon_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unconfigured>".to_string())
+    }
+
+    fn is_guarded_path(&self, candidate: &Path) -> bool {
+        self.runtime.is_guarded_path(candidate)
+    }
+
+    fn profile_warning(&self) -> Option<String> {
+        if self.runtime.is_default_profile() {
+            return None;
+        }
+
+        if self.active_screen == Screen::Onboarding
+            && self.is_guarded_path(Path::new(self.onboarding.input.trim()))
+        {
+            return Some(
+                "Warning: non-default profiles must use a sandbox AddOns directory.".to_string(),
+            );
+        }
+
+        self.effective_addon_dir.as_ref().and_then(|path| {
+            self.is_guarded_path(path).then(|| {
+                "Warning: non-default profiles must use a sandbox AddOns directory.".to_string()
+            })
+        })
+    }
+
+    fn onboarding_found_state(&self, path: PathBuf) -> OnboardingState {
+        let state = self.onboarding.found(path.clone());
+        if self.is_guarded_path(&path) {
+            state.next_found_action()
+        } else {
+            state
+        }
+    }
+
+    fn found_status_for_input(&self) -> String {
+        self.found_status_for_path(Path::new(self.onboarding.input.trim()))
+    }
+
+    fn found_status_for_path(&self, path: &Path) -> String {
+        if self.is_guarded_path(path) {
+            self.with_base_status("found default profile target | choose another location")
+        } else {
+            self.with_base_status("found WoW installation | select action with j/k, enter confirm")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -720,11 +925,12 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::widgets::ListState;
+    use tempfile::tempdir;
 
-    use super::{App, AppMessage, ManageState, Screen};
+    use super::{App, AppMessage, AppRuntime, ManageState, Screen};
     use crate::action::AppAction;
-    use crate::onboarding::{FoundState, OnboardingPhase, OnboardingState};
-    use lemonup_core::ConfigStore;
+    use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
+    use lemonup_core::{AppPaths, ConfigStore, DEFAULT_PROFILE};
     use tokio::sync::mpsc;
 
     fn app_for_tests(screen: Screen) -> App {
@@ -732,9 +938,11 @@ mod tests {
         App {
             active_screen: screen,
             quit_requested: false,
-            status_line: super::BASE_STATUS.to_string(),
+            status_line: format!("profile {} | {}", DEFAULT_PROFILE, super::STATUS_COMMANDS),
             config_present: true,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
+            runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
+            effective_addon_dir: None,
             manage: ManageState {
                 items: vec![
                     "first".to_string(),
@@ -788,7 +996,7 @@ mod tests {
             forward,
             vec![
                 AppAction::SetManageSelection(Some(1)),
-                AppAction::SetStatus(format!("manage selection moved | {}", super::BASE_STATUS)),
+                AppAction::SetStatus(app.with_base_status("manage selection moved")),
             ]
         );
 
@@ -799,7 +1007,7 @@ mod tests {
             backward,
             vec![
                 AppAction::SetManageSelection(Some(2)),
-                AppAction::SetStatus(format!("manage selection moved | {}", super::BASE_STATUS)),
+                AppAction::SetStatus(wrapped.with_base_status("manage selection moved")),
             ]
         );
     }
@@ -815,7 +1023,7 @@ mod tests {
             actions,
             vec![
                 AppAction::SetOnboardingState(app.onboarding.begin_quick_check()),
-                AppAction::SetStatus("checking common install locations | q quit".to_string()),
+                AppAction::SetStatus(app.with_base_status("checking common install locations")),
                 AppAction::StartOnboardingQuickCheck,
             ]
         );
@@ -876,5 +1084,111 @@ mod tests {
         };
 
         assert!(app.messages_for_key(release).is_empty());
+    }
+
+    #[test]
+    fn guarded_found_path_defaults_to_scan_another_location() {
+        let mut app = app_for_tests(Screen::Onboarding);
+        app.runtime = AppRuntime::new(
+            "dev".to_string(),
+            None,
+            Some(PathBuf::from(
+                "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
+            )),
+        );
+
+        let path = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
+        let actions = app.update(AppMessage::OnboardingTaskEvent(
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Some(path.clone())),
+        ));
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetOnboardingState(app.onboarding_found_state(path.clone())),
+                AppAction::SetStatus(app.found_status_for_path(&path)),
+            ]
+        );
+        assert_eq!(
+            app.onboarding_found_state(path).selected_found_action(),
+            FoundAction::ScanAnotherLocation
+        );
+    }
+
+    #[test]
+    fn save_refuses_guarded_path_for_non_default_profile() {
+        let mut app = app_for_tests(Screen::Onboarding);
+        app.runtime = AppRuntime::new(
+            "dev".to_string(),
+            None,
+            Some(PathBuf::from(
+                "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
+            )),
+        );
+
+        app.apply(AppAction::SaveAddonDir(PathBuf::from(
+            "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        )));
+
+        assert_eq!(app.active_screen, Screen::Onboarding);
+        assert!(matches!(app.onboarding.phase, OnboardingPhase::Error(_)));
+        assert!(app.status_line.contains("refused to save default target"));
+    }
+
+    #[test]
+    fn bootstrap_rejects_invalid_addon_dir_override() {
+        let temp = tempdir().expect("tempdir");
+        let paths = AppPaths {
+            profile: "dev".to_string(),
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+            log_dir: temp.path().join("data").join("logs"),
+            config_file: temp.path().join("config").join("config.toml"),
+            state_db_file: temp.path().join("data").join("state.sqlite"),
+        };
+
+        let error = match App::bootstrap(
+            paths,
+            AppRuntime::new("dev".to_string(), Some(PathBuf::from("D:\\bad-path")), None),
+        ) {
+            Ok(_) => panic!("invalid override should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid --addon-dir for profile 'dev'")
+        );
+    }
+
+    #[test]
+    fn bootstrap_rejects_guarded_addon_dir_override() {
+        let temp = tempdir().expect("tempdir");
+        let paths = AppPaths {
+            profile: "dev".to_string(),
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+            log_dir: temp.path().join("data").join("logs"),
+            config_file: temp.path().join("config").join("config.toml"),
+            state_db_file: temp.path().join("data").join("state.sqlite"),
+        };
+
+        let guarded = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
+        let error = match App::bootstrap(
+            paths,
+            AppRuntime::new("dev".to_string(), Some(guarded.clone()), Some(guarded)),
+        ) {
+            Ok(_) => panic!("guarded override should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("matches the default profile AddOns directory")
+        );
     }
 }

@@ -13,7 +13,7 @@ pub use domain::{
 };
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
-pub use paths::AppPaths;
+pub use paths::{AppPaths, DEFAULT_PROFILE, paths_match};
 pub use storage::StateDatabase;
 pub use wow::{
     ScanProgressUpdate, detect_known_addons_path, quick_check_common_paths, search_for_wow,
