@@ -53,7 +53,7 @@ pub fn detect_known_addons_path() -> Option<PathBuf> {
             if root_str.len() == 3 && root_str.ends_with(":\\") {
                 let drive = &root_str[0..1];
                 for template in windows_relative_candidates() {
-                    let candidate = PathBuf::from(format!("{drive}{template}"));
+                    let candidate = PathBuf::from(format!(r"{drive}:\{template}"));
                     if validate_addons_path(&candidate).is_ok() {
                         return Some(candidate);
                     }
@@ -296,10 +296,10 @@ fn common_relative_candidates() -> Vec<PathBuf> {
 
 fn windows_relative_candidates() -> Vec<&'static str> {
     vec![
-        r":\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
-        r":\Program Files\World of Warcraft\_retail_\Interface\AddOns",
-        r":\Games\World of Warcraft\_retail_\Interface\AddOns",
-        r":\World of Warcraft\_retail_\Interface\AddOns",
+        r"Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
+        r"Program Files\World of Warcraft\_retail_\Interface\AddOns",
+        r"Games\World of Warcraft\_retail_\Interface\AddOns",
+        r"World of Warcraft\_retail_\Interface\AddOns",
     ]
 }
 

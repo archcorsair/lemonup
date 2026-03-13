@@ -3,6 +3,7 @@ pub mod domain;
 pub mod error;
 pub mod events;
 pub mod paths;
+pub mod scan;
 pub mod storage;
 pub mod wow;
 
@@ -14,6 +15,10 @@ pub use domain::{
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
 pub use paths::{AppPaths, DEFAULT_PROFILE, paths_match};
+pub use scan::{
+    ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
+    parse_toc_content, scan_addons_dir, select_toc_file,
+};
 pub use storage::StateDatabase;
 pub use wow::{
     ScanProgressUpdate, detect_known_addons_path, quick_check_common_paths, search_for_wow,
