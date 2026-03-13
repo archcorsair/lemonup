@@ -5,16 +5,15 @@ use std::sync::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
-use ratatui::Frame;
-use ratatui::Terminal;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
-    AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, StateDatabase,
-    detect_known_addons_path, paths_match, search_for_wow, validate_addons_path,
+    AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, SourceKind,
+    StateDatabase, detect_known_addons_path, paths_match, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -23,15 +22,23 @@ use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
 
-const STATUS_COMMANDS: &str = "q quit | 1 onboarding | 2 manage | 3 install | 4 config | 5 wago";
+const DASHBOARD_COMMANDS: &str =
+    "q quit | j/k list | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
+pub enum ShellMode {
     Onboarding,
-    Manage,
+    Dashboard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailMode {
+    Overview,
     Install,
+    Search,
+    Update,
     Config,
-    WagoSearch,
+    Backup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,10 +80,10 @@ impl AppRuntime {
 enum AppMessage {
     Tick,
     QuitRequested,
-    Navigate(Screen),
     TerminalResized { width: u16, height: u16 },
-    ManageSelectionNext,
-    ManageSelectionPrevious,
+    DashboardSelectionNext,
+    DashboardSelectionPrevious,
+    SetDetailMode(DetailMode),
     OnboardingBeginEditing,
     OnboardingStopEditing,
     OnboardingInputChar(char),
@@ -92,24 +99,46 @@ enum AppMessage {
     OnboardingTaskEvent(OnboardingTaskEvent),
 }
 
-struct ManageState {
-    items: Vec<String>,
-    list_state: ListState,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardItem {
+    name: String,
+    folder: String,
+    source: SourceKind,
+    version: Option<String>,
+    author: Option<String>,
+    owned_folder_count: usize,
 }
 
-impl ManageState {
-    fn new(addon_count: usize) -> Self {
-        let items = vec![
-            format!("Tracked addons in state DB: {addon_count}"),
-            "Planned: update/remove/check actions against typed core events".to_string(),
-            "Planned: filter/search, ownership, dependencies, and backup actions".to_string(),
-        ];
+struct DashboardState {
+    items: Vec<DashboardItem>,
+    list_state: ListState,
+    detail_mode: DetailMode,
+}
+
+impl DashboardState {
+    fn from_addons(addons: Vec<AddonRecord>) -> Self {
+        let items = addons
+            .into_iter()
+            .map(|addon| DashboardItem {
+                name: addon.name,
+                folder: addon.folder,
+                source: addon.source,
+                version: addon.version,
+                author: addon.author,
+                owned_folder_count: addon.owned_folders.len(),
+            })
+            .collect::<Vec<_>>();
+
         let mut list_state = ListState::default();
         if !items.is_empty() {
             list_state.select(Some(0));
         }
 
-        Self { items, list_state }
+        Self {
+            items,
+            list_state,
+            detail_mode: DetailMode::Overview,
+        }
     }
 
     fn next_selection(&self) -> Option<usize> {
@@ -117,11 +146,10 @@ impl ManageState {
             return None;
         }
 
-        let next = match self.list_state.selected() {
+        Some(match self.list_state.selected() {
             Some(index) => (index + 1) % self.items.len(),
             None => 0,
-        };
-        Some(next)
+        })
     }
 
     fn previous_selection(&self) -> Option<usize> {
@@ -129,23 +157,28 @@ impl ManageState {
             return None;
         }
 
-        let previous = match self.list_state.selected() {
+        Some(match self.list_state.selected() {
             Some(0) | None => self.items.len() - 1,
             Some(index) => index - 1,
-        };
-        Some(previous)
+        })
+    }
+
+    fn selected_item(&self) -> Option<&DashboardItem> {
+        self.list_state
+            .selected()
+            .and_then(|index| self.items.get(index))
     }
 }
 
 pub struct App {
-    active_screen: Screen,
+    shell_mode: ShellMode,
     quit_requested: bool,
     status_line: String,
     config_present: bool,
     config_store: ConfigStore,
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
-    manage: ManageState,
+    dashboard: DashboardState,
     onboarding: OnboardingState,
     onboarding_events_tx: mpsc::UnboundedSender<OnboardingTaskEvent>,
     onboarding_events_rx: mpsc::UnboundedReceiver<OnboardingTaskEvent>,
@@ -157,7 +190,7 @@ impl App {
         let config_store = ConfigStore::new(paths.config_file);
         let config_state = config_store.load()?;
         let database = StateDatabase::open(paths.state_db_file)?;
-        let addon_count = database.list_addons()?.len();
+        let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
@@ -194,24 +227,24 @@ impl App {
             .map(|path| OnboardingState::with_input(path.display().to_string()))
             .unwrap_or_else(OnboardingState::new);
 
-        let active_screen = match effective_addon_dir.as_ref() {
+        let shell_mode = match effective_addon_dir.as_ref() {
             Some(path) if validate_addons_path(path).is_ok() && !runtime.is_guarded_path(path) => {
-                Screen::Manage
+                ShellMode::Dashboard
             }
-            _ => Screen::Onboarding,
+            _ => ShellMode::Onboarding,
         };
 
         let (onboarding_events_tx, onboarding_events_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
-            active_screen,
+            shell_mode,
             quit_requested: false,
             status_line: String::new(),
             config_present,
             config_store,
             runtime,
             effective_addon_dir,
-            manage: ManageState::new(addon_count),
+            dashboard: DashboardState::from_addons(addons),
             onboarding,
             onboarding_events_tx,
             onboarding_events_rx,
@@ -247,22 +280,24 @@ impl App {
     }
 
     fn initial_status_line(&self) -> String {
-        match self.active_screen {
-            Screen::Manage => {
+        match self.shell_mode {
+            ShellMode::Dashboard => {
                 if self.runtime.addon_dir_override.is_some() {
-                    self.with_base_status("using addon-dir override")
+                    self.dashboard_status_for(DetailMode::Overview, "using addon-dir override")
                 } else {
-                    self.base_status_line()
+                    self.dashboard_status_for(
+                        DetailMode::Overview,
+                        "single-surface shell ready | scan sync wiring lands next",
+                    )
                 }
             }
-            Screen::Onboarding => match &self.onboarding.phase {
+            ShellMode::Onboarding => match &self.onboarding.phase {
                 OnboardingPhase::Error(message) => {
                     self.with_base_status(&format!("location finder blocked: {message}"))
                 }
                 OnboardingPhase::Ready => self.location_finder_status(),
                 _ => self.with_base_status("location finder"),
             },
-            _ => self.base_status_line(),
         }
     }
 
@@ -290,23 +325,25 @@ impl App {
             return vec![];
         }
 
-        if self.active_screen == Screen::Onboarding {
-            return self.onboarding_messages_for_key(key);
+        match self.shell_mode {
+            ShellMode::Onboarding => self.onboarding_messages_for_key(key),
+            ShellMode::Dashboard => self.dashboard_messages_for_key(key),
         }
+    }
 
+    fn dashboard_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-            KeyCode::Char('1') => vec![AppMessage::Navigate(Screen::Onboarding)],
-            KeyCode::Char('2') => vec![AppMessage::Navigate(Screen::Manage)],
-            KeyCode::Char('3') => vec![AppMessage::Navigate(Screen::Install)],
-            KeyCode::Char('4') => vec![AppMessage::Navigate(Screen::Config)],
-            KeyCode::Char('5') => vec![AppMessage::Navigate(Screen::WagoSearch)],
-            KeyCode::Down | KeyCode::Char('j') if self.active_screen == Screen::Manage => {
-                vec![AppMessage::ManageSelectionNext]
+            KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
+            KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
+            KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
+            KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
+            KeyCode::Char('s') | KeyCode::Char('/') => {
+                vec![AppMessage::SetDetailMode(DetailMode::Search)]
             }
-            KeyCode::Up | KeyCode::Char('k') if self.active_screen == Screen::Manage => {
-                vec![AppMessage::ManageSelectionPrevious]
-            }
+            KeyCode::Char('u') => vec![AppMessage::SetDetailMode(DetailMode::Update)],
+            KeyCode::Char('c') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
+            KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
             _ => vec![],
         }
     }
@@ -367,7 +404,7 @@ impl App {
     fn update(&self, message: AppMessage) -> Vec<AppAction> {
         match message {
             AppMessage::Tick => {
-                if self.active_screen == Screen::Onboarding
+                if self.shell_mode == ShellMode::Onboarding
                     && matches!(self.onboarding.phase, OnboardingPhase::Bootstrapping)
                 {
                     vec![
@@ -382,29 +419,34 @@ impl App {
                 }
             }
             AppMessage::QuitRequested => vec![AppAction::Quit],
-            AppMessage::Navigate(screen) => {
-                vec![
-                    AppAction::SetScreen(screen),
-                    AppAction::SetStatus(self.base_status_for_screen(screen)),
-                ]
-            }
             AppMessage::TerminalResized { width, height } => vec![AppAction::SetStatus(
                 self.with_base_status(&format!("terminal resized to {width}x{height}")),
             )],
-            AppMessage::ManageSelectionNext => {
-                let selection = self.manage.next_selection();
+            AppMessage::DashboardSelectionNext => {
+                let selection = self.dashboard.next_selection();
                 vec![
-                    AppAction::SetManageSelection(selection),
-                    AppAction::SetStatus(self.with_base_status("manage selection moved")),
+                    AppAction::SetDashboardSelection(selection),
+                    AppAction::SetStatus(
+                        self.dashboard_status_for(self.dashboard.detail_mode, "selection moved"),
+                    ),
                 ]
             }
-            AppMessage::ManageSelectionPrevious => {
-                let selection = self.manage.previous_selection();
+            AppMessage::DashboardSelectionPrevious => {
+                let selection = self.dashboard.previous_selection();
                 vec![
-                    AppAction::SetManageSelection(selection),
-                    AppAction::SetStatus(self.with_base_status("manage selection moved")),
+                    AppAction::SetDashboardSelection(selection),
+                    AppAction::SetStatus(
+                        self.dashboard_status_for(self.dashboard.detail_mode, "selection moved"),
+                    ),
                 ]
             }
+            AppMessage::SetDetailMode(detail_mode) => vec![
+                AppAction::SetDetailMode(detail_mode),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    detail_mode,
+                    &format!("{} panel selected", detail_mode_label(detail_mode)),
+                )),
+            ],
             AppMessage::OnboardingBeginEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.begin_editing()),
                 AppAction::SetStatus(self.with_base_status(
@@ -554,9 +596,11 @@ impl App {
         match action {
             AppAction::None => {}
             AppAction::Quit => self.quit_requested = true,
-            AppAction::SetScreen(screen) => self.active_screen = screen,
             AppAction::SetStatus(status) => self.status_line = status,
-            AppAction::SetManageSelection(selection) => self.manage.list_state.select(selection),
+            AppAction::SetDashboardSelection(selection) => {
+                self.dashboard.list_state.select(selection)
+            }
+            AppAction::SetDetailMode(detail_mode) => self.dashboard.detail_mode = detail_mode,
             AppAction::SetOnboardingState(state) => self.onboarding = state,
             AppAction::StartOnboardingQuickCheck => {
                 let sender = self.onboarding_events_tx.clone();
@@ -612,7 +656,7 @@ impl App {
                     self.status_line = self.with_base_status(
                         "refused to save default target into non-default profile",
                     );
-                    self.active_screen = Screen::Onboarding;
+                    self.shell_mode = ShellMode::Onboarding;
                     return;
                 }
 
@@ -626,9 +670,14 @@ impl App {
                     Ok(()) => {
                         self.config_present = true;
                         self.effective_addon_dir = Some(path.clone());
-                        self.active_screen = Screen::Manage;
-                        self.status_line = self
-                            .with_base_status(&format!("saved addon directory {}", path.display()));
+                        self.shell_mode = ShellMode::Dashboard;
+                        self.status_line = self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "saved addon directory {} | scan sync wiring lands next",
+                                path.display()
+                            ),
+                        );
                     }
                     Err(error) => {
                         self.onboarding = self.onboarding.error(error.to_string());
@@ -645,55 +694,63 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(5),
-                Constraint::Min(10),
+                Constraint::Min(12),
                 Constraint::Length(3),
             ])
             .split(frame.area());
 
-        let mut header_lines = vec![Line::from(vec![
-            Span::styled(
-                "LemonUp v2",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Rust + Ratatui foundation"),
-        ])];
-        header_lines.push(Line::from(format!(
-            "Profile: {}",
-            self.runtime.profile_name
-        )));
-        header_lines.push(Line::from(format!(
-            "Target: {}",
-            self.rendered_target_path()
-        )));
-        if let Some(warning) = self.profile_warning() {
-            header_lines.push(Line::from(Span::styled(
-                warning,
-                Style::default().fg(Color::Red),
-            )));
-        }
-
-        let header = Paragraph::new(header_lines)
+        let header = Paragraph::new(self.header_lines())
             .block(Block::default().borders(Borders::ALL).title("Header"));
 
         let footer = Paragraph::new(self.status_line.clone())
             .block(Block::default().borders(Borders::ALL).title("Status"));
 
         frame.render_widget(header, layout[0]);
-        match self.active_screen {
-            Screen::Onboarding => frame.render_widget(self.onboarding_body(), layout[1]),
-            Screen::Manage => self.render_manage(frame, layout[1]),
-            Screen::Install => frame.render_widget(self.install_body(), layout[1]),
-            Screen::Config => frame.render_widget(self.config_body(), layout[1]),
-            Screen::WagoSearch => frame.render_widget(self.wago_body(), layout[1]),
+        match self.shell_mode {
+            ShellMode::Onboarding => frame.render_widget(self.onboarding_body(), layout[1]),
+            ShellMode::Dashboard => self.render_dashboard(frame, layout[1]),
         }
         frame.render_widget(footer, layout[2]);
+    }
+
+    fn header_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                "LemonUp v2",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  single-surface shell"),
+        ])];
+        lines.push(Line::from(format!(
+            "Profile: {}",
+            self.runtime.profile_name
+        )));
+        lines.push(Line::from(format!(
+            "Target: {}",
+            self.rendered_target_path()
+        )));
+        lines.push(Line::from(format!(
+            "Surface: {}",
+            match self.shell_mode {
+                ShellMode::Onboarding => "setup takeover",
+                ShellMode::Dashboard => detail_mode_label(self.dashboard.detail_mode),
+            }
+        )));
+        if let Some(warning) = self.profile_warning() {
+            lines.push(Line::from(Span::styled(
+                warning,
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines
     }
 
     fn onboarding_body(&self) -> Paragraph<'static> {
         let mut lines = vec![
             Line::from("Locate your World of Warcraft AddOns folder"),
+            Line::from("This is an inline takeover inside the single-screen shell."),
             Line::from(format!("Current path: {}", self.onboarding.input)),
             Line::from(format!("Config present: {}", self.config_present)),
             Line::from(""),
@@ -787,79 +844,185 @@ impl App {
             ));
         }
 
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Onboarding"))
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Setup"))
     }
 
-    fn render_manage(&mut self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+    fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let [list_area, detail_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .areas(area);
+
+        self.render_dashboard_list(frame, list_area);
+        frame.render_widget(self.detail_panel(), detail_area);
+    }
+
+    fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        if self.dashboard.items.is_empty() {
+            let body = Paragraph::new(vec![
+                Line::from("No scanned addons yet."),
+                Line::from("This shell foundation is ready; scan sync wiring lands next chunk."),
+                Line::from("Use the detail pane modes to inspect the integrated surface layout."),
+            ])
+            .block(Block::default().borders(Borders::ALL).title("Addons"));
+            frame.render_widget(body, area);
+            return;
+        }
+
         let items = self
-            .manage
+            .dashboard
             .items
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let prefix = if self.manage.list_state.selected() == Some(index) {
+                let prefix = if self.dashboard.list_state.selected() == Some(index) {
                     "› "
                 } else {
                     "  "
                 };
-                ListItem::new(format!("{prefix}{item}"))
+                let version = item.version.as_deref().unwrap_or("unknown");
+                ListItem::new(vec![
+                    Line::from(format!("{prefix}{}", item.name)),
+                    Line::from(format!("    {} | {}", item.folder, version)),
+                ])
             })
             .collect::<Vec<_>>();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Manage"))
+            .block(Block::default().borders(Borders::ALL).title("Addons"))
             .highlight_style(
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             );
 
-        frame.render_stateful_widget(list, area, &mut self.manage.list_state);
+        frame.render_stateful_widget(list, area, &mut self.dashboard.list_state);
     }
 
-    fn install_body(&self) -> Paragraph<'static> {
-        Paragraph::new(vec![
-            Line::from("Current screen: install"),
-            Line::from("Planned sources: GitHub, TukUI, WoWInterface, Wago."),
-            Line::from("Typed InstallPlan exists in core; provider wiring is next."),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Install"))
-    }
+    fn detail_panel(&self) -> Paragraph<'static> {
+        let mut lines = Vec::new();
+        let selected = self.dashboard.selected_item();
 
-    fn config_body(&self) -> Paragraph<'static> {
-        Paragraph::new(vec![
-            Line::from("Current screen: config"),
-            Line::from("Config store uses versioned TOML under OS-native config dirs."),
-            Line::from("State database lives separately under the OS-native data dir."),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Config"))
-    }
+        lines.push(Line::from(format!(
+            "Mode: {}",
+            detail_mode_label(self.dashboard.detail_mode)
+        )));
+        lines.push(Line::from(""));
 
-    fn wago_body(&self) -> Paragraph<'static> {
-        Paragraph::new(vec![
-            Line::from("Current screen: Wago search"),
-            Line::from("Planned: search/install flow over a shared provider trait."),
-            Line::from("This screen exists now to lock routing and public UI boundaries."),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Wago"))
+        match self.dashboard.detail_mode {
+            DetailMode::Overview => {
+                if let Some(item) = selected {
+                    lines.push(Line::from(format!("Name: {}", item.name)));
+                    lines.push(Line::from(format!("Folder: {}", item.folder)));
+                    lines.push(Line::from(format!("Source: {}", source_label(item.source))));
+                    lines.push(Line::from(format!(
+                        "Version: {}",
+                        item.version.as_deref().unwrap_or("unknown")
+                    )));
+                    lines.push(Line::from(format!(
+                        "Author: {}",
+                        item.author.as_deref().unwrap_or("unknown")
+                    )));
+                    lines.push(Line::from(format!(
+                        "Owned folders: {}",
+                        item.owned_folder_count
+                    )));
+                } else {
+                    lines.push(Line::from("No addon selected."));
+                    lines.push(Line::from(
+                        "Once scan sync is wired, real addon rows will populate here.",
+                    ));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "Single-surface foundation is active. Scan sync and richer interactions land next.",
+                ));
+            }
+            DetailMode::Install => {
+                lines.push(Line::from("Install area"));
+                lines.push(Line::from(
+                    "GitHub, TukUI, WoWInterface, and Wago entry points will live here.",
+                ));
+                lines.push(Line::from("Provider wiring is intentionally deferred."));
+            }
+            DetailMode::Search => {
+                lines.push(Line::from("Search area"));
+                lines.push(Line::from(
+                    "Command/search surface placeholder for addon lookup and filtering.",
+                ));
+                lines.push(Line::from(
+                    "Persistent single-screen routing is now in place.",
+                ));
+            }
+            DetailMode::Update => {
+                lines.push(Line::from("Update area"));
+                lines.push(Line::from(
+                    "Check/update actions will be integrated here without leaving the shell.",
+                ));
+                lines.push(Line::from("Only shell boundaries are wired in this chunk."));
+            }
+            DetailMode::Config => {
+                lines.push(Line::from("Config area"));
+                lines.push(Line::from(format!(
+                    "Target path: {}",
+                    self.rendered_target_path()
+                )));
+                lines.push(Line::from(format!(
+                    "Config present: {}",
+                    self.config_present
+                )));
+                lines.push(Line::from("Config editing controls are not wired yet."));
+            }
+            DetailMode::Backup => {
+                lines.push(Line::from("Backup area"));
+                lines.push(Line::from(
+                    "WTF backup and restore actions will be integrated here later.",
+                ));
+                lines.push(Line::from(
+                    "This pane currently exists to validate the unified layout.",
+                ));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("Modes"));
+        for (mode, key, label) in [
+            (DetailMode::Overview, "o", "Overview"),
+            (DetailMode::Install, "i", "Install"),
+            (DetailMode::Search, "s", "Search"),
+            (DetailMode::Update, "u", "Update"),
+            (DetailMode::Config, "c", "Config"),
+            (DetailMode::Backup, "b", "Backup"),
+        ] {
+            let marker = if self.dashboard.detail_mode == mode {
+                "•"
+            } else {
+                " "
+            };
+            lines.push(Line::from(format!("{marker} {key} {label}")));
+        }
+
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
     }
 
     fn base_status_line(&self) -> String {
-        format!(
-            "profile {} | {}",
-            self.runtime.profile_name, STATUS_COMMANDS
-        )
+        match self.shell_mode {
+            ShellMode::Onboarding => format!("profile {} | q quit", self.runtime.profile_name),
+            ShellMode::Dashboard => {
+                format!(
+                    "profile {} | {}",
+                    self.runtime.profile_name, DASHBOARD_COMMANDS
+                )
+            }
+        }
     }
 
     fn with_base_status(&self, message: &str) -> String {
         format!("{message} | {}", self.base_status_line())
     }
 
-    fn base_status_for_screen(&self, screen: Screen) -> String {
-        match screen {
-            Screen::Onboarding => self.location_finder_status(),
-            _ => self.base_status_line(),
-        }
+    fn dashboard_status_for(&self, detail_mode: DetailMode, message: &str) -> String {
+        self.with_base_status(&format!("{} | {message}", detail_mode_label(detail_mode)))
     }
 
     fn location_finder_status(&self) -> String {
@@ -882,7 +1045,7 @@ impl App {
             return None;
         }
 
-        if self.active_screen == Screen::Onboarding
+        if self.shell_mode == ShellMode::Onboarding
             && self.is_guarded_path(Path::new(self.onboarding.input.trim()))
         {
             return Some(
@@ -919,6 +1082,27 @@ impl App {
     }
 }
 
+fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
+    match detail_mode {
+        DetailMode::Overview => "Overview",
+        DetailMode::Install => "Install",
+        DetailMode::Search => "Search",
+        DetailMode::Update => "Update",
+        DetailMode::Config => "Config",
+        DetailMode::Backup => "Backup",
+    }
+}
+
+fn source_label(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::GitHub => "GitHub",
+        SourceKind::Tukui => "TukUI",
+        SourceKind::WowInterface => "WoWInterface",
+        SourceKind::Wago => "Wago",
+        SourceKind::Manual => "Manual",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -926,34 +1110,58 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::widgets::ListState;
     use tempfile::tempdir;
-
-    use super::{App, AppMessage, AppRuntime, ManageState, Screen};
-    use crate::action::AppAction;
-    use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
-    use lemonup_core::{AppPaths, ConfigStore, DEFAULT_PROFILE};
     use tokio::sync::mpsc;
 
-    fn app_for_tests(screen: Screen) -> App {
+    use super::{
+        App, AppMessage, AppRuntime, DashboardItem, DashboardState, DetailMode, ShellMode,
+    };
+    use crate::action::AppAction;
+    use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
+    use lemonup_core::{AppPaths, ConfigStore, DEFAULT_PROFILE, SourceKind};
+
+    fn app_for_tests(shell_mode: ShellMode) -> App {
         let (onboarding_events_tx, onboarding_events_rx) = mpsc::unbounded_channel();
         App {
-            active_screen: screen,
+            shell_mode,
             quit_requested: false,
-            status_line: format!("profile {} | {}", DEFAULT_PROFILE, super::STATUS_COMMANDS),
+            status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
             config_present: true,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
             effective_addon_dir: None,
-            manage: ManageState {
+            dashboard: DashboardState {
                 items: vec![
-                    "first".to_string(),
-                    "second".to_string(),
-                    "third".to_string(),
+                    DashboardItem {
+                        name: "First".to_string(),
+                        folder: "First".to_string(),
+                        source: SourceKind::Manual,
+                        version: Some("1.0.0".to_string()),
+                        author: None,
+                        owned_folder_count: 0,
+                    },
+                    DashboardItem {
+                        name: "Second".to_string(),
+                        folder: "Second".to_string(),
+                        source: SourceKind::GitHub,
+                        version: Some("2.0.0".to_string()),
+                        author: Some("Author".to_string()),
+                        owned_folder_count: 1,
+                    },
+                    DashboardItem {
+                        name: "Third".to_string(),
+                        folder: "Third".to_string(),
+                        source: SourceKind::Wago,
+                        version: None,
+                        author: None,
+                        owned_folder_count: 0,
+                    },
                 ],
                 list_state: {
                     let mut state = ListState::default();
                     state.select(Some(0));
                     state
                 },
+                detail_mode: DetailMode::Overview,
             },
             onboarding: OnboardingState::new(),
             onboarding_events_tx,
@@ -963,58 +1171,62 @@ mod tests {
     }
 
     #[test]
-    fn manage_navigation_keys_emit_messages_on_manage_screen() {
-        let app = app_for_tests(Screen::Manage);
+    fn dashboard_navigation_keys_emit_messages_on_dashboard() {
+        let app = app_for_tests(ShellMode::Dashboard);
 
         let next = app.messages_for_key(KeyEvent::from(KeyCode::Char('j')));
         let previous = app.messages_for_key(KeyEvent::from(KeyCode::Up));
 
-        assert_eq!(next, vec![AppMessage::ManageSelectionNext]);
-        assert_eq!(previous, vec![AppMessage::ManageSelectionPrevious]);
+        assert_eq!(next, vec![AppMessage::DashboardSelectionNext]);
+        assert_eq!(previous, vec![AppMessage::DashboardSelectionPrevious]);
     }
 
     #[test]
-    fn manage_navigation_keys_are_ignored_outside_manage_screen() {
-        let app = app_for_tests(Screen::Install);
+    fn detail_mode_keys_emit_messages_on_dashboard() {
+        let app = app_for_tests(ShellMode::Dashboard);
 
-        assert!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('j')))
-                .is_empty()
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
+            vec![AppMessage::SetDetailMode(DetailMode::Install)]
         );
-        assert!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Down))
-                .is_empty()
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
+            vec![AppMessage::SetDetailMode(DetailMode::Backup)]
         );
     }
 
     #[test]
-    fn manage_selection_wraps_forward_and_backward() {
-        let app = app_for_tests(Screen::Manage);
+    fn dashboard_selection_wraps_forward_and_backward() {
+        let app = app_for_tests(ShellMode::Dashboard);
 
-        let forward = app.update(AppMessage::ManageSelectionNext);
+        let forward = app.update(AppMessage::DashboardSelectionNext);
         assert_eq!(
             forward,
             vec![
-                AppAction::SetManageSelection(Some(1)),
-                AppAction::SetStatus(app.with_base_status("manage selection moved")),
+                AppAction::SetDashboardSelection(Some(1)),
+                AppAction::SetStatus(
+                    app.dashboard_status_for(app.dashboard.detail_mode, "selection moved")
+                ),
             ]
         );
 
-        let mut wrapped = app_for_tests(Screen::Manage);
-        wrapped.manage.list_state.select(Some(0));
-        let backward = wrapped.update(AppMessage::ManageSelectionPrevious);
+        let mut wrapped = app_for_tests(ShellMode::Dashboard);
+        wrapped.dashboard.list_state.select(Some(0));
+        let backward = wrapped.update(AppMessage::DashboardSelectionPrevious);
         assert_eq!(
             backward,
             vec![
-                AppAction::SetManageSelection(Some(2)),
-                AppAction::SetStatus(wrapped.with_base_status("manage selection moved")),
+                AppAction::SetDashboardSelection(Some(2)),
+                AppAction::SetStatus(
+                    wrapped.dashboard_status_for(wrapped.dashboard.detail_mode, "selection moved")
+                ),
             ]
         );
     }
 
     #[test]
     fn onboarding_tick_bootstraps_quick_check() {
-        let mut app = app_for_tests(Screen::Onboarding);
+        let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.phase = OnboardingPhase::Bootstrapping;
 
         let actions = app.update(AppMessage::Tick);
@@ -1031,7 +1243,7 @@ mod tests {
 
     #[test]
     fn found_confirmation_uses_selected_action() {
-        let mut app = app_for_tests(Screen::Onboarding);
+        let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.input =
             "C:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns".to_string();
         app.onboarding.phase = OnboardingPhase::Found(FoundState {
@@ -1050,7 +1262,7 @@ mod tests {
 
     #[test]
     fn deep_scan_progress_event_updates_onboarding_state() {
-        let app = app_for_tests(Screen::Onboarding);
+        let app = app_for_tests(ShellMode::Onboarding);
 
         let actions = app.update(AppMessage::OnboardingTaskEvent(
             crate::onboarding::OnboardingTaskEvent::DeepScanProgress(
@@ -1075,7 +1287,7 @@ mod tests {
 
     #[test]
     fn release_events_are_ignored_for_navigation() {
-        let app = app_for_tests(Screen::Onboarding);
+        let app = app_for_tests(ShellMode::Onboarding);
         let release = KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
@@ -1088,7 +1300,7 @@ mod tests {
 
     #[test]
     fn guarded_found_path_defaults_to_scan_another_location() {
-        let mut app = app_for_tests(Screen::Onboarding);
+        let mut app = app_for_tests(ShellMode::Onboarding);
         app.runtime = AppRuntime::new(
             "dev".to_string(),
             None,
@@ -1117,7 +1329,7 @@ mod tests {
 
     #[test]
     fn save_refuses_guarded_path_for_non_default_profile() {
-        let mut app = app_for_tests(Screen::Onboarding);
+        let mut app = app_for_tests(ShellMode::Onboarding);
         app.runtime = AppRuntime::new(
             "dev".to_string(),
             None,
@@ -1130,7 +1342,7 @@ mod tests {
             "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
         )));
 
-        assert_eq!(app.active_screen, Screen::Onboarding);
+        assert_eq!(app.shell_mode, ShellMode::Onboarding);
         assert!(matches!(app.onboarding.phase, OnboardingPhase::Error(_)));
         assert!(app.status_line.contains("refused to save default target"));
     }

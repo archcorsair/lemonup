@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 
-use crate::app::Screen;
+use crate::app::DetailMode;
 use crate::onboarding::OnboardingState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     None,
     Quit,
-    SetScreen(Screen),
     SetStatus(String),
-    SetManageSelection(Option<usize>),
+    SetDashboardSelection(Option<usize>),
+    SetDetailMode(DetailMode),
     SetOnboardingState(OnboardingState),
     StartOnboardingQuickCheck,
     StartOnboardingDeepScan(PathBuf),
