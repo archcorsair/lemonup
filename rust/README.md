@@ -6,7 +6,7 @@ Rust rewrite scaffold for LemonUp.
 
 - `crates/lemonup-core`: shared domain model, config/state storage, typed progress events
 - `crates/lemonup-app`: Ratatui shell and narrow CLI entrypoint
-- `docs/`: acceptance matrix and captured v1 gaps to avoid porting blindly
+- `docs/`: acceptance matrix, handoff notes, v1 gaps, and the single-surface shell plan
 
 ## Intended commands
 
