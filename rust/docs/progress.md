@@ -75,7 +75,7 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work added explicit ownership authority in core state
+- latest completed work added the managed ownership write path for install/update flows
 
 ## Newly Completed
 
@@ -93,12 +93,15 @@ These are implemented and manually verified in addition to the earlier chunks:
 - delete cascade now follows managed ownership only
 - scan-inferred relationships no longer trigger child cascade delete
 - added regression coverage for managed vs scan-inferred ownership behavior
+- dedicated `record_managed_addon(...)` core API for install/update flows
+- managed writes now remove represented standalone child rows
+- managed updates now replace prior owned-folder sets while preserving install time
 
 ## Next Up
 
 Next phase:
 
-1. install and update paths write authoritative managed ownership
+1. wire the first real install/update caller to `record_managed_addon(...)`
 2. multi-select groundwork in the shell
 3. bulk action groundwork for update selected and delete selected
 4. drift detection surfaced in the UI
@@ -112,7 +115,7 @@ Next phase:
 
 ### Planned order
 
-1. install and update paths write authoritative ownership
+1. wire a real install/update caller to managed ownership persistence
 2. expose managed-ownership assumptions to app state where needed
 3. shell multi-select state
 4. bulk delete and bulk update actions
@@ -122,7 +125,7 @@ Next phase:
 
 Still missing or incomplete:
 
-- install/update flows that persist managed ownership
+- real install/update callers using managed ownership persistence
 - richer tree view for parent/child relationships
 - install flows
 - update flows

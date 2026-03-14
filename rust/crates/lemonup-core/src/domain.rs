@@ -97,6 +97,8 @@ impl AddonRecord {
     pub fn effective_ownership_source(&self) -> OwnershipSource {
         if self.owned_folders.is_empty() {
             OwnershipSource::None
+        } else if self.ownership_source == OwnershipSource::None {
+            OwnershipSource::ScanInferred
         } else {
             self.ownership_source
         }

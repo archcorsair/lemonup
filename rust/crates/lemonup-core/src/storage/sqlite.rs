@@ -50,6 +50,65 @@ impl StateDatabase {
         Self::upsert_addon_with_connection(&self.connection, addon)
     }
 
+    pub fn record_managed_addon(&mut self, addon: &AddonRecord) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        let existing_addons = Self::list_addons_from_connection(&tx)?;
+        let existing_parent = existing_addons
+            .iter()
+            .find(|existing| existing.folder == addon.folder);
+        let incoming_owned_folders = addon
+            .owned_folders
+            .iter()
+            .map(|owned_folder| owned_folder.name.clone())
+            .collect::<HashSet<_>>();
+        let prior_owned_folders = existing_parent
+            .iter()
+            .flat_map(|existing| {
+                existing
+                    .owned_folders
+                    .iter()
+                    .map(|owned_folder| owned_folder.name.clone())
+            })
+            .collect::<HashSet<_>>();
+        let represented_folders = incoming_owned_folders
+            .union(&prior_owned_folders)
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        for mut existing in existing_addons
+            .iter()
+            .filter(|existing| existing.folder != addon.folder)
+            .cloned()
+        {
+            let filtered = existing
+                .owned_folders
+                .iter()
+                .filter(|owned_folder| !incoming_owned_folders.contains(&owned_folder.name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if filtered.len() != existing.owned_folders.len() {
+                if filtered.is_empty() {
+                    existing.clear_owned_folders();
+                } else {
+                    existing.owned_folders = filtered;
+                }
+                Self::upsert_addon_with_connection(&tx, &existing)?;
+            }
+        }
+
+        for folder in represented_folders {
+            if folder != addon.folder {
+                Self::remove_addon_with_connection(&tx, &folder)?;
+            }
+        }
+
+        let merged = merge_managed_addon(addon, existing_parent);
+        Self::upsert_addon_with_connection(&tx, &merged)?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn reconcile_scanned_addons(
         &mut self,
         scanned_addons: &[ScannedAddon],
@@ -210,6 +269,12 @@ impl StateDatabase {
             self.connection.execute_batch(
                 "
                 ALTER TABLE addons ADD COLUMN ownership_source TEXT NOT NULL DEFAULT 'none';
+                UPDATE addons
+                SET ownership_source = CASE
+                    WHEN owned_folders = '[]' THEN 'none'
+                    ELSE 'scan_inferred'
+                END
+                WHERE ownership_source = 'none';
                 PRAGMA user_version = 2;
                 ",
             )?;
@@ -389,6 +454,58 @@ fn merge_scanned_addon(
         last_checked_at: existing.and_then(|addon| addon.last_checked_at),
         remote_version: existing.and_then(|addon| addon.remote_version.clone()),
     }
+}
+
+fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -> AddonRecord {
+    let now = OffsetDateTime::now_utc();
+    let preserve_kind_override = existing.is_some_and(|addon| addon.kind_override);
+    let mut merged = AddonRecord {
+        id: existing.and_then(|addon| addon.id),
+        name: incoming.name.clone(),
+        folder: incoming.folder.clone(),
+        owned_folders: incoming.owned_folders.clone(),
+        ownership_source: incoming.effective_ownership_source(),
+        kind: if preserve_kind_override {
+            existing
+                .expect("kind override requires existing addon")
+                .kind
+        } else {
+            incoming.kind
+        },
+        kind_override: incoming.kind_override || preserve_kind_override,
+        flavor: incoming.flavor,
+        version: incoming.version.clone(),
+        git_commit: incoming.git_commit.clone(),
+        author: incoming.author.clone(),
+        interface: incoming.interface.clone(),
+        source: incoming.source,
+        source_url: incoming
+            .source_url
+            .clone()
+            .or_else(|| existing.and_then(|addon| addon.source_url.clone())),
+        required_deps: incoming.required_deps.clone(),
+        optional_deps: incoming.optional_deps.clone(),
+        embedded_libs: incoming.embedded_libs.clone(),
+        installed_at: existing
+            .map(|addon| addon.installed_at)
+            .unwrap_or(incoming.installed_at),
+        updated_at: now,
+        last_checked_at: incoming
+            .last_checked_at
+            .or_else(|| existing.and_then(|addon| addon.last_checked_at)),
+        remote_version: incoming
+            .remote_version
+            .clone()
+            .or_else(|| existing.and_then(|addon| addon.remote_version.clone())),
+    };
+
+    if merged.owned_folders.is_empty() {
+        merged.clear_owned_folders();
+    } else {
+        merged.ownership_source = OwnershipSource::Managed;
+    }
+
+    merged
 }
 
 fn collect_owned_descendants(
@@ -887,6 +1004,151 @@ mod tests {
                 .get_addon_by_folder("ElvUI_WindTools")
                 .expect("get child")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn record_managed_addon_removes_standalone_child_rows() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM Naxx",
+                "DBM-Naxx",
+                SourceKind::Manual,
+            ))
+            .expect("seed existing child");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM Vault",
+                "DBM-Vault",
+                SourceKind::Manual,
+            ))
+            .expect("seed second child");
+
+        let mut managed = AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        managed.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "DBM-Naxx".to_string(),
+            },
+            OwnedFolder {
+                name: "DBM-Vault".to_string(),
+            },
+        ]);
+        managed.version = Some("11.0.1".to_string());
+        managed.remote_version = Some("11.0.1".to_string());
+        managed.source_url = Some("https://addons.wago.io/addons/dbm".to_string());
+
+        database
+            .record_managed_addon(&managed)
+            .expect("record managed addon");
+
+        let parent = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get parent")
+            .expect("parent exists");
+        assert!(parent.has_authoritative_owned_folders());
+        assert_eq!(parent.owned_folders.len(), 2);
+        assert_eq!(parent.remote_version.as_deref(), Some("11.0.1"));
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Naxx")
+                .expect("get child")
+                .is_none()
+        );
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Vault")
+                .expect("get second child")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn record_managed_addon_update_replaces_previous_owned_folders_and_preserves_install_time() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let installed_at =
+            OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("installed_at");
+        let checked_at = OffsetDateTime::from_unix_timestamp(1_700_000_123).expect("checked_at");
+
+        let mut existing = AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        existing.installed_at = installed_at;
+        existing.last_checked_at = Some(checked_at);
+        existing.kind = AddonKind::Addon;
+        existing.kind_override = true;
+        existing.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "DBM-Naxx".to_string(),
+            },
+            OwnedFolder {
+                name: "DBM-Vault".to_string(),
+            },
+        ]);
+        database
+            .record_managed_addon(&existing)
+            .expect("seed managed parent");
+
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM Vault",
+                "DBM-Vault",
+                SourceKind::Manual,
+            ))
+            .expect("seed prior child row");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM Ulduar",
+                "DBM-Ulduar",
+                SourceKind::Manual,
+            ))
+            .expect("seed new child row");
+
+        let mut updated = AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        updated.kind = AddonKind::Library;
+        updated.version = Some("11.0.2".to_string());
+        updated.source_url = Some("https://addons.wago.io/addons/dbm".to_string());
+        updated.remote_version = Some("11.0.2".to_string());
+        updated.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "DBM-Naxx".to_string(),
+            },
+            OwnedFolder {
+                name: "DBM-Ulduar".to_string(),
+            },
+        ]);
+
+        database
+            .record_managed_addon(&updated)
+            .expect("update managed addon");
+
+        let parent = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get parent")
+            .expect("parent exists");
+        assert!(parent.has_authoritative_owned_folders());
+        assert_eq!(parent.installed_at, installed_at);
+        assert_eq!(parent.last_checked_at, Some(checked_at));
+        assert_eq!(parent.kind, AddonKind::Addon);
+        assert!(parent.kind_override);
+        assert_eq!(parent.version.as_deref(), Some("11.0.2"));
+        assert_eq!(parent.remote_version.as_deref(), Some("11.0.2"));
+        assert_eq!(parent.owned_folders.len(), 2);
+        assert_eq!(parent.owned_folders[0].name, "DBM-Naxx");
+        assert_eq!(parent.owned_folders[1].name, "DBM-Ulduar");
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Vault")
+                .expect("get prior child")
+                .is_none()
+        );
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Ulduar")
+                .expect("get new child row")
+                .is_none()
         );
     }
 }
