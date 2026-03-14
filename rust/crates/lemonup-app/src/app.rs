@@ -12,8 +12,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
-    AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, SourceKind,
-    StateDatabase, detect_known_addons_path, paths_match, search_for_wow, validate_addons_path,
+    AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
+    GameFlavor, ScanSummary, SourceKind, StateDatabase, detect_known_addons_path, paths_match,
+    scan_addons_dir, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -96,7 +97,20 @@ enum AppMessage {
     OnboardingFoundActionNext,
     OnboardingFoundActionPrevious,
     OnboardingFoundConfirm,
-    OnboardingTaskEvent(OnboardingTaskEvent),
+    BackgroundTask(AppTaskEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppTaskEvent {
+    Onboarding(OnboardingTaskEvent),
+    AddonScanFinished(std::result::Result<AddonScanOutcome, String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddonScanOutcome {
+    path: PathBuf,
+    summary: ScanSummary,
+    addons: Vec<AddonRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,8 +118,14 @@ struct DashboardItem {
     name: String,
     folder: String,
     source: SourceKind,
+    kind: AddonKind,
     version: Option<String>,
     author: Option<String>,
+    interface: Option<String>,
+    git_commit: Option<String>,
+    required_deps: Vec<String>,
+    optional_deps: Vec<String>,
+    embedded_libs: Vec<String>,
     owned_folder_count: usize,
 }
 
@@ -117,17 +137,33 @@ struct DashboardState {
 
 impl DashboardState {
     fn from_addons(addons: Vec<AddonRecord>) -> Self {
-        let items = addons
+        let mut items = addons
             .into_iter()
             .map(|addon| DashboardItem {
                 name: addon.name,
                 folder: addon.folder,
                 source: addon.source,
+                kind: addon.kind,
                 version: addon.version,
                 author: addon.author,
+                interface: addon.interface,
+                git_commit: addon.git_commit,
+                required_deps: addon.required_deps,
+                optional_deps: addon.optional_deps,
+                embedded_libs: addon.embedded_libs,
                 owned_folder_count: addon.owned_folders.len(),
             })
             .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| {
+                    left.folder
+                        .to_ascii_lowercase()
+                        .cmp(&right.folder.to_ascii_lowercase())
+                })
+        });
 
         let mut list_state = ListState::default();
         if !items.is_empty() {
@@ -139,6 +175,23 @@ impl DashboardState {
             list_state,
             detail_mode: DetailMode::Overview,
         }
+    }
+
+    fn replace_addons(&mut self, addons: Vec<AddonRecord>) {
+        let selected_folder = self.selected_item().map(|item| item.folder.clone());
+        let next = DashboardState::from_addons(addons);
+        let mut selected = next.items.iter().position(|item| {
+            selected_folder
+                .as_ref()
+                .is_some_and(|folder| item.folder == *folder)
+        });
+        if selected.is_none() && !next.items.is_empty() {
+            selected = Some(0);
+        }
+
+        self.items = next.items;
+        self.list_state = next.list_state;
+        self.list_state.select(selected);
     }
 
     fn next_selection(&self) -> Option<usize> {
@@ -170,18 +223,29 @@ impl DashboardState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanState {
+    Idle,
+    Pending,
+    Running(PathBuf),
+    Succeeded { path: PathBuf, summary: ScanSummary },
+    Failed(String),
+}
+
 pub struct App {
     shell_mode: ShellMode,
     quit_requested: bool,
     status_line: String,
     config_present: bool,
     config_store: ConfigStore,
+    state_db_file: PathBuf,
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
+    scan_state: ScanState,
     dashboard: DashboardState,
     onboarding: OnboardingState,
-    onboarding_events_tx: mpsc::UnboundedSender<OnboardingTaskEvent>,
-    onboarding_events_rx: mpsc::UnboundedReceiver<OnboardingTaskEvent>,
+    task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
+    task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
     active_onboarding_cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -189,7 +253,8 @@ impl App {
     pub fn bootstrap(paths: AppPaths, runtime: AppRuntime) -> lemonup_core::Result<Self> {
         let config_store = ConfigStore::new(paths.config_file);
         let config_state = config_store.load()?;
-        let database = StateDatabase::open(paths.state_db_file)?;
+        let state_db_file = paths.state_db_file.clone();
+        let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
         let configured_addon_dir = match &config_state {
@@ -234,7 +299,12 @@ impl App {
             _ => ShellMode::Onboarding,
         };
 
-        let (onboarding_events_tx, onboarding_events_rx) = mpsc::unbounded_channel();
+        let scan_state = if shell_mode == ShellMode::Dashboard {
+            ScanState::Pending
+        } else {
+            ScanState::Idle
+        };
+        let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
             shell_mode,
@@ -242,12 +312,14 @@ impl App {
             status_line: String::new(),
             config_present,
             config_store,
+            state_db_file,
             runtime,
             effective_addon_dir,
+            scan_state,
             dashboard: DashboardState::from_addons(addons),
             onboarding,
-            onboarding_events_tx,
-            onboarding_events_rx,
+            task_events_tx,
+            task_events_rx,
             active_onboarding_cancel: None,
         };
         app.status_line = app.initial_status_line();
@@ -284,11 +356,13 @@ impl App {
             ShellMode::Dashboard => {
                 if self.runtime.addon_dir_override.is_some() {
                     self.dashboard_status_for(DetailMode::Overview, "using addon-dir override")
-                } else {
+                } else if matches!(self.scan_state, ScanState::Pending) {
                     self.dashboard_status_for(
                         DetailMode::Overview,
-                        "single-surface shell ready | scan sync wiring lands next",
+                        "dashboard ready | initial scan pending",
                     )
+                } else {
+                    self.dashboard_status_for(DetailMode::Overview, "dashboard ready")
                 }
             }
             ShellMode::Onboarding => match &self.onboarding.phase {
@@ -302,8 +376,8 @@ impl App {
     }
 
     fn process_background_events(&mut self) {
-        while let Ok(event) = self.onboarding_events_rx.try_recv() {
-            let actions = self.update(AppMessage::OnboardingTaskEvent(event));
+        while let Ok(event) = self.task_events_rx.try_recv() {
+            let actions = self.update(AppMessage::BackgroundTask(event));
             for action in actions {
                 self.apply(action);
             }
@@ -414,6 +488,14 @@ impl App {
                         ),
                         AppAction::StartOnboardingQuickCheck,
                     ]
+                } else if self.shell_mode == ShellMode::Dashboard
+                    && matches!(self.scan_state, ScanState::Pending)
+                {
+                    self.effective_addon_dir
+                        .clone()
+                        .map(AppAction::StartAddonScan)
+                        .into_iter()
+                        .collect()
                 } else {
                     vec![AppAction::None]
                 }
@@ -553,27 +635,31 @@ impl App {
                     )),
                 ],
             },
-            AppMessage::OnboardingTaskEvent(event) => match event {
-                OnboardingTaskEvent::QuickCheckFinished(Some(path)) => vec![
-                    AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
-                    AppAction::SetStatus(self.found_status_for_path(&path)),
-                ],
-                OnboardingTaskEvent::QuickCheckFinished(None) => vec![
+            AppMessage::BackgroundTask(event) => match event {
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(Some(path))) => {
+                    vec![
+                        AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
+                        AppAction::SetStatus(self.found_status_for_path(&path)),
+                    ]
+                }
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(None)) => vec![
                     AppAction::SetOnboardingState(self.onboarding.ready()),
                     AppAction::SetStatus(self.with_base_status(
                         "no install found yet | enter validate | d deep scan | e edit path",
                     )),
                 ],
-                OnboardingTaskEvent::DeepScanProgress(progress) => {
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanProgress(progress)) => {
                     vec![AppAction::SetOnboardingState(
                         self.onboarding.set_scan_progress(progress),
                     )]
                 }
-                OnboardingTaskEvent::DeepScanFinished(Ok(Some(path))) => vec![
-                    AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
-                    AppAction::SetStatus(self.found_status_for_path(&path)),
-                ],
-                OnboardingTaskEvent::DeepScanFinished(Ok(None)) => vec![
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(Some(path)))) => {
+                    vec![
+                        AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
+                        AppAction::SetStatus(self.found_status_for_path(&path)),
+                    ]
+                }
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(None))) => vec![
                     AppAction::SetOnboardingState(
                         self.onboarding
                             .error("no WoW installation found from this root".to_string()),
@@ -582,12 +668,24 @@ impl App {
                         "deep scan finished with no result | e edit path | d scan again",
                     )),
                 ],
-                OnboardingTaskEvent::DeepScanFinished(Err(error)) => vec![
-                    AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                    AppAction::SetStatus(
-                        self.with_base_status(&format!("deep scan failed: {error}")),
-                    ),
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Err(error))) => {
+                    vec![
+                        AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
+                        AppAction::SetStatus(
+                            self.with_base_status(&format!("deep scan failed: {error}")),
+                        ),
+                    ]
+                }
+                AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
+                    AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::CompleteAddonScan {
+                        path: outcome.path,
+                        summary: outcome.summary,
+                    },
                 ],
+                AppTaskEvent::AddonScanFinished(Err(error)) => {
+                    vec![AppAction::FailAddonScan(error)]
+                }
             },
         }
     }
@@ -603,17 +701,19 @@ impl App {
             AppAction::SetDetailMode(detail_mode) => self.dashboard.detail_mode = detail_mode,
             AppAction::SetOnboardingState(state) => self.onboarding = state,
             AppAction::StartOnboardingQuickCheck => {
-                let sender = self.onboarding_events_tx.clone();
+                let sender = self.task_events_tx.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(detect_known_addons_path)
                         .await
                         .ok()
                         .flatten();
-                    let _ = sender.send(OnboardingTaskEvent::QuickCheckFinished(result));
+                    let _ = sender.send(AppTaskEvent::Onboarding(
+                        OnboardingTaskEvent::QuickCheckFinished(result),
+                    ));
                 });
             }
             AppAction::StartOnboardingDeepScan(root) => {
-                let sender = self.onboarding_events_tx.clone();
+                let sender = self.task_events_tx.clone();
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.active_onboarding_cancel = Some(cancel.clone());
                 tokio::spawn(async move {
@@ -623,8 +723,8 @@ impl App {
                             &root,
                             || cancel.load(Ordering::SeqCst),
                             |progress| {
-                                let _ =
-                                    progress_sender.send(OnboardingTaskEvent::DeepScanProgress(
+                                let _ = progress_sender.send(AppTaskEvent::Onboarding(
+                                    OnboardingTaskEvent::DeepScanProgress(
                                         crate::onboarding::ScanProgressState {
                                             dirs_scanned: progress.dirs_scanned,
                                             current_path: progress
@@ -632,14 +732,17 @@ impl App {
                                                 .display()
                                                 .to_string(),
                                         },
-                                    ));
+                                    ),
+                                ));
                             },
                         )
                     })
                     .await
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
-                    let _ = sender.send(OnboardingTaskEvent::DeepScanFinished(result));
+                    let _ = sender.send(AppTaskEvent::Onboarding(
+                        OnboardingTaskEvent::DeepScanFinished(result),
+                    ));
                 });
             }
             AppAction::CancelOnboardingScan => {
@@ -671,13 +774,15 @@ impl App {
                         self.config_present = true;
                         self.effective_addon_dir = Some(path.clone());
                         self.shell_mode = ShellMode::Dashboard;
-                        self.status_line = self.dashboard_status_for(
-                            self.dashboard.detail_mode,
-                            &format!(
-                                "saved addon directory {} | scan sync wiring lands next",
-                                path.display()
-                            ),
-                        );
+                        if tokio::runtime::Handle::try_current().is_ok() {
+                            self.apply(AppAction::StartAddonScan(path));
+                        } else {
+                            self.scan_state = ScanState::Pending;
+                            self.status_line = self.dashboard_status_for(
+                                self.dashboard.detail_mode,
+                                &format!("saved addon directory {} | scan queued", path.display()),
+                            );
+                        }
                     }
                     Err(error) => {
                         self.onboarding = self.onboarding.error(error.to_string());
@@ -686,6 +791,55 @@ impl App {
                     }
                 }
             }
+            AppAction::StartAddonScan(path) => {
+                self.scan_state = ScanState::Running(path.clone());
+                self.status_line = self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    &format!("scanning {} and syncing state", path.display()),
+                );
+
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let scanned = scan_addons_dir(&path, GameFlavor::Retail)?;
+                        let mut database = StateDatabase::open(state_db_file)?;
+                        let summary = database.reconcile_scanned_addons(&scanned)?;
+                        let addons = database.list_addons()?;
+                        Ok::<AddonScanOutcome, lemonup_core::LemonupError>(AddonScanOutcome {
+                            path,
+                            summary,
+                            addons,
+                        })
+                    })
+                    .await
+                    .map_err(|join_error| join_error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::AddonScanFinished(result));
+                });
+            }
+            AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
+            AppAction::CompleteAddonScan { path, summary } => {
+                self.scan_state = ScanState::Succeeded {
+                    path: path.clone(),
+                    summary: summary.clone(),
+                };
+                self.status_line = self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    &format!(
+                        "scan complete | {} addons synced, {} removed",
+                        summary.upserted_addons, summary.removed_addons
+                    ),
+                );
+            }
+            AppAction::FailAddonScan(error) => {
+                self.scan_state = ScanState::Failed(error.clone());
+                self.status_line = self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    &format!("scan failed: {error}"),
+                );
+            }
         }
     }
 
@@ -693,7 +847,7 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(5),
+                Constraint::Length(8),
                 Constraint::Min(12),
                 Constraint::Length(3),
             ])
@@ -731,6 +885,7 @@ impl App {
             "Target: {}",
             self.rendered_target_path()
         )));
+        lines.push(Line::from(format!("Scan: {}", self.scan_status_label())));
         lines.push(Line::from(format!(
             "Surface: {}",
             match self.shell_mode {
@@ -861,8 +1016,10 @@ impl App {
         if self.dashboard.items.is_empty() {
             let body = Paragraph::new(vec![
                 Line::from("No scanned addons yet."),
-                Line::from("This shell foundation is ready; scan sync wiring lands next chunk."),
-                Line::from("Use the detail pane modes to inspect the integrated surface layout."),
+                Line::from(format!("Scan state: {}", self.scan_status_label())),
+                Line::from(
+                    "If this is your first launch on this profile, wait for the background scan.",
+                ),
             ])
             .block(Block::default().borders(Borders::ALL).title("Addons"));
             frame.render_widget(body, area);
@@ -881,9 +1038,10 @@ impl App {
                     "  "
                 };
                 let version = item.version.as_deref().unwrap_or("unknown");
+                let kind = addon_kind_label(item.kind);
                 ListItem::new(vec![
                     Line::from(format!("{prefix}{}", item.name)),
-                    Line::from(format!("    {} | {}", item.folder, version)),
+                    Line::from(format!("    {} | {} | {}", item.folder, version, kind)),
                 ])
             })
             .collect::<Vec<_>>();
@@ -914,6 +1072,7 @@ impl App {
                 if let Some(item) = selected {
                     lines.push(Line::from(format!("Name: {}", item.name)));
                     lines.push(Line::from(format!("Folder: {}", item.folder)));
+                    lines.push(Line::from(format!("Kind: {}", addon_kind_label(item.kind))));
                     lines.push(Line::from(format!("Source: {}", source_label(item.source))));
                     lines.push(Line::from(format!(
                         "Version: {}",
@@ -924,19 +1083,38 @@ impl App {
                         item.author.as_deref().unwrap_or("unknown")
                     )));
                     lines.push(Line::from(format!(
+                        "Interface: {}",
+                        item.interface.as_deref().unwrap_or("unknown")
+                    )));
+                    lines.push(Line::from(format!(
+                        "Git commit: {}",
+                        item.git_commit.as_deref().unwrap_or("n/a")
+                    )));
+                    lines.push(Line::from(format!(
                         "Owned folders: {}",
                         item.owned_folder_count
                     )));
+                    lines.push(Line::from(format!(
+                        "Required deps: {}",
+                        join_or_unknown(&item.required_deps)
+                    )));
+                    lines.push(Line::from(format!(
+                        "Optional deps: {}",
+                        join_or_unknown(&item.optional_deps)
+                    )));
+                    lines.push(Line::from(format!(
+                        "Embedded libs: {}",
+                        join_or_unknown(&item.embedded_libs)
+                    )));
                 } else {
                     lines.push(Line::from("No addon selected."));
-                    lines.push(Line::from(
-                        "Once scan sync is wired, real addon rows will populate here.",
-                    ));
+                    lines.push(Line::from("Waiting for scan results."));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(
-                    "Single-surface foundation is active. Scan sync and richer interactions land next.",
-                ));
+                lines.push(Line::from(format!(
+                    "Scan status: {}",
+                    self.scan_status_label()
+                )));
             }
             DetailMode::Install => {
                 lines.push(Line::from("Install area"));
@@ -1080,6 +1258,19 @@ impl App {
             self.with_base_status("found WoW installation | select action with j/k, enter confirm")
         }
     }
+
+    fn scan_status_label(&self) -> String {
+        match &self.scan_state {
+            ScanState::Idle => "idle".to_string(),
+            ScanState::Pending => "pending".to_string(),
+            ScanState::Running(path) => format!("running ({})", path.display()),
+            ScanState::Succeeded { summary, .. } => format!(
+                "synced {} addons, removed {}",
+                summary.upserted_addons, summary.removed_addons
+            ),
+            ScanState::Failed(error) => format!("failed ({error})"),
+        }
+    }
 }
 
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
@@ -1103,6 +1294,21 @@ fn source_label(source: SourceKind) -> &'static str {
     }
 }
 
+fn addon_kind_label(kind: AddonKind) -> &'static str {
+    match kind {
+        AddonKind::Addon => "Addon",
+        AddonKind::Library => "Library",
+    }
+}
+
+fn join_or_unknown(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1113,46 +1319,70 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        App, AppMessage, AppRuntime, DashboardItem, DashboardState, DetailMode, ShellMode,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardItem, DashboardState,
+        DetailMode, ScanState, ShellMode,
     };
     use crate::action::AppAction;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
-    use lemonup_core::{AppPaths, ConfigStore, DEFAULT_PROFILE, SourceKind};
+    use lemonup_core::{
+        AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, ScanSummary,
+        SourceKind,
+    };
 
     fn app_for_tests(shell_mode: ShellMode) -> App {
-        let (onboarding_events_tx, onboarding_events_rx) = mpsc::unbounded_channel();
+        let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         App {
             shell_mode,
             quit_requested: false,
             status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
             config_present: true,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
+            state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
             effective_addon_dir: None,
+            scan_state: ScanState::Idle,
             dashboard: DashboardState {
                 items: vec![
                     DashboardItem {
                         name: "First".to_string(),
                         folder: "First".to_string(),
                         source: SourceKind::Manual,
+                        kind: AddonKind::Addon,
                         version: Some("1.0.0".to_string()),
                         author: None,
+                        interface: None,
+                        git_commit: None,
+                        required_deps: Vec::new(),
+                        optional_deps: Vec::new(),
+                        embedded_libs: Vec::new(),
                         owned_folder_count: 0,
                     },
                     DashboardItem {
                         name: "Second".to_string(),
                         folder: "Second".to_string(),
                         source: SourceKind::GitHub,
+                        kind: AddonKind::Addon,
                         version: Some("2.0.0".to_string()),
                         author: Some("Author".to_string()),
+                        interface: None,
+                        git_commit: Some("abcdef".to_string()),
+                        required_deps: vec!["Ace3".to_string()],
+                        optional_deps: Vec::new(),
+                        embedded_libs: vec!["LibStub".to_string()],
                         owned_folder_count: 1,
                     },
                     DashboardItem {
                         name: "Third".to_string(),
                         folder: "Third".to_string(),
                         source: SourceKind::Wago,
+                        kind: AddonKind::Library,
                         version: None,
                         author: None,
+                        interface: Some("110005".to_string()),
+                        git_commit: None,
+                        required_deps: Vec::new(),
+                        optional_deps: vec!["Optional".to_string()],
+                        embedded_libs: Vec::new(),
                         owned_folder_count: 0,
                     },
                 ],
@@ -1164,8 +1394,8 @@ mod tests {
                 detail_mode: DetailMode::Overview,
             },
             onboarding: OnboardingState::new(),
-            onboarding_events_tx,
-            onboarding_events_rx,
+            task_events_tx,
+            task_events_rx,
             active_onboarding_cancel: None,
         }
     }
@@ -1264,14 +1494,14 @@ mod tests {
     fn deep_scan_progress_event_updates_onboarding_state() {
         let app = app_for_tests(ShellMode::Onboarding);
 
-        let actions = app.update(AppMessage::OnboardingTaskEvent(
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
             crate::onboarding::OnboardingTaskEvent::DeepScanProgress(
                 crate::onboarding::ScanProgressState {
                     dirs_scanned: 42,
                     current_path: "C:\\".to_string(),
                 },
             ),
-        ));
+        )));
 
         assert_eq!(
             actions,
@@ -1310,9 +1540,9 @@ mod tests {
         );
 
         let path = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
-        let actions = app.update(AppMessage::OnboardingTaskEvent(
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
             crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Some(path.clone())),
-        ));
+        )));
 
         assert_eq!(
             actions,
@@ -1402,5 +1632,109 @@ mod tests {
                 .to_string()
                 .contains("matches the default profile AddOns directory")
         );
+    }
+
+    #[test]
+    fn dashboard_tick_starts_pending_scan() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.scan_state = ScanState::Pending;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+
+        let actions = app.update(AppMessage::Tick);
+
+        assert_eq!(
+            actions,
+            vec![AppAction::StartAddonScan(PathBuf::from(
+                "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+            ))]
+        );
+    }
+
+    #[test]
+    fn addon_scan_success_hydrates_dashboard_and_status() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let mut stored = AddonRecord::new("Details", "Details", SourceKind::Manual);
+        stored.kind = AddonKind::Addon;
+        stored.version = Some("1.2.3".to_string());
+        stored.author = Some("Author".to_string());
+        stored.interface = Some("110005".to_string());
+        stored.required_deps = vec!["Ace3".to_string()];
+        stored.embedded_libs = vec!["LibStub".to_string()];
+
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::AddonScanFinished(
+            Ok(AddonScanOutcome {
+                path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+                summary: ScanSummary {
+                    scanned_addons: 1,
+                    upserted_addons: 1,
+                    removed_addons: 0,
+                },
+                addons: vec![stored.clone()],
+            }),
+        )));
+
+        assert_eq!(actions.len(), 2);
+        app.apply(actions[0].clone());
+        app.apply(actions[1].clone());
+
+        assert_eq!(app.dashboard.items.len(), 1);
+        assert_eq!(app.dashboard.items[0].name, "Details");
+        assert!(app.status_line.contains("scan complete"));
+        assert!(matches!(app.scan_state, ScanState::Succeeded { .. }));
+    }
+
+    #[test]
+    fn bootstrap_with_valid_config_enters_dashboard_with_pending_scan() {
+        let temp = tempdir().expect("tempdir");
+        let addons_dir = temp
+            .path()
+            .join("World of Warcraft")
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addons_dir).expect("create addons dir");
+        std::fs::create_dir_all(
+            temp.path()
+                .join("World of Warcraft")
+                .join("Data"),
+        )
+        .expect("create data dir");
+        std::fs::write(
+            temp.path()
+                .join("World of Warcraft")
+                .join("_retail_")
+                .join("Wow.exe"),
+            "",
+        )
+        .expect("write wow exe");
+
+        let paths = AppPaths {
+            profile: "dev".to_string(),
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+            log_dir: temp.path().join("data").join("logs"),
+            config_file: temp.path().join("config").join("config.toml"),
+            state_db_file: temp.path().join("data").join("state.sqlite"),
+        };
+
+        let config_store = ConfigStore::new(paths.config_file.clone());
+        let mut config = AppConfig::new_unconfigured();
+        config.addon_dir = Some(addons_dir.clone());
+        config_store
+            .write_new_config(&config)
+            .expect("write config");
+
+        let app = App::bootstrap(
+            paths,
+            AppRuntime::new("dev".to_string(), None, Some(PathBuf::from("D:\\guarded"))),
+        )
+        .expect("bootstrap app");
+
+        assert_eq!(app.shell_mode, ShellMode::Dashboard);
+        assert_eq!(app.effective_addon_dir, Some(addons_dir));
+        assert_eq!(app.scan_state, ScanState::Pending);
     }
 }

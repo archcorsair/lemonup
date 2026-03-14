@@ -405,15 +405,17 @@ fn flavor_suffixes(flavor: GameFlavor) -> &'static [&'static str] {
 fn field_value(content: &str, keys: &[&str]) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
-        for key in keys {
-            let prefix = format!("## {key}:");
-            if trimmed.len() >= prefix.len()
-                && trimmed[..prefix.len()].eq_ignore_ascii_case(&prefix)
-            {
-                let value = trimmed[prefix.len()..].trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
+        let Some(remainder) = trimmed.strip_prefix("##") else {
+            continue;
+        };
+        let Some((raw_key, raw_value)) = remainder.trim().split_once(':') else {
+            continue;
+        };
+
+        if keys.iter().any(|key| raw_key.trim().eq_ignore_ascii_case(key)) {
+            let value = raw_value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
@@ -488,6 +490,18 @@ mod tests {
         );
         assert_eq!(parsed.optional_deps, vec!["ElvUI", "Masque"]);
         assert!(parsed.x_library);
+    }
+
+    #[test]
+    fn ignores_localized_metadata_without_utf8_boundary_panics() {
+        let parsed = parse_toc_content(
+            "## Notes-ruRU: Собирает информацию об ошибках и ловит их в мешок.\n## Title: BugSack\n## Author: Rabbit\n## OptionalDeps: Masque",
+            "Fallback",
+        );
+
+        assert_eq!(parsed.title, "BugSack");
+        assert_eq!(parsed.author.as_deref(), Some("Rabbit"));
+        assert_eq!(parsed.optional_deps, vec!["Masque"]);
     }
 
     #[test]
