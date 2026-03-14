@@ -28,6 +28,14 @@ pub enum AddonKind {
     Library,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipSource {
+    None,
+    ScanInferred,
+    Managed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedFolder {
     pub name: String,
@@ -39,6 +47,7 @@ pub struct AddonRecord {
     pub name: String,
     pub folder: String,
     pub owned_folders: Vec<OwnedFolder>,
+    pub ownership_source: OwnershipSource,
     pub kind: AddonKind,
     pub kind_override: bool,
     pub flavor: GameFlavor,
@@ -65,6 +74,7 @@ impl AddonRecord {
             name: name.into(),
             folder: folder.into(),
             owned_folders: Vec::new(),
+            ownership_source: OwnershipSource::None,
             kind: AddonKind::Addon,
             kind_override: false,
             flavor: GameFlavor::Retail,
@@ -82,6 +92,42 @@ impl AddonRecord {
             last_checked_at: None,
             remote_version: None,
         }
+    }
+
+    pub fn effective_ownership_source(&self) -> OwnershipSource {
+        if self.owned_folders.is_empty() {
+            OwnershipSource::None
+        } else {
+            self.ownership_source
+        }
+    }
+
+    pub fn set_scan_owned_folders(&mut self, owned_folders: Vec<OwnedFolder>) {
+        self.owned_folders = owned_folders;
+        self.ownership_source = if self.owned_folders.is_empty() {
+            OwnershipSource::None
+        } else {
+            OwnershipSource::ScanInferred
+        };
+    }
+
+    pub fn set_managed_owned_folders(&mut self, owned_folders: Vec<OwnedFolder>) {
+        self.owned_folders = owned_folders;
+        self.ownership_source = if self.owned_folders.is_empty() {
+            OwnershipSource::None
+        } else {
+            OwnershipSource::Managed
+        };
+    }
+
+    pub fn clear_owned_folders(&mut self) {
+        self.owned_folders.clear();
+        self.ownership_source = OwnershipSource::None;
+    }
+
+    pub fn has_authoritative_owned_folders(&self) -> bool {
+        self.effective_ownership_source() == OwnershipSource::Managed
+            && !self.owned_folders.is_empty()
     }
 }
 

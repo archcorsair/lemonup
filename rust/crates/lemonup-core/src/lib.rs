@@ -9,8 +9,8 @@ pub mod wow;
 
 pub use config::{AppConfig, ConfigLoad, ConfigStore, DefaultScreen, ThemeMode};
 pub use domain::{
-    AddonKind, AddonRecord, GameFlavor, InstallPlan, InstallSource, OwnedFolder, SourceKind,
-    UpdateCheck, UpdateStatus,
+    AddonKind, AddonRecord, GameFlavor, InstallPlan, InstallSource, OwnedFolder, OwnershipSource,
+    SourceKind, UpdateCheck, UpdateStatus,
 };
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};

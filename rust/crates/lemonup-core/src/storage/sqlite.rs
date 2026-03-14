@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 use time::OffsetDateTime;
 
-use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
+use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, OwnershipSource, SourceKind};
 use crate::error::Result;
 use crate::scan::{ScanSummary, ScannedAddon};
 
@@ -33,7 +33,7 @@ impl StateDatabase {
     pub fn get_addon_by_folder(&self, folder: &str) -> Result<Option<AddonRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT
-                id, name, folder, owned_folders, kind, kind_override, flavor,
+                id, name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version
@@ -71,7 +71,7 @@ impl StateDatabase {
         let active_authoritative_parents = existing_addons
             .iter()
             .filter(|addon| {
-                has_authoritative_owned_folders(addon)
+                addon.has_authoritative_owned_folders()
                     && live_scanned_folders.contains(&addon.folder)
             })
             .map(|addon| addon.folder.clone())
@@ -142,7 +142,7 @@ impl StateDatabase {
 
     pub fn remove_addon(&self, folder: &str) -> Result<()> {
         let existing_addons = Self::list_addons_from_connection(&self.connection)?;
-        let descendants = collect_owned_descendants(&existing_addons, folder);
+        let descendants = collect_owned_descendants(&existing_addons, folder, true);
         let removed_folders = std::iter::once(folder.to_string())
             .chain(descendants)
             .collect::<HashSet<_>>();
@@ -168,41 +168,59 @@ impl StateDatabase {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.connection.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            CREATE TABLE IF NOT EXISTS addons (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                folder TEXT NOT NULL UNIQUE,
-                owned_folders TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                kind_override INTEGER NOT NULL,
-                flavor TEXT NOT NULL,
-                version TEXT,
-                git_commit TEXT,
-                author TEXT,
-                interface TEXT,
-                source TEXT NOT NULL,
-                source_url TEXT,
-                required_deps TEXT NOT NULL,
-                optional_deps TEXT NOT NULL,
-                embedded_libs TEXT NOT NULL,
-                installed_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                last_checked_at INTEGER,
-                remote_version TEXT
-            );
-            PRAGMA user_version = 1;
-            ",
-        )?;
+        self.connection
+            .execute_batch("PRAGMA journal_mode = WAL;")?;
+        let user_version = self
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+
+        if user_version == 0 {
+            self.connection.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS addons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    folder TEXT NOT NULL UNIQUE,
+                    owned_folders TEXT NOT NULL,
+                    ownership_source TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    kind_override INTEGER NOT NULL,
+                    flavor TEXT NOT NULL,
+                    version TEXT,
+                    git_commit TEXT,
+                    author TEXT,
+                    interface TEXT,
+                    source TEXT NOT NULL,
+                    source_url TEXT,
+                    required_deps TEXT NOT NULL,
+                    optional_deps TEXT NOT NULL,
+                    embedded_libs TEXT NOT NULL,
+                    installed_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_checked_at INTEGER,
+                    remote_version TEXT
+                );
+                PRAGMA user_version = 2;
+                ",
+            )?;
+            return Ok(());
+        }
+
+        if user_version == 1 {
+            self.connection.execute_batch(
+                "
+                ALTER TABLE addons ADD COLUMN ownership_source TEXT NOT NULL DEFAULT 'none';
+                PRAGMA user_version = 2;
+                ",
+            )?;
+        }
         Ok(())
     }
 
     fn list_addons_from_connection(connection: &Connection) -> Result<Vec<AddonRecord>> {
         let mut statement = connection.prepare(
             "SELECT
-                id, name, folder, owned_folders, kind, kind_override, flavor,
+                id, name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version
@@ -217,20 +235,22 @@ impl StateDatabase {
 
     fn upsert_addon_with_connection(connection: &Connection, addon: &AddonRecord) -> Result<()> {
         let owned_folders = serde_json::to_string(&addon.owned_folders)?;
+        let ownership_source = serialize_ownership_source(addon.effective_ownership_source());
         let required_deps = serde_json::to_string(&addon.required_deps)?;
         let optional_deps = serde_json::to_string(&addon.optional_deps)?;
         let embedded_libs = serde_json::to_string(&addon.embedded_libs)?;
 
         connection.execute(
             "INSERT INTO addons (
-                name, folder, owned_folders, kind, kind_override, flavor,
+                name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(folder) DO UPDATE SET
                 name = excluded.name,
                 owned_folders = excluded.owned_folders,
+                ownership_source = excluded.ownership_source,
                 kind = excluded.kind,
                 kind_override = excluded.kind_override,
                 flavor = excluded.flavor,
@@ -251,6 +271,7 @@ impl StateDatabase {
                 addon.name,
                 addon.folder,
                 owned_folders,
+                ownership_source,
                 serialize_addon_kind(addon.kind),
                 addon.kind_override,
                 serialize_flavor(addon.flavor),
@@ -280,34 +301,35 @@ impl StateDatabase {
 
     fn row_to_addon(row: &rusqlite::Row<'_>) -> rusqlite::Result<AddonRecord> {
         let owned_folders = parse_json::<Vec<OwnedFolder>>(row.get::<_, String>(3)?)?;
-        let required_deps = parse_json::<Vec<String>>(row.get::<_, String>(13)?)?;
-        let optional_deps = parse_json::<Vec<String>>(row.get::<_, String>(14)?)?;
-        let embedded_libs = parse_json::<Vec<String>>(row.get::<_, String>(15)?)?;
+        let required_deps = parse_json::<Vec<String>>(row.get::<_, String>(14)?)?;
+        let optional_deps = parse_json::<Vec<String>>(row.get::<_, String>(15)?)?;
+        let embedded_libs = parse_json::<Vec<String>>(row.get::<_, String>(16)?)?;
 
         Ok(AddonRecord {
             id: row.get(0)?,
             name: row.get(1)?,
             folder: row.get(2)?,
             owned_folders,
-            kind: parse_addon_kind(&row.get::<_, String>(4)?)?,
-            kind_override: row.get(5)?,
-            flavor: parse_flavor(&row.get::<_, String>(6)?)?,
-            version: row.get(7)?,
-            git_commit: row.get(8)?,
-            author: row.get(9)?,
-            interface: row.get(10)?,
-            source: parse_source(&row.get::<_, String>(11)?)?,
-            source_url: row.get(12)?,
+            ownership_source: parse_ownership_source(&row.get::<_, String>(4)?)?,
+            kind: parse_addon_kind(&row.get::<_, String>(5)?)?,
+            kind_override: row.get(6)?,
+            flavor: parse_flavor(&row.get::<_, String>(7)?)?,
+            version: row.get(8)?,
+            git_commit: row.get(9)?,
+            author: row.get(10)?,
+            interface: row.get(11)?,
+            source: parse_source(&row.get::<_, String>(12)?)?,
+            source_url: row.get(13)?,
             required_deps,
             optional_deps,
             embedded_libs,
-            installed_at: parse_timestamp(row.get::<_, i64>(16)?)?,
-            updated_at: parse_timestamp(row.get::<_, i64>(17)?)?,
+            installed_at: parse_timestamp(row.get::<_, i64>(17)?)?,
+            updated_at: parse_timestamp(row.get::<_, i64>(18)?)?,
             last_checked_at: row
-                .get::<_, Option<i64>>(18)?
+                .get::<_, Option<i64>>(19)?
                 .map(parse_timestamp)
                 .transpose()?,
-            remote_version: row.get(19)?,
+            remote_version: row.get(20)?,
         })
     }
 }
@@ -319,6 +341,15 @@ fn merge_scanned_addon(
 ) -> AddonRecord {
     let now = OffsetDateTime::now_utc();
     let kind_override = existing.is_some_and(|addon| addon.kind_override);
+    let ownership_source = if preserve_existing_owned_folders {
+        existing
+            .expect("preserving owned folders requires existing addon")
+            .effective_ownership_source()
+    } else if scanned_addon.owned_folders.is_empty() {
+        OwnershipSource::None
+    } else {
+        OwnershipSource::ScanInferred
+    };
 
     AddonRecord {
         id: existing.and_then(|addon| addon.id),
@@ -332,6 +363,7 @@ fn merge_scanned_addon(
         } else {
             scanned_addon.owned_folders.clone()
         },
+        ownership_source,
         kind: if kind_override {
             existing
                 .expect("kind override requires existing addon")
@@ -359,13 +391,14 @@ fn merge_scanned_addon(
     }
 }
 
-fn has_authoritative_owned_folders(addon: &AddonRecord) -> bool {
-    addon.source != SourceKind::Manual && !addon.owned_folders.is_empty()
-}
-
-fn collect_owned_descendants(existing_addons: &[AddonRecord], folder: &str) -> HashSet<String> {
+fn collect_owned_descendants(
+    existing_addons: &[AddonRecord],
+    folder: &str,
+    authoritative_only: bool,
+) -> HashSet<String> {
     let owned_by_folder = existing_addons
         .iter()
+        .filter(|addon| !authoritative_only || addon.has_authoritative_owned_folders())
         .map(|addon| {
             (
                 addon.folder.clone(),
@@ -425,6 +458,15 @@ fn parse_source(value: &str) -> rusqlite::Result<SourceKind> {
     }
 }
 
+fn parse_ownership_source(value: &str) -> rusqlite::Result<OwnershipSource> {
+    match value {
+        "none" => Ok(OwnershipSource::None),
+        "scan_inferred" => Ok(OwnershipSource::ScanInferred),
+        "managed" => Ok(OwnershipSource::Managed),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn parse_flavor(value: &str) -> rusqlite::Result<GameFlavor> {
     match value {
         "retail" => Ok(GameFlavor::Retail),
@@ -449,6 +491,14 @@ fn serialize_source(value: SourceKind) -> &'static str {
         SourceKind::WowInterface => "wowinterface",
         SourceKind::Wago => "wago",
         SourceKind::Manual => "manual",
+    }
+}
+
+fn serialize_ownership_source(value: OwnershipSource) -> &'static str {
+    match value {
+        OwnershipSource::None => "none",
+        OwnershipSource::ScanInferred => "scan_inferred",
+        OwnershipSource::Managed => "managed",
     }
 }
 
@@ -484,14 +534,14 @@ mod tests {
         let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
 
         let mut addon = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
-        addon.owned_folders = vec![
+        addon.set_managed_owned_folders(vec![
             OwnedFolder {
                 name: "ElvUI_Options".to_string(),
             },
             OwnedFolder {
                 name: "ElvUI_Libraries".to_string(),
             },
-        ];
+        ]);
         addon.required_deps = vec!["LibStub".to_string()];
         database.upsert_addon(&addon).expect("upsert");
 
@@ -499,6 +549,7 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].name, "ElvUI");
         assert_eq!(stored[0].owned_folders.len(), 2);
+        assert!(stored[0].has_authoritative_owned_folders());
         assert_eq!(stored[0].required_deps, vec!["LibStub".to_string()]);
     }
 
@@ -654,14 +705,14 @@ mod tests {
         let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
 
         let mut parent = AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
-        parent.owned_folders = vec![
+        parent.set_managed_owned_folders(vec![
             OwnedFolder {
                 name: "DBM-Naxx".to_string(),
             },
             OwnedFolder {
                 name: "DBM-Vault".to_string(),
             },
-        ];
+        ]);
         database.upsert_addon(&parent).expect("seed parent");
 
         let child_row = AddonRecord::new("DBM Naxx", "DBM-Naxx", SourceKind::Manual);
@@ -711,6 +762,7 @@ mod tests {
             .get_addon_by_folder("DBM-Core")
             .expect("get parent")
             .expect("parent exists");
+        assert!(stored_parent.has_authoritative_owned_folders());
         assert_eq!(stored_parent.owned_folders.len(), 2);
         assert_eq!(stored_parent.owned_folders[0].name, "DBM-Naxx");
         assert_eq!(stored_parent.owned_folders[1].name, "DBM-Vault");
@@ -729,26 +781,26 @@ mod tests {
         let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
 
         let mut parent = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
-        parent.owned_folders = vec![
+        parent.set_managed_owned_folders(vec![
             OwnedFolder {
                 name: "ElvUI_Options".to_string(),
             },
             OwnedFolder {
                 name: "ElvUI_Libraries".to_string(),
             },
-        ];
+        ]);
         database.upsert_addon(&parent).expect("seed parent");
 
         let mut sibling = AddonRecord::new("Independent", "Independent", SourceKind::Manual);
-        sibling.owned_folders = vec![OwnedFolder {
+        sibling.set_scan_owned_folders(vec![OwnedFolder {
             name: "Independent_Child".to_string(),
-        }];
+        }]);
         database.upsert_addon(&sibling).expect("seed sibling");
 
         let mut nested = AddonRecord::new("ElvUI_Options", "ElvUI_Options", SourceKind::Manual);
-        nested.owned_folders = vec![OwnedFolder {
+        nested.set_managed_owned_folders(vec![OwnedFolder {
             name: "ElvUI_Options_Theme".to_string(),
-        }];
+        }]);
         database.upsert_addon(&nested).expect("seed nested child");
 
         database
@@ -806,5 +858,35 @@ mod tests {
             .expect("sibling remains");
         assert_eq!(remaining.owned_folders.len(), 1);
         assert_eq!(remaining.owned_folders[0].name, "Independent_Child");
+    }
+
+    #[test]
+    fn remove_addon_does_not_cascade_scan_inferred_relationships() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut parent = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Manual);
+        parent.set_scan_owned_folders(vec![OwnedFolder {
+            name: "ElvUI_WindTools".to_string(),
+        }]);
+        database.upsert_addon(&parent).expect("seed parent");
+
+        let child = AddonRecord::new("WindTools", "ElvUI_WindTools", SourceKind::Manual);
+        database.upsert_addon(&child).expect("seed child");
+
+        database.remove_addon("ElvUI").expect("remove parent only");
+
+        assert!(
+            database
+                .get_addon_by_folder("ElvUI")
+                .expect("get parent")
+                .is_none()
+        );
+        assert!(
+            database
+                .get_addon_by_folder("ElvUI_WindTools")
+                .expect("get child")
+                .is_some()
+        );
     }
 }

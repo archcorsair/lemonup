@@ -75,7 +75,7 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work added relationship hardening in core state and first tree-ready shell plumbing
+- latest completed work added explicit ownership authority in core state
 
 ## Newly Completed
 
@@ -85,22 +85,44 @@ These are implemented and manually verified in addition to the earlier chunks:
 - parent delete cascade through owned descendants
 - first tree-ready shell expansion and collapse for owned child rows
 - tightened MVP and drift-detection requirements in Rust docs
+- explicit `ownership_source` tracking in core state:
+  - `none`
+  - `scan_inferred`
+  - `managed`
+- SQLite migration to persist ownership authority
+- delete cascade now follows managed ownership only
+- scan-inferred relationships no longer trigger child cascade delete
+- added regression coverage for managed vs scan-inferred ownership behavior
 
 ## Next Up
 
-After relationship integrity hardening:
+Next phase:
 
-1. authoritative install/update ownership model
-2. multi-select and bulk-action groundwork
-3. delete/update behavior that preserves ownership links end-to-end
-4. richer tree rendering beyond owned-child expansion
-5. richer management operations inside the single-surface shell
+1. install and update paths write authoritative managed ownership
+2. multi-select groundwork in the shell
+3. bulk action groundwork for update selected and delete selected
+4. drift detection surfaced in the UI
+5. relationship-safe update and delete behavior end-to-end
+
+### Goal
+
+- stop relying on scan heuristics for important parent-child truth in managed flows
+- make install and update flows write the authoritative managed folder set
+- let shell bulk actions operate safely on that model
+
+### Planned order
+
+1. install and update paths write authoritative ownership
+2. expose managed-ownership assumptions to app state where needed
+3. shell multi-select state
+4. bulk delete and bulk update actions
+5. drift indicators in list and detail views
 
 ## Remaining Major Work
 
 Still missing or incomplete:
 
-- authoritative install/update ownership model
+- install/update flows that persist managed ownership
 - richer tree view for parent/child relationships
 - install flows
 - update flows
@@ -170,9 +192,9 @@ Useful commands:
 
 ```powershell
 cd C:\Users\archc\ghq\github.com\archcorsair\lemonup\rust
-cargo fmt --all
-cargo test --workspace
-cargo run -p lemonup-app --bin lemonup -- --profile dev tui
+mise exec rust@latest -- cargo fmt --all
+mise exec rust@latest -- cargo test --workspace
+mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev tui
 ```
 
 ## Commit Workflow
@@ -180,13 +202,6 @@ cargo run -p lemonup-app --bin lemonup -- --profile dev tui
 - work in logical chunks
 - user manually tests each chunk before commit
 - commit only after user approval
-
-## Repo Caveats
-
-These should stay out of unrelated commits unless intentionally included:
-
-- `.node-version` is deleted at repo root
-- `rust/mise.toml` is untracked and should be validated before folding into a future chunk commit
 
 ## Related Docs
 
