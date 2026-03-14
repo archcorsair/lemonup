@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -23,8 +24,7 @@ use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
 
-const DASHBOARD_COMMANDS: &str =
-    "q quit | j/k list | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -84,6 +84,8 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardSelectionNext,
     DashboardSelectionPrevious,
+    DashboardToggleExpanded,
+    DashboardCollapseExpanded,
     SetDetailMode(DetailMode),
     OnboardingBeginEditing,
     OnboardingStopEditing,
@@ -117,6 +119,7 @@ struct AddonScanOutcome {
 struct DashboardItem {
     name: String,
     folder: String,
+    owned_folders: Vec<String>,
     source: SourceKind,
     kind: AddonKind,
     version: Option<String>,
@@ -129,29 +132,64 @@ struct DashboardItem {
     owned_folder_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DashboardRowKey {
+    Parent(String),
+    OwnedChild {
+        parent_folder: String,
+        child_folder: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DashboardRowKind {
+    Parent,
+    OwnedChild { parent_folder: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardRow {
+    key: DashboardRowKey,
+    name: String,
+    folder: String,
+    kind: DashboardRowKind,
+    expandable: bool,
+    expanded: bool,
+}
+
 struct DashboardState {
     items: Vec<DashboardItem>,
+    rows: Vec<DashboardRow>,
     list_state: ListState,
     detail_mode: DetailMode,
+    expanded_folders: HashSet<String>,
 }
 
 impl DashboardState {
     fn from_addons(addons: Vec<AddonRecord>) -> Self {
         let mut items = addons
             .into_iter()
-            .map(|addon| DashboardItem {
-                name: addon.name,
-                folder: addon.folder,
-                source: addon.source,
-                kind: addon.kind,
-                version: addon.version,
-                author: addon.author,
-                interface: addon.interface,
-                git_commit: addon.git_commit,
-                required_deps: addon.required_deps,
-                optional_deps: addon.optional_deps,
-                embedded_libs: addon.embedded_libs,
-                owned_folder_count: addon.owned_folders.len(),
+            .map(|addon| {
+                let owned_folder_count = addon.owned_folders.len();
+                DashboardItem {
+                    name: addon.name,
+                    folder: addon.folder,
+                    owned_folders: addon
+                        .owned_folders
+                        .into_iter()
+                        .map(|owned_folder| owned_folder.name)
+                        .collect(),
+                    source: addon.source,
+                    kind: addon.kind,
+                    version: addon.version,
+                    author: addon.author,
+                    interface: addon.interface,
+                    git_commit: addon.git_commit,
+                    required_deps: addon.required_deps,
+                    optional_deps: addon.optional_deps,
+                    embedded_libs: addon.embedded_libs,
+                    owned_folder_count,
+                }
             })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| {
@@ -165,61 +203,190 @@ impl DashboardState {
                 })
         });
 
-        let mut list_state = ListState::default();
-        if !items.is_empty() {
-            list_state.select(Some(0));
-        }
-
-        Self {
+        let mut state = Self {
             items,
-            list_state,
+            rows: Vec::new(),
+            list_state: ListState::default(),
             detail_mode: DetailMode::Overview,
+            expanded_folders: HashSet::new(),
+        };
+        state.rebuild_rows();
+        if !state.rows.is_empty() {
+            state.list_state.select(Some(0));
         }
+        state
     }
 
     fn replace_addons(&mut self, addons: Vec<AddonRecord>) {
-        let selected_folder = self.selected_item().map(|item| item.folder.clone());
+        let selected_key = self.selected_row().map(|row| row.key.clone());
+        let previous_expanded = self.expanded_folders.clone();
         let next = DashboardState::from_addons(addons);
-        let mut selected = next.items.iter().position(|item| {
-            selected_folder
-                .as_ref()
-                .is_some_and(|folder| item.folder == *folder)
-        });
-        if selected.is_none() && !next.items.is_empty() {
-            selected = Some(0);
-        }
 
         self.items = next.items;
+        self.rows = next.rows;
         self.list_state = next.list_state;
+        self.expanded_folders = previous_expanded
+            .into_iter()
+            .filter(|folder| {
+                self.items
+                    .iter()
+                    .any(|item| item.folder == *folder && !item.owned_folders.is_empty())
+            })
+            .collect();
+        self.rebuild_rows();
+
+        let mut selected = selected_key
+            .as_ref()
+            .and_then(|key| self.rows.iter().position(|row| row.key == *key));
+        if selected.is_none() && !self.rows.is_empty() {
+            selected = Some(0);
+        }
         self.list_state.select(selected);
     }
 
     fn next_selection(&self) -> Option<usize> {
-        if self.items.is_empty() {
+        if self.rows.is_empty() {
             return None;
         }
 
         Some(match self.list_state.selected() {
-            Some(index) => (index + 1) % self.items.len(),
+            Some(index) => (index + 1) % self.rows.len(),
             None => 0,
         })
     }
 
     fn previous_selection(&self) -> Option<usize> {
-        if self.items.is_empty() {
+        if self.rows.is_empty() {
             return None;
         }
 
         Some(match self.list_state.selected() {
-            Some(0) | None => self.items.len() - 1,
+            Some(0) | None => self.rows.len() - 1,
             Some(index) => index - 1,
         })
     }
 
-    fn selected_item(&self) -> Option<&DashboardItem> {
+    fn toggle_selected_expanded(&mut self) -> bool {
+        let Some(row) = self.selected_row().cloned() else {
+            return false;
+        };
+
+        match row.kind {
+            DashboardRowKind::Parent if row.expandable => {
+                if row.expanded {
+                    self.expanded_folders.remove(&row.folder);
+                } else {
+                    self.expanded_folders.insert(row.folder.clone());
+                }
+                self.rebuild_rows();
+                self.restore_selection(&row.key);
+                true
+            }
+            DashboardRowKind::OwnedChild { parent_folder } => {
+                if self.expanded_folders.remove(&parent_folder) {
+                    self.rebuild_rows();
+                    self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn collapse_selected_expanded(&mut self) -> bool {
+        let Some(row) = self.selected_row().cloned() else {
+            return false;
+        };
+
+        match row.kind {
+            DashboardRowKind::Parent if row.expanded => {
+                self.expanded_folders.remove(&row.folder);
+                self.rebuild_rows();
+                self.restore_selection(&row.key);
+                true
+            }
+            DashboardRowKind::OwnedChild { parent_folder } => {
+                if self.expanded_folders.remove(&parent_folder) {
+                    self.rebuild_rows();
+                    self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn selected_row(&self) -> Option<&DashboardRow> {
         self.list_state
             .selected()
-            .and_then(|index| self.items.get(index))
+            .and_then(|index| self.rows.get(index))
+    }
+
+    fn selected_item(&self) -> Option<&DashboardItem> {
+        let row = self.selected_row()?;
+        let parent_folder = match &row.kind {
+            DashboardRowKind::Parent => &row.folder,
+            DashboardRowKind::OwnedChild { parent_folder } => parent_folder,
+        };
+        self.items.iter().find(|item| item.folder == *parent_folder)
+    }
+
+    fn selected_owned_child_folder(&self) -> Option<&str> {
+        let row = self.selected_row()?;
+        match &row.kind {
+            DashboardRowKind::OwnedChild { .. } => Some(row.folder.as_str()),
+            DashboardRowKind::Parent => None,
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        let mut rows = Vec::new();
+
+        for item in &self.items {
+            let expanded = self.expanded_folders.contains(&item.folder);
+            let expandable = !item.owned_folders.is_empty();
+            rows.push(DashboardRow {
+                key: DashboardRowKey::Parent(item.folder.clone()),
+                name: item.name.clone(),
+                folder: item.folder.clone(),
+                kind: DashboardRowKind::Parent,
+                expandable,
+                expanded,
+            });
+
+            if expanded {
+                for child_folder in &item.owned_folders {
+                    rows.push(DashboardRow {
+                        key: DashboardRowKey::OwnedChild {
+                            parent_folder: item.folder.clone(),
+                            child_folder: child_folder.clone(),
+                        },
+                        name: child_folder.clone(),
+                        folder: child_folder.clone(),
+                        kind: DashboardRowKind::OwnedChild {
+                            parent_folder: item.folder.clone(),
+                        },
+                        expandable: false,
+                        expanded: false,
+                    });
+                }
+            }
+        }
+
+        self.rows = rows;
+    }
+
+    fn restore_selection(&mut self, key: &DashboardRowKey) {
+        let selection = self
+            .rows
+            .iter()
+            .position(|row| row.key == *key)
+            .or_else(|| if self.rows.is_empty() { None } else { Some(0) });
+        self.list_state.select(selection);
     }
 }
 
@@ -410,6 +577,10 @@ impl App {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                vec![AppMessage::DashboardToggleExpanded]
+            }
+            KeyCode::Left | KeyCode::Char('h') => vec![AppMessage::DashboardCollapseExpanded],
             KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
             KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
             KeyCode::Char('s') | KeyCode::Char('/') => {
@@ -522,6 +693,18 @@ impl App {
                     ),
                 ]
             }
+            AppMessage::DashboardToggleExpanded => vec![
+                AppAction::ToggleDashboardExpanded,
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated"),
+                ),
+            ],
+            AppMessage::DashboardCollapseExpanded => vec![
+                AppAction::CollapseDashboardExpanded,
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated"),
+                ),
+            ],
             AppMessage::SetDetailMode(detail_mode) => vec![
                 AppAction::SetDetailMode(detail_mode),
                 AppAction::SetStatus(self.dashboard_status_for(
@@ -697,6 +880,18 @@ impl App {
             AppAction::SetStatus(status) => self.status_line = status,
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
+            }
+            AppAction::ToggleDashboardExpanded => {
+                if self.dashboard.toggle_selected_expanded() {
+                    self.status_line =
+                        self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
+                }
+            }
+            AppAction::CollapseDashboardExpanded => {
+                if self.dashboard.collapse_selected_expanded() {
+                    self.status_line =
+                        self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
+                }
             }
             AppAction::SetDetailMode(detail_mode) => self.dashboard.detail_mode = detail_mode,
             AppAction::SetOnboardingState(state) => self.onboarding = state,
@@ -1013,7 +1208,7 @@ impl App {
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        if self.dashboard.items.is_empty() {
+        if self.dashboard.rows.is_empty() {
             let body = Paragraph::new(vec![
                 Line::from("No scanned addons yet."),
                 Line::from(format!("Scan state: {}", self.scan_status_label())),
@@ -1028,20 +1223,39 @@ impl App {
 
         let items = self
             .dashboard
-            .items
+            .rows
             .iter()
             .enumerate()
-            .map(|(index, item)| {
+            .map(|(index, row)| {
                 let prefix = if self.dashboard.list_state.selected() == Some(index) {
                     "› "
                 } else {
                     "  "
                 };
-                let version = item.version.as_deref().unwrap_or("unknown");
-                let kind = addon_kind_label(item.kind);
+                let marker = match &row.kind {
+                    DashboardRowKind::Parent if row.expandable && row.expanded => "v ",
+                    DashboardRowKind::Parent if row.expandable => "> ",
+                    DashboardRowKind::Parent => "  ",
+                    DashboardRowKind::OwnedChild { .. } => "|- ",
+                };
                 ListItem::new(vec![
-                    Line::from(format!("{prefix}{}", item.name)),
-                    Line::from(format!("    {} | {} | {}", item.folder, version, kind)),
+                    Line::from(format!("{prefix}{marker}{}", row.name)),
+                    Line::from(match &row.kind {
+                        DashboardRowKind::Parent => {
+                            let item = self
+                                .dashboard
+                                .items
+                                .iter()
+                                .find(|item| item.folder == row.folder)
+                                .expect("row parent item exists");
+                            let version = item.version.as_deref().unwrap_or("unknown");
+                            let kind = addon_kind_label(item.kind);
+                            format!("    {} | {} | {}", item.folder, version, kind)
+                        }
+                        DashboardRowKind::OwnedChild { parent_folder } => {
+                            format!("    child of {} | folder {}", parent_folder, row.folder)
+                        }
+                    }),
                 ])
             })
             .collect::<Vec<_>>();
@@ -1060,6 +1274,8 @@ impl App {
     fn detail_panel(&self) -> Paragraph<'static> {
         let mut lines = Vec::new();
         let selected = self.dashboard.selected_item();
+        let selected_row = self.dashboard.selected_row();
+        let selected_owned_child = self.dashboard.selected_owned_child_folder();
 
         lines.push(Line::from(format!(
             "Mode: {}",
@@ -1069,7 +1285,23 @@ impl App {
 
         match self.dashboard.detail_mode {
             DetailMode::Overview => {
-                if let Some(item) = selected {
+                if let (Some(item), Some(child_folder)) = (selected, selected_owned_child) {
+                    lines.push(Line::from("Relationship row: owned child"));
+                    lines.push(Line::from(format!("Child folder: {child_folder}")));
+                    lines.push(Line::from(format!("Parent addon: {}", item.name)));
+                    lines.push(Line::from(format!("Parent folder: {}", item.folder)));
+                    lines.push(Line::from(format!(
+                        "Parent source: {}",
+                        source_label(item.source)
+                    )));
+                    lines.push(Line::from(format!(
+                        "Parent version: {}",
+                        item.version.as_deref().unwrap_or("unknown")
+                    )));
+                    lines.push(Line::from(
+                        "Child rows are tree-visible from parent ownership data.",
+                    ));
+                } else if let Some(item) = selected {
                     lines.push(Line::from(format!("Name: {}", item.name)));
                     lines.push(Line::from(format!("Folder: {}", item.folder)));
                     lines.push(Line::from(format!("Kind: {}", addon_kind_label(item.kind))));
@@ -1095,6 +1327,14 @@ impl App {
                         item.owned_folder_count
                     )));
                     lines.push(Line::from(format!(
+                        "Tree state: {}",
+                        if self.dashboard.expanded_folders.contains(&item.folder) {
+                            "expanded"
+                        } else {
+                            "collapsed"
+                        }
+                    )));
+                    lines.push(Line::from(format!(
                         "Required deps: {}",
                         join_or_unknown(&item.required_deps)
                     )));
@@ -1111,6 +1351,15 @@ impl App {
                     lines.push(Line::from("Waiting for scan results."));
                 }
                 lines.push(Line::from(""));
+                if let Some(row) = selected_row {
+                    lines.push(Line::from(format!(
+                        "Selected row: {}",
+                        match row.kind {
+                            DashboardRowKind::Parent => "parent",
+                            DashboardRowKind::OwnedChild { .. } => "owned child",
+                        }
+                    )));
+                }
                 lines.push(Line::from(format!(
                     "Scan status: {}",
                     self.scan_status_label()
@@ -1314,13 +1563,12 @@ mod tests {
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use ratatui::widgets::ListState;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardItem, DashboardState,
-        DetailMode, ScanState, ShellMode,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardState, DetailMode,
+        ScanState, ShellMode,
     };
     use crate::action::AppAction;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
@@ -1331,6 +1579,26 @@ mod tests {
 
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
+        let mut first = AddonRecord::new("First", "First", SourceKind::Manual);
+        first.kind = AddonKind::Addon;
+        first.version = Some("1.0.0".to_string());
+
+        let mut second = AddonRecord::new("Second", "Second", SourceKind::GitHub);
+        second.kind = AddonKind::Addon;
+        second.version = Some("2.0.0".to_string());
+        second.author = Some("Author".to_string());
+        second.git_commit = Some("abcdef".to_string());
+        second.required_deps = vec!["Ace3".to_string()];
+        second.embedded_libs = vec!["LibStub".to_string()];
+        second.owned_folders = vec![lemonup_core::OwnedFolder {
+            name: "Second_Config".to_string(),
+        }];
+
+        let mut third = AddonRecord::new("Third", "Third", SourceKind::Wago);
+        third.kind = AddonKind::Library;
+        third.interface = Some("110005".to_string());
+        third.optional_deps = vec!["Optional".to_string()];
+
         App {
             shell_mode,
             quit_requested: false,
@@ -1341,58 +1609,7 @@ mod tests {
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
-            dashboard: DashboardState {
-                items: vec![
-                    DashboardItem {
-                        name: "First".to_string(),
-                        folder: "First".to_string(),
-                        source: SourceKind::Manual,
-                        kind: AddonKind::Addon,
-                        version: Some("1.0.0".to_string()),
-                        author: None,
-                        interface: None,
-                        git_commit: None,
-                        required_deps: Vec::new(),
-                        optional_deps: Vec::new(),
-                        embedded_libs: Vec::new(),
-                        owned_folder_count: 0,
-                    },
-                    DashboardItem {
-                        name: "Second".to_string(),
-                        folder: "Second".to_string(),
-                        source: SourceKind::GitHub,
-                        kind: AddonKind::Addon,
-                        version: Some("2.0.0".to_string()),
-                        author: Some("Author".to_string()),
-                        interface: None,
-                        git_commit: Some("abcdef".to_string()),
-                        required_deps: vec!["Ace3".to_string()],
-                        optional_deps: Vec::new(),
-                        embedded_libs: vec!["LibStub".to_string()],
-                        owned_folder_count: 1,
-                    },
-                    DashboardItem {
-                        name: "Third".to_string(),
-                        folder: "Third".to_string(),
-                        source: SourceKind::Wago,
-                        kind: AddonKind::Library,
-                        version: None,
-                        author: None,
-                        interface: Some("110005".to_string()),
-                        git_commit: None,
-                        required_deps: Vec::new(),
-                        optional_deps: vec!["Optional".to_string()],
-                        embedded_libs: Vec::new(),
-                        owned_folder_count: 0,
-                    },
-                ],
-                list_state: {
-                    let mut state = ListState::default();
-                    state.select(Some(0));
-                    state
-                },
-                detail_mode: DetailMode::Overview,
-            },
+            dashboard: DashboardState::from_addons(vec![first, second, third]),
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
@@ -1423,6 +1640,10 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
             vec![AppMessage::SetDetailMode(DetailMode::Backup)]
         );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::DashboardToggleExpanded]
+        );
     }
 
     #[test]
@@ -1451,6 +1672,37 @@ mod tests {
                     wrapped.dashboard_status_for(wrapped.dashboard.detail_mode, "selection moved")
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn dashboard_toggle_expand_reveals_owned_child_rows() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+
+        app.apply(AppAction::ToggleDashboardExpanded);
+
+        assert!(app.dashboard.expanded_folders.contains("Second"));
+        assert_eq!(app.dashboard.rows.len(), 4);
+        assert_eq!(app.dashboard.rows[2].folder, "Second_Config");
+    }
+
+    #[test]
+    fn collapsing_selected_child_returns_selection_to_parent() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardExpanded);
+        app.dashboard.list_state.select(Some(2));
+
+        app.apply(AppAction::CollapseDashboardExpanded);
+
+        assert!(!app.dashboard.expanded_folders.contains("Second"));
+        assert_eq!(app.dashboard.list_state.selected(), Some(1));
+        assert_eq!(
+            app.dashboard
+                .selected_item()
+                .map(|item| item.folder.as_str()),
+            Some("Second")
         );
     }
 
@@ -1695,12 +1947,8 @@ mod tests {
             .join("Interface")
             .join("AddOns");
         std::fs::create_dir_all(&addons_dir).expect("create addons dir");
-        std::fs::create_dir_all(
-            temp.path()
-                .join("World of Warcraft")
-                .join("Data"),
-        )
-        .expect("create data dir");
+        std::fs::create_dir_all(temp.path().join("World of Warcraft").join("Data"))
+            .expect("create data dir");
         std::fs::write(
             temp.path()
                 .join("World of Warcraft")

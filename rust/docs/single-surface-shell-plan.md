@@ -18,6 +18,43 @@ The core interaction model is:
 
 Do not reintroduce a multi-screen mental model as the primary UX.
 
+## MVP Requirements
+
+Minimum product scope should cover:
+
+- install addon from supported sources
+- update one addon
+- update all addons
+- update selected addons
+- delete one addon
+- delete selected addons
+- search addons from Wago
+- view addon metadata and details
+- maintain parent-child ownership correctly during install, update, delete, and rescan
+
+### MVP-adjacent support behavior
+
+These are not optional if the core actions above are to behave safely:
+
+- multi-select in the main list
+- bulk actions on selection
+- clear progress and result status for install, update, and delete
+- destructive-action confirmation
+- update-check status visibility
+- rescan or reconcile command inside the shell
+- source and state indicators
+
+### Drift detection requirements
+
+The app should eventually detect and surface both directions of drift:
+
+- folder exists on disk with no tracked record
+- tracked record exists with no folder on disk
+- parent record exists but an owned child folder is missing on disk
+- child folder exists on disk but parent or ownership record is missing
+- tracked ownership does not match actual disk contents
+- tracked source metadata and disk state disagree in a meaningful way
+
 ## v1 Spirit To Preserve
 
 The old app got several things right. Preserve these qualities in the Rust TUI:
@@ -215,6 +252,17 @@ Keep visible action modes inside the right pane:
 
 These are integrated feature areas, not separate routed screens.
 
+## Relationship Integrity Contract
+
+These are hard invariants for future work:
+
+- parent update must preserve child ownership links
+- parent delete must remove owned children too
+- managed child folders must not split into standalone addons after update
+- scan-only inference must stay conservative
+- install or update metadata should become the authoritative ownership source where possible
+- flat parent view and optional expanded tree view must both be supported
+
 ## Testing Contract
 
 Use the dev profile only for manual app testing.
@@ -234,13 +282,17 @@ If an explicit sandbox addon directory is needed, pass a dev-safe path via `--ad
 Already implemented and user-verified:
 - addon scan plus state reconcile core
 - single-surface shell foundation
+- background scan plus DB-backed shell dashboard
+- UTF-8-safe TOC parsing for localized metadata
+- relationship-safe reconcile rules for managed parents
+- tree-ready owned-child expansion and collapse in the shell
 
 Next implementation chunk:
-- wire background scan and reconcile into the shell
-- trigger on boot when a valid addon dir exists
-- trigger after onboarding save
-- replace placeholder rows with real scanned addon rows
-- populate right-pane metadata from real DB rows
+- authoritative install and update ownership model
+- multi-select and bulk action groundwork
+- update or delete behavior that preserves ownership links end-to-end
+- drift detection surfaced in the shell
+- richer tree rendering beyond owned-child expansion
 
 ## Related Docs
 

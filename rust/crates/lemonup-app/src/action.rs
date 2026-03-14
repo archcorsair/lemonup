@@ -11,6 +11,8 @@ pub enum AppAction {
     Quit,
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
+    ToggleDashboardExpanded,
+    CollapseDashboardExpanded,
     SetDetailMode(DetailMode),
     SetOnboardingState(OnboardingState),
     StartOnboardingQuickCheck,

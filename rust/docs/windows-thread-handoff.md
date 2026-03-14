@@ -12,6 +12,7 @@ Before making changes:
    - `rust/docs/acceptance-matrix.md`
    - `rust/docs/known-v1-gaps.md`
    - `rust/docs/single-surface-shell-plan.md`
+   - `rust/docs/progress.md`
 4. If product context is needed, root `AGENTS.md` says only read:
    - `conductor/product.md`
    - `conductor/product-guidelines.md`
@@ -44,12 +45,15 @@ Implemented and committed:
 - non-default profile guard against using the default/prod AddOns path
 - addon scan plus state reconcile core
 - single-surface shell foundation
+- background scan plus DB-backed shell dashboard
 
 Recent commits:
 - `01c6abe` `feat(rust): scaffold v2 foundation and onboarding flow`
 - `7c97cb2` `feat(rust): add profile-isolated sandbox mode`
 - `91d9227` `feat(rust): add addon scan and state reconcile core`
 - `f2ac4a3` `feat(rust): add single-surface shell foundation`
+- `c9af6f1` `docs(rust): capture single-surface shell plan`
+- `42eb7ab` `feat(rust): wire scan sync into shell dashboard`
 
 ## Product / UX Decisions Already Made
 
@@ -88,6 +92,9 @@ Use this as the high-level parity target.
 ### `rust/docs/known-v1-gaps.md`
 Use this to avoid porting known v1 problems forward.
 
+### `rust/docs/progress.md`
+Use this for current branch status, completed slices, next work, and testing rules.
+
 ## Environment Notes
 
 Preferred environment going forward:
@@ -117,17 +124,19 @@ Do not revert unrelated changes unless the user asks.
 - found-action navigation bug was fixed
 - `dev` profile isolation worked
 - invalid `--addon-dir` now fails before opening the TUI
+- dashboard auto-scan populated real addon rows
+- detail pane updated with real addon metadata
+- owned-child tree expansion and collapse worked in the shell
 
 ## Next Recommended Slice
 
-Wire the real addon scan + state sync path into the single-surface shell:
-1. start background scan on boot when addon dir is valid
-2. start background scan after onboarding save
-3. sync scan results into `state.sqlite`
-4. replace placeholder shell rows with real scanned addon rows
-5. populate right-pane addon metadata from DB-backed rows
-6. keep testing on `--profile dev` and avoid live AddOns paths
-7. use `rust/docs/single-surface-shell-plan.md` as the UX contract for this slice
+Harden authoritative ownership and bulk-management foundations:
+1. make install and update metadata the authoritative ownership source
+2. preserve parent-child links across update and delete flows
+3. add multi-select groundwork for bulk update and bulk delete
+4. surface drift detection for broken disk or state relationships
+5. keep testing on `--profile dev` and avoid live AddOns paths
+6. use `rust/docs/progress.md` and `rust/docs/single-surface-shell-plan.md` as active contracts
 
 ## Suggested First Commands In A New Windows-Rooted Thread
 

@@ -49,4 +49,6 @@ conductor/
 
 # misc
 docs/
+!rust/docs/
+!rust/docs/**
 rust/target/

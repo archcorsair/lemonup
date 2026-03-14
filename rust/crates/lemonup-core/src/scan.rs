@@ -412,7 +412,10 @@ fn field_value(content: &str, keys: &[&str]) -> Option<String> {
             continue;
         };
 
-        if keys.iter().any(|key| raw_key.trim().eq_ignore_ascii_case(key)) {
+        if keys
+            .iter()
+            .any(|key| raw_key.trim().eq_ignore_ascii_case(key))
+        {
             let value = raw_value.trim();
             if !value.is_empty() {
                 return Some(value.to_string());
