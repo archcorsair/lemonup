@@ -74,8 +74,9 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work added parent-only update-selected groundwork in the shell
+- drift detection is the active slice
+- scan-derived drift indicators are being surfaced in the shell without changing destructive behavior
+- no active half-finished slice should be considered stable until user verifies it
 
 ## Newly Completed
 
@@ -128,16 +129,21 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `r` refreshes selected tracked addons from current disk state
   - refresh stays parent-only and ownership-safe
   - refresh summary remains visible in the update panel after completion
+- drift indicator groundwork now exists:
+  - last scan records imported disk-only folders
+  - last scan records removed missing tracked records
+  - last scan records orphaned owned children on disk
+  - parent rows show drift markers when tracked owned children are missing on disk
+  - overview detail panel surfaces selected-parent drift and last-scan drift summary
 
 ## Next Up
 
 Next phase:
 
-1. drift detection surfaced in the UI
-2. relationship-safe update and delete behavior end-to-end
-3. expose richer update-state summaries and selection-aware actions in the shell
-4. richer tree and management UX on top of the hardened model
-5. soft-delete trash model with undo for safer destructive operations
+1. relationship-safe update and delete behavior end-to-end
+2. expose richer update-state summaries and selection-aware actions in the shell
+3. richer tree and management UX on top of the hardened model
+4. soft-delete trash model with undo for safer destructive operations
 
 ### Goal
 
@@ -147,10 +153,9 @@ Next phase:
 
 ### Planned order
 
-1. drift indicators in list and detail views
-2. expose richer update-state summaries and selection-aware actions in the shell
-3. richer tree and relationship UX
-4. soft-delete trash model with undo for safer destructive operations
+1. expose richer update-state summaries and selection-aware actions in the shell
+2. richer tree and relationship UX
+3. soft-delete trash model with undo for safer destructive operations
 
 ## Remaining Major Work
 

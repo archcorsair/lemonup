@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod cli;
+mod drift;
 mod event;
 mod onboarding;
 mod tui;

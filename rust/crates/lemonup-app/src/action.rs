@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use lemonup_core::{AddonRecord, ScanSummary};
 
 use crate::app::{DashboardUpdateRunSummary, DetailMode};
+use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub enum AppAction {
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
     SetPendingDelete(Option<Vec<String>>),
+    SetDashboardDriftReport(Option<DriftReport>),
     SetDashboardUpdateInProgress(bool),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
     ToggleDashboardSelection,

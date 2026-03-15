@@ -21,6 +21,7 @@ use lemonup_core::{
 use tokio::sync::mpsc;
 
 use crate::action::AppAction;
+use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
@@ -126,6 +127,7 @@ struct AddonScanOutcome {
     path: PathBuf,
     summary: ScanSummary,
     addons: Vec<AddonRecord>,
+    drift_report: DriftReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +207,7 @@ struct DashboardState {
     expanded_folders: HashSet<String>,
     selected_parents: HashSet<String>,
     pending_delete_folders: Option<Vec<String>>,
+    drift_report: Option<DriftReport>,
     update_in_progress: bool,
     last_update_summary: Option<DashboardUpdateRunSummary>,
 }
@@ -256,6 +259,7 @@ impl DashboardState {
             expanded_folders: HashSet::new(),
             selected_parents: HashSet::new(),
             pending_delete_folders: None,
+            drift_report: None,
             update_in_progress: false,
             last_update_summary: None,
         };
@@ -491,6 +495,14 @@ impl DashboardState {
 
     fn pending_delete_folders(&self) -> Option<&[String]> {
         self.pending_delete_folders.as_deref()
+    }
+
+    fn set_drift_report(&mut self, drift_report: Option<DriftReport>) {
+        self.drift_report = drift_report;
+    }
+
+    fn drift_report(&self) -> Option<&DriftReport> {
+        self.drift_report.as_ref()
     }
 
     fn set_update_in_progress(&mut self, in_progress: bool) {
@@ -1167,6 +1179,7 @@ impl App {
                 }
                 AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::SetDashboardDriftReport(Some(outcome.drift_report)),
                     AppAction::CompleteAddonScan {
                         path: outcome.path,
                         summary: outcome.summary,
@@ -1178,6 +1191,7 @@ impl App {
                 AppTaskEvent::DashboardDeleteFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
                     AppAction::SetPendingDelete(None),
+                    AppAction::SetDashboardDriftReport(None),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &format!(
@@ -1198,6 +1212,7 @@ impl App {
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::SetDashboardDriftReport(None),
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetDashboardUpdateSummary(Some(
                         dashboard_update_run_summary_from_refresh(
@@ -1236,6 +1251,9 @@ impl App {
             }
             AppAction::SetPendingDelete(folders) => {
                 self.dashboard.set_pending_delete_folders(folders);
+            }
+            AppAction::SetDashboardDriftReport(drift_report) => {
+                self.dashboard.set_drift_report(drift_report);
             }
             AppAction::SetDashboardUpdateInProgress(in_progress) => {
                 self.dashboard.set_update_in_progress(in_progress);
@@ -1391,12 +1409,15 @@ impl App {
                     let result = tokio::task::spawn_blocking(move || {
                         let scanned = scan_addons_dir(&path, GameFlavor::Retail)?;
                         let mut database = StateDatabase::open(state_db_file)?;
+                        let tracked = database.list_addons()?;
+                        let drift_report = compute_drift_report(&tracked, &scanned);
                         let summary = database.reconcile_scanned_addons(&scanned)?;
                         let addons = database.list_addons()?;
                         Ok::<AddonScanOutcome, lemonup_core::LemonupError>(AddonScanOutcome {
                             path,
                             summary,
                             addons,
+                            drift_report,
                         })
                     })
                     .await
@@ -1666,8 +1687,15 @@ impl App {
                     DashboardRowKind::Parent => "  ",
                     DashboardRowKind::OwnedChild { .. } => "|- ",
                 };
+                let drift_marker = match &row.kind {
+                    DashboardRowKind::Parent if self.parent_has_drift(&row.folder) => "! ",
+                    _ => "",
+                };
                 ListItem::new(vec![
-                    Line::from(format!("{prefix}{selection_marker}{marker}{}", row.name)),
+                    Line::from(format!(
+                        "{prefix}{selection_marker}{drift_marker}{marker}{}",
+                        row.name
+                    )),
                     Line::from(match &row.kind {
                         DashboardRowKind::Parent => {
                             let item = self
@@ -1800,6 +1828,22 @@ impl App {
                             "no"
                         }
                     )));
+                    let missing_owned_children =
+                        self.dashboard_parent_missing_owned_children(&item.folder);
+                    lines.push(Line::from(format!(
+                        "Drift marker: {}",
+                        if missing_owned_children.is_empty() {
+                            "clear"
+                        } else {
+                            "attention"
+                        }
+                    )));
+                    if !missing_owned_children.is_empty() {
+                        lines.push(Line::from(format!(
+                            "Missing owned children: {}",
+                            missing_owned_children.join(", ")
+                        )));
+                    }
                 } else {
                     lines.push(Line::from("No addon selected."));
                     lines.push(Line::from("Waiting for scan results."));
@@ -1822,6 +1866,9 @@ impl App {
                     "Scan status: {}",
                     self.scan_status_label()
                 )));
+                for line in self.last_scan_drift_lines() {
+                    lines.push(line);
+                }
             }
             DetailMode::Install => {
                 lines.push(Line::from("Install area"));
@@ -2010,6 +2057,46 @@ impl App {
         } else {
             self.with_base_status("found WoW installation | select action with j/k, enter confirm")
         }
+    }
+
+    fn parent_has_drift(&self, folder: &str) -> bool {
+        !self
+            .dashboard_parent_missing_owned_children(folder)
+            .is_empty()
+    }
+
+    fn dashboard_parent_missing_owned_children(&self, folder: &str) -> &[String] {
+        self.dashboard
+            .drift_report()
+            .map(|report| report.missing_owned_children_for(folder))
+            .unwrap_or(&[])
+    }
+
+    fn last_scan_drift_lines(&self) -> Vec<Line<'static>> {
+        let Some(report) = self.dashboard.drift_report() else {
+            return vec![Line::from(
+                "Last scan drift: unavailable until the next full scan.",
+            )];
+        };
+
+        if report.is_empty() {
+            return vec![Line::from("Last scan drift: no issues detected.")];
+        }
+
+        let mut lines = vec![Line::from("Last scan drift:")];
+        lines.push(Line::from(format!(
+            "Imported disk-only addons: {}",
+            report.imported_disk_only_folders.len()
+        )));
+        lines.push(Line::from(format!(
+            "Removed missing tracked records: {}",
+            report.removed_missing_records.len()
+        )));
+        lines.push(Line::from(format!(
+            "Orphaned owned children on disk: {}",
+            report.orphaned_owned_children_on_disk.len()
+        )));
+        lines
     }
 
     fn scan_status_label(&self) -> String {
@@ -2207,6 +2294,7 @@ mod tests {
         ScanState, ShellMode,
     };
     use crate::action::AppAction;
+    use crate::drift::DriftReport;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
     use lemonup_core::{
         AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
@@ -2779,12 +2867,14 @@ mod tests {
                     removed_addons: 0,
                 },
                 addons: vec![stored.clone()],
+                drift_report: DriftReport::empty(),
             }),
         )));
 
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
         app.apply(actions[0].clone());
         app.apply(actions[1].clone());
+        app.apply(actions[2].clone());
 
         assert_eq!(app.dashboard.items.len(), 1);
         assert_eq!(app.dashboard.items[0].name, "Details");
