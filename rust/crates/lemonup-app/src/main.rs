@@ -12,7 +12,7 @@ use std::time::Duration;
 use clap::Parser;
 use lemonup_core::{
     AddonRecord, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, LemonupError,
-    ScannedAddon, StateDatabase, scan_addons_dir, validate_addons_path,
+    ScannedAddon, StateDatabase, UpdateStatus, scan_addons_dir, validate_addons_path,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui => run_tui(paths, runtime).await?,
+        Commands::Check { addons } => run_check(paths, addons)?,
         Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run)?,
     }
 
@@ -61,6 +62,63 @@ async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std
     let result = app.run(tui.terminal_mut(), events).await;
     tui.exit()?;
     result?;
+    Ok(())
+}
+
+fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let database = StateDatabase::open(paths.state_db_file)?;
+    let installed = database.list_addons()?;
+    let show_details = !addons.is_empty();
+    let checks =
+        build_update_checks(&installed, &addons).map_err(Box::<dyn std::error::Error>::from)?;
+
+    let up_to_date = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::UpToDate)
+        .count();
+    let update_available = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::UpdateAvailable)
+        .count();
+    let unknown = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::Unknown)
+        .count();
+    let errors = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::Error)
+        .count();
+
+    println!(
+        "check summary: targets={}, checked={}, up_to_date={}, update_available={}, unknown={}, errors={}",
+        if addons.is_empty() {
+            "all".to_string()
+        } else {
+            addons.join("|")
+        },
+        checks.len(),
+        up_to_date,
+        update_available,
+        unknown,
+        errors
+    );
+
+    if show_details {
+        for check in checks {
+            println!(
+                "check result: addon={}, status={}, remote_version={}, message={}",
+                check.addon_name,
+                serialize_update_status(check.status),
+                check.remote_version.as_deref().unwrap_or("<unknown>"),
+                check.message.as_deref().unwrap_or("<none>")
+            );
+        }
+    } else {
+        println!(
+            "check detail: pass one or more exact addon names or folders to inspect individual results"
+        );
+    }
+
     Ok(())
 }
 
@@ -133,6 +191,129 @@ fn run_update(
     }
 
     Ok(())
+}
+
+fn build_update_checks(
+    installed: &[AddonRecord],
+    selectors: &[String],
+) -> Result<Vec<CheckResult>, LemonupError> {
+    let selected = resolve_selected_addons(installed, selectors)?;
+
+    Ok(selected
+        .into_iter()
+        .map(|addon| {
+            let (status, message) = determine_update_status(addon);
+            CheckResult {
+                addon_name: addon.folder.clone(),
+                status,
+                remote_version: addon.remote_version.clone(),
+                message,
+            }
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckResult {
+    addon_name: String,
+    status: UpdateStatus,
+    remote_version: Option<String>,
+    message: Option<String>,
+}
+
+fn resolve_selected_addons<'a>(
+    installed: &'a [AddonRecord],
+    selectors: &[String],
+) -> Result<Vec<&'a AddonRecord>, LemonupError> {
+    if selectors.is_empty() {
+        return Ok(installed.iter().collect());
+    }
+
+    let by_name_or_folder = installed
+        .iter()
+        .flat_map(|addon| {
+            [
+                (normalize_selector(&addon.folder), addon),
+                (normalize_selector(&addon.name), addon),
+            ]
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut selected = Vec::new();
+    let mut seen_folders = std::collections::HashSet::new();
+    let mut missing = Vec::new();
+
+    for selector in selectors {
+        let normalized = normalize_selector(selector);
+        let Some(addon) = by_name_or_folder.get(&normalized).copied() else {
+            missing.push(selector.clone());
+            continue;
+        };
+
+        if seen_folders.insert(addon.folder.clone()) {
+            selected.push(addon);
+        }
+    }
+
+    if !missing.is_empty() {
+        let noun = if missing.len() == 1 {
+            "No tracked addon matches"
+        } else {
+            "No tracked addons match"
+        };
+        return Err(LemonupError::InvalidArgument(format!(
+            "{noun}: {}. Use exact addon names or folder names, or run `lemonup check` to see the overall summary.",
+            missing.join(", ")
+        )));
+    }
+
+    Ok(selected)
+}
+
+fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
+    if addon.source == lemonup_core::SourceKind::Manual {
+        return (
+            UpdateStatus::Unknown,
+            Some("manual addons cannot be checked yet".to_string()),
+        );
+    }
+
+    match (addon.version.as_deref(), addon.remote_version.as_deref()) {
+        (Some(version), Some(remote_version))
+            if normalize_version(version) == normalize_version(remote_version) =>
+        {
+            (UpdateStatus::UpToDate, None)
+        }
+        (Some(_), Some(_)) => (
+            UpdateStatus::UpdateAvailable,
+            Some("tracked remote version differs from installed version".to_string()),
+        ),
+        (_, None) => (
+            UpdateStatus::Unknown,
+            Some("no tracked remote version yet".to_string()),
+        ),
+        (None, Some(_)) => (
+            UpdateStatus::Unknown,
+            Some("no installed version metadata is tracked yet".to_string()),
+        ),
+    }
+}
+
+fn normalize_selector(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn normalize_version(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn serialize_update_status(status: UpdateStatus) -> &'static str {
+    match status {
+        UpdateStatus::UpToDate => "up_to_date",
+        UpdateStatus::UpdateAvailable => "update_available",
+        UpdateStatus::Unknown => "unknown",
+        UpdateStatus::Error => "error",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,8 +418,13 @@ fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>
 mod tests {
     use tempfile::tempdir;
 
-    use super::{build_managed_update_record, refresh_managed_update_state};
-    use lemonup_core::{AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase};
+    use super::{
+        build_managed_update_record, build_update_checks, determine_update_status,
+        refresh_managed_update_state,
+    };
+    use lemonup_core::{
+        AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
+    };
 
     fn write_addon(root: &std::path::Path, folder: &str, toc_body: &str) {
         let addon_dir = root.join(folder);
@@ -385,5 +571,58 @@ mod tests {
         assert_eq!(refreshed.owned_folders.len(), 1);
         assert_eq!(refreshed.owned_folders[0].name, "DBM-Naxx");
         assert_eq!(refreshed.required_deps, vec!["Ace3"]);
+    }
+
+    #[test]
+    fn build_update_checks_filters_targets_and_reports_statuses() {
+        let mut dbm = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        dbm.version = Some("11.0.0".to_string());
+        dbm.remote_version = Some("11.0.2".to_string());
+
+        let mut details =
+            lemonup_core::AddonRecord::new("Details! Damage Meter", "Details", SourceKind::Wago);
+        details.version = Some("11.0.2".to_string());
+        details.remote_version = Some("11.0.2".to_string());
+
+        let manual = lemonup_core::AddonRecord::new("Scratch", "Scratch", SourceKind::Manual);
+
+        let checks = build_update_checks(
+            &[dbm, details, manual],
+            &["dbm-core".to_string(), "Details! Damage Meter".to_string()],
+        )
+        .expect("build checks");
+
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].addon_name, "DBM-Core");
+        assert_eq!(checks[0].status, UpdateStatus::UpdateAvailable);
+        assert_eq!(checks[1].addon_name, "Details");
+        assert_eq!(checks[1].status, UpdateStatus::UpToDate);
+    }
+
+    #[test]
+    fn build_update_checks_rejects_unknown_selectors() {
+        let addon = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        let error = build_update_checks(&[addon], &["Unknown".to_string()]).expect_err("missing");
+        assert!(
+            error
+                .to_string()
+                .contains("No tracked addon matches: Unknown")
+        );
+    }
+
+    #[test]
+    fn determine_update_status_handles_manual_and_missing_versions() {
+        let manual = lemonup_core::AddonRecord::new("Scratch", "Scratch", SourceKind::Manual);
+        let (status, message) = determine_update_status(&manual);
+        assert_eq!(status, UpdateStatus::Unknown);
+        assert_eq!(
+            message.as_deref(),
+            Some("manual addons cannot be checked yet")
+        );
+
+        let tracked = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        let (status, message) = determine_update_status(&tracked);
+        assert_eq!(status, UpdateStatus::Unknown);
+        assert_eq!(message.as_deref(), Some("no tracked remote version yet"));
     }
 }

@@ -99,6 +99,16 @@ These are implemented and manually verified in addition to the earlier chunks:
 - non-interactive `update` now performs a real managed-state refresh from disk scan
 - `update --dry-run` now computes refresh results without mutating state
 - unmanaged/manual rows are skipped instead of guessed into managed ownership
+- CLI-only `check` companion command now exists
+- `check` supports:
+  - global check with no addon arguments
+  - exact-match targeted checks for one addon or a list of addons
+  - sanitized selector parsing with path-like and shell-like input rejected
+- current `check` behavior uses tracked metadata only:
+  - `up_to_date`
+  - `update_available`
+  - `unknown`
+  - no remote refresh yet
 
 ## Next Up
 
@@ -132,6 +142,7 @@ Still missing or incomplete:
 - install flows
 - update flows
 - update all and update selected flows
+- remote-backed update checks beyond tracked metadata
 - search flows
 - delete selected flow
 - multi-select
