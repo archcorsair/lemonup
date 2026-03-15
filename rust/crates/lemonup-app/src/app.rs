@@ -24,7 +24,7 @@ use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -84,6 +84,9 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardSelectionNext,
     DashboardSelectionPrevious,
+    DashboardToggleSelected,
+    DashboardSelectAll,
+    DashboardClearSelection,
     DashboardToggleExpanded,
     DashboardCollapseExpanded,
     SetDetailMode(DetailMode),
@@ -163,6 +166,7 @@ struct DashboardState {
     list_state: ListState,
     detail_mode: DetailMode,
     expanded_folders: HashSet<String>,
+    selected_parents: HashSet<String>,
 }
 
 impl DashboardState {
@@ -209,6 +213,7 @@ impl DashboardState {
             list_state: ListState::default(),
             detail_mode: DetailMode::Overview,
             expanded_folders: HashSet::new(),
+            selected_parents: HashSet::new(),
         };
         state.rebuild_rows();
         if !state.rows.is_empty() {
@@ -220,6 +225,7 @@ impl DashboardState {
     fn replace_addons(&mut self, addons: Vec<AddonRecord>) {
         let selected_key = self.selected_row().map(|row| row.key.clone());
         let previous_expanded = self.expanded_folders.clone();
+        let previous_selected = self.selected_parents.clone();
         let next = DashboardState::from_addons(addons);
 
         self.items = next.items;
@@ -232,6 +238,10 @@ impl DashboardState {
                     .iter()
                     .any(|item| item.folder == *folder && !item.owned_folders.is_empty())
             })
+            .collect();
+        self.selected_parents = previous_selected
+            .into_iter()
+            .filter(|folder| self.items.iter().any(|item| item.folder == *folder))
             .collect();
         self.rebuild_rows();
 
@@ -341,6 +351,61 @@ impl DashboardState {
             DashboardRowKind::OwnedChild { .. } => Some(row.folder.as_str()),
             DashboardRowKind::Parent => None,
         }
+    }
+
+    fn selected_parent_folder(&self) -> Option<&str> {
+        let row = self.selected_row()?;
+        match &row.kind {
+            DashboardRowKind::Parent => Some(row.folder.as_str()),
+            DashboardRowKind::OwnedChild { parent_folder } => Some(parent_folder.as_str()),
+        }
+    }
+
+    fn selected_parent_row_folder(&self) -> Option<&str> {
+        let row = self.selected_row()?;
+        match &row.kind {
+            DashboardRowKind::Parent => Some(row.folder.as_str()),
+            DashboardRowKind::OwnedChild { .. } => None,
+        }
+    }
+
+    fn selected_parent_count(&self) -> usize {
+        self.selected_parents.len()
+    }
+
+    fn is_parent_selected(&self, folder: &str) -> bool {
+        self.selected_parents.contains(folder)
+    }
+
+    fn toggle_selected_parent(&mut self) -> bool {
+        let Some(parent_folder) = self.selected_parent_row_folder().map(str::to_string) else {
+            return false;
+        };
+
+        if !self.selected_parents.remove(&parent_folder) {
+            self.selected_parents.insert(parent_folder);
+        }
+
+        true
+    }
+
+    fn select_all_parents(&mut self) -> bool {
+        let before = self.selected_parents.len();
+        self.selected_parents = self
+            .items
+            .iter()
+            .map(|item| item.folder.clone())
+            .collect::<HashSet<_>>();
+        self.selected_parents.len() != before
+    }
+
+    fn clear_selected_parents(&mut self) -> bool {
+        if self.selected_parents.is_empty() {
+            return false;
+        }
+
+        self.selected_parents.clear();
+        true
     }
 
     fn rebuild_rows(&mut self) {
@@ -577,6 +642,9 @@ impl App {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
+            KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
+            KeyCode::Char('a') => vec![AppMessage::DashboardSelectAll],
+            KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 vec![AppMessage::DashboardToggleExpanded]
             }
@@ -693,6 +761,43 @@ impl App {
                     ),
                 ]
             }
+            AppMessage::DashboardToggleSelected => vec![
+                AppAction::ToggleDashboardSelection,
+                AppAction::SetStatus(match self.dashboard.selected_row() {
+                    Some(DashboardRow {
+                        kind: DashboardRowKind::OwnedChild { .. },
+                        ..
+                    }) => self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "owned child rows inherit parent actions | select the parent row instead",
+                    ),
+                    _ => self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "selected {} addon{}",
+                            selection_count_after_toggle(&self.dashboard),
+                            plural_suffix(selection_count_after_toggle(&self.dashboard))
+                        ),
+                    ),
+                }),
+            ],
+            AppMessage::DashboardSelectAll => vec![
+                AppAction::SelectAllDashboardParents,
+                AppAction::SetStatus(self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    &format!(
+                        "selected all {} addon{}",
+                        self.dashboard.items.len(),
+                        plural_suffix(self.dashboard.items.len())
+                    ),
+                )),
+            ],
+            AppMessage::DashboardClearSelection => vec![
+                AppAction::ClearDashboardSelection,
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "selection cleared"),
+                ),
+            ],
             AppMessage::DashboardToggleExpanded => vec![
                 AppAction::ToggleDashboardExpanded,
                 AppAction::SetStatus(
@@ -880,6 +985,36 @@ impl App {
             AppAction::SetStatus(status) => self.status_line = status,
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
+            }
+            AppAction::ToggleDashboardSelection => {
+                if self.dashboard.toggle_selected_parent() {
+                    self.status_line = self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "selected {} addon{}",
+                            self.dashboard.selected_parent_count(),
+                            plural_suffix(self.dashboard.selected_parent_count())
+                        ),
+                    );
+                }
+            }
+            AppAction::SelectAllDashboardParents => {
+                if self.dashboard.select_all_parents() {
+                    self.status_line = self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "selected all {} addon{}",
+                            self.dashboard.selected_parent_count(),
+                            plural_suffix(self.dashboard.selected_parent_count())
+                        ),
+                    );
+                }
+            }
+            AppAction::ClearDashboardSelection => {
+                if self.dashboard.clear_selected_parents() {
+                    self.status_line =
+                        self.dashboard_status_for(self.dashboard.detail_mode, "selection cleared");
+                }
             }
             AppAction::ToggleDashboardExpanded => {
                 if self.dashboard.toggle_selected_expanded() {
@@ -1232,6 +1367,16 @@ impl App {
                 } else {
                     "  "
                 };
+                let selection_marker = match &row.kind {
+                    DashboardRowKind::Parent => {
+                        if self.dashboard.is_parent_selected(&row.folder) {
+                            "[x] "
+                        } else {
+                            "[ ] "
+                        }
+                    }
+                    DashboardRowKind::OwnedChild { .. } => "",
+                };
                 let marker = match &row.kind {
                     DashboardRowKind::Parent if row.expandable && row.expanded => "v ",
                     DashboardRowKind::Parent if row.expandable => "> ",
@@ -1239,7 +1384,7 @@ impl App {
                     DashboardRowKind::OwnedChild { .. } => "|- ",
                 };
                 ListItem::new(vec![
-                    Line::from(format!("{prefix}{marker}{}", row.name)),
+                    Line::from(format!("{prefix}{selection_marker}{marker}{}", row.name)),
                     Line::from(match &row.kind {
                         DashboardRowKind::Parent => {
                             let item = self
@@ -1346,11 +1491,23 @@ impl App {
                         "Embedded libs: {}",
                         join_or_unknown(&item.embedded_libs)
                     )));
+                    lines.push(Line::from(format!(
+                        "Selected for bulk actions: {}",
+                        if self.dashboard.is_parent_selected(&item.folder) {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                    )));
                 } else {
                     lines.push(Line::from("No addon selected."));
                     lines.push(Line::from("Waiting for scan results."));
                 }
                 lines.push(Line::from(""));
+                lines.push(Line::from(format!(
+                    "Selected parents: {}",
+                    self.dashboard.selected_parent_count()
+                )));
                 if let Some(row) = selected_row {
                     lines.push(Line::from(format!(
                         "Selected row: {}",
@@ -1558,6 +1715,22 @@ fn join_or_unknown(values: &[String]) -> String {
     }
 }
 
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn selection_count_after_toggle(dashboard: &DashboardState) -> usize {
+    let Some(parent_folder) = dashboard.selected_parent_folder() else {
+        return dashboard.selected_parent_count();
+    };
+
+    if dashboard.is_parent_selected(parent_folder) {
+        dashboard.selected_parent_count().saturating_sub(1)
+    } else {
+        dashboard.selected_parent_count() + 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1644,6 +1817,18 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
             vec![AppMessage::DashboardToggleExpanded]
         );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char(' '))),
+            vec![AppMessage::DashboardToggleSelected]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('a'))),
+            vec![AppMessage::DashboardSelectAll]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardClearSelection]
+        );
     }
 
     #[test]
@@ -1704,6 +1889,60 @@ mod tests {
                 .map(|item| item.folder.as_str()),
             Some("Second")
         );
+    }
+
+    #[test]
+    fn toggle_selection_marks_parent_rows_for_bulk_actions() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+
+        app.apply(AppAction::ToggleDashboardSelection);
+        assert!(app.dashboard.is_parent_selected("Second"));
+
+        app.apply(AppAction::ToggleDashboardSelection);
+        assert!(!app.dashboard.is_parent_selected("Second"));
+    }
+
+    #[test]
+    fn toggling_selected_child_is_a_noop_for_bulk_selection() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardExpanded);
+        app.dashboard.list_state.select(Some(2));
+
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        assert!(!app.dashboard.is_parent_selected("Second"));
+        assert_eq!(app.dashboard.selected_parent_count(), 0);
+    }
+
+    #[test]
+    fn select_all_and_clear_selection_update_parent_set() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        app.apply(AppAction::SelectAllDashboardParents);
+        assert_eq!(app.dashboard.selected_parent_count(), 3);
+        assert!(app.dashboard.is_parent_selected("First"));
+        assert!(app.dashboard.is_parent_selected("Second"));
+        assert!(app.dashboard.is_parent_selected("Third"));
+
+        app.apply(AppAction::ClearDashboardSelection);
+        assert_eq!(app.dashboard.selected_parent_count(), 0);
+    }
+
+    #[test]
+    fn replacing_addons_drops_stale_selected_parents() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SelectAllDashboardParents);
+
+        let mut only_second = AddonRecord::new("Second", "Second", SourceKind::GitHub);
+        only_second.version = Some("2.1.0".to_string());
+        app.apply(AppAction::ReplaceDashboardAddons(vec![only_second]));
+
+        assert_eq!(app.dashboard.selected_parent_count(), 1);
+        assert!(app.dashboard.is_parent_selected("Second"));
+        assert!(!app.dashboard.is_parent_selected("First"));
+        assert!(!app.dashboard.is_parent_selected("Third"));
     }
 
     #[test]

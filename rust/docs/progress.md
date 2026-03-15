@@ -75,7 +75,7 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work wired the first real managed ownership caller through the update command
+- latest completed work added shell multi-select groundwork
 
 ## Newly Completed
 
@@ -109,15 +109,23 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `update_available`
   - `unknown`
   - no remote refresh yet
+- shell multi-select groundwork now exists
+- parent rows are the only selectable bulk-action target
+- child rows remain visual-only relationship context
+- multi-select keys now support:
+  - `space` toggle selected parent
+  - `a` select all parent rows
+  - `esc` clear selection
+- selected-count and bulk-target context are now visible in the shell
 
 ## Next Up
 
 Next phase:
 
-1. shell multi-select groundwork
-2. bulk action groundwork for update selected and delete selected
-3. drift detection surfaced in the UI
-4. relationship-safe update and delete behavior end-to-end
+1. bulk action groundwork for update selected and delete selected
+2. drift detection surfaced in the UI
+3. relationship-safe update and delete behavior end-to-end
+4. expose update-state summaries and selection-aware actions in the shell
 5. richer tree and management UX on top of the hardened model
 
 ### Goal
@@ -128,11 +136,10 @@ Next phase:
 
 ### Planned order
 
-1. shell multi-select state
-2. bulk delete and bulk update actions
-3. drift indicators in list and detail views
-4. expose update-state summaries and selection-aware actions in the shell
-5. richer tree and relationship UX
+1. bulk delete and bulk update actions
+2. drift indicators in list and detail views
+3. expose update-state summaries and selection-aware actions in the shell
+4. richer tree and relationship UX
 
 ## Remaining Major Work
 
@@ -145,7 +152,6 @@ Still missing or incomplete:
 - remote-backed update checks beyond tracked metadata
 - search flows
 - delete selected flow
-- multi-select
 - config editing
 - backup workflows
 - broader source parity behavior
