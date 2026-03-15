@@ -16,6 +16,7 @@ pub enum AppAction {
     SetDashboardDriftReport(Option<DriftReport>),
     SetDashboardUpdateInProgress(bool),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
+    SetSelectedDashboardParents(Vec<String>),
     ToggleDashboardSelection,
     SelectAllDashboardParents,
     ClearDashboardSelection,

@@ -29,7 +29,7 @@ use crate::update::{
     CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
 };
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | v select-refreshable | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -93,6 +93,7 @@ enum AppMessage {
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
     DashboardRunUpdateSelected,
+    DashboardSelectRefreshableUpdates,
     DashboardToggleSelected,
     DashboardSelectAll,
     DashboardClearSelection,
@@ -134,13 +135,13 @@ struct AddonScanOutcome {
 struct DashboardDeleteOutcome {
     deleted_parents: usize,
     deleted_folders: usize,
-    addons: Vec<AddonRecord>,
+    sync: AddonScanOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardUpdateOutcome {
     summary: UpdateRefreshSummary,
-    addons: Vec<AddonRecord>,
+    sync: AddonScanOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,14 @@ pub struct DashboardUpdateRunSummary {
     skipped_unmanaged: usize,
     missing_on_disk: usize,
     scanned_addons: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardRefreshabilitySummary {
+    total: usize,
+    refreshable: usize,
+    manual: usize,
+    unmanaged: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +181,7 @@ struct DashboardItem {
     optional_deps: Vec<String>,
     embedded_libs: Vec<String>,
     owned_folder_count: usize,
+    has_authoritative_owned_folders: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -218,6 +228,7 @@ impl DashboardState {
             .into_iter()
             .map(|addon| {
                 let owned_folder_count = addon.owned_folders.len();
+                let has_authoritative_owned_folders = addon.has_authoritative_owned_folders();
                 DashboardItem {
                     name: addon.name,
                     folder: addon.folder,
@@ -237,6 +248,7 @@ impl DashboardState {
                     optional_deps: addon.optional_deps,
                     embedded_libs: addon.embedded_libs,
                     owned_folder_count,
+                    has_authoritative_owned_folders,
                 }
             })
             .collect::<Vec<_>>();
@@ -272,6 +284,7 @@ impl DashboardState {
 
     fn replace_addons(&mut self, addons: Vec<AddonRecord>) {
         let selected_key = self.selected_row().map(|row| row.key.clone());
+        let previous_offset = self.list_state.offset();
         let previous_expanded = self.expanded_folders.clone();
         let previous_selected = self.selected_parents.clone();
         let next = DashboardState::from_addons(addons);
@@ -312,7 +325,10 @@ impl DashboardState {
         if selected.is_none() && !self.rows.is_empty() {
             selected = Some(0);
         }
-        self.list_state.select(selected);
+        let max_offset = self.rows.len().saturating_sub(1);
+        self.list_state = ListState::default()
+            .with_offset(previous_offset.min(max_offset))
+            .with_selected(selected);
     }
 
     fn next_selection(&self) -> Option<usize> {
@@ -483,6 +499,24 @@ impl DashboardState {
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.folder.cmp(&right.folder));
         items
+    }
+
+    fn refreshable_parent_folders(&self) -> Vec<String> {
+        let mut folders = self
+            .items
+            .iter()
+            .filter(|item| is_refreshable_dashboard_item(item))
+            .map(|item| item.folder.clone())
+            .collect::<Vec<_>>();
+        folders.sort();
+        folders
+    }
+
+    fn set_selected_parents(&mut self, folders: Vec<String>) {
+        self.selected_parents = folders
+            .into_iter()
+            .filter(|folder| self.items.iter().any(|item| item.folder == *folder))
+            .collect();
     }
 
     fn set_pending_delete_folders(&mut self, folders: Option<Vec<String>>) {
@@ -780,6 +814,9 @@ impl App {
             KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
                 vec![AppMessage::DashboardRunUpdateSelected]
             }
+            KeyCode::Char('v') if self.dashboard.detail_mode == DetailMode::Update => {
+                vec![AppMessage::DashboardSelectRefreshableUpdates]
+            }
             KeyCode::Char('u') => vec![AppMessage::SetDetailMode(DetailMode::Update)],
             KeyCode::Char('c') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
@@ -972,6 +1009,28 @@ impl App {
                             ]
                         }
                     }
+                }
+            }
+            AppMessage::DashboardSelectRefreshableUpdates => {
+                let refreshable = self.dashboard.refreshable_parent_folders();
+                if refreshable.is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "no refreshable tracked parent addons are available in the current list",
+                    ))]
+                } else {
+                    let count = refreshable.len();
+                    vec![
+                        AppAction::SetSelectedDashboardParents(refreshable),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "selected {} refreshable tracked addon{}",
+                                count,
+                                plural_suffix(count)
+                            ),
+                        )),
+                    ]
                 }
             }
             AppMessage::DashboardToggleSelected => vec![
@@ -1189,13 +1248,17 @@ impl App {
                     vec![AppAction::FailAddonScan(error)]
                 }
                 AppTaskEvent::DashboardDeleteFinished(Ok(outcome)) => vec![
-                    AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                     AppAction::SetPendingDelete(None),
-                    AppAction::SetDashboardDriftReport(None),
+                    AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                    AppAction::CompleteAddonScan {
+                        path: outcome.sync.path,
+                        summary: outcome.sync.summary,
+                    },
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &format!(
-                            "deleted {} addon{}, removed {} folder{}",
+                            "deleted {} addon{}, removed {} folder{}, sync complete",
                             outcome.deleted_parents,
                             plural_suffix(outcome.deleted_parents),
                             outcome.deleted_folders,
@@ -1211,8 +1274,12 @@ impl App {
                     )),
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
-                    AppAction::ReplaceDashboardAddons(outcome.addons),
-                    AppAction::SetDashboardDriftReport(None),
+                    AppAction::ReplaceDashboardAddons(outcome.sync.addons),
+                    AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                    AppAction::CompleteAddonScan {
+                        path: outcome.sync.path,
+                        summary: outcome.sync.summary,
+                    },
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetDashboardUpdateSummary(Some(
                         dashboard_update_run_summary_from_refresh(
@@ -1222,12 +1289,7 @@ impl App {
                     )),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        &format!(
-                            "update refresh complete: refreshed {}, skipped {}, missing {}",
-                            outcome.summary.refreshed_addons,
-                            outcome.summary.skipped_unmanaged,
-                            outcome.summary.missing_on_disk
-                        ),
+                        &dashboard_update_status_message(outcome.summary),
                     )),
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
@@ -1260,6 +1322,9 @@ impl App {
             }
             AppAction::SetDashboardUpdateSummary(summary) => {
                 self.dashboard.set_last_update_summary(summary);
+            }
+            AppAction::SetSelectedDashboardParents(folders) => {
+                self.dashboard.set_selected_parents(folders);
             }
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
@@ -1407,22 +1472,10 @@ impl App {
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        let scanned = scan_addons_dir(&path, GameFlavor::Retail)?;
-                        let mut database = StateDatabase::open(state_db_file)?;
-                        let tracked = database.list_addons()?;
-                        let drift_report = compute_drift_report(&tracked, &scanned);
-                        let summary = database.reconcile_scanned_addons(&scanned)?;
-                        let addons = database.list_addons()?;
-                        Ok::<AddonScanOutcome, lemonup_core::LemonupError>(AddonScanOutcome {
-                            path,
-                            summary,
-                            addons,
-                            drift_report,
-                        })
+                        sync_dashboard_state(&state_db_file, &path)
                     })
                     .await
-                    .map_err(|join_error| join_error.to_string())
-                    .and_then(|result| result.map_err(|error| error.to_string()));
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::AddonScanFinished(result));
                 });
@@ -1888,13 +1941,24 @@ impl App {
             }
             DetailMode::Update => {
                 lines.push(Line::from("Update area"));
+                let all_items = self.dashboard.items.iter().collect::<Vec<_>>();
                 let selected_items = self.dashboard.selected_parent_items();
                 let selected_folders = self.dashboard.selected_parent_folders();
                 let checks = build_update_checks_for_dashboard(&selected_items);
                 let summary = summarize_checks(&checks);
+                let inventory = summarize_refreshability(&all_items);
+                let selection = summarize_refreshability(&selected_items);
+                lines.push(Line::from(format!(
+                    "Inventory: parents={}, refreshable={}, manual={}, unmanaged={}",
+                    inventory.total, inventory.refreshable, inventory.manual, inventory.unmanaged
+                )));
                 lines.push(Line::from(format!(
                     "Selected parents: {}",
                     selected_items.len()
+                )));
+                lines.push(Line::from(format!(
+                    "Selection readiness: refreshable={}, manual={}, unmanaged={}",
+                    selection.refreshable, selection.manual, selection.unmanaged
                 )));
                 lines.push(Line::from(format!(
                     "Targets: {}",
@@ -1917,7 +1981,7 @@ impl App {
                     }
                 )));
                 lines.push(Line::from(
-                    "Press r to refresh selected tracked addons from current disk state.",
+                    "Press v to select refreshable tracked parents, r to refresh the current selection.",
                 ));
                 if let Some(last_summary) = self.dashboard.last_update_summary() {
                     lines.push(Line::from(""));
@@ -2083,20 +2147,12 @@ impl App {
             return vec![Line::from("Last scan drift: no issues detected.")];
         }
 
-        let mut lines = vec![Line::from("Last scan drift:")];
-        lines.push(Line::from(format!(
-            "Imported disk-only addons: {}",
-            report.imported_disk_only_folders.len()
-        )));
-        lines.push(Line::from(format!(
-            "Removed missing tracked records: {}",
-            report.removed_missing_records.len()
-        )));
-        lines.push(Line::from(format!(
-            "Orphaned owned children on disk: {}",
+        vec![Line::from(format!(
+            "Last scan drift: imported {}, removed {}, orphaned children {}.",
+            report.imported_disk_only_folders.len(),
+            report.removed_missing_records.len(),
             report.orphaned_owned_children_on_disk.len()
-        )));
-        lines
+        ))]
     }
 
     fn scan_status_label(&self) -> String {
@@ -2144,11 +2200,11 @@ fn delete_selected_addons(
         deleted_parents += 1;
     }
 
-    let addons = database.list_addons().map_err(|error| error.to_string())?;
+    let sync = sync_dashboard_state(state_db_file, addon_dir)?;
     Ok(DashboardDeleteOutcome {
         deleted_parents,
         deleted_folders,
-        addons,
+        sync,
     })
 }
 
@@ -2161,9 +2217,31 @@ fn refresh_selected_addons(
     let summary =
         refresh_managed_update_state_for_selectors(&mut database, addon_dir, folders, false)
             .map_err(|error| error.to_string())?;
+    let sync = sync_dashboard_state(state_db_file, addon_dir)?;
+
+    Ok(DashboardUpdateOutcome { summary, sync })
+}
+
+fn sync_dashboard_state(
+    state_db_file: &Path,
+    addon_dir: &Path,
+) -> std::result::Result<AddonScanOutcome, String> {
+    let scanned =
+        scan_addons_dir(addon_dir, GameFlavor::Retail).map_err(|error| error.to_string())?;
+    let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    let tracked = database.list_addons().map_err(|error| error.to_string())?;
+    let drift_report = compute_drift_report(&tracked, &scanned);
+    let summary = database
+        .reconcile_scanned_addons(&scanned)
+        .map_err(|error| error.to_string())?;
     let addons = database.list_addons().map_err(|error| error.to_string())?;
 
-    Ok(DashboardUpdateOutcome { summary, addons })
+    Ok(AddonScanOutcome {
+        path: addon_dir.to_path_buf(),
+        summary,
+        addons,
+        drift_report,
+    })
 }
 
 fn build_update_checks_for_dashboard(items: &[&DashboardItem]) -> Vec<CheckResult> {
@@ -2182,6 +2260,31 @@ fn build_update_checks_for_dashboard(items: &[&DashboardItem]) -> Vec<CheckResul
             }
         })
         .collect()
+}
+
+fn is_refreshable_dashboard_item(item: &DashboardItem) -> bool {
+    item.source != SourceKind::Manual && item.has_authoritative_owned_folders
+}
+
+fn summarize_refreshability(items: &[&DashboardItem]) -> DashboardRefreshabilitySummary {
+    let mut summary = DashboardRefreshabilitySummary {
+        total: items.len(),
+        refreshable: 0,
+        manual: 0,
+        unmanaged: 0,
+    };
+
+    for item in items {
+        if item.source == SourceKind::Manual {
+            summary.manual += 1;
+        } else if item.has_authoritative_owned_folders {
+            summary.refreshable += 1;
+        } else {
+            summary.unmanaged += 1;
+        }
+    }
+
+    summary
 }
 
 fn summarize_checks(checks: &[CheckResult]) -> DashboardUpdateRunSummary {
@@ -2226,6 +2329,23 @@ fn dashboard_update_run_summary_from_refresh(
     summary.missing_on_disk = refresh_summary.missing_on_disk;
     summary.scanned_addons = refresh_summary.scanned_addons;
     summary
+}
+
+fn dashboard_update_status_message(summary: UpdateRefreshSummary) -> String {
+    if summary.refreshed_addons == 0
+        && summary.skipped_unmanaged == 0
+        && summary.missing_on_disk == 0
+    {
+        return format!(
+            "update refresh complete: no selected addons were refreshable from tracked managed state ({} selected), sync complete",
+            summary.target_addons
+        );
+    }
+
+    format!(
+        "update refresh complete: refreshed {}, skipped {}, missing {}, sync complete",
+        summary.refreshed_addons, summary.skipped_unmanaged, summary.missing_on_disk
+    )
 }
 
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
@@ -2282,20 +2402,23 @@ fn selection_count_after_toggle(dashboard: &DashboardState) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use ratatui::widgets::ListState;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardState, DetailMode,
-        ScanState, ShellMode,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardDeleteOutcome,
+        DashboardState, DashboardUpdateOutcome, DetailMode, ScanState, ShellMode,
     };
     use crate::action::AppAction;
-    use crate::drift::DriftReport;
+    use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
+    use crate::update::UpdateRefreshSummary;
     use lemonup_core::{
         AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
         ScanSummary, SourceKind, StateDatabase,
@@ -2314,9 +2437,9 @@ mod tests {
         second.git_commit = Some("abcdef".to_string());
         second.required_deps = vec!["Ace3".to_string()];
         second.embedded_libs = vec!["LibStub".to_string()];
-        second.owned_folders = vec![lemonup_core::OwnedFolder {
+        second.set_managed_owned_folders(vec![lemonup_core::OwnedFolder {
             name: "Second_Config".to_string(),
-        }];
+        }]);
 
         let mut third = AddonRecord::new("Third", "Third", SourceKind::Wago);
         third.kind = AddonKind::Library;
@@ -2389,6 +2512,10 @@ mod tests {
         assert_eq!(
             update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('r'))),
             vec![AppMessage::DashboardRunUpdateSelected]
+        );
+        assert_eq!(
+            update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('v'))),
+            vec![AppMessage::DashboardSelectRefreshableUpdates]
         );
     }
 
@@ -2574,6 +2701,45 @@ mod tests {
     }
 
     #[test]
+    fn selecting_refreshable_updates_targets_managed_tracked_parents_only() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+
+        let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetSelectedDashboardParents(vec!["Second".to_string()]),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Update,
+                    "selected 1 refreshable tracked addon",
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn selecting_refreshable_updates_reports_when_none_are_available() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+        app.apply(AppAction::ReplaceDashboardAddons(vec![
+            AddonRecord::new("First", "First", SourceKind::Manual),
+            AddonRecord::new("Third", "Third", SourceKind::Wago),
+        ]));
+
+        let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
+
+        assert_eq!(
+            actions,
+            vec![AppAction::SetStatus(app.dashboard_status_for(
+                DetailMode::Update,
+                "no refreshable tracked parent addons are available in the current list",
+            ))]
+        );
+    }
+
+    #[test]
     fn update_selected_starts_background_refresh_for_selected_parents() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Update;
@@ -2629,9 +2795,169 @@ mod tests {
 
         assert_eq!(outcome.deleted_parents, 1);
         assert_eq!(outcome.deleted_folders, 2);
-        assert!(outcome.addons.is_empty());
+        assert!(outcome.sync.addons.is_empty());
         assert!(!addon_dir.join("Second").exists());
         assert!(!addon_dir.join("Second_Config").exists());
+    }
+
+    #[test]
+    fn dashboard_delete_finished_triggers_fresh_sync_actions() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let sync = AddonScanOutcome {
+            path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+            summary: ScanSummary {
+                scanned_addons: 1,
+                upserted_addons: 1,
+                removed_addons: 0,
+            },
+            addons: vec![AddonRecord::new("First", "First", SourceKind::Manual)],
+            drift_report: DriftReport::empty(),
+        };
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::DashboardDeleteFinished(Ok(DashboardDeleteOutcome {
+                deleted_parents: 1,
+                deleted_folders: 2,
+                sync: sync.clone(),
+            })),
+        ));
+
+        assert_eq!(actions.len(), 5);
+        assert!(matches!(actions[0], AppAction::ReplaceDashboardAddons(_)));
+        assert_eq!(actions[1], AppAction::SetPendingDelete(None));
+        assert!(matches!(
+            actions[2],
+            AppAction::SetDashboardDriftReport(Some(_))
+        ));
+        assert_eq!(
+            actions[3],
+            AppAction::CompleteAddonScan {
+                path: sync.path,
+                summary: sync.summary,
+            }
+        );
+    }
+
+    #[test]
+    fn dashboard_update_finished_triggers_fresh_sync_actions() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        let sync = AddonScanOutcome {
+            path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+            summary: ScanSummary {
+                scanned_addons: 1,
+                upserted_addons: 1,
+                removed_addons: 0,
+            },
+            addons: vec![AddonRecord::new("Second", "Second", SourceKind::GitHub)],
+            drift_report: DriftReport::empty(),
+        };
+
+        let refresh = UpdateRefreshSummary {
+            target_addons: 1,
+            scanned_addons: 1,
+            refreshed_addons: 1,
+            skipped_unmanaged: 0,
+            missing_on_disk: 0,
+        };
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
+                summary: refresh,
+                sync: sync.clone(),
+            })),
+        ));
+
+        assert_eq!(actions.len(), 6);
+        assert!(matches!(actions[0], AppAction::ReplaceDashboardAddons(_)));
+        assert!(matches!(
+            actions[1],
+            AppAction::SetDashboardDriftReport(Some(_))
+        ));
+        assert_eq!(
+            actions[2],
+            AppAction::CompleteAddonScan {
+                path: sync.path,
+                summary: sync.summary,
+            }
+        );
+        assert_eq!(actions[3], AppAction::SetDashboardUpdateInProgress(false));
+        assert!(matches!(
+            actions[4],
+            AppAction::SetDashboardUpdateSummary(Some(_))
+        ));
+        assert!(matches!(actions[5], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn dashboard_update_finished_uses_human_status_when_nothing_is_refreshable() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+        app.dashboard.list_state.select(Some(0));
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        let sync = AddonScanOutcome {
+            path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+            summary: ScanSummary {
+                scanned_addons: 3,
+                upserted_addons: 3,
+                removed_addons: 0,
+            },
+            addons: vec![
+                AddonRecord::new("First", "First", SourceKind::Manual),
+                AddonRecord::new("Second", "Second", SourceKind::GitHub),
+            ],
+            drift_report: DriftReport::empty(),
+        };
+
+        let refresh = UpdateRefreshSummary {
+            target_addons: 1,
+            scanned_addons: 3,
+            refreshed_addons: 0,
+            skipped_unmanaged: 0,
+            missing_on_disk: 0,
+        };
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
+                summary: refresh,
+                sync,
+            })),
+        ));
+
+        assert_eq!(
+            actions[5],
+            AppAction::SetStatus(app.dashboard_status_for(
+                DetailMode::Update,
+                "update refresh complete: no selected addons were refreshable from tracked managed state (1 selected), sync complete",
+            ))
+        );
+    }
+
+    #[test]
+    fn replacing_addons_preserves_selected_row_and_scroll_offset() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state = ListState::default().with_offset(2).with_selected(Some(2));
+
+        let updated = vec![
+            AddonRecord::new("First", "First", SourceKind::Manual),
+            AddonRecord::new("Second", "Second", SourceKind::GitHub),
+            AddonRecord::new("Third", "Third", SourceKind::Wago),
+        ];
+
+        app.apply(AppAction::ReplaceDashboardAddons(updated));
+
+        assert_eq!(app.dashboard.list_state.selected(), Some(2));
+        assert_eq!(app.dashboard.list_state.offset(), 2);
+        assert_eq!(
+            app.dashboard
+                .selected_item()
+                .map(|item| item.folder.as_str()),
+            Some("Third")
+        );
     }
 
     #[test]
@@ -2647,6 +2973,28 @@ mod tests {
         assert!(app.dashboard.is_parent_selected("Second"));
         assert!(!app.dashboard.is_parent_selected("First"));
         assert!(!app.dashboard.is_parent_selected("Third"));
+    }
+
+    #[test]
+    fn last_scan_drift_lines_stay_single_line_when_report_has_counts() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.set_drift_report(Some(DriftReport {
+            imported_disk_only_folders: vec!["WeakAuras".to_string()],
+            removed_missing_records: vec!["DeadAddon".to_string()],
+            orphaned_owned_children_on_disk: vec![OwnedChildDrift {
+                parent_folder: "DBM-Core".to_string(),
+                child_folder: "DBM-Naxx".to_string(),
+            }],
+            parent_missing_owned_children: HashMap::new(),
+        }));
+
+        let lines = app.last_scan_drift_lines();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].to_string(),
+            "Last scan drift: imported 1, removed 1, orphaned children 1."
+        );
     }
 
     #[test]

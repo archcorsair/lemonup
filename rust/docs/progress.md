@@ -74,8 +74,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- drift detection is the active slice
-- scan-derived drift indicators are being surfaced in the shell without changing destructive behavior
+- relationship-safe post-action sync is the active slice
+- richer update-state summaries and selection-aware actions are the active slice
+- current focus:
+  - make update readiness visible before the user runs refresh
+  - add selection helpers for refreshable tracked parents
 - no active half-finished slice should be considered stable until user verifies it
 
 ## Newly Completed
@@ -135,15 +138,23 @@ These are implemented and manually verified in addition to the earlier chunks:
   - last scan records orphaned owned children on disk
   - parent rows show drift markers when tracked owned children are missing on disk
   - overview detail panel surfaces selected-parent drift and last-scan drift summary
+- post-delete and post-update now resync through the same dashboard scan path:
+  - fresh addon rows after action completion
+  - fresh drift report after action completion
+  - fresh scan summary after action completion
+  - less stale UI state between destructive and non-destructive actions
+- refresh UX cleanup landed:
+  - list viewport and selection stay stable across refresh-driven row replacement
+  - zero-result update refresh status is human-readable
+  - overview drift summary stays readable in one line
 
 ## Next Up
 
 Next phase:
 
-1. relationship-safe update and delete behavior end-to-end
-2. expose richer update-state summaries and selection-aware actions in the shell
-3. richer tree and management UX on top of the hardened model
-4. soft-delete trash model with undo for safer destructive operations
+1. expose richer update-state summaries and selection-aware actions in the shell
+2. richer tree and management UX on top of the hardened model
+3. soft-delete trash model with undo for safer destructive operations
 
 ### Goal
 
