@@ -11,6 +11,7 @@ pub enum AppAction {
     Quit,
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
+    SetPendingDelete(Option<Vec<String>>),
     ToggleDashboardSelection,
     SelectAllDashboardParents,
     ClearDashboardSelection,
@@ -23,7 +24,14 @@ pub enum AppAction {
     CancelOnboardingScan,
     SaveAddonDir(PathBuf),
     StartAddonScan(PathBuf),
+    StartDashboardDelete {
+        addon_dir: PathBuf,
+        folders: Vec<String>,
+    },
     ReplaceDashboardAddons(Vec<AddonRecord>),
-    CompleteAddonScan { path: PathBuf, summary: ScanSummary },
+    CompleteAddonScan {
+        path: PathBuf,
+        summary: ScanSummary,
+    },
     FailAddonScan(String),
 }

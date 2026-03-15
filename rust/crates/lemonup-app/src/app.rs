@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -24,7 +25,7 @@ use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -84,6 +85,9 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardSelectionNext,
     DashboardSelectionPrevious,
+    DashboardRequestDelete,
+    DashboardConfirmDelete,
+    DashboardCancelPendingDelete,
     DashboardToggleSelected,
     DashboardSelectAll,
     DashboardClearSelection,
@@ -109,12 +113,20 @@ enum AppMessage {
 enum AppTaskEvent {
     Onboarding(OnboardingTaskEvent),
     AddonScanFinished(std::result::Result<AddonScanOutcome, String>),
+    DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AddonScanOutcome {
     path: PathBuf,
     summary: ScanSummary,
+    addons: Vec<AddonRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardDeleteOutcome {
+    deleted_parents: usize,
+    deleted_folders: usize,
     addons: Vec<AddonRecord>,
 }
 
@@ -167,6 +179,7 @@ struct DashboardState {
     detail_mode: DetailMode,
     expanded_folders: HashSet<String>,
     selected_parents: HashSet<String>,
+    pending_delete_folders: Option<Vec<String>>,
 }
 
 impl DashboardState {
@@ -214,6 +227,7 @@ impl DashboardState {
             detail_mode: DetailMode::Overview,
             expanded_folders: HashSet::new(),
             selected_parents: HashSet::new(),
+            pending_delete_folders: None,
         };
         state.rebuild_rows();
         if !state.rows.is_empty() {
@@ -243,6 +257,18 @@ impl DashboardState {
             .into_iter()
             .filter(|folder| self.items.iter().any(|item| item.folder == *folder))
             .collect();
+        self.pending_delete_folders = self.pending_delete_folders.as_ref().and_then(|pending| {
+            let filtered = pending
+                .iter()
+                .filter(|folder| self.items.iter().any(|item| item.folder == **folder))
+                .cloned()
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                None
+            } else {
+                Some(filtered)
+            }
+        });
         self.rebuild_rows();
 
         let mut selected = selected_key
@@ -406,6 +432,24 @@ impl DashboardState {
 
         self.selected_parents.clear();
         true
+    }
+
+    fn selected_parent_folders(&self) -> Vec<String> {
+        let mut folders = self.selected_parents.iter().cloned().collect::<Vec<_>>();
+        folders.sort();
+        folders
+    }
+
+    fn set_pending_delete_folders(&mut self, folders: Option<Vec<String>>) {
+        self.pending_delete_folders = folders.map(|mut folders| {
+            folders.sort();
+            folders.dedup();
+            folders
+        });
+    }
+
+    fn pending_delete_folders(&self) -> Option<&[String]> {
+        self.pending_delete_folders.as_deref()
     }
 
     fn rebuild_rows(&mut self) {
@@ -638,10 +682,20 @@ impl App {
     }
 
     fn dashboard_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
+        if self.dashboard.pending_delete_folders().is_some() {
+            return match key.code {
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char('y') => vec![AppMessage::DashboardConfirmDelete],
+                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::DashboardCancelPendingDelete],
+                _ => vec![],
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
+            KeyCode::Char('x') => vec![AppMessage::DashboardRequestDelete],
             KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
             KeyCode::Char('a') => vec![AppMessage::DashboardSelectAll],
             KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
@@ -761,6 +815,50 @@ impl App {
                     ),
                 ]
             }
+            AppMessage::DashboardRequestDelete => {
+                let selected = self.dashboard.selected_parent_folders();
+                if selected.is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "select one or more parent addons before deleting",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetPendingDelete(Some(selected.clone())),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "delete {} selected addon{}? press y to confirm, n to cancel",
+                                selected.len(),
+                                plural_suffix(selected.len())
+                            ),
+                        )),
+                    ]
+                }
+            }
+            AppMessage::DashboardConfirmDelete => match (
+                self.effective_addon_dir.clone(),
+                self.dashboard
+                    .pending_delete_folders()
+                    .map(|value| value.to_vec()),
+            ) {
+                (Some(addon_dir), Some(folders)) if !folders.is_empty() => vec![
+                    AppAction::StartDashboardDelete { addon_dir, folders },
+                    AppAction::SetStatus(
+                        self.dashboard_status_for(self.dashboard.detail_mode, "delete running"),
+                    ),
+                ],
+                _ => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    "no pending delete to confirm",
+                ))],
+            },
+            AppMessage::DashboardCancelPendingDelete => vec![
+                AppAction::SetPendingDelete(None),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "delete cancelled"),
+                ),
+            ],
             AppMessage::DashboardToggleSelected => vec![
                 AppAction::ToggleDashboardSelection,
                 AppAction::SetStatus(match self.dashboard.selected_row() {
@@ -974,6 +1072,27 @@ impl App {
                 AppTaskEvent::AddonScanFinished(Err(error)) => {
                     vec![AppAction::FailAddonScan(error)]
                 }
+                AppTaskEvent::DashboardDeleteFinished(Ok(outcome)) => vec![
+                    AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::SetPendingDelete(None),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "deleted {} addon{}, removed {} folder{}",
+                            outcome.deleted_parents,
+                            plural_suffix(outcome.deleted_parents),
+                            outcome.deleted_folders,
+                            plural_suffix(outcome.deleted_folders)
+                        ),
+                    )),
+                ],
+                AppTaskEvent::DashboardDeleteFinished(Err(error)) => vec![
+                    AppAction::SetPendingDelete(None),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("delete failed: {error}"),
+                    )),
+                ],
             },
         }
     }
@@ -985,6 +1104,9 @@ impl App {
             AppAction::SetStatus(status) => self.status_line = status,
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
+            }
+            AppAction::SetPendingDelete(folders) => {
+                self.dashboard.set_pending_delete_folders(folders);
             }
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
@@ -1147,6 +1269,19 @@ impl App {
                     .and_then(|result| result.map_err(|error| error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::AddonScanFinished(result));
+                });
+            }
+            AppAction::StartDashboardDelete { addon_dir, folders } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        delete_selected_addons(&state_db_file, &addon_dir, &folders)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::DashboardDeleteFinished(result));
                 });
             }
             AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
@@ -1406,7 +1541,10 @@ impl App {
             .collect::<Vec<_>>();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Addons"))
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "Addons ({} selected)",
+                self.dashboard.selected_parent_count()
+            )))
             .highlight_style(
                 Style::default()
                     .fg(Color::Yellow)
@@ -1427,6 +1565,21 @@ impl App {
             detail_mode_label(self.dashboard.detail_mode)
         )));
         lines.push(Line::from(""));
+
+        if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
+            lines.push(Line::from("Pending delete confirmation"));
+            lines.push(Line::from(format!(
+                "{} parent addon{} selected for deletion",
+                pending_delete_folders.len(),
+                plural_suffix(pending_delete_folders.len())
+            )));
+            lines.push(Line::from(format!(
+                "Targets: {}",
+                pending_delete_folders.join(", ")
+            )));
+            lines.push(Line::from("Press y to confirm or n/esc to cancel."));
+            lines.push(Line::from(""));
+        }
 
         match self.dashboard.detail_mode {
             DetailMode::Overview => {
@@ -1543,7 +1696,9 @@ impl App {
                 lines.push(Line::from(
                     "Check/update actions will be integrated here without leaving the shell.",
                 ));
-                lines.push(Line::from("Only shell boundaries are wired in this chunk."));
+                lines.push(Line::from(
+                    "Delete confirmation groundwork is active while update actions stay pending.",
+                ));
             }
             DetailMode::Config => {
                 lines.push(Line::from("Config area"));
@@ -1679,6 +1834,45 @@ impl App {
     }
 }
 
+fn delete_selected_addons(
+    state_db_file: &Path,
+    addon_dir: &Path,
+    folders: &[String],
+) -> std::result::Result<DashboardDeleteOutcome, String> {
+    let database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    let mut deleted_parents = 0usize;
+    let mut deleted_folders = 0usize;
+
+    for folder in folders {
+        let planned_folders = database
+            .planned_removal_folders(folder)
+            .map_err(|error| error.to_string())?;
+
+        for planned_folder in planned_folders {
+            let path = addon_dir.join(&planned_folder);
+            if path.is_dir() {
+                fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+                deleted_folders += 1;
+            } else if path.is_file() {
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                deleted_folders += 1;
+            }
+        }
+
+        database
+            .remove_addon(folder)
+            .map_err(|error| error.to_string())?;
+        deleted_parents += 1;
+    }
+
+    let addons = database.list_addons().map_err(|error| error.to_string())?;
+    Ok(DashboardDeleteOutcome {
+        deleted_parents,
+        deleted_folders,
+        addons,
+    })
+}
+
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
     match detail_mode {
         DetailMode::Overview => "Overview",
@@ -1733,6 +1927,7 @@ fn selection_count_after_toggle(dashboard: &DashboardState) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -1746,8 +1941,8 @@ mod tests {
     use crate::action::AppAction;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
     use lemonup_core::{
-        AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, ScanSummary,
-        SourceKind,
+        AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
+        ScanSummary, SourceKind, StateDatabase,
     };
 
     fn app_for_tests(shell_mode: ShellMode) -> App {
@@ -1828,6 +2023,30 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
             vec![AppMessage::DashboardClearSelection]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('x'))),
+            vec![AppMessage::DashboardRequestDelete]
+        );
+    }
+
+    #[test]
+    fn pending_delete_keys_emit_confirm_or_cancel_messages() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+            vec![AppMessage::DashboardConfirmDelete]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+            vec![AppMessage::DashboardCancelPendingDelete]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardCancelPendingDelete]
         );
     }
 
@@ -1928,6 +2147,83 @@ mod tests {
 
         app.apply(AppAction::ClearDashboardSelection);
         assert_eq!(app.dashboard.selected_parent_count(), 0);
+    }
+
+    #[test]
+    fn requesting_delete_without_selection_sets_status_only() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        let actions = app.update(AppMessage::DashboardRequestDelete);
+
+        assert_eq!(
+            actions,
+            vec![AppAction::SetStatus(app.dashboard_status_for(
+                app.dashboard.detail_mode,
+                "select one or more parent addons before deleting",
+            ))]
+        );
+    }
+
+    #[test]
+    fn requesting_delete_with_selection_sets_pending_delete() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        let actions = app.update(AppMessage::DashboardRequestDelete);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetPendingDelete(Some(vec!["Second".to_string()])),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    app.dashboard.detail_mode,
+                    "delete 1 selected addon? press y to confirm, n to cancel",
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelling_pending_delete_clears_pending_state() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+
+        app.apply(AppAction::SetPendingDelete(None));
+
+        assert!(app.dashboard.pending_delete_folders().is_none());
+    }
+
+    #[test]
+    fn delete_selected_addons_removes_parent_owned_folders_and_state_rows() {
+        let temp = tempdir().expect("temp dir");
+        let addon_dir = temp.path().join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::create_dir_all(addon_dir.join("Second")).expect("create parent dir");
+        fs::create_dir_all(addon_dir.join("Second_Config")).expect("create child dir");
+
+        let state_db_file = temp.path().join("state.sqlite");
+        let mut database = StateDatabase::open(&state_db_file).expect("open state db");
+
+        let mut managed = AddonRecord::new("Second", "Second", SourceKind::GitHub);
+        managed.version = Some("2.0.0".to_string());
+        managed.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Second_Config".to_string(),
+        }]);
+        database
+            .record_managed_addon(&managed)
+            .expect("record managed addon");
+
+        let outcome =
+            super::delete_selected_addons(&state_db_file, &addon_dir, &["Second".to_string()])
+                .expect("delete selected addons");
+
+        assert_eq!(outcome.deleted_parents, 1);
+        assert_eq!(outcome.deleted_folders, 2);
+        assert!(outcome.addons.is_empty());
+        assert!(!addon_dir.join("Second").exists());
+        assert!(!addon_dir.join("Second_Config").exists());
     }
 
     #[test]

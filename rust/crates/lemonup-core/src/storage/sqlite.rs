@@ -226,6 +226,16 @@ impl StateDatabase {
         Ok(())
     }
 
+    pub fn planned_removal_folders(&self, folder: &str) -> Result<Vec<String>> {
+        let existing_addons = Self::list_addons_from_connection(&self.connection)?;
+        let mut planned = std::iter::once(folder.to_string())
+            .chain(collect_owned_descendants(&existing_addons, folder, true))
+            .collect::<Vec<_>>();
+        planned.sort();
+        planned.dedup();
+        Ok(planned)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.connection
             .execute_batch("PRAGMA journal_mode = WAL;")?;
@@ -975,6 +985,52 @@ mod tests {
             .expect("sibling remains");
         assert_eq!(remaining.owned_folders.len(), 1);
         assert_eq!(remaining.owned_folders[0].name, "Independent_Child");
+    }
+
+    #[test]
+    fn planned_removal_folders_returns_parent_and_authoritative_descendants_only() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut parent = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        parent.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "ElvUI_Options".to_string(),
+            },
+            OwnedFolder {
+                name: "ElvUI_Libraries".to_string(),
+            },
+        ]);
+        database.upsert_addon(&parent).expect("seed parent");
+
+        let mut managed_child =
+            AddonRecord::new("ElvUI_Options", "ElvUI_Options", SourceKind::Manual);
+        managed_child.set_managed_owned_folders(vec![OwnedFolder {
+            name: "ElvUI_Options_Theme".to_string(),
+        }]);
+        database
+            .upsert_addon(&managed_child)
+            .expect("seed managed child");
+
+        let mut scan_only = AddonRecord::new("Independent", "Independent", SourceKind::Manual);
+        scan_only.set_scan_owned_folders(vec![OwnedFolder {
+            name: "Independent_Child".to_string(),
+        }]);
+        database.upsert_addon(&scan_only).expect("seed scan-only");
+
+        let planned = database
+            .planned_removal_folders("ElvUI")
+            .expect("planned removal");
+
+        assert_eq!(
+            planned,
+            vec![
+                "ElvUI".to_string(),
+                "ElvUI_Libraries".to_string(),
+                "ElvUI_Options".to_string(),
+                "ElvUI_Options_Theme".to_string(),
+            ]
+        );
     }
 
     #[test]

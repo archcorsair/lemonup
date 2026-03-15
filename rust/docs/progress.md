@@ -74,8 +74,9 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work added shell multi-select groundwork
+- bulk delete groundwork is the active slice
+- confirmation flow is being added on top of parent-only multi-select
+- no active half-finished slice should be considered stable until user verifies it
 
 ## Newly Completed
 
@@ -117,6 +118,12 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `a` select all parent rows
   - `esc` clear selection
 - selected-count and bulk-target context are now visible in the shell
+- bulk delete groundwork now exists in the shell:
+  - `x` requests delete for selected parent rows
+  - `y` confirms a pending delete
+  - `n` or `esc` cancels a pending delete
+  - delete operates on selected parent rows only
+  - owned child folders are removed through authoritative ownership rules
 
 ## Next Up
 
@@ -140,6 +147,7 @@ Next phase:
 2. drift indicators in list and detail views
 3. expose update-state summaries and selection-aware actions in the shell
 4. richer tree and relationship UX
+5. soft-delete trash model with undo for safer destructive operations
 
 ## Remaining Major Work
 
@@ -156,6 +164,7 @@ Still missing or incomplete:
 - backup workflows
 - broader source parity behavior
 - CLI update path beyond foundation
+- soft-delete trash/undo flow for delete operations
 
 ## Minimum MVP
 
@@ -180,6 +189,7 @@ Supporting behavior expected for MVP quality:
 - update-check visibility
 - rescan or reconcile command
 - source and state indicators
+- safer destructive UX, ideally via soft-delete undo after MVP groundwork
 
 ## Relationship Rules
 
@@ -202,6 +212,16 @@ The app should eventually detect:
 - child folder on disk with no matching parent ownership record
 - tracked ownership that no longer matches disk contents
 - tracked source metadata that materially disagrees with disk state
+
+## Delete Safety Plan
+
+- current groundwork uses hard delete with explicit confirmation
+- follow-up target is soft-delete, not fake undo after hard delete
+- desired undo model:
+  - move removed addon folders into LemonUp-managed trash
+  - keep authoritative parent-child relationships intact in trash metadata
+  - offer short-lived undo from the shell after delete completes
+  - purge trash on an explicit future action or retention policy
 
 ## Testing Rules
 
