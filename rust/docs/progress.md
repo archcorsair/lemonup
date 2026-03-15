@@ -75,7 +75,7 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - no active half-finished slice should be considered stable until the next chunk starts
-- latest completed work added the managed ownership write path for install/update flows
+- latest completed work wired the first real managed ownership caller through the update command
 
 ## Newly Completed
 
@@ -96,16 +96,19 @@ These are implemented and manually verified in addition to the earlier chunks:
 - dedicated `record_managed_addon(...)` core API for install/update flows
 - managed writes now remove represented standalone child rows
 - managed updates now replace prior owned-folder sets while preserving install time
+- non-interactive `update` now performs a real managed-state refresh from disk scan
+- `update --dry-run` now computes refresh results without mutating state
+- unmanaged/manual rows are skipped instead of guessed into managed ownership
 
 ## Next Up
 
 Next phase:
 
-1. wire the first real install/update caller to `record_managed_addon(...)`
-2. multi-select groundwork in the shell
-3. bulk action groundwork for update selected and delete selected
-4. drift detection surfaced in the UI
-5. relationship-safe update and delete behavior end-to-end
+1. shell multi-select groundwork
+2. bulk action groundwork for update selected and delete selected
+3. drift detection surfaced in the UI
+4. relationship-safe update and delete behavior end-to-end
+5. richer tree and management UX on top of the hardened model
 
 ### Goal
 
@@ -115,17 +118,16 @@ Next phase:
 
 ### Planned order
 
-1. wire a real install/update caller to managed ownership persistence
-2. expose managed-ownership assumptions to app state where needed
-3. shell multi-select state
-4. bulk delete and bulk update actions
-5. drift indicators in list and detail views
+1. shell multi-select state
+2. bulk delete and bulk update actions
+3. drift indicators in list and detail views
+4. expose update-state summaries and selection-aware actions in the shell
+5. richer tree and relationship UX
 
 ## Remaining Major Work
 
 Still missing or incomplete:
 
-- real install/update callers using managed ownership persistence
 - richer tree view for parent/child relationships
 - install flows
 - update flows

@@ -5,13 +5,14 @@ mod event;
 mod onboarding;
 mod tui;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 use lemonup_core::{
-    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, LemonupError, StateDatabase,
-    validate_addons_path,
+    AddonRecord, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, LemonupError,
+    ScannedAddon, StateDatabase, scan_addons_dir, validate_addons_path,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -71,7 +72,7 @@ fn run_update(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
-    let database = StateDatabase::open(paths.state_db_file)?;
+    let mut database = StateDatabase::open(paths.state_db_file)?;
     let installed = database.list_addons()?;
 
     let configured_addon_dir = match &config_state {
@@ -105,15 +106,26 @@ fn run_update(
                 runtime.profile_name
             );
         }
-        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
+        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
             println!(
-                "update foundation ready: profile={}, tracked addons={}, addon_dir={}, force={}, dry_run={}",
+                "update skipped: profile={}, tracked addons={}, addon_dir=<unconfigured>, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
-                effective_addon_dir
-                    .as_ref()
-                    .map(|value| value.display().to_string())
-                    .unwrap_or_else(|| "<unconfigured>".to_string()),
+                force,
+                dry_run
+            );
+        }
+        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
+            let addon_dir = effective_addon_dir.expect("checked above");
+            let summary = refresh_managed_update_state(&mut database, &addon_dir, dry_run)?;
+            println!(
+                "update refresh: profile={}, tracked addons={}, scanned={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, force={}, dry_run={}",
+                runtime.profile_name,
+                installed.len(),
+                summary.scanned_addons,
+                summary.refreshed_addons,
+                summary.skipped_unmanaged,
+                summary.missing_on_disk,
                 force,
                 dry_run
             );
@@ -121,6 +133,91 @@ fn run_update(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateRefreshSummary {
+    scanned_addons: usize,
+    refreshed_addons: usize,
+    skipped_unmanaged: usize,
+    missing_on_disk: usize,
+}
+
+fn refresh_managed_update_state(
+    database: &mut StateDatabase,
+    addon_dir: &std::path::Path,
+    dry_run: bool,
+) -> lemonup_core::Result<UpdateRefreshSummary> {
+    let scanned = scan_addons_dir(addon_dir, GameFlavor::Retail)?;
+    let scanned_by_folder = scanned
+        .iter()
+        .map(|addon| (addon.folder.as_str(), addon))
+        .collect::<HashMap<_, _>>();
+
+    let mut refreshed_addons = 0;
+    let mut skipped_unmanaged = 0;
+    let mut missing_on_disk = 0;
+
+    for addon in database.list_addons()? {
+        if addon.source == lemonup_core::SourceKind::Manual {
+            continue;
+        }
+
+        if !addon.has_authoritative_owned_folders() {
+            skipped_unmanaged += 1;
+            continue;
+        }
+
+        let Some(scanned_addon) = scanned_by_folder.get(addon.folder.as_str()) else {
+            missing_on_disk += 1;
+            continue;
+        };
+
+        let refreshed = build_managed_update_record(&addon, scanned_addon);
+        if !dry_run {
+            database.record_managed_addon(&refreshed)?;
+        }
+        refreshed_addons += 1;
+    }
+
+    Ok(UpdateRefreshSummary {
+        scanned_addons: scanned.len(),
+        refreshed_addons,
+        skipped_unmanaged,
+        missing_on_disk,
+    })
+}
+
+fn build_managed_update_record(existing: &AddonRecord, scanned: &ScannedAddon) -> AddonRecord {
+    let mut refreshed = AddonRecord {
+        id: existing.id,
+        name: scanned.name.clone(),
+        folder: existing.folder.clone(),
+        owned_folders: existing.owned_folders.clone(),
+        ownership_source: existing.effective_ownership_source(),
+        kind: if existing.kind_override {
+            existing.kind
+        } else {
+            scanned.kind
+        },
+        kind_override: existing.kind_override,
+        flavor: scanned.flavor,
+        version: scanned.version.clone(),
+        git_commit: scanned.git_commit.clone(),
+        author: scanned.author.clone(),
+        interface: scanned.interface.clone(),
+        source: existing.source,
+        source_url: existing.source_url.clone(),
+        required_deps: scanned.required_deps.clone(),
+        optional_deps: scanned.optional_deps.clone(),
+        embedded_libs: scanned.embedded_libs.clone(),
+        installed_at: existing.installed_at,
+        updated_at: existing.updated_at,
+        last_checked_at: existing.last_checked_at,
+        remote_version: existing.remote_version.clone(),
+    };
+    refreshed.set_managed_owned_folders(existing.owned_folders.clone());
+    refreshed
 }
 
 fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {
@@ -133,5 +230,160 @@ fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>
     match config_store.load()? {
         ConfigLoad::Missing(_) => Ok(None),
         ConfigLoad::Loaded(config) => Ok(config.addon_dir),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::{build_managed_update_record, refresh_managed_update_state};
+    use lemonup_core::{AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase};
+
+    fn write_addon(root: &std::path::Path, folder: &str, toc_body: &str) {
+        let addon_dir = root.join(folder);
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        std::fs::write(addon_dir.join(format!("{folder}.toc")), toc_body).expect("write toc");
+    }
+
+    #[test]
+    fn refresh_managed_update_state_records_managed_rows() {
+        let temp = tempdir().expect("tempdir");
+        let addons_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addons_dir).expect("create addons dir");
+        write_addon(
+            &addons_dir,
+            "DBM-Core",
+            "## Title: Deadly Boss Mods\n## Version: 11.0.2\n## Author: MysticalOS\n## Interface: 110002\n",
+        );
+        write_addon(
+            &addons_dir,
+            "DBM-Naxx",
+            "## Title: DBM Naxx\n## Version: 11.0.2\n## Author: MysticalOS\n## Interface: 110002\n",
+        );
+        write_addon(
+            &addons_dir,
+            "DBM-Ulduar",
+            "## Title: DBM Ulduar\n## Version: 11.0.2\n## Author: MysticalOS\n## Interface: 110002\n",
+        );
+
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut parent = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        parent.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "DBM-Naxx".to_string(),
+            },
+            OwnedFolder {
+                name: "DBM-Ulduar".to_string(),
+            },
+        ]);
+        parent.remote_version = Some("11.0.2".to_string());
+        database.record_managed_addon(&parent).expect("seed parent");
+        database
+            .upsert_addon(&lemonup_core::AddonRecord::new(
+                "DBM Ulduar",
+                "DBM-Ulduar",
+                SourceKind::Manual,
+            ))
+            .expect("seed stale child row");
+
+        let summary =
+            refresh_managed_update_state(&mut database, &addons_dir, false).expect("refresh");
+
+        assert_eq!(summary.scanned_addons, 3);
+        assert_eq!(summary.refreshed_addons, 1);
+        assert_eq!(summary.skipped_unmanaged, 0);
+        assert_eq!(summary.missing_on_disk, 0);
+
+        let parent = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get parent")
+            .expect("parent exists");
+        assert!(parent.has_authoritative_owned_folders());
+        assert_eq!(parent.version.as_deref(), Some("11.0.2"));
+        assert_eq!(parent.author.as_deref(), Some("MysticalOS"));
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Ulduar")
+                .expect("get stale child")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refresh_managed_update_state_dry_run_does_not_mutate_state() {
+        let temp = tempdir().expect("tempdir");
+        let addons_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addons_dir).expect("create addons dir");
+        write_addon(
+            &addons_dir,
+            "DBM-Core",
+            "## Title: Deadly Boss Mods\n## Version: 11.0.2\n",
+        );
+        write_addon(
+            &addons_dir,
+            "DBM-Naxx",
+            "## Title: DBM Naxx\n## Version: 11.0.2\n",
+        );
+
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut parent = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        parent.version = Some("11.0.1".to_string());
+        parent.set_managed_owned_folders(vec![OwnedFolder {
+            name: "DBM-Naxx".to_string(),
+        }]);
+        database.record_managed_addon(&parent).expect("seed parent");
+
+        let summary =
+            refresh_managed_update_state(&mut database, &addons_dir, true).expect("dry-run");
+
+        assert_eq!(summary.refreshed_addons, 1);
+        let parent = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get parent")
+            .expect("parent exists");
+        assert_eq!(parent.version.as_deref(), Some("11.0.1"));
+    }
+
+    #[test]
+    fn build_managed_update_record_preserves_kind_override_and_owned_folders() {
+        let mut existing = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        existing.kind = AddonKind::Library;
+        existing.kind_override = true;
+        existing.set_managed_owned_folders(vec![OwnedFolder {
+            name: "DBM-Naxx".to_string(),
+        }]);
+
+        let scanned = ScannedAddon {
+            name: "Deadly Boss Mods".to_string(),
+            folder: "DBM-Core".to_string(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: Some("11.0.2".to_string()),
+            git_commit: None,
+            author: Some("MysticalOS".to_string()),
+            interface: Some("110002".to_string()),
+            source: SourceKind::Manual,
+            required_deps: vec!["Ace3".to_string()],
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+        };
+
+        let refreshed = build_managed_update_record(&existing, &scanned);
+        assert_eq!(refreshed.kind, AddonKind::Library);
+        assert!(refreshed.kind_override);
+        assert!(refreshed.has_authoritative_owned_folders());
+        assert_eq!(refreshed.owned_folders.len(), 1);
+        assert_eq!(refreshed.owned_folders[0].name, "DBM-Naxx");
+        assert_eq!(refreshed.required_deps, vec!["Ace3"]);
     }
 }
