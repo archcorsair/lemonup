@@ -74,9 +74,8 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- bulk delete groundwork is the active slice
-- confirmation flow is being added on top of parent-only multi-select
-- no active half-finished slice should be considered stable until user verifies it
+- no active half-finished slice should be considered stable until the next chunk starts
+- latest completed work added parent-only update-selected groundwork in the shell
 
 ## Newly Completed
 
@@ -124,16 +123,21 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `n` or `esc` cancels a pending delete
   - delete operates on selected parent rows only
   - owned child folders are removed through authoritative ownership rules
+- update-selected groundwork now exists in the shell:
+  - update panel summarizes tracked status for selected parent rows
+  - `r` refreshes selected tracked addons from current disk state
+  - refresh stays parent-only and ownership-safe
+  - refresh summary remains visible in the update panel after completion
 
 ## Next Up
 
 Next phase:
 
-1. bulk action groundwork for update selected and delete selected
-2. drift detection surfaced in the UI
-3. relationship-safe update and delete behavior end-to-end
-4. expose update-state summaries and selection-aware actions in the shell
-5. richer tree and management UX on top of the hardened model
+1. drift detection surfaced in the UI
+2. relationship-safe update and delete behavior end-to-end
+3. expose richer update-state summaries and selection-aware actions in the shell
+4. richer tree and management UX on top of the hardened model
+5. soft-delete trash model with undo for safer destructive operations
 
 ### Goal
 
@@ -143,11 +147,10 @@ Next phase:
 
 ### Planned order
 
-1. bulk delete and bulk update actions
-2. drift indicators in list and detail views
-3. expose update-state summaries and selection-aware actions in the shell
-4. richer tree and relationship UX
-5. soft-delete trash model with undo for safer destructive operations
+1. drift indicators in list and detail views
+2. expose richer update-state summaries and selection-aware actions in the shell
+3. richer tree and relationship UX
+4. soft-delete trash model with undo for safer destructive operations
 
 ## Remaining Major Work
 
@@ -156,7 +159,7 @@ Still missing or incomplete:
 - richer tree view for parent/child relationships
 - install flows
 - update flows
-- update all and update selected flows
+- update all flow
 - remote-backed update checks beyond tracked metadata
 - search flows
 - delete selected flow

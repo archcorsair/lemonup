@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use lemonup_core::{AddonRecord, ScanSummary};
 
-use crate::app::DetailMode;
+use crate::app::{DashboardUpdateRunSummary, DetailMode};
 use crate::onboarding::OnboardingState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +12,8 @@ pub enum AppAction {
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
     SetPendingDelete(Option<Vec<String>>),
+    SetDashboardUpdateInProgress(bool),
+    SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
     ToggleDashboardSelection,
     SelectAllDashboardParents,
     ClearDashboardSelection,
@@ -25,6 +27,10 @@ pub enum AppAction {
     SaveAddonDir(PathBuf),
     StartAddonScan(PathBuf),
     StartDashboardDelete {
+        addon_dir: PathBuf,
+        folders: Vec<String>,
+    },
+    StartDashboardUpdateSelected {
         addon_dir: PathBuf,
         folders: Vec<String>,
     },

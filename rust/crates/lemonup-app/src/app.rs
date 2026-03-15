@@ -15,8 +15,8 @@ use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
-    GameFlavor, ScanSummary, SourceKind, StateDatabase, detect_known_addons_path, paths_match,
-    scan_addons_dir, search_for_wow, validate_addons_path,
+    GameFlavor, ScanSummary, SourceKind, StateDatabase, UpdateStatus, detect_known_addons_path,
+    paths_match, scan_addons_dir, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -24,8 +24,11 @@ use crate::action::AppAction;
 use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
+use crate::update::{
+    CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
+};
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -88,6 +91,7 @@ enum AppMessage {
     DashboardRequestDelete,
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
+    DashboardRunUpdateSelected,
     DashboardToggleSelected,
     DashboardSelectAll,
     DashboardClearSelection,
@@ -114,6 +118,7 @@ enum AppTaskEvent {
     Onboarding(OnboardingTaskEvent),
     AddonScanFinished(std::result::Result<AddonScanOutcome, String>),
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
+    DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +136,25 @@ struct DashboardDeleteOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardUpdateOutcome {
+    summary: UpdateRefreshSummary,
+    addons: Vec<AddonRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardUpdateRunSummary {
+    targets: usize,
+    up_to_date: usize,
+    update_available: usize,
+    unknown: usize,
+    errors: usize,
+    refreshed_addons: usize,
+    skipped_unmanaged: usize,
+    missing_on_disk: usize,
+    scanned_addons: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardItem {
     name: String,
     folder: String,
@@ -141,6 +165,7 @@ struct DashboardItem {
     author: Option<String>,
     interface: Option<String>,
     git_commit: Option<String>,
+    remote_version: Option<String>,
     required_deps: Vec<String>,
     optional_deps: Vec<String>,
     embedded_libs: Vec<String>,
@@ -180,6 +205,8 @@ struct DashboardState {
     expanded_folders: HashSet<String>,
     selected_parents: HashSet<String>,
     pending_delete_folders: Option<Vec<String>>,
+    update_in_progress: bool,
+    last_update_summary: Option<DashboardUpdateRunSummary>,
 }
 
 impl DashboardState {
@@ -202,6 +229,7 @@ impl DashboardState {
                     author: addon.author,
                     interface: addon.interface,
                     git_commit: addon.git_commit,
+                    remote_version: addon.remote_version,
                     required_deps: addon.required_deps,
                     optional_deps: addon.optional_deps,
                     embedded_libs: addon.embedded_libs,
@@ -228,6 +256,8 @@ impl DashboardState {
             expanded_folders: HashSet::new(),
             selected_parents: HashSet::new(),
             pending_delete_folders: None,
+            update_in_progress: false,
+            last_update_summary: None,
         };
         state.rebuild_rows();
         if !state.rows.is_empty() {
@@ -269,6 +299,7 @@ impl DashboardState {
                 Some(filtered)
             }
         });
+        self.update_in_progress = false;
         self.rebuild_rows();
 
         let mut selected = selected_key
@@ -440,6 +471,16 @@ impl DashboardState {
         folders
     }
 
+    fn selected_parent_items(&self) -> Vec<&DashboardItem> {
+        let mut items = self
+            .items
+            .iter()
+            .filter(|item| self.selected_parents.contains(&item.folder))
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| left.folder.cmp(&right.folder));
+        items
+    }
+
     fn set_pending_delete_folders(&mut self, folders: Option<Vec<String>>) {
         self.pending_delete_folders = folders.map(|mut folders| {
             folders.sort();
@@ -450,6 +491,22 @@ impl DashboardState {
 
     fn pending_delete_folders(&self) -> Option<&[String]> {
         self.pending_delete_folders.as_deref()
+    }
+
+    fn set_update_in_progress(&mut self, in_progress: bool) {
+        self.update_in_progress = in_progress;
+    }
+
+    fn update_in_progress(&self) -> bool {
+        self.update_in_progress
+    }
+
+    fn set_last_update_summary(&mut self, summary: Option<DashboardUpdateRunSummary>) {
+        self.last_update_summary = summary;
+    }
+
+    fn last_update_summary(&self) -> Option<&DashboardUpdateRunSummary> {
+        self.last_update_summary.as_ref()
     }
 
     fn rebuild_rows(&mut self) {
@@ -708,6 +765,9 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('/') => {
                 vec![AppMessage::SetDetailMode(DetailMode::Search)]
             }
+            KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
+                vec![AppMessage::DashboardRunUpdateSelected]
+            }
             KeyCode::Char('u') => vec![AppMessage::SetDetailMode(DetailMode::Update)],
             KeyCode::Char('c') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
@@ -859,6 +919,49 @@ impl App {
                     self.dashboard_status_for(self.dashboard.detail_mode, "delete cancelled"),
                 ),
             ],
+            AppMessage::DashboardRunUpdateSelected => {
+                if self.dashboard.update_in_progress() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "update refresh already running",
+                    ))]
+                } else if self.dashboard.pending_delete_folders().is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "confirm or cancel the pending delete before running update refresh",
+                    ))]
+                } else {
+                    let selected = self.dashboard.selected_parent_folders();
+                    match (self.effective_addon_dir.clone(), selected.is_empty()) {
+                        (_, true) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            "select one or more parent addons before refreshing updates",
+                        ))],
+                        (None, false) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            "addon directory is not configured",
+                        ))],
+                        (Some(addon_dir), false) => {
+                            let selected_len = selected.len();
+                            vec![
+                                AppAction::SetDashboardUpdateInProgress(true),
+                                AppAction::StartDashboardUpdateSelected {
+                                    addon_dir,
+                                    folders: selected,
+                                },
+                                AppAction::SetStatus(self.dashboard_status_for(
+                                    self.dashboard.detail_mode,
+                                    &format!(
+                                        "refreshing update state for {} selected addon{}",
+                                        selected_len,
+                                        plural_suffix(selected_len)
+                                    ),
+                                )),
+                            ]
+                        }
+                    }
+                }
+            }
             AppMessage::DashboardToggleSelected => vec![
                 AppAction::ToggleDashboardSelection,
                 AppAction::SetStatus(match self.dashboard.selected_row() {
@@ -1093,6 +1196,32 @@ impl App {
                         &format!("delete failed: {error}"),
                     )),
                 ],
+                AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
+                    AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::SetDashboardUpdateInProgress(false),
+                    AppAction::SetDashboardUpdateSummary(Some(
+                        dashboard_update_run_summary_from_refresh(
+                            &self.dashboard.selected_parent_items(),
+                            outcome.summary,
+                        ),
+                    )),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "update refresh complete: refreshed {}, skipped {}, missing {}",
+                            outcome.summary.refreshed_addons,
+                            outcome.summary.skipped_unmanaged,
+                            outcome.summary.missing_on_disk
+                        ),
+                    )),
+                ],
+                AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
+                    AppAction::SetDashboardUpdateInProgress(false),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("update refresh failed: {error}"),
+                    )),
+                ],
             },
         }
     }
@@ -1107,6 +1236,12 @@ impl App {
             }
             AppAction::SetPendingDelete(folders) => {
                 self.dashboard.set_pending_delete_folders(folders);
+            }
+            AppAction::SetDashboardUpdateInProgress(in_progress) => {
+                self.dashboard.set_update_in_progress(in_progress);
+            }
+            AppAction::SetDashboardUpdateSummary(summary) => {
+                self.dashboard.set_last_update_summary(summary);
             }
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
@@ -1282,6 +1417,19 @@ impl App {
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::DashboardDeleteFinished(result));
+                });
+            }
+            AppAction::StartDashboardUpdateSelected { addon_dir, folders } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        refresh_selected_addons(&state_db_file, &addon_dir, &folders)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
                 });
             }
             AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
@@ -1693,12 +1841,56 @@ impl App {
             }
             DetailMode::Update => {
                 lines.push(Line::from("Update area"));
+                let selected_items = self.dashboard.selected_parent_items();
+                let selected_folders = self.dashboard.selected_parent_folders();
+                let checks = build_update_checks_for_dashboard(&selected_items);
+                let summary = summarize_checks(&checks);
+                lines.push(Line::from(format!(
+                    "Selected parents: {}",
+                    selected_items.len()
+                )));
+                lines.push(Line::from(format!(
+                    "Targets: {}",
+                    if selected_folders.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        selected_folders.join(", ")
+                    }
+                )));
+                lines.push(Line::from(format!(
+                    "Tracked status: up_to_date={}, update_available={}, unknown={}, errors={}",
+                    summary.up_to_date, summary.update_available, summary.unknown, summary.errors
+                )));
+                lines.push(Line::from(format!(
+                    "Refresh state: {}",
+                    if self.dashboard.update_in_progress() {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                )));
                 lines.push(Line::from(
-                    "Check/update actions will be integrated here without leaving the shell.",
+                    "Press r to refresh selected tracked addons from current disk state.",
                 ));
-                lines.push(Line::from(
-                    "Delete confirmation groundwork is active while update actions stay pending.",
-                ));
+                if let Some(last_summary) = self.dashboard.last_update_summary() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("Last refresh"));
+                    lines.push(Line::from(format!(
+                        "Targets={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, scanned={}",
+                        last_summary.targets,
+                        last_summary.refreshed_addons,
+                        last_summary.skipped_unmanaged,
+                        last_summary.missing_on_disk,
+                        last_summary.scanned_addons
+                    )));
+                    lines.push(Line::from(format!(
+                        "Status mix: up_to_date={}, update_available={}, unknown={}, errors={}",
+                        last_summary.up_to_date,
+                        last_summary.update_available,
+                        last_summary.unknown,
+                        last_summary.errors
+                    )));
+                }
             }
             DetailMode::Config => {
                 lines.push(Line::from("Config area"));
@@ -1873,6 +2065,82 @@ fn delete_selected_addons(
     })
 }
 
+fn refresh_selected_addons(
+    state_db_file: &Path,
+    addon_dir: &Path,
+    folders: &[String],
+) -> std::result::Result<DashboardUpdateOutcome, String> {
+    let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    let summary =
+        refresh_managed_update_state_for_selectors(&mut database, addon_dir, folders, false)
+            .map_err(|error| error.to_string())?;
+    let addons = database.list_addons().map_err(|error| error.to_string())?;
+
+    Ok(DashboardUpdateOutcome { summary, addons })
+}
+
+fn build_update_checks_for_dashboard(items: &[&DashboardItem]) -> Vec<CheckResult> {
+    items
+        .iter()
+        .map(|item| {
+            let mut addon = AddonRecord::new(&item.name, &item.folder, item.source);
+            addon.version = item.version.clone();
+            addon.remote_version = item.remote_version.clone();
+            let (status, message) = crate::update::determine_update_status(&addon);
+            CheckResult {
+                addon_name: addon.folder,
+                status,
+                remote_version: addon.remote_version,
+                message,
+            }
+        })
+        .collect()
+}
+
+fn summarize_checks(checks: &[CheckResult]) -> DashboardUpdateRunSummary {
+    let up_to_date = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::UpToDate)
+        .count();
+    let update_available = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::UpdateAvailable)
+        .count();
+    let unknown = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::Unknown)
+        .count();
+    let errors = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::Error)
+        .count();
+
+    DashboardUpdateRunSummary {
+        targets: checks.len(),
+        up_to_date,
+        update_available,
+        unknown,
+        errors,
+        refreshed_addons: 0,
+        skipped_unmanaged: 0,
+        missing_on_disk: 0,
+        scanned_addons: 0,
+    }
+}
+
+fn dashboard_update_run_summary_from_refresh(
+    items: &[&DashboardItem],
+    refresh_summary: UpdateRefreshSummary,
+) -> DashboardUpdateRunSummary {
+    let mut summary = summarize_checks(&build_update_checks_for_dashboard(items));
+    summary.targets = refresh_summary.target_addons;
+    summary.refreshed_addons = refresh_summary.refreshed_addons;
+    summary.skipped_unmanaged = refresh_summary.skipped_unmanaged;
+    summary.missing_on_disk = refresh_summary.missing_on_disk;
+    summary.scanned_addons = refresh_summary.scanned_addons;
+    summary
+}
+
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
     match detail_mode {
         DetailMode::Overview => "Overview",
@@ -2027,6 +2295,12 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('x'))),
             vec![AppMessage::DashboardRequestDelete]
+        );
+        let mut update_mode = app_for_tests(ShellMode::Dashboard);
+        update_mode.dashboard.detail_mode = DetailMode::Update;
+        assert_eq!(
+            update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('r'))),
+            vec![AppMessage::DashboardRunUpdateSelected]
         );
     }
 
@@ -2193,6 +2467,52 @@ mod tests {
         app.apply(AppAction::SetPendingDelete(None));
 
         assert!(app.dashboard.pending_delete_folders().is_none());
+    }
+
+    #[test]
+    fn update_selected_requires_parent_selection() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+
+        let actions = app.update(AppMessage::DashboardRunUpdateSelected);
+
+        assert_eq!(
+            actions,
+            vec![AppAction::SetStatus(app.dashboard_status_for(
+                DetailMode::Update,
+                "select one or more parent addons before refreshing updates",
+            ))]
+        );
+    }
+
+    #[test]
+    fn update_selected_starts_background_refresh_for_selected_parents() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Update;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        let actions = app.update(AppMessage::DashboardRunUpdateSelected);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetDashboardUpdateInProgress(true),
+                AppAction::StartDashboardUpdateSelected {
+                    addon_dir: PathBuf::from(
+                        "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+                    ),
+                    folders: vec!["Second".to_string()],
+                },
+                AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Update,
+                    "refreshing update state for 1 selected addon",
+                )),
+            ]
+        );
     }
 
     #[test]

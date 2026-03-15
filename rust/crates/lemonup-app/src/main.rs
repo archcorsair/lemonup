@@ -4,15 +4,15 @@ mod cli;
 mod event;
 mod onboarding;
 mod tui;
+mod update;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 use lemonup_core::{
-    AddonRecord, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, LemonupError,
-    ScannedAddon, StateDatabase, UpdateStatus, scan_addons_dir, validate_addons_path,
+    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, LemonupError, StateDatabase, UpdateStatus,
+    validate_addons_path,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -20,6 +20,7 @@ use crate::app::{App, AppRuntime};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
+use crate::update::{build_update_checks, refresh_managed_update_state, serialize_update_status};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -177,9 +178,10 @@ fn run_update(
             let addon_dir = effective_addon_dir.expect("checked above");
             let summary = refresh_managed_update_state(&mut database, &addon_dir, dry_run)?;
             println!(
-                "update refresh: profile={}, tracked addons={}, scanned={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, force={}, dry_run={}",
+                "update refresh: profile={}, tracked addons={}, targets={}, scanned={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
+                summary.target_addons,
                 summary.scanned_addons,
                 summary.refreshed_addons,
                 summary.skipped_unmanaged,
@@ -191,214 +193,6 @@ fn run_update(
     }
 
     Ok(())
-}
-
-fn build_update_checks(
-    installed: &[AddonRecord],
-    selectors: &[String],
-) -> Result<Vec<CheckResult>, LemonupError> {
-    let selected = resolve_selected_addons(installed, selectors)?;
-
-    Ok(selected
-        .into_iter()
-        .map(|addon| {
-            let (status, message) = determine_update_status(addon);
-            CheckResult {
-                addon_name: addon.folder.clone(),
-                status,
-                remote_version: addon.remote_version.clone(),
-                message,
-            }
-        })
-        .collect())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CheckResult {
-    addon_name: String,
-    status: UpdateStatus,
-    remote_version: Option<String>,
-    message: Option<String>,
-}
-
-fn resolve_selected_addons<'a>(
-    installed: &'a [AddonRecord],
-    selectors: &[String],
-) -> Result<Vec<&'a AddonRecord>, LemonupError> {
-    if selectors.is_empty() {
-        return Ok(installed.iter().collect());
-    }
-
-    let by_name_or_folder = installed
-        .iter()
-        .flat_map(|addon| {
-            [
-                (normalize_selector(&addon.folder), addon),
-                (normalize_selector(&addon.name), addon),
-            ]
-        })
-        .collect::<HashMap<_, _>>();
-
-    let mut selected = Vec::new();
-    let mut seen_folders = std::collections::HashSet::new();
-    let mut missing = Vec::new();
-
-    for selector in selectors {
-        let normalized = normalize_selector(selector);
-        let Some(addon) = by_name_or_folder.get(&normalized).copied() else {
-            missing.push(selector.clone());
-            continue;
-        };
-
-        if seen_folders.insert(addon.folder.clone()) {
-            selected.push(addon);
-        }
-    }
-
-    if !missing.is_empty() {
-        let noun = if missing.len() == 1 {
-            "No tracked addon matches"
-        } else {
-            "No tracked addons match"
-        };
-        return Err(LemonupError::InvalidArgument(format!(
-            "{noun}: {}. Use exact addon names or folder names, or run `lemonup check` to see the overall summary.",
-            missing.join(", ")
-        )));
-    }
-
-    Ok(selected)
-}
-
-fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
-    if addon.source == lemonup_core::SourceKind::Manual {
-        return (
-            UpdateStatus::Unknown,
-            Some("manual addons cannot be checked yet".to_string()),
-        );
-    }
-
-    match (addon.version.as_deref(), addon.remote_version.as_deref()) {
-        (Some(version), Some(remote_version))
-            if normalize_version(version) == normalize_version(remote_version) =>
-        {
-            (UpdateStatus::UpToDate, None)
-        }
-        (Some(_), Some(_)) => (
-            UpdateStatus::UpdateAvailable,
-            Some("tracked remote version differs from installed version".to_string()),
-        ),
-        (_, None) => (
-            UpdateStatus::Unknown,
-            Some("no tracked remote version yet".to_string()),
-        ),
-        (None, Some(_)) => (
-            UpdateStatus::Unknown,
-            Some("no installed version metadata is tracked yet".to_string()),
-        ),
-    }
-}
-
-fn normalize_selector(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn normalize_version(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn serialize_update_status(status: UpdateStatus) -> &'static str {
-    match status {
-        UpdateStatus::UpToDate => "up_to_date",
-        UpdateStatus::UpdateAvailable => "update_available",
-        UpdateStatus::Unknown => "unknown",
-        UpdateStatus::Error => "error",
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UpdateRefreshSummary {
-    scanned_addons: usize,
-    refreshed_addons: usize,
-    skipped_unmanaged: usize,
-    missing_on_disk: usize,
-}
-
-fn refresh_managed_update_state(
-    database: &mut StateDatabase,
-    addon_dir: &std::path::Path,
-    dry_run: bool,
-) -> lemonup_core::Result<UpdateRefreshSummary> {
-    let scanned = scan_addons_dir(addon_dir, GameFlavor::Retail)?;
-    let scanned_by_folder = scanned
-        .iter()
-        .map(|addon| (addon.folder.as_str(), addon))
-        .collect::<HashMap<_, _>>();
-
-    let mut refreshed_addons = 0;
-    let mut skipped_unmanaged = 0;
-    let mut missing_on_disk = 0;
-
-    for addon in database.list_addons()? {
-        if addon.source == lemonup_core::SourceKind::Manual {
-            continue;
-        }
-
-        if !addon.has_authoritative_owned_folders() {
-            skipped_unmanaged += 1;
-            continue;
-        }
-
-        let Some(scanned_addon) = scanned_by_folder.get(addon.folder.as_str()) else {
-            missing_on_disk += 1;
-            continue;
-        };
-
-        let refreshed = build_managed_update_record(&addon, scanned_addon);
-        if !dry_run {
-            database.record_managed_addon(&refreshed)?;
-        }
-        refreshed_addons += 1;
-    }
-
-    Ok(UpdateRefreshSummary {
-        scanned_addons: scanned.len(),
-        refreshed_addons,
-        skipped_unmanaged,
-        missing_on_disk,
-    })
-}
-
-fn build_managed_update_record(existing: &AddonRecord, scanned: &ScannedAddon) -> AddonRecord {
-    let mut refreshed = AddonRecord {
-        id: existing.id,
-        name: scanned.name.clone(),
-        folder: existing.folder.clone(),
-        owned_folders: existing.owned_folders.clone(),
-        ownership_source: existing.effective_ownership_source(),
-        kind: if existing.kind_override {
-            existing.kind
-        } else {
-            scanned.kind
-        },
-        kind_override: existing.kind_override,
-        flavor: scanned.flavor,
-        version: scanned.version.clone(),
-        git_commit: scanned.git_commit.clone(),
-        author: scanned.author.clone(),
-        interface: scanned.interface.clone(),
-        source: existing.source,
-        source_url: existing.source_url.clone(),
-        required_deps: scanned.required_deps.clone(),
-        optional_deps: scanned.optional_deps.clone(),
-        embedded_libs: scanned.embedded_libs.clone(),
-        installed_at: existing.installed_at,
-        updated_at: existing.updated_at,
-        last_checked_at: existing.last_checked_at,
-        remote_version: existing.remote_version.clone(),
-    };
-    refreshed.set_managed_owned_folders(existing.owned_folders.clone());
-    refreshed
 }
 
 fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {
@@ -418,9 +212,9 @@ fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>
 mod tests {
     use tempfile::tempdir;
 
-    use super::{
+    use super::refresh_managed_update_state;
+    use crate::update::{
         build_managed_update_record, build_update_checks, determine_update_status,
-        refresh_managed_update_state,
     };
     use lemonup_core::{
         AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
@@ -480,6 +274,7 @@ mod tests {
         let summary =
             refresh_managed_update_state(&mut database, &addons_dir, false).expect("refresh");
 
+        assert_eq!(summary.target_addons, 2);
         assert_eq!(summary.scanned_addons, 3);
         assert_eq!(summary.refreshed_addons, 1);
         assert_eq!(summary.skipped_unmanaged, 0);
@@ -531,6 +326,7 @@ mod tests {
         let summary =
             refresh_managed_update_state(&mut database, &addons_dir, true).expect("dry-run");
 
+        assert_eq!(summary.target_addons, 1);
         assert_eq!(summary.refreshed_addons, 1);
         let parent = database
             .get_addon_by_folder("DBM-Core")
