@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -89,6 +89,7 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardSelectionNext,
     DashboardSelectionPrevious,
+    DashboardPointerSelect { column: u16, row: u16 },
     DashboardRequestDelete,
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
@@ -417,6 +418,7 @@ impl DashboardState {
     }
 
     fn expand_all_relationships(&mut self) -> bool {
+        let selected_key = self.selected_row().map(|row| row.key.clone());
         let before = self.expanded_folders.len();
         self.expanded_folders = self
             .items
@@ -425,6 +427,9 @@ impl DashboardState {
             .map(|item| item.folder.clone())
             .collect();
         self.rebuild_rows();
+        if let Some(key) = selected_key.as_ref() {
+            self.restore_selection(key);
+        }
         self.expanded_folders.len() != before
     }
 
@@ -433,11 +438,16 @@ impl DashboardState {
             return false;
         }
 
-        let selected_parent = self.selected_parent_folder().map(str::to_string);
+        let selected_key = self.selected_row().map(|row| match &row.kind {
+            DashboardRowKind::Parent => row.key.clone(),
+            DashboardRowKind::OwnedChild { parent_folder } => {
+                DashboardRowKey::Parent(parent_folder.clone())
+            }
+        });
         self.expanded_folders.clear();
         self.rebuild_rows();
-        if let Some(parent_folder) = selected_parent {
-            self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+        if let Some(key) = selected_key.as_ref() {
+            self.restore_selection(key);
         }
         true
     }
@@ -664,6 +674,7 @@ pub struct App {
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
     dashboard: DashboardState,
+    last_dashboard_list_area: Option<Rect>,
     onboarding: OnboardingState,
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
     task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
@@ -738,6 +749,7 @@ impl App {
             effective_addon_dir,
             scan_state,
             dashboard: DashboardState::from_addons(addons),
+            last_dashboard_list_area: None,
             onboarding,
             task_events_tx,
             task_events_rx,
@@ -796,6 +808,30 @@ impl App {
         }
     }
 
+    fn dashboard_selection_for_pointer(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.last_dashboard_list_area?;
+        if self.dashboard.rows.is_empty() || area.width < 3 || area.height < 3 {
+            return None;
+        }
+
+        let inner_left = area.x.saturating_add(1);
+        let inner_top = area.y.saturating_add(1);
+        let inner_right = area.x.saturating_add(area.width.saturating_sub(2));
+        let inner_bottom = area.y.saturating_add(area.height.saturating_sub(2));
+
+        if column < inner_left || column > inner_right || row < inner_top || row > inner_bottom {
+            return None;
+        }
+
+        let row_in_view = usize::from(row.saturating_sub(inner_top));
+        let absolute = self
+            .dashboard
+            .list_state
+            .offset()
+            .saturating_add(row_in_view);
+        (absolute < self.dashboard.rows.len()).then_some(absolute)
+    }
+
     fn process_background_events(&mut self) {
         while let Ok(event) = self.task_events_rx.try_recv() {
             let actions = self.update(AppMessage::BackgroundTask(event));
@@ -839,6 +875,12 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => vec![AppMessage::DashboardSelectionNext],
             MouseEventKind::ScrollUp => vec![AppMessage::DashboardSelectionPrevious],
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+                vec![AppMessage::DashboardPointerSelect {
+                    column: mouse.column,
+                    row: mouse.row,
+                }]
+            }
             _ => vec![],
         }
     }
@@ -984,6 +1026,21 @@ impl App {
                         self.dashboard_status_for(self.dashboard.detail_mode, "selection moved"),
                     ),
                 ]
+            }
+            AppMessage::DashboardPointerSelect { column, row } => {
+                match self.dashboard_selection_for_pointer(column, row) {
+                    Some(selection) if self.dashboard.list_state.selected() != Some(selection) => {
+                        vec![
+                            AppAction::SetDashboardSelection(Some(selection)),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                self.dashboard.detail_mode,
+                                "selection moved",
+                            )),
+                        ]
+                    }
+                    Some(_) => vec![],
+                    None => vec![],
+                }
             }
             AppMessage::DashboardRequestDelete => {
                 let selected = self.dashboard.selected_parent_folders();
@@ -1791,6 +1848,7 @@ impl App {
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        self.last_dashboard_list_area = Some(area);
         if self.dashboard.rows.is_empty() {
             let body = Paragraph::new(vec![
                 Line::from("No scanned addons yet."),
@@ -2540,8 +2598,10 @@ mod tests {
     use std::path::PathBuf;
 
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     };
+    use ratatui::layout::Rect;
     use ratatui::widgets::ListState;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
@@ -2594,6 +2654,7 @@ mod tests {
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
             dashboard: DashboardState::from_addons(vec![first, second, third]),
+            last_dashboard_list_area: None,
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
@@ -2631,6 +2692,80 @@ mod tests {
 
         assert_eq!(down, vec![AppMessage::DashboardSelectionNext]);
         assert_eq!(up, vec![AppMessage::DashboardSelectionPrevious]);
+    }
+
+    #[test]
+    fn left_click_emits_pointer_select_message() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        let messages = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            messages,
+            vec![AppMessage::DashboardPointerSelect { column: 5, row: 4 }]
+        );
+    }
+
+    #[test]
+    fn left_drag_emits_pointer_select_message() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        let messages = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(
+            messages,
+            vec![AppMessage::DashboardPointerSelect { column: 5, row: 5 }]
+        );
+    }
+
+    #[test]
+    fn pointer_selection_maps_click_inside_list_to_visible_row() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 20, 10));
+        app.dashboard.list_state = ListState::default().with_offset(1).with_selected(Some(1));
+
+        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 2 });
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetDashboardSelection(Some(2)),
+                AppAction::SetStatus(
+                    app.dashboard_status_for(app.dashboard.detail_mode, "selection moved",)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn pointer_selection_ignores_clicks_outside_list_inner_area() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 20, 10));
+
+        let actions = app.update(AppMessage::DashboardPointerSelect { column: 25, row: 2 });
+
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pointer_selection_is_noop_when_clicking_already_selected_row() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 20, 10));
+        app.dashboard.list_state = ListState::default().with_selected(Some(2));
+
+        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 3 });
+
+        assert!(actions.is_empty());
     }
 
     #[test]
@@ -2761,6 +2896,22 @@ mod tests {
         app.apply(AppAction::CollapseAllDashboardRelationships);
         assert!(app.dashboard.expanded_folders.is_empty());
         assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn expand_all_preserves_logical_selection_when_rows_are_inserted_above() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(2));
+
+        app.apply(AppAction::ExpandAllDashboardRelationships);
+
+        assert_eq!(
+            app.dashboard
+                .selected_item()
+                .map(|item| item.folder.as_str()),
+            Some("Third")
+        );
+        assert_eq!(app.dashboard.list_state.selected(), Some(3));
     }
 
     #[test]
