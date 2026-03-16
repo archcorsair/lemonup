@@ -11,11 +11,16 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 crossterm.workspace = true
+dotenvy = "0.15.7"
 lemonup-core = { path = "../lemonup-core" }
 ratatui.workspace = true
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+time = { version = "0.3.44", features = ["formatting", "macros", "parsing", "serde"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile.workspace = true

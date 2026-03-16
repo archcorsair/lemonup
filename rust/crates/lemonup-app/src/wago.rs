@@ -1,0 +1,818 @@
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use clap::ValueEnum;
+use lemonup_core::{
+    AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
+};
+use reqwest::{Client, Url};
+use serde::Deserialize;
+use time::OffsetDateTime;
+use zip::ZipArchive;
+
+const API_BASE: &str = "https://addons.wago.io";
+const EXTERNAL_PATH: &str = "/api/external";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WagoStability {
+    Stable,
+    Beta,
+    Alpha,
+}
+
+impl WagoStability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+            Self::Alpha => "alpha",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WagoInstallSummary {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub parent_folder: String,
+    pub installed_folders: Vec<String>,
+    pub stability: WagoStability,
+    pub version: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WagoRelease {
+    label: Option<String>,
+    download_link: Option<String>,
+    link: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WagoReleases {
+    stable: Option<WagoRelease>,
+    beta: Option<WagoRelease>,
+    alpha: Option<WagoRelease>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WagoAddonSummaryRaw {
+    id: String,
+    display_name: String,
+    owner: Option<String>,
+    authors: Option<Vec<String>>,
+    website_url: Option<String>,
+    releases: Option<WagoReleases>,
+    recent_release: Option<WagoReleases>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum WagoAddonDetailsResponse {
+    Wrapped { data: WagoAddonSummaryRaw },
+    Direct(WagoAddonSummaryRaw),
+}
+
+#[derive(Debug, Clone)]
+struct WagoAddonSummary {
+    id: String,
+    display_name: String,
+    owner: Option<String>,
+    authors: Vec<String>,
+    website_url: Option<String>,
+    releases: WagoReleases,
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedFolders {
+    source_root: PathBuf,
+    folders: Vec<String>,
+}
+
+impl WagoAddonSummary {
+    fn from_response(response: WagoAddonDetailsResponse) -> Self {
+        let raw = match response {
+            WagoAddonDetailsResponse::Wrapped { data } => data,
+            WagoAddonDetailsResponse::Direct(data) => data,
+        };
+
+        Self {
+            id: raw.id,
+            display_name: raw.display_name,
+            owner: raw.owner,
+            authors: raw.authors.unwrap_or_default(),
+            website_url: raw.website_url,
+            releases: raw.releases.or(raw.recent_release).unwrap_or_default(),
+        }
+    }
+
+    fn release(&self, stability: WagoStability) -> Option<&WagoRelease> {
+        match stability {
+            WagoStability::Stable => self.releases.stable.as_ref(),
+            WagoStability::Beta => self.releases.beta.as_ref(),
+            WagoStability::Alpha => self.releases.alpha.as_ref(),
+        }
+    }
+
+    fn best_available_stability(&self) -> Option<WagoStability> {
+        if self.releases.stable.is_some() {
+            Some(WagoStability::Stable)
+        } else if self.releases.beta.is_some() {
+            Some(WagoStability::Beta)
+        } else if self.releases.alpha.is_some() {
+            Some(WagoStability::Alpha)
+        } else {
+            None
+        }
+    }
+}
+
+pub fn parse_wago_target(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Wago addon target cannot be empty".to_string());
+    }
+
+    if trimmed.len() > 200 {
+        return Err("Wago addon target is too long".to_string());
+    }
+
+    if trimmed.contains("..") || trimmed.chars().any(|character| character.is_control()) {
+        return Err("Wago addon target contains forbidden characters".to_string());
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        let Some(host) = url.host_str() else {
+            return Err("Wago URL is missing a host".to_string());
+        };
+        if !host.ends_with("wago.io") {
+            return Err("Wago URL must point to wago.io".to_string());
+        }
+
+        let segments = url
+            .path_segments()
+            .map(|values| values.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if segments.len() < 2 || segments[0] != "addons" {
+            return Err("Wago URL must look like https://addons.wago.io/addons/<slug>".to_string());
+        }
+
+        let slug = segments[1].trim();
+        if !is_valid_wago_slug(slug) {
+            return Err("Wago URL contains an invalid addon slug".to_string());
+        }
+        return Ok(slug.to_string());
+    }
+
+    if !is_valid_wago_slug(trimmed) {
+        return Err("Wago addon slug contains unsupported characters".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+pub async fn install_wago_addon(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    target: &str,
+    api_key: &str,
+    preferred_stability: WagoStability,
+    dry_run: bool,
+) -> Result<WagoInstallSummary, String> {
+    let addon_id = parse_wago_target(target)?;
+    let client = Client::builder()
+        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let addon = fetch_addon_details(&client, &addon_id, api_key).await?;
+    let effective_stability = addon.best_available_stability().ok_or_else(|| {
+        format!(
+            "no stable, beta, or alpha release is available for Wago addon '{}'",
+            addon.display_name
+        )
+    })?;
+    let selected_stability = if addon.release(preferred_stability).is_some() {
+        preferred_stability
+    } else {
+        effective_stability
+    };
+    let release = addon.release(selected_stability).ok_or_else(|| {
+        format!(
+            "requested Wago release '{}' is not available for '{}'",
+            preferred_stability.as_str(),
+            addon.display_name
+        )
+    })?;
+    let download_url = release
+        .download_link
+        .as_deref()
+        .or(release.link.as_deref())
+        .ok_or_else(|| format!("Wago addon '{}' has no download URL", addon.display_name))?;
+
+    let download_url = validate_download_url(download_url)?;
+    let bytes = client
+        .get(download_url.clone())
+        .bearer_auth(api_key)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .bytes()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    install_downloaded_wago_addon(
+        state_database,
+        addon_dir,
+        &addon,
+        &bytes,
+        selected_stability,
+        dry_run,
+    )
+}
+
+fn install_downloaded_wago_addon(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    addon: &WagoAddonSummary,
+    archive_bytes: &[u8],
+    stability: WagoStability,
+    dry_run: bool,
+) -> Result<WagoInstallSummary, String> {
+    let temp_root = create_temp_work_dir("wago-install")?;
+    let zip_path = temp_root.join("package.zip");
+    let extract_root = temp_root.join("extract");
+    let outcome = (|| {
+        fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
+        extract_zip_archive(&zip_path, &extract_root)?;
+
+        let extracted = discover_extracted_folders(&extract_root)?;
+        let parent_folder = determine_parent_folder(&extracted.folders, &addon.display_name)?;
+        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
+            .map_err(|error| error.to_string())?;
+        let parent_metadata = scanned
+            .iter()
+            .find(|candidate| candidate.folder == parent_folder)
+            .ok_or_else(|| {
+                format!(
+                    "installed Wago package for '{}' did not yield a scannable parent folder '{}'",
+                    addon.display_name, parent_folder
+                )
+            })?;
+
+        preflight_install_targets(addon_dir, &extracted.folders)?;
+
+        if dry_run {
+            return Ok(WagoInstallSummary {
+                addon_id: addon.id.clone(),
+                addon_name: addon.display_name.clone(),
+                parent_folder,
+                installed_folders: extracted.folders,
+                stability,
+                version: release_version(addon, stability),
+                dry_run: true,
+            });
+        }
+
+        let mut copied_folders = Vec::new();
+        for folder in &extracted.folders {
+            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
+            copied_folders.push(folder.clone());
+        }
+
+        let record =
+            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
+
+        if let Err(error) = state_database.record_managed_addon(&record) {
+            for folder in copied_folders.iter().rev() {
+                let _ = fs::remove_dir_all(addon_dir.join(folder));
+            }
+            return Err(error.to_string());
+        }
+
+        Ok(WagoInstallSummary {
+            addon_id: addon.id.clone(),
+            addon_name: addon.display_name.clone(),
+            parent_folder,
+            installed_folders: extracted.folders,
+            stability,
+            version: release_version(addon, stability),
+            dry_run: false,
+        })
+    })();
+
+    let _ = fs::remove_dir_all(&temp_root);
+    outcome
+}
+
+fn build_managed_wago_record(
+    addon: &WagoAddonSummary,
+    parent_metadata: &ScannedAddon,
+    installed_folders: &[String],
+    stability: WagoStability,
+) -> AddonRecord {
+    let mut record = AddonRecord::new(
+        parent_metadata.name.clone(),
+        parent_metadata.folder.clone(),
+        SourceKind::Wago,
+    );
+    record.kind = parent_metadata.kind;
+    record.flavor = parent_metadata.flavor;
+    record.version = release_version(addon, stability).or_else(|| parent_metadata.version.clone());
+    record.author = addon
+        .owner
+        .clone()
+        .or_else(|| addon.authors.first().cloned())
+        .or_else(|| parent_metadata.author.clone());
+    record.interface = parent_metadata.interface.clone();
+    record.source_url = Some(
+        addon
+            .website_url
+            .clone()
+            .unwrap_or_else(|| format!("https://addons.wago.io/addons/{}", addon.id)),
+    );
+    record.required_deps = parent_metadata.required_deps.clone();
+    record.optional_deps = parent_metadata.optional_deps.clone();
+    record.embedded_libs = parent_metadata.embedded_libs.clone();
+    record.remote_version = release_version(addon, stability);
+    record.last_checked_at = Some(OffsetDateTime::now_utc());
+    record.set_managed_owned_folders(
+        installed_folders
+            .iter()
+            .filter(|folder| **folder != parent_metadata.folder)
+            .cloned()
+            .map(|name| OwnedFolder { name })
+            .collect(),
+    );
+    record
+}
+
+fn release_version(addon: &WagoAddonSummary, stability: WagoStability) -> Option<String> {
+    addon
+        .release(stability)
+        .and_then(|release| release.label.clone())
+}
+
+async fn fetch_addon_details(
+    client: &Client,
+    addon_id: &str,
+    api_key: &str,
+) -> Result<WagoAddonSummary, String> {
+    let url = format!("{API_BASE}{EXTERNAL_PATH}/addons/{addon_id}?game_version=retail");
+    let response = client
+        .get(url)
+        .bearer_auth(api_key)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?;
+
+    let parsed = response
+        .json::<WagoAddonDetailsResponse>()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(WagoAddonSummary::from_response(parsed))
+}
+
+fn validate_download_url(value: &str) -> Result<Url, String> {
+    let parsed = Url::parse(value).map_err(|error| error.to_string())?;
+    let Some(host) = parsed.host_str() else {
+        return Err("Wago download URL is missing a host".to_string());
+    };
+    if !host.ends_with("wago.io") {
+        return Err("Wago download URL must stay on a wago.io host".to_string());
+    }
+    Ok(parsed)
+}
+
+fn discover_extracted_folders(root: &Path) -> Result<ExtractedFolders, String> {
+    let direct = discover_first_level_addon_folders(root)?;
+    if !direct.is_empty() {
+        return Ok(ExtractedFolders {
+            source_root: root.to_path_buf(),
+            folders: direct,
+        });
+    }
+
+    let first_level_dirs = fs::read_dir(root)
+        .map_err(|error| error.to_string())?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|file_type| file_type.is_dir())
+                .map(|_| entry)
+        })
+        .collect::<Vec<_>>();
+
+    if first_level_dirs.len() == 1 {
+        let nested_root = first_level_dirs[0].path();
+        let nested = discover_first_level_addon_folders(&nested_root)?;
+        if !nested.is_empty() {
+            return Ok(ExtractedFolders {
+                source_root: nested_root,
+                folders: nested,
+            });
+        }
+    }
+
+    Err(
+        "no top-level addon folders with root .toc files were found in the Wago archive"
+            .to_string(),
+    )
+}
+
+fn discover_first_level_addon_folders(root: &Path) -> Result<Vec<String>, String> {
+    let mut folders = Vec::new();
+    for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        if has_root_toc_files(&entry.path())? {
+            folders.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    folders.sort_by_key(|folder| folder.to_ascii_lowercase());
+    Ok(folders)
+}
+
+fn has_root_toc_files(path: &Path) -> Result<bool, String> {
+    for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name.to_ascii_lowercase().ends_with(".toc") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn determine_parent_folder(folders: &[String], display_name: &str) -> Result<String, String> {
+    if folders.is_empty() {
+        return Err("no addon folders were discovered in the Wago archive".to_string());
+    }
+    if folders.len() == 1 {
+        return Ok(folders[0].clone());
+    }
+
+    let normalized_display_name = normalize_folder_like(display_name);
+    if let Some(exact) = folders.iter().find(|folder| {
+        let normalized_folder = normalize_folder_like(folder);
+        normalized_folder == normalized_display_name
+    }) {
+        return Ok(exact.clone());
+    }
+
+    let mut sorted = folders.to_vec();
+    sorted.sort_by_key(|folder| folder.len());
+    let shortest = sorted[0].clone();
+    let prefix_matches = sorted
+        .iter()
+        .filter(|folder| folder.starts_with(&shortest))
+        .count();
+    if prefix_matches * 2 >= sorted.len() {
+        return Ok(shortest);
+    }
+
+    Ok(shortest)
+}
+
+fn normalize_folder_like(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
+    let collisions = folders
+        .iter()
+        .filter(|folder| addon_dir.join(folder).exists())
+        .cloned()
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "install refused because these addon folders already exist: {}",
+            collisions.join(", ")
+        ))
+    }
+}
+
+fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    let file = File::open(zip_path).map_err(|error| error.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|error| error.to_string())?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+            continue;
+        };
+        let output_path = destination.join(relative_path);
+
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path).map_err(|error| error.to_string())?;
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut output = File::create(&output_path).map_err(|error| error.to_string())?;
+        io::copy(&mut entry, &mut output).map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            copy_dir_recursively(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::copy(&from, &to).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let root = std::env::temp_dir();
+
+    for attempt in 0..100u16 {
+        let candidate = if attempt == 0 {
+            root.join(format!("lemonup-{prefix}-{timestamp}"))
+        } else {
+            root.join(format!("lemonup-{prefix}-{timestamp}-{attempt}"))
+        };
+        if !candidate.exists() {
+            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
+            return Ok(candidate);
+        }
+    }
+
+    Err("failed to create a unique temporary Wago install directory".to_string())
+}
+
+fn is_valid_wago_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{
+        WagoAddonDetailsResponse, WagoAddonSummary, WagoAddonSummaryRaw, WagoRelease, WagoReleases,
+        WagoStability, determine_parent_folder, discover_extracted_folders, extract_zip_archive,
+        install_downloaded_wago_addon, parse_wago_target, release_version,
+    };
+    use lemonup_core::{GameFlavor, OwnedFolder, SourceKind, StateDatabase};
+    use tempfile::tempdir;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
+
+    fn sample_addon() -> WagoAddonSummary {
+        WagoAddonSummary {
+            id: "details".to_string(),
+            display_name: "Details! Damage Meter".to_string(),
+            owner: Some("Tercioo".to_string()),
+            authors: vec!["Tercioo".to_string()],
+            website_url: Some("https://addons.wago.io/addons/details".to_string()),
+            releases: WagoReleases {
+                stable: Some(WagoRelease {
+                    label: Some("v1.2.3".to_string()),
+                    download_link: Some("https://addons.wago.io/download/example.zip".to_string()),
+                    link: None,
+                }),
+                beta: None,
+                alpha: None,
+            },
+        }
+    }
+
+    fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        for (name, body) in entries {
+            writer
+                .start_file(name, options)
+                .expect("start zip file entry");
+            std::io::Write::write_all(&mut writer, body.as_bytes()).expect("write zip entry");
+        }
+
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    #[test]
+    fn parse_wago_target_accepts_slug_or_wago_url() {
+        assert_eq!(parse_wago_target("details").expect("slug"), "details");
+        assert_eq!(
+            parse_wago_target("https://addons.wago.io/addons/details").expect("url"),
+            "details"
+        );
+        assert_eq!(
+            parse_wago_target("https://wago.io/addons/details").expect("root url"),
+            "details"
+        );
+    }
+
+    #[test]
+    fn parse_wago_target_rejects_non_wago_url() {
+        assert!(parse_wago_target("https://example.com/addons/details").is_err());
+        assert!(parse_wago_target("../details").is_err());
+    }
+
+    #[test]
+    fn determine_parent_folder_prefers_display_name_match() {
+        let folders = vec![
+            "Details".to_string(),
+            "Details_Compare2".to_string(),
+            "Details_DataStorage".to_string(),
+        ];
+        assert_eq!(
+            determine_parent_folder(&folders, "Details! Damage Meter").expect("parent"),
+            "Details"
+        );
+    }
+
+    #[test]
+    fn addon_summary_falls_back_to_recent_release() {
+        let addon = WagoAddonSummary::from_response(WagoAddonDetailsResponse::Direct(
+            WagoAddonSummaryRaw {
+                id: "details".to_string(),
+                display_name: "Details! Damage Meter".to_string(),
+                owner: Some("Tercioo".to_string()),
+                authors: Some(vec!["Tercioo".to_string()]),
+                website_url: None,
+                releases: None,
+                recent_release: Some(WagoReleases {
+                    stable: Some(WagoRelease {
+                        label: Some("v1.2.3".to_string()),
+                        download_link: Some(
+                            "https://addons.wago.io/download/example.zip".to_string(),
+                        ),
+                        link: None,
+                    }),
+                    beta: None,
+                    alpha: None,
+                }),
+            },
+        ));
+
+        assert_eq!(
+            addon.best_available_stability(),
+            Some(WagoStability::Stable)
+        );
+        assert_eq!(
+            release_version(&addon, WagoStability::Stable).as_deref(),
+            Some("v1.2.3")
+        );
+    }
+
+    #[test]
+    fn discover_extracted_folders_supports_single_wrapper_directory() {
+        let temp = tempdir().expect("tempdir");
+        let zip_path = temp.path().join("package.zip");
+        let extract_path = temp.path().join("extract");
+        let bytes = build_zip(&[
+            ("wrapper/Details/Details.toc", "## Title: Details\n"),
+            (
+                "wrapper/Details_DataStorage/Details_DataStorage.toc",
+                "## Title: Details Data Storage\n",
+            ),
+        ]);
+        fs::write(&zip_path, bytes).expect("write zip");
+
+        extract_zip_archive(&zip_path, &extract_path).expect("extract zip");
+        let discovered = discover_extracted_folders(&extract_path).expect("discover folders");
+
+        assert!(discovered.source_root.ends_with("wrapper"));
+        assert_eq!(discovered.folders, vec!["Details", "Details_DataStorage"]);
+    }
+
+    #[test]
+    fn install_downloaded_wago_addon_records_managed_ownership() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let bytes = build_zip(&[
+            (
+                "Details/Details.toc",
+                "## Title: Details! Damage Meter\n## Version: 11.2.0\n## Author: Tercioo\n## Interface: 110205\n",
+            ),
+            (
+                "Details_DataStorage/Details_DataStorage.toc",
+                "## Title: Details Data Storage\n## Version: 11.2.0\n## Author: Tercioo\n## Interface: 110205\n",
+            ),
+        ]);
+
+        let summary = install_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &sample_addon(),
+            &bytes,
+            WagoStability::Stable,
+            false,
+        )
+        .expect("install addon");
+
+        assert_eq!(summary.parent_folder, "Details");
+        assert_eq!(summary.installed_folders.len(), 2);
+        assert!(addon_dir.join("Details").exists());
+        assert!(addon_dir.join("Details_DataStorage").exists());
+
+        let installed = database.list_addons().expect("list addons");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].source, SourceKind::Wago);
+        assert_eq!(installed[0].flavor, GameFlavor::Retail);
+        assert_eq!(installed[0].remote_version.as_deref(), Some("v1.2.3"));
+        assert_eq!(
+            installed[0].owned_folders,
+            vec![OwnedFolder {
+                name: "Details_DataStorage".to_string(),
+            }]
+        );
+        assert!(installed[0].has_authoritative_owned_folders());
+    }
+
+    #[test]
+    fn install_downloaded_wago_addon_dry_run_does_not_write_disk_or_state() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let bytes = build_zip(&[(
+            "Details/Details.toc",
+            "## Title: Details! Damage Meter\n## Version: 11.2.0\n## Author: Tercioo\n## Interface: 110205\n",
+        )]);
+
+        let summary = install_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &sample_addon(),
+            &bytes,
+            WagoStability::Stable,
+            true,
+        )
+        .expect("dry run install");
+
+        assert!(summary.dry_run);
+        assert!(!addon_dir.join("Details").exists());
+        assert!(database.list_addons().expect("list addons").is_empty());
+    }
+}

@@ -74,12 +74,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- soft-delete trash plus shell undo is the active slice
+- no active unverified slice
 - current focus:
-  - move parent deletes into a LemonUp-managed trash area
-  - keep undo short-lived and shell-driven
-  - preserve authoritative ownership metadata when undo restores managed addons
-- no active half-finished slice should be considered stable until user verifies it
+  - checkpoint the first real source-backed install path
+  - keep broad provider/search UI work for later slices
 
 ## Newly Completed
 
@@ -161,43 +159,59 @@ These are implemented and manually verified in addition to the earlier chunks:
   - left-button drag now moves highlight with the cursor
   - mouse interactions stay selection-only; parent-only action rules are unchanged
   - expand-all and collapse-all now preserve logical selection when tree rows are inserted or removed above the current highlight
+- soft-delete undo flow now exists:
+  - delete moves selected parent addons plus authoritative owned children into LemonUp-managed trash
+  - `z` undoes the last delete batch
+  - undo restores managed relationships and on-disk folders together
+- first real source-backed install flow now exists via Wago CLI:
+  - `install-wago` accepts a Wago slug or addon URL
+  - Wago details parsing follows v1 API drift handling:
+    - wrapped or direct addon response
+    - `releases` or `recent_release`
+    - `download_link` or `link`
+  - API key resolution now checks:
+    - config
+    - process env `WAGO_API_KEY`
+    - repo-root `.env` key `WAGO_API_KEY`
+  - downloaded archives are extracted safely with path traversal protection
+  - discovered folder sets are written as authoritative managed ownership
+  - dry-run and real install were manually verified on `--profile dev`
+  - installed Wago addons participate correctly in TUI delete and undo flows
 
 ## Next Up
 
 Next phase:
 
-1. soft-delete trash model with undo for safer destructive operations
-2. deeper update/install flows on top of the hardened ownership model
-3. broader source-backed update/install work on top of the hardened ownership model
+1. broaden source-backed update/install work on top of the hardened ownership model
+2. update-all and richer provider-backed update checks
+3. Wago search and TUI install UX
 
 ### Goal
 
 - stop relying on scan heuristics for important parent-child truth in managed flows
-- make install and update flows write the authoritative managed folder set
+- extend the proven Wago install contract into broader managed update/install behavior
 - let shell bulk actions operate safely on that model
 
 ### Planned order
 
-1. soft-delete trash model with undo for safer destructive operations
-2. deeper update/install flows on top of the hardened ownership model
-3. broader source-backed update/install work on top of the hardened ownership model
+1. broaden the Wago-backed managed install/update contract
+2. add update-all and richer provider-backed update checks
+3. layer Wago search and TUI install UX on top
 
 ## Remaining Major Work
 
 Still missing or incomplete:
 
 - richer tree view for parent/child relationships
-- install flows
-- update flows
+- broader install flows beyond CLI-first Wago
+- update flows beyond managed disk refresh
 - update all flow
 - remote-backed update checks beyond tracked metadata
 - search flows
-- delete selected flow
 - config editing
 - backup workflows
 - broader source parity behavior
-- CLI update path beyond foundation
-- soft-delete trash/undo flow for delete operations
+- TUI install/search flow
 
 ## Minimum MVP
 
@@ -248,13 +262,13 @@ The app should eventually detect:
 
 ## Delete Safety Plan
 
-- current groundwork uses hard delete with explicit confirmation
-- follow-up target is soft-delete, not fake undo after hard delete
-- desired undo model:
-  - move removed addon folders into LemonUp-managed trash
-  - keep authoritative parent-child relationships intact in trash metadata
-  - offer short-lived undo from the shell after delete completes
-  - purge trash on an explicit future action or retention policy
+- current behavior uses soft-delete into LemonUp-managed trash with shell undo
+- current undo scope:
+  - one recent delete batch
+  - shell/session driven undo
+- future work:
+  - retention or purge policy
+  - richer trash/history UX
 
 ## Testing Rules
 

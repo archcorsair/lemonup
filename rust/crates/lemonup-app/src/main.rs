@@ -6,7 +6,9 @@ mod event;
 mod onboarding;
 mod tui;
 mod update;
+mod wago;
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,6 +24,7 @@ use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
 use crate::update::{build_update_checks, refresh_managed_update_state, serialize_update_status};
+use crate::wago::{WagoStability, install_wago_addon};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Tui => run_tui(paths, runtime).await?,
         Commands::Check { addons } => run_check(paths, addons)?,
         Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run)?,
+        Commands::InstallWago {
+            addon,
+            stability,
+            dry_run,
+        } => run_install_wago(paths, runtime, &addon, stability, dry_run).await?,
     }
 
     Ok(())
@@ -194,6 +202,125 @@ fn run_update(
     }
 
     Ok(())
+}
+
+async fn run_install_wago(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    stability: WagoStability,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let effective_addon_dir = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone());
+    let Some(addon_dir) = effective_addon_dir else {
+        println!(
+            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
+            runtime.profile_name, addon, dry_run
+        );
+        return Ok(());
+    };
+
+    if runtime.is_guarded_path(&addon_dir) {
+        return Err(Box::new(LemonupError::InvalidArgument(format!(
+            "profile '{}' refuses to target the default profile addon directory: {}",
+            runtime.profile_name,
+            addon_dir.display()
+        ))));
+    }
+
+    validate_addons_path(&addon_dir).map_err(|error| {
+        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+    })?;
+
+    let Some(api_key) = resolve_wago_api_key(&config_state) else {
+        println!(
+            "install skipped: profile={}, addon={}, reason=no Wago API key configured",
+            runtime.profile_name, addon
+        );
+        return Ok(());
+    };
+
+    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let summary = install_wago_addon(
+        &mut database,
+        &addon_dir,
+        addon,
+        &api_key,
+        stability,
+        dry_run,
+    )
+    .await
+    .map_err(Box::<dyn std::error::Error>::from)?;
+
+    println!(
+        "wago install: profile={}, addon_id={}, addon_name={}, parent={}, folders={}, stability={}, version={}, dry_run={}",
+        runtime.profile_name,
+        summary.addon_id,
+        summary.addon_name,
+        summary.parent_folder,
+        summary.installed_folders.join("|"),
+        summary.stability.as_str(),
+        summary.version.as_deref().unwrap_or("<unknown>"),
+        summary.dry_run
+    );
+
+    Ok(())
+}
+
+fn resolve_wago_api_key(config_state: &ConfigLoad) -> Option<String> {
+    let from_config = match config_state {
+        ConfigLoad::Loaded(config) => config.wago_api_key.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+
+    from_config
+        .or_else(read_process_wago_api_key)
+        .or_else(load_repo_root_wago_api_key)
+}
+
+fn read_process_wago_api_key() -> Option<String> {
+    std::env::var("WAGO_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn load_repo_root_wago_api_key() -> Option<String> {
+    let dotenv_path = repo_root_dotenv_path();
+    if !dotenv_path.exists() {
+        return None;
+    }
+
+    let iter = dotenvy::from_path_iter(&dotenv_path).ok()?;
+    for entry in iter {
+        let (key, value) = entry.ok()?;
+        if key == "WAGO_API_KEY" {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+            return None;
+        }
+    }
+
+    None
+}
+
+fn repo_root_dotenv_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join(".env")
 }
 
 fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {

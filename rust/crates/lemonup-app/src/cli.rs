@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::wago::WagoStability;
 use clap::{Parser, Subcommand};
 use lemonup_core::DEFAULT_PROFILE;
 
@@ -27,6 +28,15 @@ pub enum Commands {
     Update {
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Install a Wago addon by slug or URL
+    InstallWago {
+        #[arg(value_name = "WAGO_ADDON", value_parser = parse_wago_install_target)]
+        addon: String,
+        #[arg(long, value_enum, default_value_t = WagoStability::Stable)]
+        stability: WagoStability,
         #[arg(long)]
         dry_run: bool,
     },
@@ -58,9 +68,26 @@ fn parse_addon_selector(value: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn parse_wago_install_target(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Wago addon target cannot be empty".to_string());
+    }
+
+    if trimmed.len() > 200 {
+        return Err("Wago addon target is too long".to_string());
+    }
+
+    if trimmed.chars().any(|character| character.is_control()) {
+        return Err("Wago addon target contains forbidden characters".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_addon_selector;
+    use super::{parse_addon_selector, parse_wago_install_target};
 
     #[test]
     fn addon_selector_accepts_expected_characters() {
@@ -78,5 +105,14 @@ mod tests {
         assert!(parse_addon_selector("..\\secret").is_err());
         assert!(parse_addon_selector("../secret").is_err());
         assert!(parse_addon_selector("DBM-Core; rm -rf").is_err());
+    }
+
+    #[test]
+    fn wago_target_rejects_empty_or_control_chars() {
+        assert!(parse_wago_install_target("").is_err());
+        assert!(parse_wago_install_target("  ").is_err());
+        assert!(parse_wago_install_target("detail\nbreak").is_err());
+        assert!(parse_wago_install_target("details").is_ok());
+        assert!(parse_wago_install_target("https://addons.wago.io/addons/details").is_ok());
     }
 }
