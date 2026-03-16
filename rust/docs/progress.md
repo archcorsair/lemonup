@@ -77,8 +77,8 @@ Current checkpoint state:
 - relationship-safe post-action sync is the active slice
 - richer update-state summaries and selection-aware actions are the active slice
 - current focus:
-  - make update readiness visible before the user runs refresh
-  - add selection helpers for refreshable tracked parents
+  - keep the tree list clean and mouse-friendly
+  - prepare the next interaction pass, including click-to-highlight
 - no active half-finished slice should be considered stable until user verifies it
 
 ## Newly Completed
@@ -147,6 +147,16 @@ These are implemented and manually verified in addition to the earlier chunks:
   - list viewport and selection stay stable across refresh-driven row replacement
   - zero-result update refresh status is human-readable
   - overview drift summary stays readable in one line
+- richer update-state summaries and selection-aware actions now exist:
+  - update pane shows inventory and selection readiness before refresh
+  - `v` selects refreshable tracked parent addons only
+- first richer tree UX slice now exists:
+  - `]` expands all relationship rows
+  - `[` collapses all relationship rows
+  - list rows show clearer tree glyphs with sibling-aware connectors and indentation
+  - expanded tree rows are now single-line only; list metadata noise was removed
+  - overview detail shows relationship source and child-folder summaries
+  - mouse wheel navigation is now explicitly captured and moves one row per step
 
 ## Next Up
 
@@ -164,9 +174,9 @@ Next phase:
 
 ### Planned order
 
-1. expose richer update-state summaries and selection-aware actions in the shell
-2. richer tree and relationship UX
-3. soft-delete trash model with undo for safer destructive operations
+1. richer tree and relationship UX, including click-to-highlight
+2. soft-delete trash model with undo for safer destructive operations
+3. deeper update/install flows on top of the hardened ownership model
 
 ## Remaining Major Work
 

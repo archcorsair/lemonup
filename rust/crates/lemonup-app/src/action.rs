@@ -21,6 +21,8 @@ pub enum AppAction {
     SelectAllDashboardParents,
     ClearDashboardSelection,
     ToggleDashboardExpanded,
+    ExpandAllDashboardRelationships,
+    CollapseAllDashboardRelationships,
     CollapseDashboardExpanded,
     SetDetailMode(DetailMode),
     SetOnboardingState(OnboardingState),

@@ -1,13 +1,14 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
+use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TerminalEvent {
     Tick,
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Resize(u16, u16),
 }
 
@@ -27,6 +28,11 @@ impl EventHandler {
                     Ok(true) => match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
                             if sender.send(TerminalEvent::Key(key)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(CrosstermEvent::Mouse(mouse)) => {
+                            if sender.send(TerminalEvent::Mouse(mouse)).is_err() {
                                 break;
                             }
                         }

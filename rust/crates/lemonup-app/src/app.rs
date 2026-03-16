@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -29,7 +29,7 @@ use crate::update::{
     CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
 };
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | v select-refreshable | enter tree | h collapse | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | v select-refreshable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -98,6 +98,8 @@ enum AppMessage {
     DashboardSelectAll,
     DashboardClearSelection,
     DashboardToggleExpanded,
+    DashboardExpandAllRelationships,
+    DashboardCollapseAllRelationships,
     DashboardCollapseExpanded,
     SetDetailMode(DetailMode),
     OnboardingBeginEditing,
@@ -199,6 +201,12 @@ enum DashboardRowKind {
     OwnedChild { parent_folder: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardChildConnector {
+    Mid,
+    Last,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardRow {
     key: DashboardRowKey,
@@ -207,6 +215,7 @@ struct DashboardRow {
     kind: DashboardRowKind,
     expandable: bool,
     expanded: bool,
+    child_connector: Option<DashboardChildConnector>,
 }
 
 struct DashboardState {
@@ -407,6 +416,32 @@ impl DashboardState {
         }
     }
 
+    fn expand_all_relationships(&mut self) -> bool {
+        let before = self.expanded_folders.len();
+        self.expanded_folders = self
+            .items
+            .iter()
+            .filter(|item| !item.owned_folders.is_empty())
+            .map(|item| item.folder.clone())
+            .collect();
+        self.rebuild_rows();
+        self.expanded_folders.len() != before
+    }
+
+    fn collapse_all_relationships(&mut self) -> bool {
+        if self.expanded_folders.is_empty() {
+            return false;
+        }
+
+        let selected_parent = self.selected_parent_folder().map(str::to_string);
+        self.expanded_folders.clear();
+        self.rebuild_rows();
+        if let Some(parent_folder) = selected_parent {
+            self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+        }
+        true
+    }
+
     fn selected_row(&self) -> Option<&DashboardRow> {
         self.list_state
             .selected()
@@ -568,10 +603,12 @@ impl DashboardState {
                 kind: DashboardRowKind::Parent,
                 expandable,
                 expanded,
+                child_connector: None,
             });
 
             if expanded {
-                for child_folder in &item.owned_folders {
+                let child_count = item.owned_folders.len();
+                for (index, child_folder) in item.owned_folders.iter().enumerate() {
                     rows.push(DashboardRow {
                         key: DashboardRowKey::OwnedChild {
                             parent_folder: item.folder.clone(),
@@ -584,6 +621,11 @@ impl DashboardState {
                         },
                         expandable: false,
                         expanded: false,
+                        child_connector: Some(if index + 1 == child_count {
+                            DashboardChildConnector::Last
+                        } else {
+                            DashboardChildConnector::Mid
+                        }),
                     });
                 }
             }
@@ -770,6 +812,7 @@ impl App {
                 vec![AppMessage::TerminalResized { width, height }]
             }
             TerminalEvent::Key(key) => self.messages_for_key(key),
+            TerminalEvent::Mouse(mouse) => self.messages_for_mouse(mouse),
         }
     }
 
@@ -781,6 +824,22 @@ impl App {
         match self.shell_mode {
             ShellMode::Onboarding => self.onboarding_messages_for_key(key),
             ShellMode::Dashboard => self.dashboard_messages_for_key(key),
+        }
+    }
+
+    fn messages_for_mouse(&self, mouse: MouseEvent) -> Vec<AppMessage> {
+        if self.shell_mode != ShellMode::Dashboard {
+            return vec![];
+        }
+
+        if self.dashboard.pending_delete_folders().is_some() {
+            return vec![];
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => vec![AppMessage::DashboardSelectionNext],
+            MouseEventKind::ScrollUp => vec![AppMessage::DashboardSelectionPrevious],
+            _ => vec![],
         }
     }
 
@@ -806,6 +865,8 @@ impl App {
                 vec![AppMessage::DashboardToggleExpanded]
             }
             KeyCode::Left | KeyCode::Char('h') => vec![AppMessage::DashboardCollapseExpanded],
+            KeyCode::Char(']') => vec![AppMessage::DashboardExpandAllRelationships],
+            KeyCode::Char('[') => vec![AppMessage::DashboardCollapseAllRelationships],
             KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
             KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
             KeyCode::Char('s') | KeyCode::Char('/') => {
@@ -1075,6 +1136,20 @@ impl App {
                 AppAction::SetStatus(
                     self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated"),
                 ),
+            ],
+            AppMessage::DashboardExpandAllRelationships => vec![
+                AppAction::ExpandAllDashboardRelationships,
+                AppAction::SetStatus(self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    "expanded all relationship rows",
+                )),
+            ],
+            AppMessage::DashboardCollapseAllRelationships => vec![
+                AppAction::CollapseAllDashboardRelationships,
+                AppAction::SetStatus(self.dashboard_status_for(
+                    self.dashboard.detail_mode,
+                    "collapsed all relationship rows",
+                )),
             ],
             AppMessage::DashboardCollapseExpanded => vec![
                 AppAction::CollapseDashboardExpanded,
@@ -1360,6 +1435,22 @@ impl App {
                 if self.dashboard.toggle_selected_expanded() {
                     self.status_line =
                         self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
+                }
+            }
+            AppAction::ExpandAllDashboardRelationships => {
+                if self.dashboard.expand_all_relationships() {
+                    self.status_line = self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "expanded all relationship rows",
+                    );
+                }
+            }
+            AppAction::CollapseAllDashboardRelationships => {
+                if self.dashboard.collapse_all_relationships() {
+                    self.status_line = self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "collapsed all relationship rows",
+                    );
                 }
             }
             AppAction::CollapseDashboardExpanded => {
@@ -1735,37 +1826,19 @@ impl App {
                     DashboardRowKind::OwnedChild { .. } => "",
                 };
                 let marker = match &row.kind {
-                    DashboardRowKind::Parent if row.expandable && row.expanded => "v ",
-                    DashboardRowKind::Parent if row.expandable => "> ",
+                    DashboardRowKind::Parent if row.expandable && row.expanded => "▾ ",
+                    DashboardRowKind::Parent if row.expandable => "▸ ",
                     DashboardRowKind::Parent => "  ",
-                    DashboardRowKind::OwnedChild { .. } => "|- ",
+                    DashboardRowKind::OwnedChild { .. } => child_row_prefix(row),
                 };
                 let drift_marker = match &row.kind {
                     DashboardRowKind::Parent if self.parent_has_drift(&row.folder) => "! ",
                     _ => "",
                 };
-                ListItem::new(vec![
-                    Line::from(format!(
-                        "{prefix}{selection_marker}{drift_marker}{marker}{}",
-                        row.name
-                    )),
-                    Line::from(match &row.kind {
-                        DashboardRowKind::Parent => {
-                            let item = self
-                                .dashboard
-                                .items
-                                .iter()
-                                .find(|item| item.folder == row.folder)
-                                .expect("row parent item exists");
-                            let version = item.version.as_deref().unwrap_or("unknown");
-                            let kind = addon_kind_label(item.kind);
-                            format!("    {} | {} | {}", item.folder, version, kind)
-                        }
-                        DashboardRowKind::OwnedChild { parent_folder } => {
-                            format!("    child of {} | folder {}", parent_folder, row.folder)
-                        }
-                    }),
-                ])
+                ListItem::new(vec![Line::from(format!(
+                    "{prefix}{selection_marker}{drift_marker}{marker}{}",
+                    row.name
+                ))])
             })
             .collect::<Vec<_>>();
 
@@ -1818,6 +1891,10 @@ impl App {
                     lines.push(Line::from(format!("Parent addon: {}", item.name)));
                     lines.push(Line::from(format!("Parent folder: {}", item.folder)));
                     lines.push(Line::from(format!(
+                        "Relationship source: {}",
+                        relationship_state_label(item)
+                    )));
+                    lines.push(Line::from(format!(
                         "Parent source: {}",
                         source_label(item.source)
                     )));
@@ -1852,6 +1929,10 @@ impl App {
                     lines.push(Line::from(format!(
                         "Owned folders: {}",
                         item.owned_folder_count
+                    )));
+                    lines.push(Line::from(format!(
+                        "Relationship source: {}",
+                        relationship_state_label(item)
                     )));
                     lines.push(Line::from(format!(
                         "Tree state: {}",
@@ -1895,6 +1976,14 @@ impl App {
                         lines.push(Line::from(format!(
                             "Missing owned children: {}",
                             missing_owned_children.join(", ")
+                        )));
+                    }
+                    if item.owned_folders.is_empty() {
+                        lines.push(Line::from("Child folders: none"));
+                    } else {
+                        lines.push(Line::from(format!(
+                            "Child folders: {}",
+                            summarize_owned_folders(&item.owned_folders)
                         )));
                     }
                 } else {
@@ -2348,6 +2437,50 @@ fn dashboard_update_status_message(summary: UpdateRefreshSummary) -> String {
     )
 }
 
+fn relationship_state_label(item: &DashboardItem) -> &'static str {
+    if item.owned_folder_count == 0 {
+        "none"
+    } else if item.has_authoritative_owned_folders {
+        "managed"
+    } else {
+        "scan-inferred"
+    }
+}
+
+fn child_row_prefix(row: &DashboardRow) -> &'static str {
+    match row.child_connector {
+        Some(DashboardChildConnector::Mid) => "  ├─ ",
+        Some(DashboardChildConnector::Last) => "  └─ ",
+        None => "  └─ ",
+    }
+}
+
+fn child_row_detail_prefix(row: &DashboardRow) -> &'static str {
+    match row.child_connector {
+        Some(DashboardChildConnector::Mid) => "  │  ",
+        Some(DashboardChildConnector::Last) => "     ",
+        None => "     ",
+    }
+}
+
+fn summarize_owned_folders(folders: &[String]) -> String {
+    const LIMIT: usize = 4;
+    if folders.is_empty() {
+        return "none".to_string();
+    }
+
+    let visible = folders.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    if folders.len() <= LIMIT {
+        visible.join(", ")
+    } else {
+        format!(
+            "{} +{} more",
+            visible.join(", "),
+            folders.len().saturating_sub(LIMIT)
+        )
+    }
+}
+
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
     match detail_mode {
         DetailMode::Overview => "Overview",
@@ -2406,17 +2539,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use ratatui::widgets::ListState;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardDeleteOutcome,
-        DashboardState, DashboardUpdateOutcome, DetailMode, ScanState, ShellMode,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardChildConnector,
+        DashboardDeleteOutcome, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
+        ScanState, ShellMode, child_row_detail_prefix, child_row_prefix, summarize_owned_folders,
     };
     use crate::action::AppAction;
     use crate::drift::{DriftReport, OwnedChildDrift};
+    use crate::event::TerminalEvent;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
     use crate::update::UpdateRefreshSummary;
     use lemonup_core::{
@@ -2476,6 +2613,27 @@ mod tests {
     }
 
     #[test]
+    fn mouse_wheel_moves_dashboard_selection_one_row() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        let down = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let up = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert_eq!(down, vec![AppMessage::DashboardSelectionNext]);
+        assert_eq!(up, vec![AppMessage::DashboardSelectionPrevious]);
+    }
+
+    #[test]
     fn detail_mode_keys_emit_messages_on_dashboard() {
         let app = app_for_tests(ShellMode::Dashboard);
 
@@ -2516,6 +2674,14 @@ mod tests {
         assert_eq!(
             update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('v'))),
             vec![AppMessage::DashboardSelectRefreshableUpdates]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char(']'))),
+            vec![AppMessage::DashboardExpandAllRelationships]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('['))),
+            vec![AppMessage::DashboardCollapseAllRelationships]
         );
     }
 
@@ -2578,6 +2744,60 @@ mod tests {
         assert!(app.dashboard.expanded_folders.contains("Second"));
         assert_eq!(app.dashboard.rows.len(), 4);
         assert_eq!(app.dashboard.rows[2].folder, "Second_Config");
+    }
+
+    #[test]
+    fn expand_and_collapse_all_relationships_updates_tree_rows() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        app.apply(AppAction::ExpandAllDashboardRelationships);
+        assert!(app.dashboard.expanded_folders.contains("Second"));
+        assert_eq!(app.dashboard.rows.len(), 4);
+        assert_eq!(
+            app.dashboard.rows[2].child_connector,
+            Some(DashboardChildConnector::Last)
+        );
+
+        app.apply(AppAction::CollapseAllDashboardRelationships);
+        assert!(app.dashboard.expanded_folders.is_empty());
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn child_row_prefixes_match_sibling_position() {
+        let mid = DashboardRow {
+            key: super::DashboardRowKey::OwnedChild {
+                parent_folder: "Parent".to_string(),
+                child_folder: "One".to_string(),
+            },
+            name: "One".to_string(),
+            folder: "One".to_string(),
+            kind: super::DashboardRowKind::OwnedChild {
+                parent_folder: "Parent".to_string(),
+            },
+            expandable: false,
+            expanded: false,
+            child_connector: Some(DashboardChildConnector::Mid),
+        };
+        let last = DashboardRow {
+            key: super::DashboardRowKey::OwnedChild {
+                parent_folder: "Parent".to_string(),
+                child_folder: "Two".to_string(),
+            },
+            name: "Two".to_string(),
+            folder: "Two".to_string(),
+            kind: super::DashboardRowKind::OwnedChild {
+                parent_folder: "Parent".to_string(),
+            },
+            expandable: false,
+            expanded: false,
+            child_connector: Some(DashboardChildConnector::Last),
+        };
+
+        assert_eq!(child_row_prefix(&mid), "  ├─ ");
+        assert_eq!(child_row_prefix(&last), "  └─ ");
+        assert_eq!(child_row_detail_prefix(&mid), "  │  ");
+        assert_eq!(child_row_detail_prefix(&last), "     ");
     }
 
     #[test]
@@ -2995,6 +3215,19 @@ mod tests {
             lines[0].to_string(),
             "Last scan drift: imported 1, removed 1, orphaned children 1."
         );
+    }
+
+    #[test]
+    fn summarize_owned_folders_limits_long_relationship_lists() {
+        let folders = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+            "E".to_string(),
+        ];
+
+        assert_eq!(summarize_owned_folders(&folders), "A, B, C, D +1 more");
     }
 
     #[test]
