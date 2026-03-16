@@ -44,6 +44,19 @@ pub struct WagoInstallSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WagoUpdateSummary {
+    pub(crate) addon_id: String,
+    pub(crate) addon_name: String,
+    pub(crate) parent_folder: String,
+    pub(crate) installed_folders: Vec<String>,
+    pub(crate) stability: WagoStability,
+    pub(crate) previous_version: Option<String>,
+    pub(crate) remote_version: Option<String>,
+    pub(crate) updated: bool,
+    pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WagoRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
@@ -95,6 +108,14 @@ struct WagoAddonSummary {
 struct ExtractedFolders {
     source_root: PathBuf,
     folders: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WagoResolvedRelease {
+    addon: WagoAddonSummary,
+    stability: WagoStability,
+    download_url: Url,
+    version: Option<String>,
 }
 
 impl WagoAddonSummary {
@@ -188,56 +209,17 @@ pub async fn install_wago_addon(
     dry_run: bool,
 ) -> Result<WagoInstallSummary, String> {
     let addon_id = parse_wago_target(target)?;
-    let client = Client::builder()
-        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
-        .build()
-        .map_err(|error| error.to_string())?;
-
-    let addon = fetch_addon_details(&client, &addon_id, api_key).await?;
-    let effective_stability = addon.best_available_stability().ok_or_else(|| {
-        format!(
-            "no stable, beta, or alpha release is available for Wago addon '{}'",
-            addon.display_name
-        )
-    })?;
-    let selected_stability = if addon.release(preferred_stability).is_some() {
-        preferred_stability
-    } else {
-        effective_stability
-    };
-    let release = addon.release(selected_stability).ok_or_else(|| {
-        format!(
-            "requested Wago release '{}' is not available for '{}'",
-            preferred_stability.as_str(),
-            addon.display_name
-        )
-    })?;
-    let download_url = release
-        .download_link
-        .as_deref()
-        .or(release.link.as_deref())
-        .ok_or_else(|| format!("Wago addon '{}' has no download URL", addon.display_name))?;
-
-    let download_url = validate_download_url(download_url)?;
-    let bytes = client
-        .get(download_url.clone())
-        .bearer_auth(api_key)
-        .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .bytes()
-        .await
-        .map_err(|error| error.to_string())?;
+    let client = build_wago_client()?;
+    let resolved =
+        resolve_wago_release(&client, &addon_id, api_key, Some(preferred_stability)).await?;
+    let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
 
     install_downloaded_wago_addon(
         state_database,
         addon_dir,
-        &addon,
+        &resolved.addon,
         &bytes,
-        selected_stability,
+        resolved.stability,
         dry_run,
     )
 }
@@ -257,27 +239,83 @@ pub(crate) async fn fetch_wago_remote_version(
             )
         })?;
     let addon_id = parse_wago_target(target)?;
-    let client = Client::builder()
-        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let addon = fetch_addon_details(&client, &addon_id, api_key).await?;
-    let stability = addon.best_available_stability().ok_or_else(|| {
-        format!(
-            "no release is available for Wago addon '{}'",
-            addon.display_name
-        )
-    })?;
+    let client = build_wago_client()?;
+    let resolved = resolve_wago_release(&client, &addon_id, api_key, None).await?;
 
     Ok(WagoRemoteVersion {
         source_url: Some(
-            addon
+            resolved
+                .addon
                 .website_url
                 .clone()
-                .unwrap_or_else(|| format!("https://addons.wago.io/addons/{}", addon.id)),
+                .unwrap_or_else(|| format!("https://addons.wago.io/addons/{}", resolved.addon.id)),
         ),
-        version: release_version(&addon, stability),
+        version: resolved.version,
     })
+}
+
+pub(crate) async fn update_wago_addon(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    tracked: &AddonRecord,
+    api_key: &str,
+    force: bool,
+    dry_run: bool,
+) -> Result<WagoUpdateSummary, String> {
+    if tracked.source != SourceKind::Wago {
+        return Err(format!("addon '{}' is not tracked as Wago", tracked.folder));
+    }
+    if !tracked.has_authoritative_owned_folders() {
+        return Err(format!(
+            "tracked Wago addon '{}' does not have authoritative managed ownership",
+            tracked.folder
+        ));
+    }
+
+    let target = tracked
+        .source_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "tracked Wago addon '{}' is missing a source URL",
+                tracked.folder
+            )
+        })?;
+    let addon_id = parse_wago_target(target)?;
+    let client = build_wago_client()?;
+    let resolved = resolve_wago_release(&client, &addon_id, api_key, None).await?;
+    let remote_version = resolved.version.clone();
+
+    if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
+        return Ok(WagoUpdateSummary {
+            addon_id: resolved.addon.id.clone(),
+            addon_name: resolved.addon.display_name.clone(),
+            parent_folder: tracked.folder.clone(),
+            installed_folders: tracked
+                .owned_folders
+                .iter()
+                .map(|owned| owned.name.clone())
+                .chain(std::iter::once(tracked.folder.clone()))
+                .collect(),
+            stability: resolved.stability,
+            previous_version: tracked.version.clone(),
+            remote_version,
+            updated: false,
+            dry_run,
+        });
+    }
+
+    let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
+    update_downloaded_wago_addon(
+        state_database,
+        addon_dir,
+        tracked,
+        &resolved.addon,
+        &bytes,
+        resolved.stability,
+        dry_run,
+    )
 }
 
 fn install_downloaded_wago_addon(
@@ -354,6 +392,112 @@ fn install_downloaded_wago_addon(
     outcome
 }
 
+fn update_downloaded_wago_addon(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    tracked: &AddonRecord,
+    addon: &WagoAddonSummary,
+    archive_bytes: &[u8],
+    stability: WagoStability,
+    dry_run: bool,
+) -> Result<WagoUpdateSummary, String> {
+    let temp_root = create_temp_work_dir("wago-update")?;
+    let zip_path = temp_root.join("package.zip");
+    let extract_root = temp_root.join("extract");
+    let update_root = temp_root.join("backup");
+    fs::create_dir_all(&update_root).map_err(|error| error.to_string())?;
+    let previous_version = tracked.version.clone();
+    let outcome = (|| {
+        fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
+        extract_zip_archive(&zip_path, &extract_root)?;
+
+        let extracted = discover_extracted_folders(&extract_root)?;
+        if !extracted
+            .folders
+            .iter()
+            .any(|folder| folder == &tracked.folder)
+        {
+            return Err(format!(
+                "Wago update for '{}' does not contain the tracked parent folder '{}'",
+                addon.display_name, tracked.folder
+            ));
+        }
+
+        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
+            .map_err(|error| error.to_string())?;
+        let parent_metadata = scanned
+            .iter()
+            .find(|candidate| candidate.folder == tracked.folder)
+            .ok_or_else(|| {
+                format!(
+                    "updated Wago package for '{}' did not yield a scannable tracked parent folder '{}'",
+                    addon.display_name, tracked.folder
+                )
+            })?;
+
+        let managed_folders = std::iter::once(tracked.folder.clone())
+            .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
+            .collect::<Vec<_>>();
+
+        preflight_update_targets(addon_dir, &extracted.folders, &managed_folders)?;
+
+        if dry_run {
+            return Ok(WagoUpdateSummary {
+                addon_id: addon.id.clone(),
+                addon_name: addon.display_name.clone(),
+                parent_folder: tracked.folder.clone(),
+                installed_folders: extracted.folders,
+                stability,
+                previous_version,
+                remote_version: release_version(addon, stability),
+                updated: true,
+                dry_run: true,
+            });
+        }
+
+        let mut moved_existing = Vec::new();
+        for folder in &managed_folders {
+            let source = addon_dir.join(folder);
+            if !source.exists() {
+                continue;
+            }
+            let backup = update_root.join(folder);
+            copy_dir_recursively(&source, &backup)?;
+            fs::remove_dir_all(&source).map_err(|error| error.to_string())?;
+            moved_existing.push(folder.clone());
+        }
+
+        let mut copied_new = Vec::new();
+        for folder in &extracted.folders {
+            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
+            copied_new.push(folder.clone());
+        }
+
+        let record =
+            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
+
+        if let Err(error) = state_database.record_managed_addon(&record) {
+            rollback_updated_folders(addon_dir, &update_root, &copied_new, &moved_existing);
+            return Err(error.to_string());
+        }
+
+        Ok(WagoUpdateSummary {
+            addon_id: addon.id.clone(),
+            addon_name: addon.display_name.clone(),
+            parent_folder: tracked.folder.clone(),
+            installed_folders: extracted.folders,
+            stability,
+            previous_version,
+            remote_version: release_version(addon, stability),
+            updated: true,
+            dry_run: false,
+        })
+    })();
+
+    let _ = fs::remove_dir_all(&temp_root);
+    outcome
+}
+
 fn build_managed_wago_record(
     addon: &WagoAddonSummary,
     parent_metadata: &ScannedAddon,
@@ -400,6 +544,78 @@ fn release_version(addon: &WagoAddonSummary, stability: WagoStability) -> Option
     addon
         .release(stability)
         .and_then(|release| release.label.clone())
+}
+
+fn versions_match(installed: Option<&str>, remote: Option<&str>) -> bool {
+    match (installed, remote) {
+        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        _ => false,
+    }
+}
+
+fn build_wago_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+async fn resolve_wago_release(
+    client: &Client,
+    addon_id: &str,
+    api_key: &str,
+    preferred_stability: Option<WagoStability>,
+) -> Result<WagoResolvedRelease, String> {
+    let addon = fetch_addon_details(client, addon_id, api_key).await?;
+    let effective_stability = addon.best_available_stability().ok_or_else(|| {
+        format!(
+            "no stable, beta, or alpha release is available for Wago addon '{}'",
+            addon.display_name
+        )
+    })?;
+    let selected_stability = match preferred_stability {
+        Some(preferred) if addon.release(preferred).is_some() => preferred,
+        _ => effective_stability,
+    };
+    let release = addon.release(selected_stability).ok_or_else(|| {
+        format!(
+            "requested Wago release '{}' is not available for '{}'",
+            selected_stability.as_str(),
+            addon.display_name
+        )
+    })?;
+    let download_url = release
+        .download_link
+        .as_deref()
+        .or(release.link.as_deref())
+        .ok_or_else(|| format!("Wago addon '{}' has no download URL", addon.display_name))?;
+
+    Ok(WagoResolvedRelease {
+        version: release.label.clone(),
+        download_url: validate_download_url(download_url)?,
+        stability: selected_stability,
+        addon,
+    })
+}
+
+async fn download_wago_release_bytes(
+    client: &Client,
+    download_url: &Url,
+    api_key: &str,
+) -> Result<Vec<u8>, String> {
+    client
+        .get(download_url.clone())
+        .bearer_auth(api_key)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| error.to_string())
 }
 
 async fn fetch_addon_details(
@@ -565,6 +781,29 @@ fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(),
     }
 }
 
+fn preflight_update_targets(
+    addon_dir: &Path,
+    new_folders: &[String],
+    replaceable_folders: &[String],
+) -> Result<(), String> {
+    let replaceable = replaceable_folders
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let collisions = new_folders
+        .iter()
+        .filter(|folder| addon_dir.join(folder).exists() && !replaceable.contains(folder))
+        .cloned()
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "update refused because these addon folders are owned by something else on disk: {}",
+            collisions.join(", ")
+        ))
+    }
+}
+
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -636,6 +875,26 @@ fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
     Err("failed to create a unique temporary Wago install directory".to_string())
 }
 
+fn rollback_updated_folders(
+    addon_dir: &Path,
+    backup_root: &Path,
+    copied_new: &[String],
+    moved_existing: &[String],
+) {
+    for folder in copied_new.iter().rev() {
+        let _ = fs::remove_dir_all(addon_dir.join(folder));
+    }
+
+    for folder in moved_existing {
+        let backup = backup_root.join(folder);
+        if !backup.exists() {
+            continue;
+        }
+        let restored = addon_dir.join(folder);
+        let _ = copy_dir_recursively(&backup, &restored);
+    }
+}
+
 fn is_valid_wago_slug(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -651,6 +910,7 @@ mod tests {
         WagoAddonDetailsResponse, WagoAddonSummary, WagoAddonSummaryRaw, WagoRelease, WagoReleases,
         WagoStability, determine_parent_folder, discover_extracted_folders, extract_zip_archive,
         install_downloaded_wago_addon, parse_wago_target, release_version,
+        update_downloaded_wago_addon, versions_match,
     };
     use lemonup_core::{GameFlavor, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -858,5 +1118,176 @@ mod tests {
         assert!(summary.dry_run);
         assert!(!addon_dir.join("Details").exists());
         assert!(database.list_addons().expect("list addons").is_empty());
+    }
+
+    #[test]
+    fn update_downloaded_wago_addon_replaces_owned_folders_and_preserves_install_time() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        fs::create_dir_all(addon_dir.join("WeakAuras")).expect("create parent folder");
+        fs::create_dir_all(addon_dir.join("WeakAurasOptions")).expect("create child folder");
+        fs::create_dir_all(addon_dir.join("WeakAurasArchive")).expect("create old child folder");
+
+        let mut tracked =
+            lemonup_core::AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        tracked.version = Some("5.20.0".to_string());
+        tracked.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        tracked.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "WeakAurasArchive".to_string(),
+            },
+            OwnedFolder {
+                name: "WeakAurasOptions".to_string(),
+            },
+        ]);
+        let installed_at = tracked.installed_at;
+        database
+            .record_managed_addon(&tracked)
+            .expect("seed tracked addon");
+
+        let addon = WagoAddonSummary {
+            id: "VBNBxKx5".to_string(),
+            display_name: "WeakAuras".to_string(),
+            owner: Some("WeakAuras Team".to_string()),
+            authors: vec!["WeakAuras Team".to_string()],
+            website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+            releases: WagoReleases {
+                stable: Some(WagoRelease {
+                    label: Some("5.21.1".to_string()),
+                    download_link: Some("https://addons.wago.io/download/example.zip".to_string()),
+                    link: None,
+                }),
+                beta: None,
+                alpha: None,
+            },
+        };
+
+        let bytes = build_zip(&[
+            (
+                "WeakAuras/WeakAuras.toc",
+                "## Title: WeakAuras\n## Version: 5.21.1\n## Author: WeakAuras Team\n## Interface: 110205\n",
+            ),
+            (
+                "WeakAurasOptions/WeakAurasOptions.toc",
+                "## Title: WeakAuras Options\n## Version: 5.21.1\n## Author: WeakAuras Team\n## Interface: 110205\n",
+            ),
+            (
+                "WeakAurasTemplates/WeakAurasTemplates.toc",
+                "## Title: WeakAuras Templates\n## Version: 5.21.1\n## Author: WeakAuras Team\n## Interface: 110205\n",
+            ),
+        ]);
+
+        let summary = update_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            false,
+        )
+        .expect("update addon");
+
+        assert!(summary.updated);
+        assert_eq!(summary.previous_version.as_deref(), Some("5.20.0"));
+        assert_eq!(summary.remote_version.as_deref(), Some("5.21.1"));
+        assert!(addon_dir.join("WeakAuras").exists());
+        assert!(addon_dir.join("WeakAurasOptions").exists());
+        assert!(addon_dir.join("WeakAurasTemplates").exists());
+        assert!(!addon_dir.join("WeakAurasArchive").exists());
+
+        let stored = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.installed_at.unix_timestamp(), installed_at.unix_timestamp());
+        assert_eq!(stored.version.as_deref(), Some("5.21.1"));
+        assert_eq!(stored.remote_version.as_deref(), Some("5.21.1"));
+        assert_eq!(
+            stored
+                .owned_folders
+                .iter()
+                .map(|owned| owned.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["WeakAurasOptions", "WeakAurasTemplates"]
+        );
+        assert!(stored.has_authoritative_owned_folders());
+    }
+
+    #[test]
+    fn update_downloaded_wago_addon_dry_run_does_not_mutate_disk_or_state() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        fs::create_dir_all(addon_dir.join("WeakAuras")).expect("create parent folder");
+
+        let mut tracked =
+            lemonup_core::AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        tracked.version = Some("5.20.0".to_string());
+        tracked.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        database
+            .record_managed_addon(&tracked)
+            .expect("seed tracked addon");
+
+        let addon = WagoAddonSummary {
+            id: "VBNBxKx5".to_string(),
+            display_name: "WeakAuras".to_string(),
+            owner: Some("WeakAuras Team".to_string()),
+            authors: vec!["WeakAuras Team".to_string()],
+            website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+            releases: WagoReleases {
+                stable: Some(WagoRelease {
+                    label: Some("5.21.1".to_string()),
+                    download_link: Some("https://addons.wago.io/download/example.zip".to_string()),
+                    link: None,
+                }),
+                beta: None,
+                alpha: None,
+            },
+        };
+
+        let bytes = build_zip(&[(
+            "WeakAuras/WeakAuras.toc",
+            "## Title: WeakAuras\n## Version: 5.21.1\n## Author: WeakAuras Team\n## Interface: 110205\n",
+        )]);
+
+        let summary = update_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            true,
+        )
+        .expect("dry-run update");
+
+        assert!(summary.dry_run);
+        let stored = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.version.as_deref(), Some("5.20.0"));
+        assert!(!addon_dir.join("WeakAurasTemplates").exists());
+    }
+
+    #[test]
+    fn versions_match_ignores_case_and_whitespace() {
+        assert!(versions_match(Some(" 5.21.1 "), Some("5.21.1")));
+        assert!(versions_match(Some("V5.21.1"), Some("v5.21.1")));
+        assert!(!versions_match(Some("5.21.0"), Some("5.21.1")));
     }
 }

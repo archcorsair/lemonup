@@ -23,9 +23,9 @@ use crate::app::{App, AppRuntime};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
-use crate::update::{
-    refresh_live_update_checks, refresh_managed_update_state, serialize_update_status,
-};
+#[cfg(test)]
+use crate::update::refresh_managed_update_state;
+use crate::update::{apply_live_updates, refresh_live_update_checks, serialize_update_status};
 use crate::wago::{WagoStability, install_wago_addon};
 
 #[tokio::main]
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui => run_tui(paths, runtime).await?,
         Commands::Check { addons } => run_check(paths, addons).await?,
-        Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run)?,
+        Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run).await?,
         Commands::InstallWago {
             addon,
             stability,
@@ -137,7 +137,7 @@ async fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn run_update(
+async fn run_update(
     paths: AppPaths,
     runtime: AppRuntime,
     force: bool,
@@ -190,16 +190,27 @@ fn run_update(
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
-            let summary = refresh_managed_update_state(&mut database, &addon_dir, dry_run)?;
+            let api_key = resolve_wago_api_key(&config_state);
+            let summary = apply_live_updates(
+                &mut database,
+                &addon_dir,
+                &[],
+                api_key.as_deref(),
+                force,
+                dry_run,
+            )
+            .await?;
             println!(
-                "update refresh: profile={}, tracked addons={}, targets={}, scanned={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, force={}, dry_run={}",
+                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, skipped_manual={}, skipped_unmanaged={}, skipped_unsupported={}, errors={}, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
                 summary.target_addons,
-                summary.scanned_addons,
-                summary.refreshed_addons,
+                summary.updated_addons,
+                summary.up_to_date,
+                summary.skipped_manual,
                 summary.skipped_unmanaged,
-                summary.missing_on_disk,
+                summary.skipped_unsupported,
+                summary.errors,
                 force,
                 dry_run
             );

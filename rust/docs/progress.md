@@ -76,8 +76,8 @@ Current checkpoint state:
 
 - no active unverified slice
 - current focus:
-  - checkpoint the first real provider-backed update check path
-  - move next into real Wago-backed update behavior
+  - checkpoint the first real provider-backed update path
+  - move next into update-all and richer provider-backed update behavior
 
 ## Newly Completed
 
@@ -183,26 +183,34 @@ These are implemented and manually verified in addition to the earlier chunks:
   - manual addons still report explicit `unknown`
   - non-Wago providers report explicit `unknown` until their live check paths are implemented
   - targeted live check was manually verified on `--profile dev`
+- first real provider-backed update path now exists via Wago CLI:
+  - `update` applies live Wago package updates for managed Wago addons
+  - `update --force` re-applies the current remote package for safe dev verification
+  - `update --force --dry-run` proves the update path without mutating disk
+  - updates preserve authoritative owned-folder relationships
+  - updates remove folders no longer shipped by the package
+  - updates preserve install time and kind-override behavior through managed state writes
+  - post-update `check`, TUI relationship rendering, delete, and undo were manually verified on `--profile dev`
 
 ## Next Up
 
 Next phase:
 
-1. real Wago-backed update flow
-2. update-all and richer provider-backed update checks
-3. Wago search and TUI install UX
+1. update-all and richer provider-backed update checks
+2. Wago search and TUI install UX
+3. broader provider/source parity
 
 ### Goal
 
 - stop relying on scan heuristics for important parent-child truth in managed flows
-- extend the proven Wago install and live-check contract into broader managed update/install behavior
+- extend the proven Wago install, live-check, and update contract into broader managed update/install behavior
 - let shell bulk actions operate safely on that model
 
 ### Planned order
 
-1. add real Wago-backed update behavior
-2. add update-all and richer provider-backed update checks
-3. layer Wago search and TUI install UX on top
+1. add update-all and richer provider-backed update checks
+2. layer Wago search and TUI install UX on top
+3. broaden provider/source coverage using the same managed ownership contract
 
 ## Remaining Major Work
 
@@ -210,7 +218,6 @@ Still missing or incomplete:
 
 - richer tree view for parent/child relationships
 - broader install flows beyond CLI-first Wago
-- update flows beyond managed disk refresh
 - update all flow
 - remote-backed update checks beyond Wago
 - search flows

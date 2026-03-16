@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::path::Path;
 
 use lemonup_core::{
@@ -23,6 +22,17 @@ pub(crate) struct UpdateRefreshSummary {
     pub(crate) refreshed_addons: usize,
     pub(crate) skipped_unmanaged: usize,
     pub(crate) missing_on_disk: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveUpdateSummary {
+    pub(crate) target_addons: usize,
+    pub(crate) updated_addons: usize,
+    pub(crate) up_to_date: usize,
+    pub(crate) skipped_manual: usize,
+    pub(crate) skipped_unmanaged: usize,
+    pub(crate) skipped_unsupported: usize,
+    pub(crate) errors: usize,
 }
 
 #[cfg(test)]
@@ -139,6 +149,64 @@ where
     Ok(results)
 }
 
+pub(crate) async fn apply_live_updates(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    selectors: &[String],
+    wago_api_key: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> Result<LiveUpdateSummary, LemonupError> {
+    let installed = database.list_addons()?;
+    let selected = resolve_selected_addons(&installed, selectors)?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut summary = LiveUpdateSummary {
+        target_addons: selected.len(),
+        updated_addons: 0,
+        up_to_date: 0,
+        skipped_manual: 0,
+        skipped_unmanaged: 0,
+        skipped_unsupported: 0,
+        errors: 0,
+    };
+
+    for addon in selected {
+        match addon.source {
+            SourceKind::Manual => {
+                summary.skipped_manual += 1;
+            }
+            SourceKind::Wago => {
+                if !addon.has_authoritative_owned_folders() {
+                    summary.skipped_unmanaged += 1;
+                    continue;
+                }
+                let Some(api_key) = wago_api_key else {
+                    summary.errors += 1;
+                    continue;
+                };
+
+                match crate::wago::update_wago_addon(
+                    database, addon_dir, &addon, api_key, force, dry_run,
+                )
+                .await
+                {
+                    Ok(result) if result.updated => summary.updated_addons += 1,
+                    Ok(_) => summary.up_to_date += 1,
+                    Err(_) => summary.errors += 1,
+                }
+            }
+            SourceKind::GitHub | SourceKind::Tukui | SourceKind::WowInterface => {
+                summary.skipped_unsupported += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
 pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
     if addon.source == lemonup_core::SourceKind::Manual {
         return (
@@ -177,6 +245,7 @@ pub(crate) fn serialize_update_status(status: UpdateStatus) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_managed_update_state(
     database: &mut StateDatabase,
     addon_dir: &Path,
