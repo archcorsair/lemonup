@@ -74,11 +74,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- relationship-safe post-action sync is the active slice
-- richer update-state summaries and selection-aware actions are the active slice
+- soft-delete trash plus shell undo is the active slice
 - current focus:
-  - keep the tree list clean and mouse-friendly
-  - prepare the next interaction pass, including click-to-highlight
+  - move parent deletes into a LemonUp-managed trash area
+  - keep undo short-lived and shell-driven
+  - preserve authoritative ownership metadata when undo restores managed addons
 - no active half-finished slice should be considered stable until user verifies it
 
 ## Newly Completed
@@ -166,9 +166,9 @@ These are implemented and manually verified in addition to the earlier chunks:
 
 Next phase:
 
-1. expose richer update-state summaries and selection-aware actions in the shell
-2. richer tree and management UX on top of the hardened model
-3. soft-delete trash model with undo for safer destructive operations
+1. soft-delete trash model with undo for safer destructive operations
+2. deeper update/install flows on top of the hardened ownership model
+3. broader source-backed update/install work on top of the hardened ownership model
 
 ### Goal
 

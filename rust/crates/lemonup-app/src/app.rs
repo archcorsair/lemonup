@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -29,7 +30,7 @@ use crate::update::{
     CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
 };
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | r refresh-selected | v select-refreshable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | z undo-delete | r refresh-selected | v select-refreshable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -93,6 +94,7 @@ enum AppMessage {
     DashboardRequestDelete,
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
+    DashboardUndoDelete,
     DashboardRunUpdateSelected,
     DashboardSelectRefreshableUpdates,
     DashboardToggleSelected,
@@ -123,6 +125,7 @@ enum AppTaskEvent {
     Onboarding(OnboardingTaskEvent),
     AddonScanFinished(std::result::Result<AddonScanOutcome, String>),
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
+    DashboardUndoFinished(std::result::Result<DashboardUndoOutcome, String>),
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
 }
 
@@ -138,6 +141,7 @@ struct AddonScanOutcome {
 struct DashboardDeleteOutcome {
     deleted_parents: usize,
     deleted_folders: usize,
+    undo_delete: Option<DashboardUndoDeleteState>,
     sync: AddonScanOutcome,
 }
 
@@ -145,6 +149,43 @@ struct DashboardDeleteOutcome {
 struct DashboardUpdateOutcome {
     summary: UpdateRefreshSummary,
     sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardUndoOutcome {
+    restored_parents: usize,
+    restored_folders: usize,
+    sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardTrashEntry {
+    folder: String,
+    original_path: PathBuf,
+    trashed_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardUndoDeleteState {
+    batch_dir: PathBuf,
+    addon_dir: PathBuf,
+    deleted_parent_folders: Vec<String>,
+    tracked_records: Vec<AddonRecord>,
+    moved_entries: Vec<DashboardTrashEntry>,
+}
+
+impl DashboardUndoDeleteState {
+    fn parent_count(&self) -> usize {
+        self.deleted_parent_folders.len()
+    }
+
+    fn moved_folder_count(&self) -> usize {
+        self.moved_entries.len()
+    }
+
+    fn target_summary(&self) -> String {
+        self.deleted_parent_folders.join(", ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,10 +711,13 @@ pub struct App {
     config_present: bool,
     config_store: ConfigStore,
     state_db_file: PathBuf,
+    trash_dir: PathBuf,
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
     dashboard: DashboardState,
+    undo_delete: Option<DashboardUndoDeleteState>,
+    undo_delete_in_progress: bool,
     last_dashboard_list_area: Option<Rect>,
     onboarding: OnboardingState,
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
@@ -686,6 +730,7 @@ impl App {
         let config_store = ConfigStore::new(paths.config_file);
         let config_state = config_store.load()?;
         let state_db_file = paths.state_db_file.clone();
+        let trash_dir = paths.data_dir.join("trash");
         let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
@@ -745,10 +790,13 @@ impl App {
             config_present,
             config_store,
             state_db_file,
+            trash_dir,
             runtime,
             effective_addon_dir,
             scan_state,
             dashboard: DashboardState::from_addons(addons),
+            undo_delete: None,
+            undo_delete_in_progress: false,
             last_dashboard_list_area: None,
             onboarding,
             task_events_tx,
@@ -900,6 +948,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
             KeyCode::Char('x') => vec![AppMessage::DashboardRequestDelete],
+            KeyCode::Char('z') => vec![AppMessage::DashboardUndoDelete],
             KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
             KeyCode::Char('a') => vec![AppMessage::DashboardSelectAll],
             KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
@@ -1070,7 +1119,11 @@ impl App {
                     .map(|value| value.to_vec()),
             ) {
                 (Some(addon_dir), Some(folders)) if !folders.is_empty() => vec![
-                    AppAction::StartDashboardDelete { addon_dir, folders },
+                    AppAction::StartDashboardDelete {
+                        addon_dir,
+                        trash_dir: self.trash_dir.clone(),
+                        folders,
+                    },
                     AppAction::SetStatus(
                         self.dashboard_status_for(self.dashboard.detail_mode, "delete running"),
                     ),
@@ -1086,6 +1139,39 @@ impl App {
                     self.dashboard_status_for(self.dashboard.detail_mode, "delete cancelled"),
                 ),
             ],
+            AppMessage::DashboardUndoDelete => {
+                if self.dashboard.pending_delete_folders().is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "confirm or cancel the pending delete before undoing the last delete",
+                    ))]
+                } else if self.undo_delete_in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "undo delete already running",
+                    ))]
+                } else if let Some(undo) = self.undo_delete.clone() {
+                    vec![
+                        AppAction::SetDashboardUndoInProgress(true),
+                        AppAction::StartDashboardUndoDelete { undo: undo.clone() },
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "restoring last delete: {} parent addon{}, {} folder{}",
+                                undo.parent_count(),
+                                plural_suffix(undo.parent_count()),
+                                undo.moved_folder_count(),
+                                plural_suffix(undo.moved_folder_count())
+                            ),
+                        )),
+                    ]
+                } else {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "no delete undo is available",
+                    ))]
+                }
+            }
             AppMessage::DashboardRunUpdateSelected => {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -1382,6 +1468,7 @@ impl App {
                 AppTaskEvent::DashboardDeleteFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                     AppAction::SetPendingDelete(None),
+                    AppAction::SetDashboardUndoDelete(outcome.undo_delete.clone()),
                     AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
                     AppAction::CompleteAddonScan {
                         path: outcome.sync.path,
@@ -1390,11 +1477,16 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &format!(
-                            "deleted {} addon{}, removed {} folder{}, sync complete",
+                            "deleted {} addon{}, moved {} folder{} to trash{}, sync complete",
                             outcome.deleted_parents,
                             plural_suffix(outcome.deleted_parents),
                             outcome.deleted_folders,
-                            plural_suffix(outcome.deleted_folders)
+                            plural_suffix(outcome.deleted_folders),
+                            if outcome.undo_delete.is_some() {
+                                " | press z to undo"
+                            } else {
+                                ""
+                            }
                         ),
                     )),
                 ],
@@ -1403,6 +1495,33 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &format!("delete failed: {error}"),
+                    )),
+                ],
+                AppTaskEvent::DashboardUndoFinished(Ok(outcome)) => vec![
+                    AppAction::ReplaceDashboardAddons(outcome.sync.addons),
+                    AppAction::SetDashboardUndoInProgress(false),
+                    AppAction::SetDashboardUndoDelete(None),
+                    AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                    AppAction::CompleteAddonScan {
+                        path: outcome.sync.path,
+                        summary: outcome.sync.summary,
+                    },
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "undo complete: restored {} parent addon{} and {} folder{}",
+                            outcome.restored_parents,
+                            plural_suffix(outcome.restored_parents),
+                            outcome.restored_folders,
+                            plural_suffix(outcome.restored_folders)
+                        ),
+                    )),
+                ],
+                AppTaskEvent::DashboardUndoFinished(Err(error)) => vec![
+                    AppAction::SetDashboardUndoInProgress(false),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("undo delete failed: {error}"),
                     )),
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
@@ -1446,8 +1565,24 @@ impl App {
             AppAction::SetPendingDelete(folders) => {
                 self.dashboard.set_pending_delete_folders(folders);
             }
+            AppAction::SetDashboardUndoDelete(undo) => {
+                let previous = self.undo_delete.take();
+                self.undo_delete = undo;
+                if let Some(previous) = previous {
+                    let keep_current = self
+                        .undo_delete
+                        .as_ref()
+                        .is_some_and(|current| current.batch_dir == previous.batch_dir);
+                    if !keep_current {
+                        let _ = fs::remove_dir_all(previous.batch_dir);
+                    }
+                }
+            }
             AppAction::SetDashboardDriftReport(drift_report) => {
                 self.dashboard.set_drift_report(drift_report);
+            }
+            AppAction::SetDashboardUndoInProgress(in_progress) => {
+                self.undo_delete_in_progress = in_progress;
             }
             AppAction::SetDashboardUpdateInProgress(in_progress) => {
                 self.dashboard.set_update_in_progress(in_progress);
@@ -1628,17 +1763,34 @@ impl App {
                     let _ = sender.send(AppTaskEvent::AddonScanFinished(result));
                 });
             }
-            AppAction::StartDashboardDelete { addon_dir, folders } => {
+            AppAction::StartDashboardDelete {
+                addon_dir,
+                trash_dir,
+                folders,
+            } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        delete_selected_addons(&state_db_file, &addon_dir, &folders)
+                        delete_selected_addons(&state_db_file, &addon_dir, &trash_dir, &folders)
                     })
                     .await
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::DashboardDeleteFinished(result));
+                });
+            }
+            AppAction::StartDashboardUndoDelete { undo } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        undo_deleted_addons(&state_db_file, &undo)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::DashboardUndoFinished(result));
                 });
             }
             AppAction::StartDashboardUpdateSelected { addon_dir, folders } => {
@@ -1925,6 +2077,23 @@ impl App {
             detail_mode_label(self.dashboard.detail_mode)
         )));
         lines.push(Line::from(""));
+
+        if let Some(undo_delete) = self.undo_delete.as_ref() {
+            lines.push(Line::from("Undo available"));
+            lines.push(Line::from(format!(
+                "Last delete: {} parent addon{}, {} folder{}",
+                undo_delete.parent_count(),
+                plural_suffix(undo_delete.parent_count()),
+                undo_delete.moved_folder_count(),
+                plural_suffix(undo_delete.moved_folder_count())
+            )));
+            lines.push(Line::from(format!(
+                "Targets: {}",
+                undo_delete.target_summary()
+            )));
+            lines.push(Line::from("Press z to restore the last delete batch."));
+            lines.push(Line::from(""));
+        }
 
         if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
             lines.push(Line::from("Pending delete confirmation"));
@@ -2319,24 +2488,43 @@ impl App {
 fn delete_selected_addons(
     state_db_file: &Path,
     addon_dir: &Path,
+    trash_dir: &Path,
     folders: &[String],
 ) -> std::result::Result<DashboardDeleteOutcome, String> {
     let database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    let batch_dir = create_trash_batch_dir(trash_dir)?;
     let mut deleted_parents = 0usize;
     let mut deleted_folders = 0usize;
+    let mut tracked_records = Vec::new();
+    let mut tracked_folders = HashSet::new();
+    let mut moved_entries = Vec::new();
 
     for folder in folders {
         let planned_folders = database
             .planned_removal_folders(folder)
             .map_err(|error| error.to_string())?;
 
+        for planned_folder in &planned_folders {
+            if let Some(record) = database
+                .get_addon_by_folder(planned_folder)
+                .map_err(|error| error.to_string())?
+            {
+                if tracked_folders.insert(record.folder.clone()) {
+                    tracked_records.push(record);
+                }
+            }
+        }
+
         for planned_folder in planned_folders {
             let path = addon_dir.join(&planned_folder);
-            if path.is_dir() {
-                fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
-                deleted_folders += 1;
-            } else if path.is_file() {
-                fs::remove_file(&path).map_err(|error| error.to_string())?;
+            if path.exists() {
+                let trashed_path = batch_dir.join(&planned_folder);
+                move_path(&path, &trashed_path)?;
+                moved_entries.push(DashboardTrashEntry {
+                    folder: planned_folder,
+                    original_path: path,
+                    trashed_path,
+                });
                 deleted_folders += 1;
             }
         }
@@ -2348,11 +2536,139 @@ fn delete_selected_addons(
     }
 
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
+    let undo_delete = if moved_entries.is_empty() {
+        let _ = fs::remove_dir_all(&batch_dir);
+        None
+    } else {
+        Some(DashboardUndoDeleteState {
+            batch_dir,
+            addon_dir: addon_dir.to_path_buf(),
+            deleted_parent_folders: folders.to_vec(),
+            tracked_records,
+            moved_entries,
+        })
+    };
+
     Ok(DashboardDeleteOutcome {
         deleted_parents,
         deleted_folders,
+        undo_delete,
         sync,
     })
+}
+
+fn undo_deleted_addons(
+    state_db_file: &Path,
+    undo: &DashboardUndoDeleteState,
+) -> std::result::Result<DashboardUndoOutcome, String> {
+    for entry in &undo.moved_entries {
+        if entry.original_path.exists() {
+            return Err(format!(
+                "cannot restore {} because the destination already exists",
+                entry.original_path.display()
+            ));
+        }
+    }
+
+    for entry in &undo.moved_entries {
+        move_path(&entry.trashed_path, &entry.original_path)?;
+    }
+
+    let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    for record in &undo.tracked_records {
+        if record.has_authoritative_owned_folders() {
+            database
+                .record_managed_addon(record)
+                .map_err(|error| error.to_string())?;
+        } else {
+            database
+                .upsert_addon(record)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    let _ = fs::remove_dir_all(&undo.batch_dir);
+
+    let sync = sync_dashboard_state(state_db_file, &undo.addon_dir)?;
+    let restored_parents = undo
+        .deleted_parent_folders
+        .iter()
+        .filter(|folder| {
+            sync.addons
+                .iter()
+                .any(|addon| addon.folder == folder.as_str())
+        })
+        .count();
+
+    Ok(DashboardUndoOutcome {
+        restored_parents,
+        restored_folders: undo.moved_entries.len(),
+        sync,
+    })
+}
+
+fn create_trash_batch_dir(trash_dir: &Path) -> std::result::Result<PathBuf, String> {
+    fs::create_dir_all(trash_dir).map_err(|error| error.to_string())?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+
+    for attempt in 0..100u16 {
+        let candidate = if attempt == 0 {
+            trash_dir.join(format!("batch-{timestamp}"))
+        } else {
+            trash_dir.join(format!("batch-{timestamp}-{attempt}"))
+        };
+        if !candidate.exists() {
+            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
+            return Ok(candidate);
+        }
+    }
+
+    Err("failed to allocate a unique trash batch directory".to_string())
+}
+
+fn move_path(source: &Path, destination: &Path) -> std::result::Result<(), String> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) if source.is_dir() => {
+            copy_dir_recursively(source, destination)?;
+            fs::remove_dir_all(source).map_err(|error| error.to_string())
+        }
+        Err(_) if source.is_file() => {
+            fs::copy(source, destination).map_err(|error| error.to_string())?;
+            fs::remove_file(source).map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn copy_dir_recursively(source: &Path, destination: &Path) -> std::result::Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            copy_dir_recursively(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::copy(&from, &to).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn refresh_selected_addons(
@@ -2650,10 +2966,13 @@ mod tests {
             config_present: true,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
+            trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
             dashboard: DashboardState::from_addons(vec![first, second, third]),
+            undo_delete: None,
+            undo_delete_in_progress: false,
             last_dashboard_list_area: None,
             onboarding: OnboardingState::new(),
             task_events_tx,
@@ -2799,6 +3118,10 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('x'))),
             vec![AppMessage::DashboardRequestDelete]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('z'))),
+            vec![AppMessage::DashboardUndoDelete]
         );
         let mut update_mode = app_for_tests(ShellMode::Dashboard);
         update_mode.dashboard.detail_mode = DetailMode::Update;
@@ -3149,6 +3472,7 @@ mod tests {
         fs::create_dir_all(addon_dir.join("Second_Config")).expect("create child dir");
 
         let state_db_file = temp.path().join("state.sqlite");
+        let trash_dir = temp.path().join("trash");
         let mut database = StateDatabase::open(&state_db_file).expect("open state db");
 
         let mut managed = AddonRecord::new("Second", "Second", SourceKind::GitHub);
@@ -3160,15 +3484,76 @@ mod tests {
             .record_managed_addon(&managed)
             .expect("record managed addon");
 
-        let outcome =
-            super::delete_selected_addons(&state_db_file, &addon_dir, &["Second".to_string()])
-                .expect("delete selected addons");
+        let outcome = super::delete_selected_addons(
+            &state_db_file,
+            &addon_dir,
+            &trash_dir,
+            &["Second".to_string()],
+        )
+        .expect("delete selected addons");
 
         assert_eq!(outcome.deleted_parents, 1);
         assert_eq!(outcome.deleted_folders, 2);
+        assert!(outcome.undo_delete.is_some());
         assert!(outcome.sync.addons.is_empty());
         assert!(!addon_dir.join("Second").exists());
         assert!(!addon_dir.join("Second_Config").exists());
+    }
+
+    #[test]
+    fn undo_deleted_addons_restores_parent_owned_folders_and_state_rows() {
+        let temp = tempdir().expect("temp dir");
+        let addon_dir = temp.path().join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let parent_dir = addon_dir.join("Second");
+        let child_dir = addon_dir.join("Second_Config");
+        fs::create_dir_all(&parent_dir).expect("create parent dir");
+        fs::create_dir_all(&child_dir).expect("create child dir");
+        fs::write(parent_dir.join("Second.toc"), "## Title: Second\n").expect("write parent toc");
+        fs::write(
+            child_dir.join("Second_Config.toc"),
+            "## Title: Second Config\n",
+        )
+        .expect("write child toc");
+
+        let state_db_file = temp.path().join("state.sqlite");
+        let trash_dir = temp.path().join("trash");
+        let mut database = StateDatabase::open(&state_db_file).expect("open state db");
+
+        let mut managed = AddonRecord::new("Second", "Second", SourceKind::GitHub);
+        managed.version = Some("2.0.0".to_string());
+        managed.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Second_Config".to_string(),
+        }]);
+        database
+            .record_managed_addon(&managed)
+            .expect("record managed addon");
+
+        let delete_outcome = super::delete_selected_addons(
+            &state_db_file,
+            &addon_dir,
+            &trash_dir,
+            &["Second".to_string()],
+        )
+        .expect("delete selected addons");
+        let undo = delete_outcome.undo_delete.expect("undo state");
+
+        let restore_outcome =
+            super::undo_deleted_addons(&state_db_file, &undo).expect("undo deleted addons");
+
+        assert_eq!(restore_outcome.restored_parents, 1);
+        assert_eq!(restore_outcome.restored_folders, 2);
+        assert!(addon_dir.join("Second").exists());
+        assert!(addon_dir.join("Second_Config").exists());
+
+        let restored = StateDatabase::open(&state_db_file)
+            .expect("open restored db")
+            .list_addons()
+            .expect("list addons");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].folder, "Second");
+        assert!(restored[0].has_authoritative_owned_folders());
+        assert_eq!(restored[0].owned_folders.len(), 1);
     }
 
     #[test]
@@ -3189,24 +3574,69 @@ mod tests {
             AppTaskEvent::DashboardDeleteFinished(Ok(DashboardDeleteOutcome {
                 deleted_parents: 1,
                 deleted_folders: 2,
+                undo_delete: None,
                 sync: sync.clone(),
             })),
         ));
 
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 6);
         assert!(matches!(actions[0], AppAction::ReplaceDashboardAddons(_)));
         assert_eq!(actions[1], AppAction::SetPendingDelete(None));
         assert!(matches!(
             actions[2],
+            AppAction::SetDashboardUndoDelete(None)
+        ));
+        assert!(matches!(
+            actions[3],
             AppAction::SetDashboardDriftReport(Some(_))
         ));
         assert_eq!(
-            actions[3],
+            actions[4],
             AppAction::CompleteAddonScan {
                 path: sync.path,
                 summary: sync.summary,
             }
         );
+    }
+
+    #[test]
+    fn dashboard_undo_finished_clears_undo_state_and_triggers_fresh_sync_actions() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let sync = AddonScanOutcome {
+            path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+            summary: ScanSummary {
+                scanned_addons: 1,
+                upserted_addons: 1,
+                removed_addons: 0,
+            },
+            addons: vec![AddonRecord::new("Second", "Second", SourceKind::GitHub)],
+            drift_report: DriftReport::empty(),
+        };
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::DashboardUndoFinished(Ok(super::DashboardUndoOutcome {
+                restored_parents: 1,
+                restored_folders: 2,
+                sync: sync.clone(),
+            })),
+        ));
+
+        assert_eq!(actions.len(), 6);
+        assert!(matches!(actions[0], AppAction::ReplaceDashboardAddons(_)));
+        assert_eq!(actions[1], AppAction::SetDashboardUndoInProgress(false));
+        assert_eq!(actions[2], AppAction::SetDashboardUndoDelete(None));
+        assert!(matches!(
+            actions[3],
+            AppAction::SetDashboardDriftReport(Some(_))
+        ));
+        assert_eq!(
+            actions[4],
+            AppAction::CompleteAddonScan {
+                path: sync.path,
+                summary: sync.summary,
+            }
+        );
+        assert!(matches!(actions[5], AppAction::SetStatus(_)));
     }
 
     #[test]
