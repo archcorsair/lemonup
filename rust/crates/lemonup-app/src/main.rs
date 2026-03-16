@@ -23,7 +23,9 @@ use crate::app::{App, AppRuntime};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
-use crate::update::{build_update_checks, refresh_managed_update_state, serialize_update_status};
+use crate::update::{
+    refresh_live_update_checks, refresh_managed_update_state, serialize_update_status,
+};
 use crate::wago::{WagoStability, install_wago_addon};
 
 #[tokio::main]
@@ -41,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui => run_tui(paths, runtime).await?,
-        Commands::Check { addons } => run_check(paths, addons)?,
+        Commands::Check { addons } => run_check(paths, addons).await?,
         Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run)?,
         Commands::InstallWago {
             addon,
@@ -75,12 +77,15 @@ async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let database = StateDatabase::open(paths.state_db_file)?;
-    let installed = database.list_addons()?;
+async fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let mut database = StateDatabase::open(paths.state_db_file)?;
     let show_details = !addons.is_empty();
-    let checks =
-        build_update_checks(&installed, &addons).map_err(Box::<dyn std::error::Error>::from)?;
+    let api_key = resolve_wago_api_key(&config_state);
+    let checks = refresh_live_update_checks(&mut database, &addons, api_key.as_deref())
+        .await
+        .map_err(Box::<dyn std::error::Error>::from)?;
 
     let up_to_date = checks
         .iter()

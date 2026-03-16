@@ -43,6 +43,12 @@ pub struct WagoInstallSummary {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WagoRemoteVersion {
+    pub(crate) source_url: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct WagoRelease {
     label: Option<String>,
@@ -234,6 +240,44 @@ pub async fn install_wago_addon(
         selected_stability,
         dry_run,
     )
+}
+
+pub(crate) async fn fetch_wago_remote_version(
+    addon: &AddonRecord,
+    api_key: &str,
+) -> Result<WagoRemoteVersion, String> {
+    let target = addon
+        .source_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "tracked Wago addon '{}' is missing a source URL",
+                addon.folder
+            )
+        })?;
+    let addon_id = parse_wago_target(target)?;
+    let client = Client::builder()
+        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let addon = fetch_addon_details(&client, &addon_id, api_key).await?;
+    let stability = addon.best_available_stability().ok_or_else(|| {
+        format!(
+            "no release is available for Wago addon '{}'",
+            addon.display_name
+        )
+    })?;
+
+    Ok(WagoRemoteVersion {
+        source_url: Some(
+            addon
+                .website_url
+                .clone()
+                .unwrap_or_else(|| format!("https://addons.wago.io/addons/{}", addon.id)),
+        ),
+        version: release_version(&addon, stability),
+    })
 }
 
 fn install_downloaded_wago_addon(

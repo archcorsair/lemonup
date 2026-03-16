@@ -76,8 +76,8 @@ Current checkpoint state:
 
 - no active unverified slice
 - current focus:
-  - checkpoint the first real source-backed install path
-  - keep broad provider/search UI work for later slices
+  - checkpoint the first real provider-backed update check path
+  - move next into real Wago-backed update behavior
 
 ## Newly Completed
 
@@ -177,24 +177,30 @@ These are implemented and manually verified in addition to the earlier chunks:
   - discovered folder sets are written as authoritative managed ownership
   - dry-run and real install were manually verified on `--profile dev`
   - installed Wago addons participate correctly in TUI delete and undo flows
+- first real provider-backed update check now exists via Wago CLI:
+  - `check <addon>` performs a live Wago lookup for tracked Wago addons
+  - live checks refresh `remote_version` and `last_checked_at` in state
+  - manual addons still report explicit `unknown`
+  - non-Wago providers report explicit `unknown` until their live check paths are implemented
+  - targeted live check was manually verified on `--profile dev`
 
 ## Next Up
 
 Next phase:
 
-1. broaden source-backed update/install work on top of the hardened ownership model
+1. real Wago-backed update flow
 2. update-all and richer provider-backed update checks
 3. Wago search and TUI install UX
 
 ### Goal
 
 - stop relying on scan heuristics for important parent-child truth in managed flows
-- extend the proven Wago install contract into broader managed update/install behavior
+- extend the proven Wago install and live-check contract into broader managed update/install behavior
 - let shell bulk actions operate safely on that model
 
 ### Planned order
 
-1. broaden the Wago-backed managed install/update contract
+1. add real Wago-backed update behavior
 2. add update-all and richer provider-backed update checks
 3. layer Wago search and TUI install UX on top
 
@@ -206,7 +212,7 @@ Still missing or incomplete:
 - broader install flows beyond CLI-first Wago
 - update flows beyond managed disk refresh
 - update all flow
-- remote-backed update checks beyond tracked metadata
+- remote-backed update checks beyond Wago
 - search flows
 - config editing
 - backup workflows

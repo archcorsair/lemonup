@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
 
 use lemonup_core::{
-    AddonRecord, GameFlavor, LemonupError, ScannedAddon, StateDatabase, UpdateStatus,
+    AddonRecord, GameFlavor, LemonupError, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
     scan_addons_dir,
 };
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckResult {
@@ -23,6 +25,7 @@ pub(crate) struct UpdateRefreshSummary {
     pub(crate) missing_on_disk: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn build_update_checks(
     installed: &[AddonRecord],
     selectors: &[String],
@@ -41,6 +44,99 @@ pub(crate) fn build_update_checks(
             }
         })
         .collect())
+}
+
+pub(crate) async fn refresh_live_update_checks(
+    database: &mut StateDatabase,
+    selectors: &[String],
+    wago_api_key: Option<&str>,
+) -> Result<Vec<CheckResult>, LemonupError> {
+    refresh_live_update_checks_with(database, selectors, wago_api_key, |addon, api_key| async move {
+        crate::wago::fetch_wago_remote_version(&addon, &api_key).await
+    })
+    .await
+}
+
+async fn refresh_live_update_checks_with<F, Fut>(
+    database: &mut StateDatabase,
+    selectors: &[String],
+    wago_api_key: Option<&str>,
+    fetch_wago_remote_version: F,
+) -> Result<Vec<CheckResult>, LemonupError>
+where
+    F: Fn(AddonRecord, String) -> Fut,
+    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, String>>,
+{
+    let installed = database.list_addons()?;
+    let selected = resolve_selected_addons(&installed, selectors)?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(selected.len());
+
+    for addon in selected {
+        match addon.source {
+            SourceKind::Manual => {
+                let (status, message) = determine_update_status(&addon);
+                results.push(CheckResult {
+                    addon_name: addon.folder.clone(),
+                    status,
+                    remote_version: addon.remote_version.clone(),
+                    message,
+                });
+            }
+            SourceKind::Wago => {
+                let Some(api_key) = wago_api_key else {
+                    results.push(CheckResult {
+                        addon_name: addon.folder.clone(),
+                        status: UpdateStatus::Unknown,
+                        remote_version: addon.remote_version.clone(),
+                        message: Some("Wago API key not configured".to_string()),
+                    });
+                    continue;
+                };
+
+                match fetch_wago_remote_version(addon.clone(), api_key.to_string()).await {
+                    Ok(remote) => {
+                        let mut refreshed = addon.clone();
+                        refreshed.remote_version = remote.version;
+                        refreshed.source_url = remote.source_url.or(refreshed.source_url);
+                        refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
+                        database.upsert_addon(&refreshed)?;
+
+                        let (status, message) = determine_update_status(&refreshed);
+                        results.push(CheckResult {
+                            addon_name: refreshed.folder.clone(),
+                            status,
+                            remote_version: refreshed.remote_version.clone(),
+                            message,
+                        });
+                    }
+                    Err(error) => {
+                        results.push(CheckResult {
+                            addon_name: addon.folder.clone(),
+                            status: UpdateStatus::Error,
+                            remote_version: addon.remote_version.clone(),
+                            message: Some(error),
+                        });
+                    }
+                }
+            }
+            SourceKind::GitHub | SourceKind::Tukui | SourceKind::WowInterface => {
+                results.push(CheckResult {
+                    addon_name: addon.folder.clone(),
+                    status: UpdateStatus::Unknown,
+                    remote_version: addon.remote_version.clone(),
+                    message: Some(format!(
+                        "live checks are not implemented yet for {} addons",
+                        serialize_source_kind(addon.source)
+                    )),
+                });
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
@@ -229,4 +325,130 @@ fn normalize_selector(value: &str) -> String {
 
 fn normalize_version(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn serialize_source_kind(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::GitHub => "GitHub",
+        SourceKind::Tukui => "TukUI",
+        SourceKind::WowInterface => "WoWInterface",
+        SourceKind::Wago => "Wago",
+        SourceKind::Manual => "manual",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refresh_live_update_checks_with;
+    use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn live_checks_refresh_wago_remote_versions_from_mocked_provider() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.version = Some("5.20.0".to_string());
+        addon.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            |tracked, api_key| {
+                let tracked = tracked.clone();
+                async move {
+                    assert_eq!(tracked.folder, "WeakAuras");
+                    assert_eq!(api_key, "fake-key");
+                    Ok(crate::wago::WagoRemoteVersion {
+                        source_url: tracked.source_url.clone(),
+                        version: Some("5.21.1".to_string()),
+                    })
+                }
+            },
+        )
+        .await
+        .expect("refresh checks");
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, UpdateStatus::UpdateAvailable);
+        assert_eq!(checks[0].remote_version.as_deref(), Some("5.21.1"));
+
+        let refreshed = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(refreshed.remote_version.as_deref(), Some("5.21.1"));
+        assert!(refreshed.last_checked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn live_checks_report_missing_wago_api_key_without_fetching() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.version = Some("5.20.0".to_string());
+        addon.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            None,
+            |_tracked, _api_key| async move {
+                panic!("fetcher should not run without an API key");
+                #[allow(unreachable_code)]
+                Ok(crate::wago::WagoRemoteVersion {
+                    source_url: None,
+                    version: None,
+                })
+            },
+        )
+        .await
+        .expect("refresh checks");
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, UpdateStatus::Unknown);
+        assert_eq!(
+            checks[0].message.as_deref(),
+            Some("Wago API key not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_checks_mark_non_wago_providers_as_unsupported_for_now() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut addon = AddonRecord::new("DBM", "DBM-Core", SourceKind::GitHub);
+        addon.version = Some("1.0.0".to_string());
+        addon.remote_version = Some("1.1.0".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            Some("unused"),
+            |_tracked, _api_key| async move {
+                panic!("Wago fetcher should not run for non-Wago sources");
+                #[allow(unreachable_code)]
+                Ok(crate::wago::WagoRemoteVersion {
+                    source_url: None,
+                    version: None,
+                })
+            },
+        )
+        .await
+        .expect("refresh checks");
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, UpdateStatus::Unknown);
+        assert_eq!(
+            checks[0].message.as_deref(),
+            Some("live checks are not implemented yet for GitHub addons")
+        );
+    }
 }
