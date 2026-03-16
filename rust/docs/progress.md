@@ -157,6 +157,10 @@ These are implemented and manually verified in addition to the earlier chunks:
   - expanded tree rows are now single-line only; list metadata noise was removed
   - overview detail shows relationship source and child-folder summaries
   - mouse wheel navigation is now explicitly captured and moves one row per step
+  - left-click now highlights the clicked list row
+  - left-button drag now moves highlight with the cursor
+  - mouse interactions stay selection-only; parent-only action rules are unchanged
+  - expand-all and collapse-all now preserve logical selection when tree rows are inserted or removed above the current highlight
 
 ## Next Up
 
@@ -174,9 +178,9 @@ Next phase:
 
 ### Planned order
 
-1. richer tree and relationship UX, including click-to-highlight
-2. soft-delete trash model with undo for safer destructive operations
-3. deeper update/install flows on top of the hardened ownership model
+1. soft-delete trash model with undo for safer destructive operations
+2. deeper update/install flows on top of the hardened ownership model
+3. broader source-backed update/install work on top of the hardened ownership model
 
 ## Remaining Major Work
 
