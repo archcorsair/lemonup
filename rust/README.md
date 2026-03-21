@@ -1,12 +1,27 @@
 # LemonUp Rust v2
 
-Rust rewrite scaffold for LemonUp.
+Rust rewrite for LemonUp.
+
+Important:
+- this is the v2 app intended to fully replace the existing TypeScript/Bun v1 app
+- the v1 code still exists at the repo root only as a feature-parity and UX reference
+- do not extend v1 unless the user explicitly asks
 
 ## Layout
 
 - `crates/lemonup-core`: shared domain model, config/state storage, typed progress events
 - `crates/lemonup-app`: Ratatui shell and narrow CLI entrypoint
 - `docs/`: acceptance matrix, handoff notes, progress tracker, v1 gaps, and the single-surface shell plan
+
+## Read Order
+
+Start here before continuing the rewrite:
+
+1. `docs/windows-thread-handoff.md`
+2. `docs/progress.md`
+3. `docs/acceptance-matrix.md`
+4. `docs/known-v1-gaps.md`
+5. `docs/single-surface-shell-plan.md`
 
 ## Intended commands
 
