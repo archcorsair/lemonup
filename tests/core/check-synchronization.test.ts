@@ -27,6 +27,7 @@ describe("Update Check Synchronization", () => {
 
   afterEach(() => {
     mock.restore();
+    addonManager.close();
     dbManager.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
