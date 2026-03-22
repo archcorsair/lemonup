@@ -39,8 +39,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest pushed commit at handoff time: `64e4ec8` `feat(rust): add live Wago update flow`
-- current worktree status at handoff pass: clean
+- latest commit at handoff pass: `3663147` `fix(tests): close addon manager before temp cleanup`
+- current worktree status at handoff pass: dirty with local Rust v2 Wago search/TUI install UX implementation awaiting manual verification
 
 ## Current State
 
@@ -87,10 +87,17 @@ Implemented, committed, and pushed:
 - update-all CLI contract
 - targeted CLI update selectors with per-addon result reporting
 - explicit TUI update-pane refresh wording to distinguish tracked-state refresh from live apply/update
+- local unverified Wago search plus TUI install UX implementation is currently in the worktree:
+  - Search pane runs Wago search
+  - Search pane installs the selected Wago result
+  - Install pane accepts direct Wago slug/URL install
+  - replace/reinstall now requires explicit confirmation
 
 ## Recent Important Commits
 
 Most relevant recent milestones:
+- `3663147` `fix(tests): close addon manager before temp cleanup`
+- `7236ff5` `feat(rust): add targeted cli update selectors`
 - `64e4ec8` `feat(rust): add live Wago update flow`
 - `7c3ffaa` `feat(rust): add live Wago update checks`
 - `be3320d` `feat(rust): add Wago install flow`
@@ -251,21 +258,21 @@ Already proven in some form:
 
 Still missing or incomplete for MVP:
 - update selected against real provider-backed updates in the TUI
-- Wago search flow
-- TUI install UX
+- Wago search plus TUI install UX manual verification / checkpoint
 - broader provider/source parity
 - richer config/backup workflows
 
 ## Next Recommended Slice
 
 Next real phase:
-1. layer Wago search and TUI install UX on top
+1. manually verify and checkpoint the in-worktree Wago search plus TUI install UX slice
 2. broaden provider/source coverage using the same managed ownership contract
 3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
 Why this is next:
 - Wago install, live check, update-all, and targeted update are now proven in the CLI
-- biggest remaining MVP gap is search/install UX inside the shell plus broader provider coverage
+- the next unverified slice already implemented locally is search/install UX inside the shell
+- after that, the biggest remaining MVP gap is broader provider coverage
 - the ownership model is already hardened enough to build on
 
 ## Suggested First Commands In A New Windows-Rooted Thread
@@ -289,4 +296,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. CLI update-all and targeted update selectors are already landed; next slice is Wago search plus TUI install UX, then broader provider parity and real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. CLI update-all and targeted update selectors are already landed, and the local worktree currently contains an unverified Wago search plus TUI install UX slice that needs manual verification before checkpointing. After that, move to broader provider parity and real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`

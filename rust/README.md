@@ -33,3 +33,9 @@ cargo run -p lemonup-app --bin lemonup -- update --dry-run
 cargo run -p lemonup-app --bin lemonup -- update WeakAuras --dry-run
 cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
 ```
+
+## Current Wago Shell Slice
+
+- `Search` pane: Wago search plus selected-result install
+- `Install` pane: direct Wago slug or URL install
+- current scope is retail-only and stable-only

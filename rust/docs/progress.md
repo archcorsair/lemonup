@@ -74,10 +74,16 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- no active unverified slice
+- active unverified slice:
+  - Wago search plus TUI install UX
+- implemented locally and covered by Rust tests, but still awaiting user manual verification:
+  - Search pane now runs Wago search inside the shell
+  - Search pane now supports installing the selected Wago result
+  - Install pane now supports direct Wago slug or URL install
+  - install flows now require explicit confirmation before replacing existing tracked/on-disk folders
 - current focus:
-  - checkpoint the CLI update-all plus targeted selector contract
-  - move next into Wago search and TUI install UX
+  - manually verify the new Search and Install pane behavior on `--profile dev`
+  - then checkpoint and move next into broader provider/source parity
 
 ## Newly Completed
 
@@ -203,11 +209,28 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `r` refreshes tracked update state for the current parent selection
   - status text and summary labels now say tracked refresh explicitly
 
+## Implemented, Awaiting Manual Verification
+
+- first real Wago search and install UX now exists in the TUI:
+  - Search pane is now a Wago search surface instead of a placeholder
+  - search is retail-only, stable-only, and runs on explicit `Enter`
+  - search results are navigable in-pane and show selected-result details
+  - Search pane can install the selected Wago result
+  - Install pane now accepts a direct Wago slug or addon URL
+  - both install entry points require explicit confirmation before replacing an existing tracked/on-disk addon
+  - successful installs resync the dashboard through the normal scan path
+- focused Rust coverage now exists for:
+  - search state transitions
+  - search result install dispatch
+  - direct install dispatch
+  - pending replace-confirmation routing
+  - Wago search result parsing and install inspection
+
 ## Next Up
 
 Next phase:
 
-1. Wago search and TUI install UX
+1. manually verify and checkpoint Wago search plus TUI install UX
 2. broader provider/source parity
 3. real provider-backed selected updates in the TUI
 
@@ -219,7 +242,7 @@ Next phase:
 
 ### Planned order
 
-1. layer Wago search and TUI install UX on top of the current Wago CLI contract
+1. manually verify the new Wago search/direct-install shell flows and checkpoint them
 2. broaden provider/source coverage using the same managed ownership contract
 3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
@@ -230,11 +253,9 @@ Still missing or incomplete:
 - richer tree view for parent/child relationships
 - broader install flows beyond CLI-first Wago
 - remote-backed update checks beyond Wago
-- search flows
 - config editing
 - backup workflows
 - broader source parity behavior
-- TUI install/search flow
 - real provider-backed selected updates in the TUI
 
 ## Minimum MVP

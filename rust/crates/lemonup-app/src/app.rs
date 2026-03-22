@@ -29,6 +29,11 @@ use crate::tui::Backend;
 use crate::update::{
     CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
 };
+use crate::wago::{
+    WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
+    inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
+    search_wago_addons,
+};
 
 const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | z undo-delete | r refresh-selected | v select-refreshable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
 
@@ -105,6 +110,21 @@ enum AppMessage {
     DashboardCollapseAllRelationships,
     DashboardCollapseExpanded,
     SetDetailMode(DetailMode),
+    InstallBeginEditing,
+    InstallStopEditing,
+    InstallInputChar(char),
+    InstallBackspace,
+    InstallSubmit,
+    SearchBeginEditing,
+    SearchStopEditing,
+    SearchInputChar(char),
+    SearchBackspace,
+    SearchSubmit,
+    SearchResultNext,
+    SearchResultPrevious,
+    SearchInstallSelected,
+    WagoConfirmInstall,
+    WagoCancelInstall,
     OnboardingBeginEditing,
     OnboardingStopEditing,
     OnboardingInputChar(char),
@@ -127,6 +147,8 @@ enum AppTaskEvent {
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
     DashboardUndoFinished(std::result::Result<DashboardUndoOutcome, String>),
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
+    WagoSearchFinished(std::result::Result<WagoSearchOutcome, String>),
+    WagoInstallFinished(std::result::Result<WagoInstallTaskOutcome, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +171,27 @@ struct DashboardDeleteOutcome {
 struct DashboardUpdateOutcome {
     summary: UpdateRefreshSummary,
     sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WagoSearchOutcome {
+    query: String,
+    results: Vec<WagoSearchResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WagoInstallOutcome {
+    summary: WagoInstallSummary,
+    sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WagoInstallTaskOutcome {
+    NeedsConfirmation {
+        request: PendingWagoInstallRequest,
+        inspection: WagoInstallInspection,
+    },
+    Installed(WagoInstallOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +739,173 @@ impl DashboardState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallPaneState {
+    input: String,
+    is_editing: bool,
+}
+
+impl Default for InstallPaneState {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            is_editing: true,
+        }
+    }
+}
+
+impl InstallPaneState {
+    fn begin_editing(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = true;
+        next
+    }
+
+    fn stop_editing(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = false;
+        next
+    }
+
+    fn insert_char(&self, character: char) -> Self {
+        let mut next = self.clone();
+        next.input.push(character);
+        next
+    }
+
+    fn backspace(&self) -> Self {
+        let mut next = self.clone();
+        next.input.pop();
+        next
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchPaneState {
+    query: String,
+    is_editing: bool,
+    in_progress: bool,
+    results: Vec<WagoSearchResult>,
+    selected_result: Option<usize>,
+    last_query: Option<String>,
+}
+
+impl Default for SearchPaneState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            is_editing: true,
+            in_progress: false,
+            results: Vec::new(),
+            selected_result: None,
+            last_query: None,
+        }
+    }
+}
+
+impl SearchPaneState {
+    fn begin_editing(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = true;
+        next
+    }
+
+    fn stop_editing(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = false;
+        next
+    }
+
+    fn insert_char(&self, character: char) -> Self {
+        let mut next = self.clone();
+        next.query.push(character);
+        next
+    }
+
+    fn backspace(&self) -> Self {
+        let mut next = self.clone();
+        next.query.pop();
+        next
+    }
+
+    fn start_search(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = false;
+        next.in_progress = true;
+        next.last_query = Some(next.query.trim().to_string());
+        next
+    }
+
+    fn finish_search(&self, query: String, results: Vec<WagoSearchResult>) -> Self {
+        let mut next = self.clone();
+        next.in_progress = false;
+        next.is_editing = false;
+        next.last_query = Some(query);
+        next.results = results;
+        next.selected_result = if next.results.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        next
+    }
+
+    fn fail_search(&self) -> Self {
+        let mut next = self.clone();
+        next.in_progress = false;
+        next
+    }
+
+    fn select_next(&self) -> Self {
+        if self.results.is_empty() {
+            return self.clone();
+        }
+
+        let mut next = self.clone();
+        next.selected_result = Some(match next.selected_result {
+            Some(index) => (index + 1) % next.results.len(),
+            None => 0,
+        });
+        next
+    }
+
+    fn select_previous(&self) -> Self {
+        if self.results.is_empty() {
+            return self.clone();
+        }
+
+        let mut next = self.clone();
+        next.selected_result = Some(match next.selected_result {
+            Some(0) | None => next.results.len() - 1,
+            Some(index) => index - 1,
+        });
+        next
+    }
+
+    fn selected_result(&self) -> Option<&WagoSearchResult> {
+        self.selected_result
+            .and_then(|index| self.results.get(index))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WagoInstallSource {
+    DirectInput,
+    SearchResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWagoInstallRequest {
+    target: String,
+    source: WagoInstallSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WagoInstallConfirmation {
+    request: PendingWagoInstallRequest,
+    inspection: WagoInstallInspection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ScanState {
     Idle,
     Pending,
@@ -709,6 +919,7 @@ pub struct App {
     quit_requested: bool,
     status_line: String,
     config_present: bool,
+    wago_api_key: Option<String>,
     config_store: ConfigStore,
     state_db_file: PathBuf,
     trash_dir: PathBuf,
@@ -716,6 +927,10 @@ pub struct App {
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
     dashboard: DashboardState,
+    install_pane: InstallPaneState,
+    search_pane: SearchPaneState,
+    pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
+    wago_install_in_progress: bool,
     undo_delete: Option<DashboardUndoDeleteState>,
     undo_delete_in_progress: bool,
     last_dashboard_list_area: Option<Rect>,
@@ -734,6 +949,7 @@ impl App {
         let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
+        let wago_api_key = resolve_wago_api_key(&config_state);
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
             ConfigLoad::Missing(_) => None,
@@ -788,6 +1004,7 @@ impl App {
             quit_requested: false,
             status_line: String::new(),
             config_present,
+            wago_api_key,
             config_store,
             state_db_file,
             trash_dir,
@@ -795,6 +1012,10 @@ impl App {
             effective_addon_dir,
             scan_state,
             dashboard: DashboardState::from_addons(addons),
+            install_pane: InstallPaneState::default(),
+            search_pane: SearchPaneState::default(),
+            pending_wago_install_confirmation: None,
+            wago_install_in_progress: false,
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
@@ -943,6 +1164,22 @@ impl App {
             };
         }
 
+        if self.pending_wago_install_confirmation.is_some() {
+            return match key.code {
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char('y') => vec![AppMessage::WagoConfirmInstall],
+                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::WagoCancelInstall],
+                _ => vec![],
+            };
+        }
+
+        if let Some(messages) = self.search_messages_for_key(key) {
+            return messages;
+        }
+        if let Some(messages) = self.install_messages_for_key(key) {
+            return messages;
+        }
+
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
@@ -973,6 +1210,54 @@ impl App {
             KeyCode::Char('c') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
             _ => vec![],
+        }
+    }
+
+    fn search_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        if self.dashboard.detail_mode != DetailMode::Search {
+            return None;
+        }
+
+        if self.search_pane.is_editing {
+            return Some(match key.code {
+                KeyCode::Enter => vec![AppMessage::SearchSubmit],
+                KeyCode::Esc => vec![AppMessage::SearchStopEditing],
+                KeyCode::Backspace => vec![AppMessage::SearchBackspace],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char(character) => vec![AppMessage::SearchInputChar(character)],
+                _ => vec![],
+            });
+        }
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::SearchResultNext]),
+            KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::SearchResultPrevious]),
+            KeyCode::Enter => Some(vec![AppMessage::SearchInstallSelected]),
+            KeyCode::Char('e') | KeyCode::Char('/') => Some(vec![AppMessage::SearchBeginEditing]),
+            _ => None,
+        }
+    }
+
+    fn install_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        if self.dashboard.detail_mode != DetailMode::Install {
+            return None;
+        }
+
+        if self.install_pane.is_editing {
+            return Some(match key.code {
+                KeyCode::Enter => vec![AppMessage::InstallSubmit],
+                KeyCode::Esc => vec![AppMessage::InstallStopEditing],
+                KeyCode::Backspace => vec![AppMessage::InstallBackspace],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char(character) => vec![AppMessage::InstallInputChar(character)],
+                _ => vec![],
+            });
+        }
+
+        match key.code {
+            KeyCode::Enter => Some(vec![AppMessage::InstallSubmit]),
+            KeyCode::Char('e') => Some(vec![AppMessage::InstallBeginEditing]),
+            _ => None,
         }
     }
 
@@ -1307,6 +1592,240 @@ impl App {
                     &format!("{} panel selected", detail_mode_label(detail_mode)),
                 )),
             ],
+            AppMessage::InstallBeginEditing => vec![
+                AppAction::SetInstallPaneState(self.install_pane.begin_editing()),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Install,
+                    "editing Wago target | enter install | esc stop editing",
+                )),
+            ],
+            AppMessage::InstallStopEditing => vec![
+                AppAction::SetInstallPaneState(self.install_pane.stop_editing()),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Install,
+                    "Wago direct install ready | e edit target | enter install",
+                )),
+            ],
+            AppMessage::InstallInputChar(character) => vec![AppAction::SetInstallPaneState(
+                self.install_pane.insert_char(character),
+            )],
+            AppMessage::InstallBackspace => vec![AppAction::SetInstallPaneState(
+                self.install_pane.backspace(),
+            )],
+            AppMessage::InstallSubmit => {
+                if self.wago_install_in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Install,
+                        "Wago install already running",
+                    ))]
+                } else if self.dashboard.pending_delete_folders().is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Install,
+                        "confirm or cancel the pending delete before installing addons",
+                    ))]
+                } else if self.wago_api_key.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Install,
+                        "Wago install unavailable: no API key configured",
+                    ))]
+                } else if self.install_pane.input.trim().is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Install,
+                        "enter a Wago slug or addon URL before installing",
+                    ))]
+                } else if self.effective_addon_dir.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Install,
+                        "addon directory is not configured",
+                    ))]
+                } else {
+                    let request = PendingWagoInstallRequest {
+                        target: self.install_pane.input.trim().to_string(),
+                        source: WagoInstallSource::DirectInput,
+                    };
+                    vec![
+                        AppAction::SetWagoInstallInProgress(true),
+                        AppAction::StartWagoInstall {
+                            addon_dir: self.effective_addon_dir.clone().expect("checked above"),
+                            api_key: self.wago_api_key.clone().expect("checked above"),
+                            request,
+                            allow_replace: false,
+                        },
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Install,
+                            "checking Wago package and preparing install",
+                        )),
+                    ]
+                }
+            }
+            AppMessage::SearchBeginEditing => vec![
+                AppAction::SetSearchPaneState(self.search_pane.begin_editing()),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Search,
+                    "editing Wago query | enter search | esc stop editing",
+                )),
+            ],
+            AppMessage::SearchStopEditing => vec![
+                AppAction::SetSearchPaneState(self.search_pane.stop_editing()),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Search,
+                    "Wago search ready | e edit query | enter install selected result",
+                )),
+            ],
+            AppMessage::SearchInputChar(character) => vec![AppAction::SetSearchPaneState(
+                self.search_pane.insert_char(character),
+            )],
+            AppMessage::SearchBackspace => {
+                vec![AppAction::SetSearchPaneState(self.search_pane.backspace())]
+            }
+            AppMessage::SearchSubmit => {
+                if self.search_pane.in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago search already running",
+                    ))]
+                } else if self.wago_api_key.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago search unavailable: no API key configured",
+                    ))]
+                } else if self.search_pane.query.trim().is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "enter a search query before submitting",
+                    ))]
+                } else {
+                    let query = self.search_pane.query.trim().to_string();
+                    vec![
+                        AppAction::SetSearchPaneState(self.search_pane.start_search()),
+                        AppAction::StartWagoSearch {
+                            query: query.clone(),
+                            api_key: self.wago_api_key.clone().expect("checked above"),
+                        },
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            &format!("searching Wago for '{query}'"),
+                        )),
+                    ]
+                }
+            }
+            AppMessage::SearchResultNext => {
+                if self.search_pane.results.is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "no Wago search results to select",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetSearchPaneState(self.search_pane.select_next()),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Search, "result selection moved"),
+                        ),
+                    ]
+                }
+            }
+            AppMessage::SearchResultPrevious => {
+                if self.search_pane.results.is_empty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "no Wago search results to select",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetSearchPaneState(self.search_pane.select_previous()),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Search, "result selection moved"),
+                        ),
+                    ]
+                }
+            }
+            AppMessage::SearchInstallSelected => {
+                if self.wago_install_in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago install already running",
+                    ))]
+                } else if self.wago_api_key.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago install unavailable: no API key configured",
+                    ))]
+                } else if self.effective_addon_dir.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "addon directory is not configured",
+                    ))]
+                } else if let Some(result) = self.search_pane.selected_result() {
+                    let request = PendingWagoInstallRequest {
+                        target: result.id.clone(),
+                        source: WagoInstallSource::SearchResult,
+                    };
+                    vec![
+                        AppAction::SetWagoInstallInProgress(true),
+                        AppAction::StartWagoInstall {
+                            addon_dir: self.effective_addon_dir.clone().expect("checked above"),
+                            api_key: self.wago_api_key.clone().expect("checked above"),
+                            request,
+                            allow_replace: false,
+                        },
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            &format!("checking Wago result '{}' for install", result.display_name),
+                        )),
+                    ]
+                } else {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "select a Wago search result before installing",
+                    ))]
+                }
+            }
+            AppMessage::WagoConfirmInstall => {
+                if let Some(confirmation) = self.pending_wago_install_confirmation.clone() {
+                    if self.wago_install_in_progress {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            "Wago install already running",
+                        ))]
+                    } else if self.wago_api_key.is_none() {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            "Wago install unavailable: no API key configured",
+                        ))]
+                    } else if let Some(addon_dir) = self.effective_addon_dir.clone() {
+                        vec![
+                            AppAction::SetPendingWagoInstallConfirmation(None),
+                            AppAction::SetWagoInstallInProgress(true),
+                            AppAction::StartWagoInstall {
+                                addon_dir,
+                                api_key: self.wago_api_key.clone().expect("checked above"),
+                                request: confirmation.request,
+                                allow_replace: true,
+                            },
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                self.dashboard.detail_mode,
+                                "replacing existing addon folders from confirmed Wago install",
+                            )),
+                        ]
+                    } else {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            "addon directory is not configured",
+                        ))]
+                    }
+                } else {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "no Wago install confirmation is pending",
+                    ))]
+                }
+            }
+            AppMessage::WagoCancelInstall => vec![
+                AppAction::SetPendingWagoInstallConfirmation(None),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "Wago install cancelled"),
+                ),
+            ],
             AppMessage::OnboardingBeginEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.begin_editing()),
                 AppAction::SetStatus(self.with_base_status(
@@ -1550,6 +2069,71 @@ impl App {
                         &format!("tracked update refresh failed: {error}"),
                     )),
                 ],
+                AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
+                    AppAction::SetSearchPaneState(
+                        self.search_pane
+                            .finish_search(outcome.query.clone(), outcome.results.clone()),
+                    ),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        &format!(
+                            "Wago search complete: {} result{}",
+                            outcome.results.len(),
+                            plural_suffix(outcome.results.len())
+                        ),
+                    )),
+                ],
+                AppTaskEvent::WagoSearchFinished(Err(error)) => vec![
+                    AppAction::SetSearchPaneState(self.search_pane.fail_search()),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        &format!("Wago search failed: {error}"),
+                    )),
+                ],
+                AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::NeedsConfirmation {
+                        request,
+                        inspection,
+                    },
+                )) => vec![
+                    AppAction::SetWagoInstallInProgress(false),
+                    AppAction::SetPendingWagoInstallConfirmation(Some(WagoInstallConfirmation {
+                        request,
+                        inspection,
+                    })),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        "Wago install needs confirmation: press y to replace, n or esc to cancel",
+                    )),
+                ],
+                AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::Installed(
+                    outcome,
+                ))) => {
+                    vec![
+                        AppAction::ReplaceDashboardAddons(outcome.sync.addons),
+                        AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                        AppAction::CompleteAddonScan {
+                            path: outcome.sync.path,
+                            summary: outcome.sync.summary,
+                        },
+                        AppAction::SetPendingWagoInstallConfirmation(None),
+                        AppAction::SetWagoInstallInProgress(false),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "installed Wago addon '{}' into {} | sync complete",
+                                outcome.summary.addon_name, outcome.summary.parent_folder
+                            ),
+                        )),
+                    ]
+                }
+                AppTaskEvent::WagoInstallFinished(Err(error)) => vec![
+                    AppAction::SetWagoInstallInProgress(false),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("Wago install failed: {error}"),
+                    )),
+                ],
             },
         }
     }
@@ -1592,6 +2176,18 @@ impl App {
             }
             AppAction::SetSelectedDashboardParents(folders) => {
                 self.dashboard.set_selected_parents(folders);
+            }
+            AppAction::SetInstallPaneState(state) => {
+                self.install_pane = state;
+            }
+            AppAction::SetSearchPaneState(state) => {
+                self.search_pane = state;
+            }
+            AppAction::SetPendingWagoInstallConfirmation(confirmation) => {
+                self.pending_wago_install_confirmation = confirmation;
+            }
+            AppAction::SetWagoInstallInProgress(in_progress) => {
+                self.wago_install_in_progress = in_progress;
             }
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
@@ -1804,6 +2400,42 @@ impl App {
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
+                });
+            }
+            AppAction::StartWagoSearch { query, api_key } => {
+                let sender = self.task_events_tx.clone();
+                tokio::spawn(async move {
+                    let result = search_wago_addons(&query, &api_key)
+                        .await
+                        .map(|results| WagoSearchOutcome { query, results });
+                    let _ = sender.send(AppTaskEvent::WagoSearchFinished(result));
+                });
+            }
+            AppAction::StartWagoInstall {
+                addon_dir,
+                api_key,
+                request,
+                allow_replace,
+            } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|error| error.to_string())?;
+                        runtime.block_on(run_wago_install_task(
+                            &state_db_file,
+                            &addon_dir,
+                            &api_key,
+                            request,
+                            allow_replace,
+                        ))
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+                    let _ = sender.send(AppTaskEvent::WagoInstallFinished(result));
                 });
             }
             AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
@@ -2110,6 +2742,29 @@ impl App {
             lines.push(Line::from(""));
         }
 
+        if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
+            lines.push(Line::from("Pending Wago replace confirmation"));
+            lines.push(Line::from(format!(
+                "Addon: {} ({})",
+                confirmation.inspection.addon_name, confirmation.inspection.addon_id
+            )));
+            lines.push(Line::from(format!(
+                "Parent folder: {}",
+                confirmation.inspection.parent_folder
+            )));
+            if let Some(tracked_parent) = confirmation.inspection.tracked_parent.as_deref() {
+                lines.push(Line::from(format!("Tracked install: {tracked_parent}")));
+            }
+            if !confirmation.inspection.existing_folders.is_empty() {
+                lines.push(Line::from(format!(
+                    "Existing folders on disk: {}",
+                    confirmation.inspection.existing_folders.join(", ")
+                )));
+            }
+            lines.push(Line::from("Press y to replace, n/esc to cancel."));
+            lines.push(Line::from(""));
+        }
+
         match self.dashboard.detail_mode {
             DetailMode::Overview => {
                 if let (Some(item), Some(child_folder)) = (selected, selected_owned_child) {
@@ -2240,20 +2895,160 @@ impl App {
                 }
             }
             DetailMode::Install => {
-                lines.push(Line::from("Install area"));
-                lines.push(Line::from(
-                    "GitHub, TukUI, WoWInterface, and Wago entry points will live here.",
-                ));
-                lines.push(Line::from("Provider wiring is intentionally deferred."));
+                lines.push(Line::from("Wago direct install"));
+                lines.push(Line::from(format!(
+                    "Target: {}",
+                    if self.install_pane.input.trim().is_empty() {
+                        "<empty>".to_string()
+                    } else {
+                        self.install_pane.input.clone()
+                    }
+                )));
+                lines.push(Line::from(format!(
+                    "Editing: {}",
+                    if self.install_pane.is_editing {
+                        "active"
+                    } else {
+                        "idle"
+                    }
+                )));
+                lines.push(Line::from(format!(
+                    "Install state: {}",
+                    if self.wago_install_in_progress {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                )));
+                if self.wago_api_key.is_none() {
+                    lines.push(Line::from("Wago API key required before install can run."));
+                    lines.push(Line::from(
+                        "Configure it in profile config, WAGO_API_KEY, or repo-root .env.",
+                    ));
+                } else {
+                    lines.push(Line::from(
+                        "Accepts a Wago addon slug or https://addons.wago.io/addons/<slug> URL.",
+                    ));
+                    lines.push(Line::from("Retail + stable only in this slice."));
+                    lines.push(Line::from(if self.install_pane.is_editing {
+                        "Commands: type target | backspace delete | enter install | esc stop editing"
+                    } else {
+                        "Commands: e edit target | enter install"
+                    }));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from("Other providers stay deferred here for now."));
             }
             DetailMode::Search => {
-                lines.push(Line::from("Search area"));
-                lines.push(Line::from(
-                    "Command/search surface placeholder for addon lookup and filtering.",
-                ));
-                lines.push(Line::from(
-                    "Persistent single-screen routing is now in place.",
-                ));
+                lines.push(Line::from("Wago search"));
+                lines.push(Line::from(format!(
+                    "Query: {}",
+                    if self.search_pane.query.trim().is_empty() {
+                        "<empty>".to_string()
+                    } else {
+                        self.search_pane.query.clone()
+                    }
+                )));
+                lines.push(Line::from(format!(
+                    "Search state: {}",
+                    if self.search_pane.in_progress {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                )));
+                lines.push(Line::from(format!(
+                    "Results: {}",
+                    self.search_pane.results.len()
+                )));
+                if self.wago_api_key.is_none() {
+                    lines.push(Line::from("Wago API key required before search can run."));
+                    lines.push(Line::from(
+                        "Configure it in profile config, WAGO_API_KEY, or repo-root .env.",
+                    ));
+                } else {
+                    lines.push(Line::from("Retail + stable only in this slice."));
+                    lines.push(Line::from(if self.search_pane.is_editing {
+                        "Commands: type query | backspace delete | enter search | esc stop editing"
+                    } else {
+                        "Commands: e edit query | j/k select result | enter install selected"
+                    }));
+                    if self.search_pane.results.is_empty() {
+                        lines.push(Line::from("No results loaded yet."));
+                    } else {
+                        let (window_start, window_end) = visible_search_result_window(
+                            self.search_pane.results.len(),
+                            self.search_pane.selected_result,
+                            8,
+                        );
+                        lines.push(Line::from(""));
+                        lines.push(Line::from("Results"));
+                        if window_start > 0 {
+                            lines.push(Line::from(format!(
+                                "... {} more result{} above",
+                                window_start,
+                                plural_suffix(window_start)
+                            )));
+                        }
+                        for (index, result) in self.search_pane.results[window_start..window_end]
+                            .iter()
+                            .enumerate()
+                        {
+                            let absolute_index = window_start + index;
+                            let marker = if self.search_pane.selected_result == Some(absolute_index)
+                            {
+                                "›"
+                            } else {
+                                " "
+                            };
+                            lines.push(Line::from(format!(
+                                "{marker} {} | {} | downloads {} | version {}",
+                                result.display_name,
+                                result
+                                    .owner
+                                    .as_deref()
+                                    .or_else(|| result.authors.first().map(String::as_str))
+                                    .unwrap_or("unknown"),
+                                result
+                                    .download_count
+                                    .map(|count| count.to_string())
+                                    .unwrap_or_else(|| "<unknown>".to_string()),
+                                result.version.as_deref().unwrap_or("<unknown>")
+                            )));
+                        }
+                        let remaining_below =
+                            self.search_pane.results.len().saturating_sub(window_end);
+                        if remaining_below > 0 {
+                            lines.push(Line::from(format!(
+                                "... {} more result{} below",
+                                remaining_below,
+                                plural_suffix(remaining_below)
+                            )));
+                        }
+                        if let Some(result) = self.search_pane.selected_result() {
+                            lines.push(Line::from(""));
+                            lines.push(Line::from("Selected result"));
+                            lines.push(Line::from(format!("Addon: {}", result.display_name)));
+                            lines.push(Line::from(format!("Slug: {}", result.id)));
+                            lines.push(Line::from(format!(
+                                "Author: {}",
+                                result
+                                    .owner
+                                    .as_deref()
+                                    .or_else(|| result.authors.first().map(String::as_str))
+                                    .unwrap_or("unknown")
+                            )));
+                            lines.push(Line::from(format!(
+                                "Summary: {}",
+                                result.summary.as_deref().unwrap_or("<none>")
+                            )));
+                            lines.push(Line::from(format!(
+                                "Website: {}",
+                                result.website_url.as_deref().unwrap_or("<unknown>")
+                            )));
+                        }
+                    }
+                }
             }
             DetailMode::Update => {
                 lines.push(Line::from("Update area"));
@@ -2671,6 +3466,48 @@ fn copy_dir_recursively(source: &Path, destination: &Path) -> std::result::Resul
     Ok(())
 }
 
+async fn run_wago_install_task(
+    state_db_file: &Path,
+    addon_dir: &Path,
+    api_key: &str,
+    request: PendingWagoInstallRequest,
+    allow_replace: bool,
+) -> std::result::Result<WagoInstallTaskOutcome, String> {
+    let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    if !allow_replace {
+        let inspection = inspect_wago_install_target(
+            &database,
+            addon_dir,
+            &request.target,
+            api_key,
+            WagoStability::Stable,
+        )
+        .await?;
+        if inspection.requires_confirmation() {
+            return Ok(WagoInstallTaskOutcome::NeedsConfirmation {
+                request,
+                inspection,
+            });
+        }
+    }
+
+    let summary = install_wago_addon_with_replace(
+        &mut database,
+        addon_dir,
+        &request.target,
+        api_key,
+        WagoStability::Stable,
+        false,
+        allow_replace,
+    )
+    .await?;
+    let sync = sync_dashboard_state(state_db_file, addon_dir)?;
+    Ok(WagoInstallTaskOutcome::Installed(WagoInstallOutcome {
+        summary,
+        sync,
+    }))
+}
+
 fn refresh_selected_addons(
     state_db_file: &Path,
     addon_dir: &Path,
@@ -2856,6 +3693,24 @@ fn summarize_owned_folders(folders: &[String]) -> String {
     }
 }
 
+fn visible_search_result_window(
+    result_count: usize,
+    selected_result: Option<usize>,
+    max_visible: usize,
+) -> (usize, usize) {
+    if result_count == 0 || max_visible == 0 {
+        return (0, 0);
+    }
+
+    let visible = result_count.min(max_visible);
+    let selected = selected_result
+        .unwrap_or(0)
+        .min(result_count.saturating_sub(1));
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    let end = (start + visible).min(result_count);
+    (start, end)
+}
+
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
     match detail_mode {
         DetailMode::Overview => "Overview",
@@ -2926,13 +3781,17 @@ mod tests {
     use super::{
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardChildConnector,
         DashboardDeleteOutcome, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
-        ScanState, ShellMode, child_row_detail_prefix, child_row_prefix, summarize_owned_folders,
+        InstallPaneState, PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode,
+        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
+        child_row_detail_prefix, child_row_prefix, summarize_owned_folders,
+        visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
     use crate::update::UpdateRefreshSummary;
+    use crate::wago::{WagoInstallInspection, WagoSearchResult};
     use lemonup_core::{
         AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
         ScanSummary, SourceKind, StateDatabase,
@@ -2965,6 +3824,7 @@ mod tests {
             quit_requested: false,
             status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
             config_present: true,
+            wago_api_key: Some("test-wago-key".to_string()),
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
@@ -2972,6 +3832,10 @@ mod tests {
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
             dashboard: DashboardState::from_addons(vec![first, second, third]),
+            install_pane: InstallPaneState::default(),
+            search_pane: SearchPaneState::default(),
+            pending_wago_install_confirmation: None,
+            wago_install_in_progress: false,
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
@@ -3142,6 +4006,234 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('['))),
             vec![AppMessage::DashboardCollapseAllRelationships]
         );
+    }
+
+    #[test]
+    fn search_mode_submit_starts_background_search() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.query = "WeakAuras".to_string();
+
+        let actions = app.update(AppMessage::SearchSubmit);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetSearchPaneState(app.search_pane.start_search()),
+                AppAction::StartWagoSearch {
+                    query: "WeakAuras".to_string(),
+                    api_key: "test-wago-key".to_string(),
+                },
+                AppAction::SetStatus(
+                    app.dashboard_status_for(DetailMode::Search, "searching Wago for 'WeakAuras'")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_mode_without_api_key_reports_blocked_status() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.wago_api_key = None;
+        app.search_pane.query = "WeakAuras".to_string();
+
+        let actions = app.update(AppMessage::SearchSubmit);
+
+        assert_eq!(
+            actions,
+            vec![AppAction::SetStatus(app.dashboard_status_for(
+                DetailMode::Search,
+                "Wago search unavailable: no API key configured",
+            ))]
+        );
+    }
+
+    #[test]
+    fn search_install_selected_starts_install_flow_for_selected_result() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.search_pane = SearchPaneState {
+            query: "WeakAuras".to_string(),
+            is_editing: false,
+            in_progress: false,
+            results: vec![WagoSearchResult {
+                id: "VBNBxKx5".to_string(),
+                display_name: "WeakAuras".to_string(),
+                summary: Some("Aura framework".to_string()),
+                owner: Some("WeakAuras Team".to_string()),
+                authors: vec!["WeakAuras Team".to_string()],
+                website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+                download_count: Some(500_000),
+                version: Some("5.21.1".to_string()),
+            }],
+            selected_result: Some(0),
+            last_query: Some("WeakAuras".to_string()),
+        };
+
+        let actions = app.update(AppMessage::SearchInstallSelected);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetWagoInstallInProgress(true),
+                AppAction::StartWagoInstall {
+                    addon_dir: PathBuf::from(
+                        "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+                    ),
+                    api_key: "test-wago-key".to_string(),
+                    request: PendingWagoInstallRequest {
+                        target: "VBNBxKx5".to_string(),
+                        source: WagoInstallSource::SearchResult,
+                    },
+                    allow_replace: false,
+                },
+                AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Search,
+                    "checking Wago result 'WeakAuras' for install",
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn install_submit_starts_direct_install_flow() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Install;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.install_pane.input = "https://addons.wago.io/addons/VBNBxKx5".to_string();
+
+        let actions = app.update(AppMessage::InstallSubmit);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetWagoInstallInProgress(true),
+                AppAction::StartWagoInstall {
+                    addon_dir: PathBuf::from(
+                        "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+                    ),
+                    api_key: "test-wago-key".to_string(),
+                    request: PendingWagoInstallRequest {
+                        target: "https://addons.wago.io/addons/VBNBxKx5".to_string(),
+                        source: WagoInstallSource::DirectInput,
+                    },
+                    allow_replace: false,
+                },
+                AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Install,
+                    "checking Wago package and preparing install",
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_wago_install_confirmation_keys_route_to_confirm_or_cancel() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.pending_wago_install_confirmation = Some(WagoInstallConfirmation {
+            request: PendingWagoInstallRequest {
+                target: "VBNBxKx5".to_string(),
+                source: WagoInstallSource::SearchResult,
+            },
+            inspection: WagoInstallInspection {
+                addon_id: "VBNBxKx5".to_string(),
+                addon_name: "WeakAuras".to_string(),
+                parent_folder: "WeakAuras".to_string(),
+                installed_folders: vec!["WeakAuras".to_string()],
+                stability: crate::wago::WagoStability::Stable,
+                version: Some("5.21.1".to_string()),
+                existing_folders: vec!["WeakAuras".to_string()],
+                tracked_parent: Some("WeakAuras".to_string()),
+            },
+        });
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+            vec![AppMessage::WagoConfirmInstall]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::WagoCancelInstall]
+        );
+    }
+
+    #[test]
+    fn wago_search_finished_updates_results_and_status() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.in_progress = true;
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "WeakAuras".to_string(),
+                results: vec![WagoSearchResult {
+                    id: "VBNBxKx5".to_string(),
+                    display_name: "WeakAuras".to_string(),
+                    summary: Some("Aura framework".to_string()),
+                    owner: Some("WeakAuras Team".to_string()),
+                    authors: vec!["WeakAuras Team".to_string()],
+                    website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+                    download_count: Some(500_000),
+                    version: Some("5.21.1".to_string()),
+                }],
+            })),
+        ));
+
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], AppAction::SetSearchPaneState(_)));
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(
+                app.dashboard_status_for(DetailMode::Search, "Wago search complete: 1 result")
+            )
+        );
+    }
+
+    #[test]
+    fn wago_install_confirmation_event_sets_pending_confirmation() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::NeedsConfirmation {
+                request: PendingWagoInstallRequest {
+                    target: "VBNBxKx5".to_string(),
+                    source: WagoInstallSource::SearchResult,
+                },
+                inspection: WagoInstallInspection {
+                    addon_id: "VBNBxKx5".to_string(),
+                    addon_name: "WeakAuras".to_string(),
+                    parent_folder: "WeakAuras".to_string(),
+                    installed_folders: vec!["WeakAuras".to_string()],
+                    stability: crate::wago::WagoStability::Stable,
+                    version: Some("5.21.1".to_string()),
+                    existing_folders: vec!["WeakAuras".to_string()],
+                    tracked_parent: Some("WeakAuras".to_string()),
+                },
+            })),
+        ));
+
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0], AppAction::SetWagoInstallInProgress(false));
+        assert!(matches!(
+            actions[1],
+            AppAction::SetPendingWagoInstallConfirmation(Some(_))
+        ));
+        assert!(matches!(actions[2], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn visible_search_result_window_keeps_selected_result_in_view() {
+        assert_eq!(visible_search_result_window(12, Some(0), 8), (0, 8));
+        assert_eq!(visible_search_result_window(12, Some(7), 8), (0, 8));
+        assert_eq!(visible_search_result_window(12, Some(8), 8), (1, 9));
+        assert_eq!(visible_search_result_window(12, Some(11), 8), (4, 12));
     }
 
     #[test]

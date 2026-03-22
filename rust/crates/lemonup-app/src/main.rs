@@ -8,7 +8,6 @@ mod tui;
 mod update;
 mod wago;
 
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,7 +28,7 @@ use crate::update::{
     LiveUpdateResult, LiveUpdateStatus, apply_live_updates, refresh_live_update_checks,
     serialize_live_update_status, serialize_update_status,
 };
-use crate::wago::{WagoStability, install_wago_addon};
+use crate::wago::{WagoStability, install_wago_addon, resolve_wago_api_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -382,53 +381,6 @@ async fn run_install_wago(
     );
 
     Ok(())
-}
-
-fn resolve_wago_api_key(config_state: &ConfigLoad) -> Option<String> {
-    let from_config = match config_state {
-        ConfigLoad::Loaded(config) => config.wago_api_key.clone(),
-        ConfigLoad::Missing(_) => None,
-    };
-
-    from_config
-        .or_else(read_process_wago_api_key)
-        .or_else(load_repo_root_wago_api_key)
-}
-
-fn read_process_wago_api_key() -> Option<String> {
-    std::env::var("WAGO_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn load_repo_root_wago_api_key() -> Option<String> {
-    let dotenv_path = repo_root_dotenv_path();
-    if !dotenv_path.exists() {
-        return None;
-    }
-
-    let iter = dotenvy::from_path_iter(&dotenv_path).ok()?;
-    for entry in iter {
-        let (key, value) = entry.ok()?;
-        if key == "WAGO_API_KEY" {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-            return None;
-        }
-    }
-
-    None
-}
-
-fn repo_root_dotenv_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("..")
-        .join(".env")
 }
 
 fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {
