@@ -35,6 +35,32 @@ pub(crate) struct LiveUpdateSummary {
     pub(crate) errors: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveUpdateStatus {
+    Updated,
+    UpToDate,
+    SkippedManual,
+    SkippedUnmanaged,
+    SkippedUnsupported,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveUpdateResult {
+    pub(crate) addon_name: String,
+    pub(crate) source: SourceKind,
+    pub(crate) status: LiveUpdateStatus,
+    pub(crate) previous_version: Option<String>,
+    pub(crate) remote_version: Option<String>,
+    pub(crate) message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveUpdateRun {
+    pub(crate) summary: LiveUpdateSummary,
+    pub(crate) results: Vec<LiveUpdateResult>,
+}
+
 #[cfg(test)]
 pub(crate) fn build_update_checks(
     installed: &[AddonRecord],
@@ -156,7 +182,7 @@ pub(crate) async fn apply_live_updates(
     wago_api_key: Option<&str>,
     force: bool,
     dry_run: bool,
-) -> Result<LiveUpdateSummary, LemonupError> {
+) -> Result<LiveUpdateRun, LemonupError> {
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?
         .into_iter()
@@ -172,19 +198,47 @@ pub(crate) async fn apply_live_updates(
         skipped_unsupported: 0,
         errors: 0,
     };
+    let mut results = Vec::with_capacity(selected.len());
 
     for addon in selected {
         match addon.source {
             SourceKind::Manual => {
                 summary.skipped_manual += 1;
+                results.push(LiveUpdateResult {
+                    addon_name: addon.folder.clone(),
+                    source: addon.source,
+                    status: LiveUpdateStatus::SkippedManual,
+                    previous_version: addon.version.clone(),
+                    remote_version: addon.remote_version.clone(),
+                    message: Some("manual addons cannot be updated yet".to_string()),
+                });
             }
             SourceKind::Wago => {
                 if !addon.has_authoritative_owned_folders() {
                     summary.skipped_unmanaged += 1;
+                    results.push(LiveUpdateResult {
+                        addon_name: addon.folder.clone(),
+                        source: addon.source,
+                        status: LiveUpdateStatus::SkippedUnmanaged,
+                        previous_version: addon.version.clone(),
+                        remote_version: addon.remote_version.clone(),
+                        message: Some(
+                            "tracked addon does not have authoritative managed ownership"
+                                .to_string(),
+                        ),
+                    });
                     continue;
                 }
                 let Some(api_key) = wago_api_key else {
                     summary.errors += 1;
+                    results.push(LiveUpdateResult {
+                        addon_name: addon.folder.clone(),
+                        source: addon.source,
+                        status: LiveUpdateStatus::Error,
+                        previous_version: addon.version.clone(),
+                        remote_version: addon.remote_version.clone(),
+                        message: Some("Wago API key not configured".to_string()),
+                    });
                     continue;
                 };
 
@@ -193,18 +247,61 @@ pub(crate) async fn apply_live_updates(
                 )
                 .await
                 {
-                    Ok(result) if result.updated => summary.updated_addons += 1,
-                    Ok(_) => summary.up_to_date += 1,
-                    Err(_) => summary.errors += 1,
+                    Ok(result) if result.updated => {
+                        summary.updated_addons += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Updated,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: None,
+                        });
+                    }
+                    Ok(result) => {
+                        summary.up_to_date += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::UpToDate,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: Some(
+                                "remote package already matches installed version".to_string(),
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        summary.errors += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Error,
+                            previous_version: addon.version.clone(),
+                            remote_version: addon.remote_version.clone(),
+                            message: Some(error),
+                        });
+                    }
                 }
             }
             SourceKind::GitHub | SourceKind::Tukui | SourceKind::WowInterface => {
                 summary.skipped_unsupported += 1;
+                results.push(LiveUpdateResult {
+                    addon_name: addon.folder.clone(),
+                    source: addon.source,
+                    status: LiveUpdateStatus::SkippedUnsupported,
+                    previous_version: addon.version.clone(),
+                    remote_version: addon.remote_version.clone(),
+                    message: Some(format!(
+                        "live updates are not implemented yet for {} addons",
+                        serialize_source_kind(addon.source)
+                    )),
+                });
             }
         }
     }
 
-    Ok(summary)
+    Ok(LiveUpdateRun { summary, results })
 }
 
 pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
@@ -242,6 +339,17 @@ pub(crate) fn serialize_update_status(status: UpdateStatus) -> &'static str {
         UpdateStatus::UpdateAvailable => "update_available",
         UpdateStatus::Unknown => "unknown",
         UpdateStatus::Error => "error",
+    }
+}
+
+pub(crate) fn serialize_live_update_status(status: LiveUpdateStatus) -> &'static str {
+    match status {
+        LiveUpdateStatus::Updated => "updated",
+        LiveUpdateStatus::UpToDate => "up_to_date",
+        LiveUpdateStatus::SkippedManual => "skipped_manual",
+        LiveUpdateStatus::SkippedUnmanaged => "skipped_unmanaged",
+        LiveUpdateStatus::SkippedUnsupported => "skipped_unsupported",
+        LiveUpdateStatus::Error => "error",
     }
 }
 
@@ -408,7 +516,10 @@ fn serialize_source_kind(source: SourceKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::refresh_live_update_checks_with;
+    use super::{
+        LiveUpdateStatus, apply_live_updates, refresh_live_update_checks_with,
+        serialize_live_update_status,
+    };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
     use tempfile::tempdir;
 
@@ -518,6 +629,53 @@ mod tests {
         assert_eq!(
             checks[0].message.as_deref(),
             Some("live checks are not implemented yet for GitHub addons")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_live_updates_reports_targeted_result_mix() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp.path().join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let manual = AddonRecord::new("Manual", "Manual", SourceKind::Manual);
+        database.upsert_addon(&manual).expect("seed manual");
+
+        let mut github = AddonRecord::new("DBM", "DBM-Core", SourceKind::GitHub);
+        github.version = Some("1.0.0".to_string());
+        github.remote_version = Some("1.1.0".to_string());
+        database.upsert_addon(&github).expect("seed github");
+
+        let run = apply_live_updates(
+            &mut database,
+            &addon_dir,
+            &["Manual".to_string(), "DBM-Core".to_string()],
+            Some("unused"),
+            false,
+            true,
+        )
+        .await
+        .expect("apply live updates");
+
+        assert_eq!(run.summary.target_addons, 2);
+        assert_eq!(run.summary.skipped_manual, 1);
+        assert_eq!(run.summary.skipped_unsupported, 1);
+        assert_eq!(run.summary.errors, 0);
+        assert_eq!(run.results.len(), 2);
+        assert_eq!(run.results[0].status, LiveUpdateStatus::SkippedManual);
+        assert_eq!(run.results[1].status, LiveUpdateStatus::SkippedUnsupported);
+    }
+
+    #[test]
+    fn live_update_status_serializes_for_cli_output() {
+        assert_eq!(
+            serialize_live_update_status(LiveUpdateStatus::Updated),
+            "updated"
+        );
+        assert_eq!(
+            serialize_live_update_status(LiveUpdateStatus::SkippedUnsupported),
+            "skipped_unsupported"
         );
     }
 }

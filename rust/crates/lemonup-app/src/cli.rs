@@ -24,8 +24,17 @@ pub enum Commands {
         #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
         addons: Vec<String>,
     },
-    /// Run the basic non-interactive updater path
+    /// Update tracked addons by exact addon or folder name; omit targets to update all
     Update {
+        #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
+        addons: Vec<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Update all tracked addons
+    UpdateAll {
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -87,7 +96,9 @@ fn parse_wago_install_target(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_addon_selector, parse_wago_install_target};
+    use clap::Parser;
+
+    use super::{Cli, Commands, parse_addon_selector, parse_wago_install_target};
 
     #[test]
     fn addon_selector_accepts_expected_characters() {
@@ -114,5 +125,38 @@ mod tests {
         assert!(parse_wago_install_target("detail\nbreak").is_err());
         assert!(parse_wago_install_target("details").is_ok());
         assert!(parse_wago_install_target("https://addons.wago.io/addons/details").is_ok());
+    }
+
+    #[test]
+    fn update_command_accepts_multiple_exact_selectors() {
+        let cli = Cli::try_parse_from(["lemonup", "update", "WeakAuras", "DBM-Core", "--dry-run"])
+            .expect("parse update selectors");
+
+        match cli.command.expect("subcommand") {
+            Commands::Update {
+                addons,
+                force,
+                dry_run,
+            } => {
+                assert_eq!(addons, vec!["WeakAuras", "DBM-Core"]);
+                assert!(!force);
+                assert!(dry_run);
+            }
+            other => panic!("expected update command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_all_command_parses_as_distinct_alias() {
+        let cli =
+            Cli::try_parse_from(["lemonup", "update-all", "--force"]).expect("parse update-all");
+
+        match cli.command.expect("subcommand") {
+            Commands::UpdateAll { force, dry_run } => {
+                assert!(force);
+                assert!(!dry_run);
+            }
+            other => panic!("expected update-all command, got {other:?}"),
+        }
     }
 }

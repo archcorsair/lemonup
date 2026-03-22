@@ -84,6 +84,9 @@ Implemented, committed, and pushed:
 - first real source-backed install flow via Wago CLI
 - first real live provider-backed update checks via Wago CLI
 - first real live provider-backed update flow via Wago CLI
+- update-all CLI contract
+- targeted CLI update selectors with per-addon result reporting
+- explicit TUI update-pane refresh wording to distinguish tracked-state refresh from live apply/update
 
 ## Recent Important Commits
 
@@ -241,12 +244,12 @@ Already proven in some form:
 - install one addon from Wago via CLI
 - check one addon against Wago live metadata via CLI
 - update one managed Wago addon via CLI
+- update all tracked addons via CLI
 - delete one or many selected parents in the TUI
 - undo delete
 - relationship-safe parent/child handling in managed flows
 
 Still missing or incomplete for MVP:
-- update-all flow
 - update selected against real provider-backed updates in the TUI
 - Wago search flow
 - TUI install UX
@@ -256,13 +259,13 @@ Still missing or incomplete for MVP:
 ## Next Recommended Slice
 
 Next real phase:
-1. add update-all and richer provider-backed update checks
-2. layer Wago search and TUI install UX on top
-3. broaden provider/source coverage using the same managed ownership contract
+1. layer Wago search and TUI install UX on top
+2. broaden provider/source coverage using the same managed ownership contract
+3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
 Why this is next:
-- Wago install, live check, and live update are already proven end-to-end
-- biggest remaining MVP gap is broader real update/install behavior, not more shell scaffolding
+- Wago install, live check, update-all, and targeted update are now proven in the CLI
+- biggest remaining MVP gap is search/install UX inside the shell plus broader provider coverage
 - the ownership model is already hardened enough to build on
 
 ## Suggested First Commands In A New Windows-Rooted Thread
@@ -286,4 +289,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Next slice: update-all and richer provider-backed update behavior, then Wago search and TUI install UX. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. CLI update-all and targeted update selectors are already landed; next slice is Wago search plus TUI install UX, then broader provider parity and real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`

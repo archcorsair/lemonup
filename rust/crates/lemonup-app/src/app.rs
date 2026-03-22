@@ -1176,19 +1176,19 @@ impl App {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        "update refresh already running",
+                        "tracked update refresh already running",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        "confirm or cancel the pending delete before running update refresh",
+                        "confirm or cancel the pending delete before refreshing tracked update state",
                     ))]
                 } else {
                     let selected = self.dashboard.selected_parent_folders();
                     match (self.effective_addon_dir.clone(), selected.is_empty()) {
                         (_, true) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
-                            "select one or more parent addons before refreshing updates",
+                            "select one or more parent addons before refreshing tracked update state",
                         ))],
                         (None, false) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
@@ -1205,7 +1205,7 @@ impl App {
                                 AppAction::SetStatus(self.dashboard_status_for(
                                     self.dashboard.detail_mode,
                                     &format!(
-                                        "refreshing update state for {} selected addon{}",
+                                        "refreshing tracked update state for {} selected addon{}",
                                         selected_len,
                                         plural_suffix(selected_len)
                                     ),
@@ -1547,7 +1547,7 @@ impl App {
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        &format!("update refresh failed: {error}"),
+                        &format!("tracked update refresh failed: {error}"),
                     )),
                 ],
             },
@@ -2289,7 +2289,7 @@ impl App {
                     summary.up_to_date, summary.update_available, summary.unknown, summary.errors
                 )));
                 lines.push(Line::from(format!(
-                    "Refresh state: {}",
+                    "Tracked refresh state: {}",
                     if self.dashboard.update_in_progress() {
                         "running"
                     } else {
@@ -2297,11 +2297,11 @@ impl App {
                     }
                 )));
                 lines.push(Line::from(
-                    "Press v to select refreshable tracked parents, r to refresh the current selection.",
+                    "Press v to select refreshable tracked parents, r to refresh tracked state for the current selection.",
                 ));
                 if let Some(last_summary) = self.dashboard.last_update_summary() {
                     lines.push(Line::from(""));
-                    lines.push(Line::from("Last refresh"));
+                    lines.push(Line::from("Last tracked refresh"));
                     lines.push(Line::from(format!(
                         "Targets={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, scanned={}",
                         last_summary.targets,
@@ -2800,13 +2800,13 @@ fn dashboard_update_status_message(summary: UpdateRefreshSummary) -> String {
         && summary.missing_on_disk == 0
     {
         return format!(
-            "update refresh complete: no selected addons were refreshable from tracked managed state ({} selected), sync complete",
+            "tracked update refresh complete: no selected addons were refreshable from tracked managed state ({} selected), sync complete",
             summary.target_addons
         );
     }
 
     format!(
-        "update refresh complete: refreshed {}, skipped {}, missing {}, sync complete",
+        "tracked update refresh complete: refreshed {}, skipped {}, missing {}, sync complete",
         summary.refreshed_addons, summary.skipped_unmanaged, summary.missing_on_disk
     )
 }
@@ -3390,7 +3390,7 @@ mod tests {
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
-                "select one or more parent addons before refreshing updates",
+                "select one or more parent addons before refreshing tracked update state",
             ))]
         );
     }
@@ -3458,7 +3458,7 @@ mod tests {
                 },
                 AppAction::SetStatus(app.dashboard_status_for(
                     DetailMode::Update,
-                    "refreshing update state for 1 selected addon",
+                    "refreshing tracked update state for 1 selected addon",
                 )),
             ]
         );
@@ -3734,7 +3734,7 @@ mod tests {
             actions[5],
             AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
-                "update refresh complete: no selected addons were refreshable from tracked managed state (1 selected), sync complete",
+                "tracked update refresh complete: no selected addons were refreshable from tracked managed state (1 selected), sync complete",
             ))
         );
     }

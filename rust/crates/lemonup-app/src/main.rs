@@ -25,7 +25,10 @@ use crate::event::EventHandler;
 use crate::tui::Tui;
 #[cfg(test)]
 use crate::update::refresh_managed_update_state;
-use crate::update::{apply_live_updates, refresh_live_update_checks, serialize_update_status};
+use crate::update::{
+    LiveUpdateResult, LiveUpdateStatus, apply_live_updates, refresh_live_update_checks,
+    serialize_live_update_status, serialize_update_status,
+};
 use crate::wago::{WagoStability, install_wago_addon};
 
 #[tokio::main]
@@ -44,7 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui => run_tui(paths, runtime).await?,
         Commands::Check { addons } => run_check(paths, addons).await?,
-        Commands::Update { force, dry_run } => run_update(paths, runtime, force, dry_run).await?,
+        Commands::Update {
+            addons,
+            force,
+            dry_run,
+        } => run_update(paths, runtime, addons, force, dry_run).await?,
+        Commands::UpdateAll { force, dry_run } => {
+            run_update(paths, runtime, Vec::new(), force, dry_run).await?
+        }
         Commands::InstallWago {
             addon,
             stability,
@@ -140,6 +150,7 @@ async fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn s
 async fn run_update(
     paths: AppPaths,
     runtime: AppRuntime,
+    addons: Vec<String>,
     force: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -181,9 +192,10 @@ async fn run_update(
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
             println!(
-                "update skipped: profile={}, tracked addons={}, addon_dir=<unconfigured>, force={}, dry_run={}",
+                "update skipped: profile={}, tracked_addons={}, targets={}, addon_dir=<unconfigured>, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
+                render_target_list(&addons),
                 force,
                 dry_run
             );
@@ -191,20 +203,21 @@ async fn run_update(
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
             let api_key = resolve_wago_api_key(&config_state);
-            let summary = apply_live_updates(
+            let run = apply_live_updates(
                 &mut database,
                 &addon_dir,
-                &[],
+                &addons,
                 api_key.as_deref(),
                 force,
                 dry_run,
             )
             .await?;
+            let summary = run.summary;
             println!(
                 "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, skipped_manual={}, skipped_unmanaged={}, skipped_unsupported={}, errors={}, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
-                summary.target_addons,
+                render_target_list(&addons),
                 summary.updated_addons,
                 summary.up_to_date,
                 summary.skipped_manual,
@@ -214,10 +227,89 @@ async fn run_update(
                 force,
                 dry_run
             );
+            print_update_details(&addons, &run.results);
         }
     }
 
     Ok(())
+}
+
+fn render_target_list(addons: &[String]) -> String {
+    if addons.is_empty() {
+        "all".to_string()
+    } else {
+        addons.join("|")
+    }
+}
+
+fn print_update_details(addons: &[String], results: &[LiveUpdateResult]) {
+    for line in build_update_detail_lines(addons, results) {
+        println!("{line}");
+    }
+}
+
+fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) -> Vec<String> {
+    if !addons.is_empty() {
+        return results.iter().map(format_update_result_line).collect();
+    }
+
+    let skipped_manual = results
+        .iter()
+        .filter(|result| result.status == LiveUpdateStatus::SkippedManual)
+        .count();
+    let skipped_unmanaged = results
+        .iter()
+        .filter(|result| result.status == LiveUpdateStatus::SkippedUnmanaged)
+        .count();
+    let skipped_unsupported = results
+        .iter()
+        .filter(|result| result.status == LiveUpdateStatus::SkippedUnsupported)
+        .count();
+    let error_lines = results
+        .iter()
+        .filter(|result| result.status == LiveUpdateStatus::Error)
+        .map(format_update_result_line)
+        .collect::<Vec<_>>();
+
+    let mut lines = Vec::new();
+    if skipped_manual > 0 || skipped_unmanaged > 0 || skipped_unsupported > 0 {
+        lines.push(format!(
+            "update detail: skipped manual={}, unmanaged={}, unsupported={} | rerun `lemonup update <addon...>` for per-addon detail",
+            skipped_manual, skipped_unmanaged, skipped_unsupported
+        ));
+    }
+
+    if lines.is_empty() && error_lines.is_empty() {
+        lines.push(
+            "update detail: all processed targets were updated or already up to date".to_string(),
+        );
+        return lines;
+    }
+
+    lines.extend(error_lines);
+    lines
+}
+
+fn format_update_result_line(result: &LiveUpdateResult) -> String {
+    format!(
+        "update result: addon={}, source={}, status={}, previous_version={}, remote_version={}, message={}",
+        result.addon_name,
+        render_source_kind(result.source),
+        serialize_live_update_status(result.status),
+        result.previous_version.as_deref().unwrap_or("<unknown>"),
+        result.remote_version.as_deref().unwrap_or("<unknown>"),
+        result.message.as_deref().unwrap_or("<none>")
+    )
+}
+
+fn render_source_kind(source: lemonup_core::SourceKind) -> &'static str {
+    match source {
+        lemonup_core::SourceKind::GitHub => "GitHub",
+        lemonup_core::SourceKind::Tukui => "TukUI",
+        lemonup_core::SourceKind::WowInterface => "WoWInterface",
+        lemonup_core::SourceKind::Wago => "Wago",
+        lemonup_core::SourceKind::Manual => "manual",
+    }
 }
 
 async fn run_install_wago(
@@ -356,9 +448,10 @@ fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>
 mod tests {
     use tempfile::tempdir;
 
-    use super::refresh_managed_update_state;
+    use super::{build_update_detail_lines, refresh_managed_update_state};
     use crate::update::{
-        build_managed_update_record, build_update_checks, determine_update_status,
+        LiveUpdateResult, LiveUpdateStatus, build_managed_update_record, build_update_checks,
+        determine_update_status,
     };
     use lemonup_core::{
         AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
@@ -368,6 +461,21 @@ mod tests {
         let addon_dir = root.join(folder);
         std::fs::create_dir_all(&addon_dir).expect("create addon dir");
         std::fs::write(addon_dir.join(format!("{folder}.toc")), toc_body).expect("write toc");
+    }
+
+    fn update_result(
+        addon_name: &str,
+        status: LiveUpdateStatus,
+        source: SourceKind,
+    ) -> LiveUpdateResult {
+        LiveUpdateResult {
+            addon_name: addon_name.to_string(),
+            source,
+            status,
+            previous_version: Some("1.0.0".to_string()),
+            remote_version: Some("1.1.0".to_string()),
+            message: Some("detail".to_string()),
+        }
     }
 
     #[test]
@@ -564,5 +672,63 @@ mod tests {
         let (status, message) = determine_update_status(&tracked);
         assert_eq!(status, UpdateStatus::Unknown);
         assert_eq!(message.as_deref(), Some("no tracked remote version yet"));
+    }
+
+    #[test]
+    fn update_all_detail_lines_aggregate_skip_noise() {
+        let lines = build_update_detail_lines(
+            &[],
+            &[
+                update_result(
+                    "HandyNotes",
+                    LiveUpdateStatus::SkippedManual,
+                    SourceKind::Manual,
+                ),
+                update_result("Pawn", LiveUpdateStatus::SkippedManual, SourceKind::Manual),
+                update_result(
+                    "DBM-Core",
+                    LiveUpdateStatus::SkippedUnsupported,
+                    SourceKind::GitHub,
+                ),
+            ],
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            "update detail: skipped manual=2, unmanaged=0, unsupported=1 | rerun `lemonup update <addon...>` for per-addon detail"
+        );
+    }
+
+    #[test]
+    fn update_all_detail_lines_keep_error_rows_actionable() {
+        let lines = build_update_detail_lines(
+            &[],
+            &[update_result(
+                "WeakAuras",
+                LiveUpdateStatus::Error,
+                SourceKind::Wago,
+            )],
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("update result: addon=WeakAuras"));
+        assert!(lines[0].contains("status=error"));
+    }
+
+    #[test]
+    fn targeted_update_detail_lines_keep_per_addon_rows() {
+        let lines = build_update_detail_lines(
+            &["WeakAuras".to_string()],
+            &[update_result(
+                "WeakAuras",
+                LiveUpdateStatus::SkippedManual,
+                SourceKind::Manual,
+            )],
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("update result: addon=WeakAuras"));
+        assert!(lines[0].contains("status=skipped_manual"));
     }
 }

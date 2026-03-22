@@ -76,8 +76,8 @@ Current checkpoint state:
 
 - no active unverified slice
 - current focus:
-  - checkpoint the first real provider-backed update path
-  - move next into update-all and richer provider-backed update behavior
+  - checkpoint the CLI update-all plus targeted selector contract
+  - move next into Wago search and TUI install UX
 
 ## Newly Completed
 
@@ -191,14 +191,25 @@ These are implemented and manually verified in addition to the earlier chunks:
   - updates remove folders no longer shipped by the package
   - updates preserve install time and kind-override behavior through managed state writes
   - post-update `check`, TUI relationship rendering, delete, and undo were manually verified on `--profile dev`
+- broader CLI update contract now exists:
+  - `update` with no selectors is the update-all path
+  - `update-all` is an explicit alias for update-all
+  - `update <addon...>` accepts one or more exact addon or folder selectors
+  - update selectors reuse the same sanitized exact-match rules as `check`
+  - targeted update results now report per-addon outcome details
+  - update-all output now highlights only non-success per-addon details by default
+- TUI update copy now reflects current behavior accurately:
+  - the update pane is still a tracked-state refresh surface, not live provider-backed apply/update
+  - `r` refreshes tracked update state for the current parent selection
+  - status text and summary labels now say tracked refresh explicitly
 
 ## Next Up
 
 Next phase:
 
-1. update-all and richer provider-backed update checks
-2. Wago search and TUI install UX
-3. broader provider/source parity
+1. Wago search and TUI install UX
+2. broader provider/source parity
+3. real provider-backed selected updates in the TUI
 
 ### Goal
 
@@ -208,9 +219,9 @@ Next phase:
 
 ### Planned order
 
-1. add update-all and richer provider-backed update checks
-2. layer Wago search and TUI install UX on top
-3. broaden provider/source coverage using the same managed ownership contract
+1. layer Wago search and TUI install UX on top of the current Wago CLI contract
+2. broaden provider/source coverage using the same managed ownership contract
+3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
 ## Remaining Major Work
 
@@ -218,13 +229,13 @@ Still missing or incomplete:
 
 - richer tree view for parent/child relationships
 - broader install flows beyond CLI-first Wago
-- update all flow
 - remote-backed update checks beyond Wago
 - search flows
 - config editing
 - backup workflows
 - broader source parity behavior
 - TUI install/search flow
+- real provider-backed selected updates in the TUI
 
 ## Minimum MVP
 

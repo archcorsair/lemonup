@@ -1207,7 +1207,10 @@ mod tests {
             .get_addon_by_folder("WeakAuras")
             .expect("get addon")
             .expect("addon exists");
-        assert_eq!(stored.installed_at.unix_timestamp(), installed_at.unix_timestamp());
+        assert_eq!(
+            stored.installed_at.unix_timestamp(),
+            installed_at.unix_timestamp()
+        );
         assert_eq!(stored.version.as_deref(), Some("5.21.1"));
         assert_eq!(stored.remote_version.as_deref(), Some("5.21.1"));
         assert_eq!(

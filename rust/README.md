@@ -30,4 +30,6 @@ cargo fmt --all
 cargo test --workspace
 cargo run -p lemonup-app --bin lemonup -- tui
 cargo run -p lemonup-app --bin lemonup -- update --dry-run
+cargo run -p lemonup-app --bin lemonup -- update WeakAuras --dry-run
+cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
 ```
