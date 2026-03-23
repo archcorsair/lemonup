@@ -88,6 +88,7 @@ impl AppRuntime {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppMessage {
     Tick,
@@ -733,7 +734,7 @@ impl DashboardState {
             .rows
             .iter()
             .position(|row| row.key == *key)
-            .or_else(|| if self.rows.is_empty() { None } else { Some(0) });
+            .or(if self.rows.is_empty() { None } else { Some(0) });
         self.list_state.select(selection);
     }
 }
@@ -3303,10 +3304,9 @@ fn delete_selected_addons(
             if let Some(record) = database
                 .get_addon_by_folder(planned_folder)
                 .map_err(|error| error.to_string())?
+                && tracked_folders.insert(record.folder.clone())
             {
-                if tracked_folders.insert(record.folder.clone()) {
-                    tracked_records.push(record);
-                }
+                tracked_records.push(record);
             }
         }
 

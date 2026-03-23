@@ -32,6 +32,7 @@ cargo run -p lemonup-app --bin lemonup -- tui
 cargo run -p lemonup-app --bin lemonup -- update --dry-run
 cargo run -p lemonup-app --bin lemonup -- update WeakAuras --dry-run
 cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
+cargo run -p lemonup-app --bin lemonup -- install-tukui ElvUI --dry-run
 ```
 
 ## Current Wago Shell Slice
@@ -39,3 +40,15 @@ cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
 - `Search` pane: Wago search plus selected-result install
 - `Install` pane: direct Wago slug or URL install
 - current scope is retail-only and stable-only
+
+## Current Provider Coverage
+
+- Wago:
+  - CLI install
+  - CLI live check
+  - CLI live update
+  - TUI search and install
+- TukUI:
+  - CLI install for canonical `ElvUI` and `Tukui`
+  - CLI live check for tracked TukUI addons
+  - CLI live update for tracked TukUI addons

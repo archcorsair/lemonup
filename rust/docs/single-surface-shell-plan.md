@@ -194,7 +194,8 @@ Collapse only when an exact base folder exists.
 
 Allowed examples:
 - `Details` + `Details_DataStorage` -> parent owns child
-- `ElvUI` + `ElvUI_OptionsUI` -> parent owns child
+- `ElvUI` + `ElvUI_Options` -> parent owns child
+- `ElvUI` + `ElvUI_Libraries` -> parent owns child
 
 Disallowed examples:
 - `DBM-Core` + `DBM-Naxx` stay separate

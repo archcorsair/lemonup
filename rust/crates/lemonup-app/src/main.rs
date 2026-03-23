@@ -5,6 +5,7 @@ mod drift;
 mod event;
 mod onboarding;
 mod tui;
+mod tukui;
 mod update;
 mod wago;
 
@@ -22,6 +23,7 @@ use crate::app::{App, AppRuntime};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::tui::Tui;
+use crate::tukui::install_tukui_addon;
 #[cfg(test)]
 use crate::update::refresh_managed_update_state;
 use crate::update::{
@@ -59,6 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             stability,
             dry_run,
         } => run_install_wago(paths, runtime, &addon, stability, dry_run).await?,
+        Commands::InstallTukui { addon, dry_run } => {
+            run_install_tukui(paths, runtime, &addon, dry_run).await?
+        }
     }
 
     Ok(())
@@ -376,6 +381,61 @@ async fn run_install_wago(
         summary.parent_folder,
         summary.installed_folders.join("|"),
         summary.stability.as_str(),
+        summary.version.as_deref().unwrap_or("<unknown>"),
+        summary.dry_run
+    );
+
+    Ok(())
+}
+
+async fn run_install_tukui(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let effective_addon_dir = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone());
+    let Some(addon_dir) = effective_addon_dir else {
+        println!(
+            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
+            runtime.profile_name, addon, dry_run
+        );
+        return Ok(());
+    };
+
+    if runtime.is_guarded_path(&addon_dir) {
+        return Err(Box::new(LemonupError::InvalidArgument(format!(
+            "profile '{}' refuses to target the default profile addon directory: {}",
+            runtime.profile_name,
+            addon_dir.display()
+        ))));
+    }
+
+    validate_addons_path(&addon_dir).map_err(|error| {
+        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+    })?;
+
+    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let summary = install_tukui_addon(&mut database, &addon_dir, addon, dry_run)
+        .await
+        .map_err(Box::<dyn std::error::Error>::from)?;
+
+    println!(
+        "tukui install: profile={}, addon_slug={}, addon_name={}, parent={}, folders={}, version={}, dry_run={}",
+        runtime.profile_name,
+        summary.addon_slug,
+        summary.addon_name,
+        summary.parent_folder,
+        summary.installed_folders.join("|"),
         summary.version.as_deref().unwrap_or("<unknown>"),
         summary.dry_run
     );

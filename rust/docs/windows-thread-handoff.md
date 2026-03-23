@@ -39,8 +39,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest commit at handoff pass: `3663147` `fix(tests): close addon manager before temp cleanup`
-- current worktree status at handoff pass: dirty with local Rust v2 Wago search/TUI install UX implementation awaiting manual verification
+- latest commit at handoff pass: `7f33fe0` `feat(rust): add Wago search and TUI install flow`
+- current worktree status at handoff pass: dirty with local Rust v2 TukUI provider parity implementation awaiting manual verification
 
 ## Current State
 
@@ -87,11 +87,15 @@ Implemented, committed, and pushed:
 - update-all CLI contract
 - targeted CLI update selectors with per-addon result reporting
 - explicit TUI update-pane refresh wording to distinguish tracked-state refresh from live apply/update
-- local unverified Wago search plus TUI install UX implementation is currently in the worktree:
-  - Search pane runs Wago search
-  - Search pane installs the selected Wago result
-  - Install pane accepts direct Wago slug/URL install
-  - replace/reinstall now requires explicit confirmation
+- Wago search plus TUI install UX is implemented, manually verified, and checkpointed
+- local unverified TukUI provider parity implementation is currently in the worktree:
+  - `install-tukui` installs canonical `ElvUI` and `Tukui`
+  - tracked TukUI `check` now uses the TukUI API feed
+  - tracked TukUI `update` now uses the TukUI API feed
+  - ElvUI managed ownership matches v1:
+    - `ElvUI`
+    - `ElvUI_Libraries`
+    - `ElvUI_Options`
 
 ## Recent Important Commits
 
@@ -258,21 +262,21 @@ Already proven in some form:
 
 Still missing or incomplete for MVP:
 - update selected against real provider-backed updates in the TUI
-- Wago search plus TUI install UX manual verification / checkpoint
-- broader provider/source parity
+- manual verification / checkpoint for TukUI provider parity
+- broader provider/source parity beyond Wago + TukUI
 - richer config/backup workflows
 
 ## Next Recommended Slice
 
 Next real phase:
-1. manually verify and checkpoint the in-worktree Wago search plus TUI install UX slice
+1. manually verify and checkpoint the in-worktree TukUI provider parity slice
 2. broaden provider/source coverage using the same managed ownership contract
 3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
 Why this is next:
-- Wago install, live check, update-all, and targeted update are now proven in the CLI
-- the next unverified slice already implemented locally is search/install UX inside the shell
-- after that, the biggest remaining MVP gap is broader provider coverage
+- Wago install/search/check/update is now proven
+- canonical TukUI install/check/update is the next provider parity gap already implemented locally
+- after that, the biggest remaining MVP gap is broader provider coverage beyond Wago + TukUI
 - the ownership model is already hardened enough to build on
 
 ## Suggested First Commands In A New Windows-Rooted Thread
@@ -296,4 +300,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. CLI update-all and targeted update selectors are already landed, and the local worktree currently contains an unverified Wago search plus TUI install UX slice that needs manual verification before checkpointing. After that, move to broader provider parity and real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install is already landed and verified, and the local worktree currently contains an unverified TukUI provider parity slice for canonical ElvUI/Tukui install/check/update that needs manual verification before checkpointing. After that, move to broader provider parity and real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`

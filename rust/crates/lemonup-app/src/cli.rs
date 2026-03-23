@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
 use clap::{Parser, Subcommand};
 use lemonup_core::DEFAULT_PROFILE;
@@ -49,6 +50,13 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Install the canonical TukUI-hosted ElvUI or Tukui package
+    InstallTukui {
+        #[arg(value_name = "TUKUI_ADDON", value_parser = parse_tukui_install_target)]
+        addon: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -94,11 +102,17 @@ fn parse_wago_install_target(value: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn parse_tukui_install_target(value: &str) -> Result<String, String> {
+    parse_tukui_target(value)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Commands, parse_addon_selector, parse_wago_install_target};
+    use super::{
+        Cli, Commands, parse_addon_selector, parse_tukui_install_target, parse_wago_install_target,
+    };
 
     #[test]
     fn addon_selector_accepts_expected_characters() {
@@ -125,6 +139,13 @@ mod tests {
         assert!(parse_wago_install_target("detail\nbreak").is_err());
         assert!(parse_wago_install_target("details").is_ok());
         assert!(parse_wago_install_target("https://addons.wago.io/addons/details").is_ok());
+    }
+
+    #[test]
+    fn tukui_target_accepts_only_canonical_targets() {
+        assert_eq!(parse_tukui_install_target("ElvUI").expect("elvui"), "elvui");
+        assert_eq!(parse_tukui_install_target("tukui").expect("tukui"), "tukui");
+        assert!(parse_tukui_install_target("Details").is_err());
     }
 
     #[test]
@@ -157,6 +178,20 @@ mod tests {
                 assert!(!dry_run);
             }
             other => panic!("expected update-all command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_tukui_command_parses_canonical_target() {
+        let cli = Cli::try_parse_from(["lemonup", "install-tukui", "ElvUI", "--dry-run"])
+            .expect("parse install-tukui");
+
+        match cli.command.expect("subcommand") {
+            Commands::InstallTukui { addon, dry_run } => {
+                assert_eq!(addon, "elvui");
+                assert!(dry_run);
+            }
+            other => panic!("expected install-tukui command, got {other:?}"),
         }
     }
 }

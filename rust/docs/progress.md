@@ -75,15 +75,18 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - active unverified slice:
-  - Wago search plus TUI install UX
+  - TukUI provider parity for canonical `ElvUI` and `Tukui`
 - implemented locally and covered by Rust tests, but still awaiting user manual verification:
-  - Search pane now runs Wago search inside the shell
-  - Search pane now supports installing the selected Wago result
-  - Install pane now supports direct Wago slug or URL install
-  - install flows now require explicit confirmation before replacing existing tracked/on-disk folders
+  - `install-tukui` now installs canonical `ElvUI` or `Tukui` only
+  - tracked TukUI addons now use the TukUI API feed for live `check`
+  - tracked TukUI addons now use the TukUI API feed for live `update`
+  - ElvUI ownership matches v1 in managed writes:
+    - `ElvUI`
+    - `ElvUI_Libraries`
+    - `ElvUI_Options`
 - current focus:
-  - manually verify the new Search and Install pane behavior on `--profile dev`
-  - then checkpoint and move next into broader provider/source parity
+  - manually verify TukUI install/check/update on `--profile dev`
+  - then checkpoint and move next into broader provider/source parity beyond Wago + TukUI
 
 ## Newly Completed
 
@@ -225,13 +228,23 @@ These are implemented and manually verified in addition to the earlier chunks:
   - direct install dispatch
   - pending replace-confirmation routing
   - Wago search result parsing and install inspection
-
+- Wago search plus TUI install UX was manually verified and checkpointed
+- first real TukUI provider-backed CLI parity now exists for canonical `ElvUI` and `Tukui`:
+  - TukUI install metadata resolves only from `https://api.tukui.org/v1/addons`
+  - TukUI live `check` resolves only from the same TukUI API feed
+  - TukUI live `update` resolves only from the same TukUI API feed
+  - no GitHub fallback or inferred remote metadata is used for those packages
+  - `install-tukui` supports only canonical `ElvUI` and `Tukui` targets in this slice
+  - ElvUI managed ownership matches v1:
+    - `ElvUI_Libraries`
+    - `ElvUI_Options`
+  - Tukui remains a managed single-folder package
 ## Next Up
 
 Next phase:
 
-1. manually verify and checkpoint Wago search plus TUI install UX
-2. broader provider/source parity
+1. manually verify and checkpoint TukUI provider parity for canonical `ElvUI` and `Tukui`
+2. broaden provider/source parity beyond Wago + TukUI
 3. real provider-backed selected updates in the TUI
 
 ### Goal
@@ -242,7 +255,7 @@ Next phase:
 
 ### Planned order
 
-1. manually verify the new Wago search/direct-install shell flows and checkpoint them
+1. manually verify TukUI install/check/update for canonical `ElvUI` and `Tukui`
 2. broaden provider/source coverage using the same managed ownership contract
 3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
 
@@ -251,8 +264,8 @@ Next phase:
 Still missing or incomplete:
 
 - richer tree view for parent/child relationships
-- broader install flows beyond CLI-first Wago
-- remote-backed update checks beyond Wago
+- broader install flows beyond Wago and canonical TukUI
+- remote-backed update checks beyond Wago and canonical TukUI
 - config editing
 - backup workflows
 - broader source parity behavior
