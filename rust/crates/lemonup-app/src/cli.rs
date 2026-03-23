@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
+use crate::wowinterface::parse_wowinterface_target;
 use clap::{Parser, Subcommand};
 use lemonup_core::DEFAULT_PROFILE;
 
@@ -57,6 +58,13 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Install a WoWInterface addon by addon page URL
+    InstallWowinterface {
+        #[arg(value_name = "WOWI_ADDON", value_parser = parse_wowinterface_install_target)]
+        addon: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -106,12 +114,17 @@ fn parse_tukui_install_target(value: &str) -> Result<String, String> {
     parse_tukui_target(value)
 }
 
+fn parse_wowinterface_install_target(value: &str) -> Result<String, String> {
+    parse_wowinterface_target(value)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     use super::{
         Cli, Commands, parse_addon_selector, parse_tukui_install_target, parse_wago_install_target,
+        parse_wowinterface_install_target,
     };
 
     #[test]
@@ -192,6 +205,38 @@ mod tests {
                 assert!(dry_run);
             }
             other => panic!("expected install-tukui command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wowinterface_target_accepts_expected_url_only() {
+        assert_eq!(
+            parse_wowinterface_install_target(
+                "https://www.wowinterface.com/downloads/info25687-ElvUI_WindTools.html"
+            )
+            .expect("wowi url"),
+            "25687"
+        );
+        assert!(parse_wowinterface_install_target("25687").is_err());
+        assert!(parse_wowinterface_install_target("https://example.com/info25687.html").is_err());
+    }
+
+    #[test]
+    fn install_wowinterface_command_parses_url() {
+        let cli = Cli::try_parse_from([
+            "lemonup",
+            "install-wowinterface",
+            "https://www.wowinterface.com/downloads/info25687-ElvUI_WindTools.html",
+            "--dry-run",
+        ])
+        .expect("parse install-wowinterface");
+
+        match cli.command.expect("subcommand") {
+            Commands::InstallWowinterface { addon, dry_run } => {
+                assert_eq!(addon, "25687");
+                assert!(dry_run);
+            }
+            other => panic!("expected install-wowinterface command, got {other:?}"),
         }
     }
 }

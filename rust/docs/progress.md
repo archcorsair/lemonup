@@ -74,19 +74,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- active unverified slice:
-  - TukUI provider parity for canonical `ElvUI` and `Tukui`
-- implemented locally and covered by Rust tests, but still awaiting user manual verification:
-  - `install-tukui` now installs canonical `ElvUI` or `Tukui` only
-  - tracked TukUI addons now use the TukUI API feed for live `check`
-  - tracked TukUI addons now use the TukUI API feed for live `update`
-  - ElvUI ownership matches v1 in managed writes:
-    - `ElvUI`
-    - `ElvUI_Libraries`
-    - `ElvUI_Options`
+- no active unverified slice in the worktree
 - current focus:
-  - manually verify TukUI install/check/update on `--profile dev`
-  - then checkpoint and move next into broader provider/source parity beyond Wago + TukUI
+  - broaden provider/source parity beyond Wago + TukUI + WoWInterface
+  - then move next into real provider-backed selected updates in the TUI
 
 ## Newly Completed
 
@@ -239,13 +230,21 @@ These are implemented and manually verified in addition to the earlier chunks:
     - `ElvUI_Libraries`
     - `ElvUI_Options`
   - Tukui remains a managed single-folder package
+- TukUI provider parity was manually verified and checkpointed
+- first real WoWInterface provider-backed CLI parity now exists:
+  - `install-wowinterface` accepts WoWInterface addon page URLs and parses the addon id internally
+  - WoWInterface details resolve from `https://api.mmoui.com/v3/game/WOW/filedetails/<id>.json`
+  - WoWInterface live `check` resolves only from that API and persists refreshed remote metadata
+  - WoWInterface live `update` downloads from `UIDownload` and preserves managed ownership metadata
+  - tracked WoWInterface source URLs are canonical public addon URLs that round-trip back to addon ids
+- WoWInterface CLI parity was manually verified and checkpointed
 ## Next Up
 
 Next phase:
 
-1. manually verify and checkpoint TukUI provider parity for canonical `ElvUI` and `Tukui`
-2. broaden provider/source parity beyond Wago + TukUI
-3. real provider-backed selected updates in the TUI
+1. broaden provider/source parity beyond Wago + TukUI + WoWInterface
+2. real provider-backed selected updates in the TUI
+3. richer config/backup workflows
 
 ### Goal
 
@@ -255,17 +254,17 @@ Next phase:
 
 ### Planned order
 
-1. manually verify TukUI install/check/update for canonical `ElvUI` and `Tukui`
-2. broaden provider/source coverage using the same managed ownership contract
-3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+1. broaden provider/source coverage using the same managed ownership contract
+2. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+3. continue filling remaining config/backup gaps
 
 ## Remaining Major Work
 
 Still missing or incomplete:
 
 - richer tree view for parent/child relationships
-- broader install flows beyond Wago and canonical TukUI
-- remote-backed update checks beyond Wago and canonical TukUI
+- broader install flows beyond Wago, canonical TukUI, and WoWInterface
+- remote-backed update checks beyond Wago, canonical TukUI, and WoWInterface
 - config editing
 - backup workflows
 - broader source parity behavior

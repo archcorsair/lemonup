@@ -52,3 +52,7 @@ cargo run -p lemonup-app --bin lemonup -- install-tukui ElvUI --dry-run
   - CLI install for canonical `ElvUI` and `Tukui`
   - CLI live check for tracked TukUI addons
   - CLI live update for tracked TukUI addons
+- WoWInterface:
+  - CLI install by addon page URL
+  - CLI live check for tracked WoWInterface addons
+  - CLI live update for tracked WoWInterface addons

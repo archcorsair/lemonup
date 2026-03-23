@@ -183,7 +183,34 @@ where
                     });
                 }
             },
-            SourceKind::GitHub | SourceKind::WowInterface => {
+            SourceKind::WowInterface => {
+                match crate::wowinterface::fetch_wowinterface_remote_version(&addon).await {
+                    Ok(remote) => {
+                        let mut refreshed = addon.clone();
+                        refreshed.remote_version = remote.version;
+                        refreshed.source_url = remote.source_url.or(refreshed.source_url);
+                        refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
+                        database.upsert_addon(&refreshed)?;
+
+                        let (status, message) = determine_update_status(&refreshed);
+                        results.push(CheckResult {
+                            addon_name: refreshed.folder.clone(),
+                            status,
+                            remote_version: refreshed.remote_version.clone(),
+                            message,
+                        });
+                    }
+                    Err(error) => {
+                        results.push(CheckResult {
+                            addon_name: addon.folder.clone(),
+                            status: UpdateStatus::Error,
+                            remote_version: addon.remote_version.clone(),
+                            message: Some(error),
+                        });
+                    }
+                }
+            }
+            SourceKind::GitHub => {
                 results.push(CheckResult {
                     addon_name: addon.folder.clone(),
                     status: UpdateStatus::Unknown,
@@ -350,7 +377,50 @@ pub(crate) async fn apply_live_updates(
                     }
                 }
             }
-            SourceKind::GitHub | SourceKind::WowInterface => {
+            SourceKind::WowInterface => {
+                match crate::wowinterface::update_wowinterface_addon(
+                    database, addon_dir, &addon, force, dry_run,
+                )
+                .await
+                {
+                    Ok(result) if result.updated => {
+                        summary.updated_addons += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Updated,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: None,
+                        });
+                    }
+                    Ok(result) => {
+                        summary.up_to_date += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::UpToDate,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: Some(
+                                "remote package already matches installed version".to_string(),
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        summary.errors += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Error,
+                            previous_version: addon.version.clone(),
+                            remote_version: addon.remote_version.clone(),
+                            message: Some(error),
+                        });
+                    }
+                }
+            }
+            SourceKind::GitHub => {
                 summary.skipped_unsupported += 1;
                 results.push(LiveUpdateResult {
                     addon_name: addon.folder.clone(),
