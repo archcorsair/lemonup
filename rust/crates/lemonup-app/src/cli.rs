@@ -22,6 +22,8 @@ pub struct Cli {
 pub enum Commands {
     /// Launch the Ratatui interface
     Tui,
+    /// Reconcile the current AddOns directory into tracked state
+    Sync,
     /// Check tracked addons for updates without applying changes
     Check {
         #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
@@ -203,6 +205,16 @@ mod tests {
                 assert!(!dry_run);
             }
             other => panic!("expected update-all command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_command_parses() {
+        let cli = Cli::try_parse_from(["lemonup", "sync"]).expect("parse sync");
+
+        match cli.command.expect("subcommand") {
+            Commands::Sync => {}
+            other => panic!("expected sync command, got {other:?}"),
         }
     }
 

@@ -1,0 +1,1 @@
+-- Manual smoke fixture for LemonUp Rust scripts.

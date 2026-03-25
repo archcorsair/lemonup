@@ -21,6 +21,7 @@ Before making changes:
    - `rust/docs/known-v1-gaps.md`
    - `rust/docs/single-surface-shell-plan.md`
    - `rust/docs/progress.md`
+   - `rust/docs/manual-testing.md` when manual verification or seeded sandbox coverage is relevant
 4. If product context is needed, root `AGENTS.md` says only read:
    - `conductor/product.md`
    - `conductor/product-guidelines.md`
@@ -39,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: GitHub CLI parity implemented and manually verified
-- current worktree status at handoff pass: clean after checkpoint
+- latest local milestone at handoff pass: TUI selected live updates plus manual seed/smoke harness implemented and manually verified
+- current worktree status at handoff pass: ready for checkpoint
 
 ## Current State
 
@@ -86,7 +87,7 @@ Implemented, committed, and pushed:
 - first real live provider-backed update flow via Wago CLI
 - update-all CLI contract
 - targeted CLI update selectors with per-addon result reporting
-- explicit TUI update-pane refresh wording to distinguish tracked-state refresh from live apply/update
+- real provider-backed selected updates in the TUI
 - Wago search plus TUI install UX is implemented, manually verified, and checkpointed
 - TukUI provider parity is implemented, manually verified, and checkpointed
 - WoWInterface provider parity is implemented, manually verified, and checkpointed
@@ -95,6 +96,12 @@ Implemented, committed, and pushed:
   - tracked GitHub `check` now resolves remote default-branch HEAD commits live
   - tracked GitHub `update` now reapplies managed folders from the current default-branch HEAD commit
   - GitHub package parent selection follows Rust-local repo-name heuristics and managed ownership rules
+- scripted manual-testing harness now exists and is manually verified:
+  - `seed-sandbox.ps1`
+  - `smoke-provider-matrix.ps1`
+  - `manual-test-matrix.toml`
+  - `manual-testing.md`
+  - seeded `manual-smoke` profile covers TukUI, GitHub, WoWInterface, Wago, and one manual fixture
 
 ## Recent Important Commits
 
@@ -186,6 +193,20 @@ Use this as the active ledger for:
 - testing rules
 - current MVP target
 
+### `rust/docs/final-ui-polish-plan.md`
+Keep this placeholder-only until the project explicitly enters the late-stage TUI polish phase.
+
+Do not pull it into normal implementation context early.
+
+### `rust/docs/manual-testing.md`
+Use this when you need repeatable manual coverage:
+- seeded sandbox setup
+- provider smoke coverage
+- manual fixture coverage
+- short TUI spot checks on top of a known-good seeded matrix
+
+Prefer this scripted workflow over one-off manual installs when validating broad provider behavior.
+
 ## Environment Notes
 
 Preferred environment going forward:
@@ -247,6 +268,31 @@ User-verified so far:
 - `update --force --dry-run` and `update --force` behaved correctly
 - TUI still rendered correct relationships after Wago update
 - delete and undo still worked after Wago update
+- seeded sandbox harness worked end to end:
+  - `seed-sandbox.ps1`
+  - `smoke-provider-matrix.ps1`
+  - multi-provider CLI smoke coverage now exists for TukUI, GitHub, WoWInterface, Wago, and one manual fixture
+- seeded TUI verification on `manual-smoke` worked for:
+  - checks
+  - provider-backed selected updates
+  - delete
+  - undo delete
+
+## Scripted Manual Testing Workflow
+
+Preferred repeatable validation path:
+
+1. seed a fresh sandbox root with:
+   - `pwsh -File rust/scripts/seed-sandbox.ps1 -SandboxRoot <sandbox-root>`
+2. run provider smoke coverage with:
+   - `pwsh -File rust/scripts/smoke-provider-matrix.ps1 -SandboxRoot <sandbox-root>`
+3. use the printed TUI launch command for short visual/interaction verification
+
+Notes for future agents:
+- the scripts default to `--profile manual-smoke`, not `dev`
+- they intentionally reset the sandbox root
+- they are the fastest safe way to get broad source coverage without rebuilding ad hoc test installs
+- the target list lives in `rust/scripts/manual-test-matrix.toml`
 
 ## Current MVP Boundary
 
@@ -260,24 +306,26 @@ Already proven in some form:
 - relationship-safe parent/child handling in managed flows
 
 Still missing or incomplete for MVP:
-- update selected against real provider-backed updates in the TUI
 - richer config/backup workflows
-- any remaining non-MVP source parity cleanup after the TUI update path lands
+- final TUI polish and production UX pass
+- any remaining non-MVP source parity cleanup after those slices land
 
 ## Next Recommended Slice
 
 Next real phase:
-1. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
-2. preserve the same managed ownership contract in that TUI-selected update flow
-3. continue richer config/backup workflows after the update path is proven
+1. continue richer config/backup workflows
+2. run a dedicated late-stage TUI polish and production UX pass
+3. clean up any remaining source-parity or workflow gaps after those slices are proven
 
 Why this is next:
 - Wago install/search/check/update is now proven
 - canonical TukUI install/check/update is now proven
 - WoWInterface install/check/update is now proven
 - GitHub install/check/update is now proven
-- the biggest remaining MVP gap is replacing tracked refresh in the TUI with real provider-backed selected updates
+- real provider-backed selected updates in the TUI are now proven
+- the new seeded manual-smoke workflow gives broad repeatable coverage for later slices
 - the ownership model is already hardened enough to build on
+- the visual/design pass is intentionally deferred into its own dedicated doc to preserve progressive disclosure
 
 ## Suggested First Commands In A New Windows-Rooted Thread
 
@@ -300,4 +348,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, and GitHub CLI parity are already landed and verified. Move next to real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, and TUI-selected live updates are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. Move next to richer config/backup workflows. Respect existing safety/relationship invariants and commit only after my manual verification.`

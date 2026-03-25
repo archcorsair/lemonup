@@ -51,6 +51,7 @@ pub enum AppAction {
     StartDashboardUpdateSelected {
         addon_dir: PathBuf,
         folders: Vec<String>,
+        wago_api_key: Option<String>,
     },
     StartWagoSearch {
         query: String,

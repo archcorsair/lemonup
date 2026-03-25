@@ -12,6 +12,8 @@ Important:
 - `crates/lemonup-core`: shared domain model, config/state storage, typed progress events
 - `crates/lemonup-app`: Ratatui shell and narrow CLI entrypoint
 - `docs/`: acceptance matrix, handoff notes, progress tracker, v1 gaps, and the single-surface shell plan
+- `scripts/`: Windows-native manual seed/smoke helpers for sandbox testing
+- `testdata/`: static manual-test fixtures used by the seed/smoke workflow
 
 ## Read Order
 
@@ -23,17 +25,25 @@ Start here before continuing the rewrite:
 4. `docs/known-v1-gaps.md`
 5. `docs/single-surface-shell-plan.md`
 
+Read `docs/final-ui-polish-plan.md` only when the rewrite explicitly enters the late-stage polish/design phase.
+Read `docs/manual-testing.md` when you need the seeded sandbox manual-smoke workflow.
+
+For future agents: prefer the scripted manual-test harness before ad hoc provider installs when broad manual coverage is needed.
+
 ## Intended commands
 
 ```bash
 cargo fmt --all
 cargo test --workspace
 cargo run -p lemonup-app --bin lemonup -- tui
+cargo run -p lemonup-app --bin lemonup -- sync
 cargo run -p lemonup-app --bin lemonup -- update --dry-run
 cargo run -p lemonup-app --bin lemonup -- update WeakAuras --dry-run
 cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
 cargo run -p lemonup-app --bin lemonup -- install-tukui ElvUI --dry-run
 cargo run -p lemonup-app --bin lemonup -- install-github https://github.com/WeakAuras/WeakAuras2 --dry-run
+pwsh -File scripts/seed-sandbox.ps1 -SandboxRoot D:\Sandbox\WoWDev
+pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
 ```
 
 ## Current Wago Shell Slice

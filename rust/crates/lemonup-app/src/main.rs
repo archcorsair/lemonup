@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use lemonup_core::{
-    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, LemonupError, StateDatabase, UpdateStatus,
-    validate_addons_path,
+    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, LemonupError, StateDatabase,
+    UpdateStatus, scan_addons_dir, validate_addons_path,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui => run_tui(paths, runtime).await?,
+        Commands::Sync => run_sync(paths, runtime)?,
         Commands::Check { addons } => run_check(paths, addons).await?,
         Commands::Update {
             addons,
@@ -242,6 +243,64 @@ async fn run_update(
                 dry_run
             );
             print_update_details(&addons, &run.results);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_sync(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let effective_addon_dir = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone());
+
+    match config_state {
+        ConfigLoad::Missing(path) if runtime.addon_dir_override.is_none() => {
+            println!(
+                "sync skipped: profile={}, addon_dir=<unconfigured>, config={}",
+                runtime.profile_name,
+                path.display()
+            );
+        }
+        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
+            println!(
+                "sync skipped: profile={}, addon_dir=<unconfigured>",
+                runtime.profile_name
+            );
+        }
+        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
+            let addon_dir = effective_addon_dir.expect("checked above");
+            if runtime.is_guarded_path(&addon_dir) {
+                return Err(Box::new(LemonupError::InvalidArgument(format!(
+                    "profile '{}' refuses to target the default profile addon directory: {}",
+                    runtime.profile_name,
+                    addon_dir.display()
+                ))));
+            }
+
+            validate_addons_path(&addon_dir).map_err(|error| {
+                Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+            })?;
+
+            let scanned = scan_addons_dir(&addon_dir, GameFlavor::Retail)?;
+            let mut database = StateDatabase::open(paths.state_db_file)?;
+            let summary = database.reconcile_scanned_addons(&scanned)?;
+
+            println!(
+                "sync summary: profile={}, addon_dir={}, scanned_addons={}, upserted_addons={}, removed_addons={}",
+                runtime.profile_name,
+                addon_dir.display(),
+                summary.scanned_addons,
+                summary.upserted_addons,
+                summary.removed_addons
+            );
         }
     }
 

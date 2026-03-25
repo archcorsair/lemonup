@@ -49,9 +49,20 @@ pub(crate) fn compute_drift_report(
         .iter()
         .map(|addon| (addon.folder.as_str(), addon))
         .collect::<HashMap<_, _>>();
-    let scanned_folders = scanned
+    let visible_scanned_folders = scanned
         .iter()
         .map(|addon| addon.folder.as_str())
+        .collect::<HashSet<_>>();
+    let represented_scanned_folders = scanned
+        .iter()
+        .flat_map(|addon| {
+            std::iter::once(addon.folder.as_str()).chain(
+                addon
+                    .owned_folders
+                    .iter()
+                    .map(|owned_folder| owned_folder.name.as_str()),
+            )
+        })
         .collect::<HashSet<_>>();
 
     let mut report = DriftReport::empty();
@@ -65,7 +76,7 @@ pub(crate) fn compute_drift_report(
 
     report.removed_missing_records = tracked
         .iter()
-        .filter(|addon| !scanned_folders.contains(addon.folder.as_str()))
+        .filter(|addon| !visible_scanned_folders.contains(addon.folder.as_str()))
         .map(|addon| addon.folder.clone())
         .collect();
     report.removed_missing_records.sort();
@@ -75,11 +86,13 @@ pub(crate) fn compute_drift_report(
             continue;
         }
 
-        let parent_on_disk = scanned_folders.contains(addon.folder.as_str());
+        let parent_on_disk = represented_scanned_folders.contains(addon.folder.as_str());
         let mut missing_owned_children = addon
             .owned_folders
             .iter()
-            .filter(|owned_folder| !scanned_folders.contains(owned_folder.name.as_str()))
+            .filter(|owned_folder| {
+                !represented_scanned_folders.contains(owned_folder.name.as_str())
+            })
             .map(|owned_folder| owned_folder.name.clone())
             .collect::<Vec<_>>();
         missing_owned_children.sort();
@@ -92,7 +105,7 @@ pub(crate) fn compute_drift_report(
 
         if !parent_on_disk {
             for owned_folder in &addon.owned_folders {
-                if scanned_folders.contains(owned_folder.name.as_str()) {
+                if represented_scanned_folders.contains(owned_folder.name.as_str()) {
                     report
                         .orphaned_owned_children_on_disk
                         .push(OwnedChildDrift {
@@ -202,5 +215,35 @@ mod tests {
             report.orphaned_owned_children_on_disk[0].child_folder,
             "DBM-Naxx"
         );
+    }
+
+    #[test]
+    fn drift_report_treats_collapsed_owned_children_as_present_on_disk() {
+        let mut tracked = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        tracked.set_managed_owned_folders(vec![OwnedFolder {
+            name: "ElvUI_WindTools".to_string(),
+        }]);
+
+        let scanned = vec![ScannedAddon {
+            name: "ElvUI".to_string(),
+            folder: "ElvUI".to_string(),
+            owned_folders: vec![OwnedFolder {
+                name: "ElvUI_WindTools".to_string(),
+            }],
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: None,
+            git_commit: None,
+            author: None,
+            interface: None,
+            source: SourceKind::Manual,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+        }];
+
+        let report = compute_drift_report(&[tracked], &scanned);
+        assert!(report.missing_owned_children_for("ElvUI").is_empty());
+        assert!(report.orphaned_owned_children_on_disk.is_empty());
     }
 }

@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use lemonup_core::{
-    AddonRecord, GameFlavor, LemonupError, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
-    scan_addons_dir,
-};
+use lemonup_core::{AddonRecord, LemonupError, SourceKind, StateDatabase, UpdateStatus};
+#[cfg(test)]
+use lemonup_core::{GameFlavor, ScannedAddon, scan_addons_dir};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +14,7 @@ pub(crate) struct CheckResult {
     pub(crate) message: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UpdateRefreshSummary {
     pub(crate) target_addons: usize,
@@ -566,6 +566,7 @@ pub(crate) fn refresh_managed_update_state(
     refresh_managed_update_state_for_selectors(database, addon_dir, &[], dry_run)
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_managed_update_state_for_selectors(
     database: &mut StateDatabase,
     addon_dir: &Path,
@@ -616,6 +617,7 @@ pub(crate) fn refresh_managed_update_state_for_selectors(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn build_managed_update_record(
     existing: &AddonRecord,
     scanned: &ScannedAddon,

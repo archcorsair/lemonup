@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
@@ -26,16 +26,14 @@ use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
 use crate::tui::Backend;
-use crate::update::{
-    CheckResult, UpdateRefreshSummary, refresh_managed_update_state_for_selectors,
-};
+use crate::update::{CheckResult, LiveUpdateSummary, apply_live_updates};
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
     inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
     search_wago_addons,
 };
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | z undo-delete | r refresh-selected | v select-refreshable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | z undo-delete | r update-selected | v select-updateable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -170,7 +168,7 @@ struct DashboardDeleteOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardUpdateOutcome {
-    summary: UpdateRefreshSummary,
+    summary: LiveUpdateSummary,
     sync: AddonScanOutcome,
 }
 
@@ -235,13 +233,14 @@ impl DashboardUndoDeleteState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardUpdateRunSummary {
     targets: usize,
+    updated_addons: usize,
     up_to_date: usize,
     update_available: usize,
     unknown: usize,
     errors: usize,
-    refreshed_addons: usize,
+    skipped_manual: usize,
     skipped_unmanaged: usize,
-    missing_on_disk: usize,
+    skipped_unsupported: usize,
     scanned_addons: usize,
 }
 
@@ -1462,19 +1461,19 @@ impl App {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        "tracked update refresh already running",
+                        "selected addon update already running",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        "confirm or cancel the pending delete before refreshing tracked update state",
+                        "confirm or cancel the pending delete before applying selected updates",
                     ))]
                 } else {
                     let selected = self.dashboard.selected_parent_folders();
                     match (self.effective_addon_dir.clone(), selected.is_empty()) {
                         (_, true) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
-                            "select one or more parent addons before refreshing tracked update state",
+                            "select one or more parent addons before applying selected updates",
                         ))],
                         (None, false) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
@@ -1487,11 +1486,12 @@ impl App {
                                 AppAction::StartDashboardUpdateSelected {
                                     addon_dir,
                                     folders: selected,
+                                    wago_api_key: self.wago_api_key.clone(),
                                 },
                                 AppAction::SetStatus(self.dashboard_status_for(
                                     self.dashboard.detail_mode,
                                     &format!(
-                                        "refreshing tracked update state for {} selected addon{}",
+                                        "applying updates for {} selected addon{}",
                                         selected_len,
                                         plural_suffix(selected_len)
                                     ),
@@ -1506,7 +1506,7 @@ impl App {
                 if refreshable.is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        "no refreshable tracked parent addons are available in the current list",
+                        "no updateable tracked parent addons are available in the current list",
                     ))]
                 } else {
                     let count = refreshable.len();
@@ -1515,7 +1515,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
                             &format!(
-                                "selected {} refreshable tracked addon{}",
+                                "selected {} updateable tracked addon{}",
                                 count,
                                 plural_suffix(count)
                             ),
@@ -2053,10 +2053,7 @@ impl App {
                     },
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetDashboardUpdateSummary(Some(
-                        dashboard_update_run_summary_from_refresh(
-                            &self.dashboard.selected_parent_items(),
-                            outcome.summary,
-                        ),
+                        dashboard_update_run_summary_from_live(outcome.summary),
                     )),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
@@ -2067,7 +2064,7 @@ impl App {
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        &format!("tracked update refresh failed: {error}"),
+                        &format!("selected addon update failed: {error}"),
                     )),
                 ],
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
@@ -2390,15 +2387,21 @@ impl App {
                     let _ = sender.send(AppTaskEvent::DashboardUndoFinished(result));
                 });
             }
-            AppAction::StartDashboardUpdateSelected { addon_dir, folders } => {
+            AppAction::StartDashboardUpdateSelected {
+                addon_dir,
+                folders,
+                wago_api_key,
+            } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        refresh_selected_addons(&state_db_file, &addon_dir, &folders)
-                    })
-                    .await
-                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+                    let result = run_dashboard_update_task(
+                        &state_db_file,
+                        &addon_dir,
+                        &folders,
+                        wago_api_key,
+                    )
+                    .await;
 
                     let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
                 });
@@ -3085,7 +3088,7 @@ impl App {
                     summary.up_to_date, summary.update_available, summary.unknown, summary.errors
                 )));
                 lines.push(Line::from(format!(
-                    "Tracked refresh state: {}",
+                    "Selected update state: {}",
                     if self.dashboard.update_in_progress() {
                         "running"
                     } else {
@@ -3093,21 +3096,24 @@ impl App {
                     }
                 )));
                 lines.push(Line::from(
-                    "Press v to select refreshable tracked parents, r to refresh tracked state for the current selection.",
+                    "Press v to select updateable tracked parents, r to apply provider-backed updates for the current selection.",
                 ));
                 if let Some(last_summary) = self.dashboard.last_update_summary() {
                     lines.push(Line::from(""));
-                    lines.push(Line::from("Last tracked refresh"));
+                    lines.push(Line::from("Last selected update"));
                     lines.push(Line::from(format!(
-                        "Targets={}, refreshed={}, skipped_unmanaged={}, missing_on_disk={}, scanned={}",
+                        "Targets={}, updated={}, up_to_date={}, skipped_manual={}, skipped_unmanaged={}, skipped_unsupported={}, errors={}, scanned={}",
                         last_summary.targets,
-                        last_summary.refreshed_addons,
+                        last_summary.updated_addons,
+                        last_summary.up_to_date,
+                        last_summary.skipped_manual,
                         last_summary.skipped_unmanaged,
-                        last_summary.missing_on_disk,
+                        last_summary.skipped_unsupported,
+                        last_summary.errors,
                         last_summary.scanned_addons
                     )));
                     lines.push(Line::from(format!(
-                        "Status mix: up_to_date={}, update_available={}, unknown={}, errors={}",
+                        "Tracked status snapshot: up_to_date={}, update_available={}, unknown={}, errors={}",
                         last_summary.up_to_date,
                         last_summary.update_available,
                         last_summary.unknown,
@@ -3156,7 +3162,9 @@ impl App {
             lines.push(Line::from(format!("{marker} {key} {label}")));
         }
 
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Detail"))
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Detail"))
     }
 
     fn base_status_line(&self) -> String {
@@ -3508,15 +3516,24 @@ async fn run_wago_install_task(
     }))
 }
 
-fn refresh_selected_addons(
+async fn run_dashboard_update_task(
     state_db_file: &Path,
     addon_dir: &Path,
     folders: &[String],
+    wago_api_key: Option<String>,
 ) -> std::result::Result<DashboardUpdateOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
-    let summary =
-        refresh_managed_update_state_for_selectors(&mut database, addon_dir, folders, false)
-            .map_err(|error| error.to_string())?;
+    let summary = apply_live_updates(
+        &mut database,
+        addon_dir,
+        folders,
+        wago_api_key.as_deref(),
+        false,
+        false,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .summary;
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
     Ok(DashboardUpdateOutcome { summary, sync })
@@ -3607,44 +3624,42 @@ fn summarize_checks(checks: &[CheckResult]) -> DashboardUpdateRunSummary {
 
     DashboardUpdateRunSummary {
         targets: checks.len(),
+        updated_addons: 0,
         up_to_date,
         update_available,
         unknown,
         errors,
-        refreshed_addons: 0,
+        skipped_manual: 0,
         skipped_unmanaged: 0,
-        missing_on_disk: 0,
+        skipped_unsupported: 0,
         scanned_addons: 0,
     }
 }
 
-fn dashboard_update_run_summary_from_refresh(
-    items: &[&DashboardItem],
-    refresh_summary: UpdateRefreshSummary,
-) -> DashboardUpdateRunSummary {
-    let mut summary = summarize_checks(&build_update_checks_for_dashboard(items));
-    summary.targets = refresh_summary.target_addons;
-    summary.refreshed_addons = refresh_summary.refreshed_addons;
-    summary.skipped_unmanaged = refresh_summary.skipped_unmanaged;
-    summary.missing_on_disk = refresh_summary.missing_on_disk;
-    summary.scanned_addons = refresh_summary.scanned_addons;
-    summary
+fn dashboard_update_run_summary_from_live(summary: LiveUpdateSummary) -> DashboardUpdateRunSummary {
+    DashboardUpdateRunSummary {
+        targets: summary.target_addons,
+        updated_addons: summary.updated_addons,
+        up_to_date: summary.up_to_date,
+        update_available: 0,
+        unknown: 0,
+        errors: summary.errors,
+        skipped_manual: summary.skipped_manual,
+        skipped_unmanaged: summary.skipped_unmanaged,
+        skipped_unsupported: summary.skipped_unsupported,
+        scanned_addons: 0,
+    }
 }
 
-fn dashboard_update_status_message(summary: UpdateRefreshSummary) -> String {
-    if summary.refreshed_addons == 0
-        && summary.skipped_unmanaged == 0
-        && summary.missing_on_disk == 0
-    {
-        return format!(
-            "tracked update refresh complete: no selected addons were refreshable from tracked managed state ({} selected), sync complete",
-            summary.target_addons
-        );
-    }
-
+fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
     format!(
-        "tracked update refresh complete: refreshed {}, skipped {}, missing {}, sync complete",
-        summary.refreshed_addons, summary.skipped_unmanaged, summary.missing_on_disk
+        "selected update complete: updated {}, up_to_date {}, skipped_manual {}, skipped_unmanaged {}, skipped_unsupported {}, errors {}, sync complete",
+        summary.updated_addons,
+        summary.up_to_date,
+        summary.skipped_manual,
+        summary.skipped_unmanaged,
+        summary.skipped_unsupported,
+        summary.errors
     )
 }
 
@@ -3790,7 +3805,7 @@ mod tests {
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
-    use crate::update::UpdateRefreshSummary;
+    use crate::update::LiveUpdateSummary;
     use crate::wago::{WagoInstallInspection, WagoSearchResult};
     use lemonup_core::{
         AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
@@ -4482,7 +4497,7 @@ mod tests {
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
-                "select one or more parent addons before refreshing tracked update state",
+                "select one or more parent addons before applying selected updates",
             ))]
         );
     }
@@ -4500,7 +4515,7 @@ mod tests {
                 AppAction::SetSelectedDashboardParents(vec!["Second".to_string()]),
                 AppAction::SetStatus(app.dashboard_status_for(
                     DetailMode::Update,
-                    "selected 1 refreshable tracked addon",
+                    "selected 1 updateable tracked addon",
                 )),
             ]
         );
@@ -4521,7 +4536,7 @@ mod tests {
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
-                "no refreshable tracked parent addons are available in the current list",
+                "no updateable tracked parent addons are available in the current list",
             ))]
         );
     }
@@ -4547,10 +4562,11 @@ mod tests {
                         "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
                     ),
                     folders: vec!["Second".to_string()],
+                    wago_api_key: Some("test-wago-key".to_string()),
                 },
                 AppAction::SetStatus(app.dashboard_status_for(
                     DetailMode::Update,
-                    "refreshing tracked update state for 1 selected addon",
+                    "applying updates for 1 selected addon",
                 )),
             ]
         );
@@ -4750,12 +4766,14 @@ mod tests {
             drift_report: DriftReport::empty(),
         };
 
-        let refresh = UpdateRefreshSummary {
+        let refresh = LiveUpdateSummary {
             target_addons: 1,
-            scanned_addons: 1,
-            refreshed_addons: 1,
+            updated_addons: 1,
+            up_to_date: 0,
+            skipped_manual: 0,
             skipped_unmanaged: 0,
-            missing_on_disk: 0,
+            skipped_unsupported: 0,
+            errors: 0,
         };
 
         let actions = app.update(AppMessage::BackgroundTask(
@@ -4787,7 +4805,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_update_finished_uses_human_status_when_nothing_is_refreshable() {
+    fn dashboard_update_finished_uses_human_status_when_nothing_is_updateable() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Update;
         app.dashboard.list_state.select(Some(0));
@@ -4807,12 +4825,14 @@ mod tests {
             drift_report: DriftReport::empty(),
         };
 
-        let refresh = UpdateRefreshSummary {
+        let refresh = LiveUpdateSummary {
             target_addons: 1,
-            scanned_addons: 3,
-            refreshed_addons: 0,
+            updated_addons: 0,
+            up_to_date: 0,
+            skipped_manual: 1,
             skipped_unmanaged: 0,
-            missing_on_disk: 0,
+            skipped_unsupported: 0,
+            errors: 0,
         };
 
         let actions = app.update(AppMessage::BackgroundTask(
@@ -4826,7 +4846,7 @@ mod tests {
             actions[5],
             AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
-                "tracked update refresh complete: no selected addons were refreshable from tracked managed state (1 selected), sync complete",
+                "selected update complete: updated 0, up_to_date 0, skipped_manual 1, skipped_unmanaged 0, skipped_unsupported 0, errors 0, sync complete",
             ))
         );
     }

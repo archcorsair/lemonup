@@ -10,7 +10,8 @@ Use it as the quick status page before reading deeper docs.
 
 - Branch: `codex/rusty-lemon`
 - Rust workspace: active
-- Default manual test profile: `--profile dev`
+- Default seeded manual-smoke profile: `--profile manual-smoke`
+- Ad hoc manual test profile: `--profile dev`
 - Production AddOns path: do not use for manual testing
 
 ## Completed
@@ -62,6 +63,7 @@ These chunks are implemented, user-verified, committed, and pushed.
 - SQLite reconcile
 - auto-scan on app boot when addon dir is valid
 - auto-scan after onboarding save
+- narrow CLI `sync` command for deterministic sandbox/manual-fixture reconcile
 - real DB-backed addon rows in the shell
 - real selected-addon metadata in the detail pane
 
@@ -76,8 +78,8 @@ Current checkpoint state:
 
 - no active unverified slice in the worktree
 - current focus:
-  - real provider-backed selected updates in the TUI
-  - then richer config/backup workflows
+  - richer config/backup workflows
+  - then final TUI polish and production UX pass
 
 ## Newly Completed
 
@@ -198,10 +200,11 @@ These are implemented and manually verified in addition to the earlier chunks:
   - update selectors reuse the same sanitized exact-match rules as `check`
   - targeted update results now report per-addon outcome details
   - update-all output now highlights only non-success per-addon details by default
-- TUI update copy now reflects current behavior accurately:
-  - the update pane is still a tracked-state refresh surface, not live provider-backed apply/update
-  - `r` refreshes tracked update state for the current parent selection
-  - status text and summary labels now say tracked refresh explicitly
+- TUI selected updates now use real provider-backed update paths:
+  - `r` applies live selected updates for managed tracked parent addons
+  - the same provider-backed update engine now serves both CLI and TUI
+  - post-update runs resync dashboard rows and drift state through the normal scan path
+  - update pane copy and summaries now reflect real apply/update behavior
 
 ## Implemented, Awaiting Manual Verification
 
@@ -245,13 +248,20 @@ These are implemented and manually verified in addition to the earlier chunks:
   - tracked GitHub `update` now reapplies managed folders from the current default-branch HEAD commit
   - tracked GitHub records persist canonical repo URL identity plus full commit metadata in `git_commit` and `remote_version`
 - GitHub CLI parity was manually verified and checkpointed
+- deterministic manual seed/smoke harness now exists:
+  - `rust/scripts/manual-test-matrix.toml` is the single curated provider matrix
+  - `rust/scripts/seed-sandbox.ps1` resets and seeds a safe WoW-like sandbox root
+  - `rust/scripts/smoke-provider-matrix.ps1` runs repeatable provider-backed CLI smoke checks
+  - `rust/docs/manual-testing.md` is the source of truth for how and when to use those scripts
+  - use this harness before broad ad hoc TUI verification so manual coverage stays repeatable
+  - seeded `manual-smoke` validation was manually verified end to end, including TUI check/update/delete/undo flows
 ## Next Up
 
 Next phase:
 
-1. real provider-backed selected updates in the TUI
-2. richer config/backup workflows
-3. any remaining source-parity cleanup after the TUI update path is proven
+1. richer config/backup workflows
+2. final TUI polish and production UX pass
+3. any remaining source-parity cleanup after those slices are proven
 
 ### Goal
 
@@ -261,9 +271,9 @@ Next phase:
 
 ### Planned order
 
-1. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
-2. carry the same managed ownership contract into that TUI-selected update path
-3. continue filling remaining config/backup gaps
+1. continue filling remaining config/backup gaps
+2. run one dedicated late-stage TUI polish and production UX pass
+3. clean up any remaining source-parity or workflow gaps after those slices land
 
 ## Remaining Major Work
 
@@ -274,7 +284,7 @@ Still missing or incomplete:
 - remote-backed update checks beyond Wago, canonical TukUI, WoWInterface, and GitHub
 - config editing
 - backup workflows
-- real provider-backed selected updates in the TUI
+- final TUI polish and production UX pass
 
 ## Minimum MVP
 
@@ -335,6 +345,20 @@ The app should eventually detect:
 
 ## Testing Rules
 
+Default manual-validation ladder going forward:
+
+1. run the Rust validation ladder:
+   - `cargo fmt --all`
+   - `cargo clippy -p lemonup-app -- -D warnings`
+   - `cargo test -p lemonup-app`
+2. seed a fresh sandbox with:
+   - `pwsh -File rust/scripts/seed-sandbox.ps1 -SandboxRoot <sandbox-root>`
+3. run the repeatable provider smoke pass with:
+   - `pwsh -File rust/scripts/smoke-provider-matrix.ps1 -SandboxRoot <sandbox-root>`
+4. only then do short targeted TUI verification against the seeded sandbox/profile
+
+Future agents should prefer the scripted seed/smoke path over one-off manual installs whenever they need broad provider coverage quickly.
+
 - validate with `--profile dev`
 - never manually test against the live production AddOns folder
 - prefer focused Rust tests per slice
@@ -362,3 +386,4 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 - `rust/docs/acceptance-matrix.md`
 - `rust/docs/known-v1-gaps.md`
 - `rust/docs/single-surface-shell-plan.md`
+- `rust/docs/final-ui-polish-plan.md`
