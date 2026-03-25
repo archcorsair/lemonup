@@ -143,6 +143,7 @@ function Get-WowSandboxLayout {
         RetailDir    = Join-Path $resolved '_retail_'
         AddonsDir    = Join-Path $resolved '_retail_\Interface\AddOns'
         RootDataDir  = Join-Path $resolved 'Data'
+        WtfDir       = Join-Path $resolved 'WTF'
         BuildInfo    = Join-Path $resolved '.build.info'
         RetailExe    = Join-Path $resolved '_retail_\Wow.exe'
     }
@@ -162,11 +163,18 @@ function Initialize-WowSandboxLayout {
 
     New-Item -ItemType Directory -Force -Path $layout.AddonsDir | Out-Null
     New-Item -ItemType Directory -Force -Path $layout.RootDataDir | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $layout.WtfDir 'Account\ManualSmoke') | Out-Null
     if (-not (Test-Path -LiteralPath $layout.BuildInfo)) {
         New-Item -ItemType File -Force -Path $layout.BuildInfo | Out-Null
     }
     if (-not (Test-Path -LiteralPath $layout.RetailExe)) {
         New-Item -ItemType File -Force -Path $layout.RetailExe | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $layout.WtfDir 'Config.wtf'))) {
+        Set-Content -LiteralPath (Join-Path $layout.WtfDir 'Config.wtf') -Value 'SET accountName "ManualSmoke"' -NoNewline
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $layout.WtfDir 'Account\ManualSmoke\bindings-cache.wtf'))) {
+        Set-Content -LiteralPath (Join-Path $layout.WtfDir 'Account\ManualSmoke\bindings-cache.wtf') -Value 'bindings-cache' -NoNewline
     }
 
     return $layout

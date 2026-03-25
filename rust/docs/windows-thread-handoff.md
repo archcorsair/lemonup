@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: TUI selected live updates plus manual seed/smoke harness implemented and manually verified
-- current worktree status at handoff pass: ready for checkpoint
+- latest local milestone at handoff pass: curated config editing plus backup-now/history wiring implemented on top of the TUI shell
+- current worktree status at handoff pass: dirty with an unverified config/backup slice
 
 ## Current State
 
@@ -102,6 +102,11 @@ Implemented, committed, and pushed:
   - `manual-test-matrix.toml`
   - `manual-testing.md`
   - seeded `manual-smoke` profile covers TukUI, GitHub, WoWInterface, Wago, and one manual fixture
+- first TUI config/backup slice is now implemented, awaiting manual verification:
+  - Config pane edits curated settings with explicit save/reset
+  - Backup pane creates real WTF backups into a profile-scoped app-managed backup directory
+  - backup history and retention are wired
+  - restore is intentionally deferred
 
 ## Recent Important Commits
 
@@ -306,14 +311,14 @@ Already proven in some form:
 - relationship-safe parent/child handling in managed flows
 
 Still missing or incomplete for MVP:
-- richer config/backup workflows
+- backup restore workflows
 - final TUI polish and production UX pass
 - any remaining non-MVP source parity cleanup after those slices land
 
 ## Next Recommended Slice
 
 Next real phase:
-1. continue richer config/backup workflows
+1. manually verify and checkpoint the current config/backup slice
 2. run a dedicated late-stage TUI polish and production UX pass
 3. clean up any remaining source-parity or workflow gaps after those slices are proven
 
@@ -348,4 +353,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, and TUI-selected live updates are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. Move next to richer config/backup workflows. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, and TUI-selected live updates are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. The current unverified slice is curated config editing plus backup-now/history in the TUI; restore is still deferred. Respect existing safety/relationship invariants and commit only after my manual verification.`

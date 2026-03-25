@@ -96,7 +96,7 @@ impl ConfigStore {
         Ok(ConfigLoad::Loaded(config))
     }
 
-    pub fn write_new_config(&self, config: &AppConfig) -> Result<()> {
+    pub fn write_config(&self, config: &AppConfig) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -104,6 +104,10 @@ impl ConfigStore {
         let rendered = toml::to_string_pretty(config)?;
         fs::write(&self.path, rendered)?;
         Ok(())
+    }
+
+    pub fn write_new_config(&self, config: &AppConfig) -> Result<()> {
+        self.write_config(config)
     }
 }
 

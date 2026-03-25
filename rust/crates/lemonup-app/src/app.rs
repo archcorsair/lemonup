@@ -16,12 +16,13 @@ use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
-    GameFlavor, ScanSummary, SourceKind, StateDatabase, UpdateStatus, detect_known_addons_path,
-    paths_match, scan_addons_dir, search_for_wow, validate_addons_path,
+    DefaultScreen, GameFlavor, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
+    detect_known_addons_path, paths_match, scan_addons_dir, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
 use crate::action::AppAction;
+use crate::backup::{BackupEntry, BackupRunOutcome, backup_root, create_wtf_backup, list_backups};
 use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
@@ -124,6 +125,17 @@ enum AppMessage {
     SearchInstallSelected,
     WagoConfirmInstall,
     WagoCancelInstall,
+    ConfigSelectionNext,
+    ConfigSelectionPrevious,
+    ConfigBeginEditing,
+    ConfigInputChar(char),
+    ConfigBackspace,
+    ConfigCommitEdit,
+    ConfigCancelEdit,
+    ConfigToggleSelected,
+    ConfigSave,
+    ConfigResetDraft,
+    BackupRunNow,
     OnboardingBeginEditing,
     OnboardingStopEditing,
     OnboardingInputChar(char),
@@ -146,6 +158,7 @@ enum AppTaskEvent {
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
     DashboardUndoFinished(std::result::Result<DashboardUndoOutcome, String>),
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
+    BackupFinished(std::result::Result<BackupRunOutcome, String>),
     WagoSearchFinished(std::result::Result<WagoSearchOutcome, String>),
     WagoInstallFinished(std::result::Result<WagoInstallTaskOutcome, String>),
 }
@@ -182,6 +195,205 @@ struct WagoSearchOutcome {
 struct WagoInstallOutcome {
     summary: WagoInstallSummary,
     sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigField {
+    WagoApiKey,
+    BackupWtf,
+    BackupRetention,
+    Theme,
+    ShowLibs,
+    DefaultScreen,
+}
+
+impl ConfigField {
+    const ALL: [Self; 6] = [
+        Self::WagoApiKey,
+        Self::BackupWtf,
+        Self::BackupRetention,
+        Self::Theme,
+        Self::ShowLibs,
+        Self::DefaultScreen,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::WagoApiKey => "Wago API key",
+            Self::BackupWtf => "Backup WTF",
+            Self::BackupRetention => "Backup retention",
+            Self::Theme => "Theme",
+            Self::ShowLibs => "Show libs",
+            Self::DefaultScreen => "Default screen",
+        }
+    }
+
+    fn is_textual(self) -> bool {
+        matches!(self, Self::WagoApiKey | Self::BackupRetention)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigEditState {
+    field: ConfigField,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigPaneState {
+    persisted: AppConfig,
+    draft: AppConfig,
+    selected_field: usize,
+    edit: Option<ConfigEditState>,
+}
+
+impl ConfigPaneState {
+    fn new(config: AppConfig) -> Self {
+        Self {
+            persisted: config.clone(),
+            draft: config,
+            selected_field: 0,
+            edit: None,
+        }
+    }
+
+    fn selected_field(&self) -> ConfigField {
+        ConfigField::ALL[self.selected_field]
+    }
+
+    fn select_next(&self) -> Self {
+        let mut next = self.clone();
+        next.selected_field = (next.selected_field + 1) % ConfigField::ALL.len();
+        next
+    }
+
+    fn select_previous(&self) -> Self {
+        let mut next = self.clone();
+        next.selected_field = if next.selected_field == 0 {
+            ConfigField::ALL.len() - 1
+        } else {
+            next.selected_field - 1
+        };
+        next
+    }
+
+    fn begin_editing(&self) -> Self {
+        let field = self.selected_field();
+        let value = match field {
+            ConfigField::WagoApiKey => self.draft.wago_api_key.clone().unwrap_or_default(),
+            ConfigField::BackupRetention => self.draft.backup_retention.to_string(),
+            _ => return self.clone(),
+        };
+        let mut next = self.clone();
+        next.edit = Some(ConfigEditState { field, value });
+        next
+    }
+
+    fn cancel_edit(&self) -> Self {
+        let mut next = self.clone();
+        next.edit = None;
+        next
+    }
+
+    fn insert_char(&self, character: char) -> Self {
+        let mut next = self.clone();
+        if let Some(edit) = next.edit.as_mut() {
+            edit.value.push(character);
+        }
+        next
+    }
+
+    fn backspace(&self) -> Self {
+        let mut next = self.clone();
+        if let Some(edit) = next.edit.as_mut() {
+            edit.value.pop();
+        }
+        next
+    }
+
+    fn commit_edit(&self) -> Result<Self, String> {
+        let Some(edit) = &self.edit else {
+            return Ok(self.clone());
+        };
+
+        let mut next = self.clone();
+        match edit.field {
+            ConfigField::WagoApiKey => {
+                let trimmed = edit.value.trim().to_string();
+                next.draft.wago_api_key = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+            }
+            ConfigField::BackupRetention => {
+                let parsed = edit
+                    .value
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| "backup retention must be a whole number".to_string())?;
+                if parsed == 0 {
+                    return Err("backup retention must be at least 1".to_string());
+                }
+                next.draft.backup_retention = parsed;
+            }
+            _ => {}
+        }
+        next.edit = None;
+        Ok(next)
+    }
+
+    fn toggle_selected(&self) -> Self {
+        let mut next = self.clone();
+        match next.selected_field() {
+            ConfigField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
+            ConfigField::Theme => {
+                next.draft.theme = match next.draft.theme {
+                    ThemeMode::Dark => ThemeMode::Light,
+                    ThemeMode::Light => ThemeMode::Dark,
+                };
+            }
+            ConfigField::ShowLibs => next.draft.show_libs = !next.draft.show_libs,
+            ConfigField::DefaultScreen => {
+                next.draft.default_screen = match next.draft.default_screen {
+                    DefaultScreen::Manage => DefaultScreen::Install,
+                    DefaultScreen::Install => DefaultScreen::Config,
+                    DefaultScreen::Config => DefaultScreen::WagoSearch,
+                    DefaultScreen::WagoSearch => DefaultScreen::Manage,
+                };
+            }
+            _ => {}
+        }
+        next
+    }
+
+    fn reset_draft(&self) -> Self {
+        Self {
+            persisted: self.persisted.clone(),
+            draft: self.persisted.clone(),
+            selected_field: self.selected_field,
+            edit: None,
+        }
+    }
+
+    fn mark_saved(&self, saved: AppConfig) -> Self {
+        Self {
+            persisted: saved.clone(),
+            draft: saved,
+            selected_field: self.selected_field,
+            edit: None,
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.persisted != self.draft
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackupPaneState {
+    backups: Vec<BackupEntry>,
+    in_progress: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,10 +1131,13 @@ pub struct App {
     quit_requested: bool,
     status_line: String,
     config_present: bool,
+    config_pane: ConfigPaneState,
+    backup_pane: BackupPaneState,
     wago_api_key: Option<String>,
     config_store: ConfigStore,
     state_db_file: PathBuf,
     trash_dir: PathBuf,
+    backup_dir: PathBuf,
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
@@ -946,10 +1161,15 @@ impl App {
         let config_state = config_store.load()?;
         let state_db_file = paths.state_db_file.clone();
         let trash_dir = paths.data_dir.join("trash");
+        let backup_dir = backup_root(&paths.data_dir);
         let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
         let wago_api_key = resolve_wago_api_key(&config_state);
+        let loaded_config = match &config_state {
+            ConfigLoad::Loaded(config) => config.clone(),
+            ConfigLoad::Missing(_) => AppConfig::new_unconfigured(),
+        };
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
             ConfigLoad::Missing(_) => None,
@@ -1004,10 +1224,16 @@ impl App {
             quit_requested: false,
             status_line: String::new(),
             config_present,
+            config_pane: ConfigPaneState::new(loaded_config),
+            backup_pane: BackupPaneState {
+                backups: list_backups(&backup_dir).unwrap_or_default(),
+                in_progress: false,
+            },
             wago_api_key,
             config_store,
             state_db_file,
             trash_dir,
+            backup_dir,
             runtime,
             effective_addon_dir,
             scan_state,
@@ -1179,6 +1405,12 @@ impl App {
         if let Some(messages) = self.install_messages_for_key(key) {
             return messages;
         }
+        if let Some(messages) = self.config_messages_for_key(key) {
+            return messages;
+        }
+        if let Some(messages) = self.backup_messages_for_key(key) {
+            return messages;
+        }
 
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
@@ -1257,6 +1489,44 @@ impl App {
         match key.code {
             KeyCode::Enter => Some(vec![AppMessage::InstallSubmit]),
             KeyCode::Char('e') => Some(vec![AppMessage::InstallBeginEditing]),
+            _ => None,
+        }
+    }
+
+    fn config_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        if self.dashboard.detail_mode != DetailMode::Config {
+            return None;
+        }
+
+        if self.config_pane.edit.is_some() {
+            return Some(match key.code {
+                KeyCode::Enter => vec![AppMessage::ConfigCommitEdit],
+                KeyCode::Esc => vec![AppMessage::ConfigCancelEdit],
+                KeyCode::Backspace => vec![AppMessage::ConfigBackspace],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char(character) => vec![AppMessage::ConfigInputChar(character)],
+                _ => vec![],
+            });
+        }
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::ConfigSelectionNext]),
+            KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::ConfigSelectionPrevious]),
+            KeyCode::Char('e') => Some(vec![AppMessage::ConfigBeginEditing]),
+            KeyCode::Enter => Some(vec![AppMessage::ConfigToggleSelected]),
+            KeyCode::Char('s') => Some(vec![AppMessage::ConfigSave]),
+            KeyCode::Char('n') => Some(vec![AppMessage::ConfigResetDraft]),
+            _ => None,
+        }
+    }
+
+    fn backup_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        if self.dashboard.detail_mode != DetailMode::Backup {
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Char('r') | KeyCode::Enter => Some(vec![AppMessage::BackupRunNow]),
             _ => None,
         }
     }
@@ -1827,6 +2097,139 @@ impl App {
                     self.dashboard_status_for(self.dashboard.detail_mode, "Wago install cancelled"),
                 ),
             ],
+            AppMessage::ConfigSelectionNext => vec![
+                AppAction::SetConfigPaneState(self.config_pane.select_next()),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Config, "config field selection moved"),
+                ),
+            ],
+            AppMessage::ConfigSelectionPrevious => vec![
+                AppAction::SetConfigPaneState(self.config_pane.select_previous()),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Config, "config field selection moved"),
+                ),
+            ],
+            AppMessage::ConfigBeginEditing => {
+                let field = self.config_pane.selected_field();
+                if field.is_textual() {
+                    vec![
+                        AppAction::SetConfigPaneState(self.config_pane.begin_editing()),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Config,
+                            &format!("editing {} | enter apply | esc cancel", field.label()),
+                        )),
+                    ]
+                } else {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Config,
+                        &format!("press enter to change {}", field.label()),
+                    ))]
+                }
+            }
+            AppMessage::ConfigInputChar(character) => vec![AppAction::SetConfigPaneState(
+                self.config_pane.insert_char(character),
+            )],
+            AppMessage::ConfigBackspace => {
+                vec![AppAction::SetConfigPaneState(self.config_pane.backspace())]
+            }
+            AppMessage::ConfigCommitEdit => match self.config_pane.commit_edit() {
+                Ok(next) => vec![
+                    AppAction::SetConfigPaneState(next),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Config,
+                        "config field updated locally | s save | n reset",
+                    )),
+                ],
+                Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Config,
+                    &format!("config edit failed: {error}"),
+                ))],
+            },
+            AppMessage::ConfigCancelEdit => vec![
+                AppAction::SetConfigPaneState(self.config_pane.cancel_edit()),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Config, "config edit cancelled"),
+                ),
+            ],
+            AppMessage::ConfigToggleSelected => vec![
+                if self.config_pane.selected_field().is_textual() {
+                    AppAction::SetConfigPaneState(self.config_pane.begin_editing())
+                } else {
+                    AppAction::SetConfigPaneState(self.config_pane.toggle_selected())
+                },
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Config,
+                    if self.config_pane.selected_field().is_textual() {
+                        "editing config field | enter apply | esc cancel"
+                    } else {
+                        "config field updated locally | s save | n reset"
+                    },
+                )),
+            ],
+            AppMessage::ConfigSave => {
+                if self.config_pane.edit.is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Config,
+                        "finish or cancel the active config edit before saving",
+                    ))]
+                } else if !self.config_pane.is_dirty() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Config,
+                        "no config changes to save",
+                    ))]
+                } else {
+                    match self.config_store.write_config(&self.config_pane.draft) {
+                        Ok(()) => vec![
+                            AppAction::SetPersistedConfig(self.config_pane.draft.clone()),
+                            AppAction::SetConfigPaneState(
+                                self.config_pane.mark_saved(self.config_pane.draft.clone()),
+                            ),
+                            AppAction::SetStatus(
+                                self.dashboard_status_for(DetailMode::Config, "config saved"),
+                            ),
+                        ],
+                        Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Config,
+                            &format!("config save failed: {error}"),
+                        ))],
+                    }
+                }
+            }
+            AppMessage::ConfigResetDraft => vec![
+                AppAction::SetConfigPaneState(self.config_pane.reset_draft()),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Config,
+                    "config draft reset to saved values",
+                )),
+            ],
+            AppMessage::BackupRunNow => {
+                if self.backup_pane.in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        "WTF backup already running",
+                    ))]
+                } else if self.effective_addon_dir.is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        "addon directory is not configured",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetBackupPaneState(BackupPaneState {
+                            backups: self.backup_pane.backups.clone(),
+                            in_progress: true,
+                        }),
+                        AppAction::StartBackupNow {
+                            addon_dir: self.effective_addon_dir.clone().expect("checked above"),
+                            backup_dir: self.backup_dir.clone(),
+                            retention: self.config_pane.draft.backup_retention,
+                        },
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Backup, "creating WTF backup"),
+                        ),
+                    ]
+                }
+            }
             AppMessage::OnboardingBeginEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.begin_editing()),
                 AppAction::SetStatus(self.with_base_status(
@@ -2067,6 +2470,38 @@ impl App {
                         &format!("selected addon update failed: {error}"),
                     )),
                 ],
+                AppTaskEvent::BackupFinished(Ok(outcome)) => {
+                    let mut message = format!(
+                        "backup complete: {} ({} bytes)",
+                        outcome.backup.label, outcome.backup.size_bytes
+                    );
+                    if !outcome.pruned_files.is_empty() {
+                        message.push_str(&format!(
+                            " | pruned {} older backup{}",
+                            outcome.pruned_files.len(),
+                            plural_suffix(outcome.pruned_files.len())
+                        ));
+                    }
+                    vec![
+                        AppAction::SetBackupPaneState(BackupPaneState {
+                            backups: outcome.backups,
+                            in_progress: false,
+                        }),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Backup, &message),
+                        ),
+                    ]
+                }
+                AppTaskEvent::BackupFinished(Err(error)) => vec![
+                    AppAction::SetBackupPaneState(BackupPaneState {
+                        backups: self.backup_pane.backups.clone(),
+                        in_progress: false,
+                    }),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        &format!("WTF backup failed: {error}"),
+                    )),
+                ],
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
                     AppAction::SetSearchPaneState(
                         self.search_pane
@@ -2180,6 +2615,16 @@ impl App {
             }
             AppAction::SetSearchPaneState(state) => {
                 self.search_pane = state;
+            }
+            AppAction::SetConfigPaneState(state) => {
+                self.config_pane = state;
+            }
+            AppAction::SetPersistedConfig(config) => {
+                self.wago_api_key = config.wago_api_key.clone();
+                self.config_present = true;
+            }
+            AppAction::SetBackupPaneState(state) => {
+                self.backup_pane = state;
             }
             AppAction::SetPendingWagoInstallConfirmation(confirmation) => {
                 self.pending_wago_install_confirmation = confirmation;
@@ -2319,6 +2764,8 @@ impl App {
                 match self.config_store.write_new_config(&config) {
                     Ok(()) => {
                         self.config_present = true;
+                        self.config_pane = self.config_pane.mark_saved(config.clone());
+                        self.wago_api_key = config.wago_api_key.clone();
                         self.effective_addon_dir = Some(path.clone());
                         self.shell_mode = ShellMode::Dashboard;
                         if tokio::runtime::Handle::try_current().is_ok() {
@@ -2404,6 +2851,22 @@ impl App {
                     .await;
 
                     let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
+                });
+            }
+            AppAction::StartBackupNow {
+                addon_dir,
+                backup_dir,
+                retention,
+            } => {
+                let sender = self.task_events_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        create_wtf_backup(&addon_dir, &backup_dir, retention)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::BackupFinished(result));
                 });
             }
             AppAction::StartWagoSearch { query, api_key } => {
@@ -3131,16 +3594,92 @@ impl App {
                     "Config present: {}",
                     self.config_present
                 )));
-                lines.push(Line::from("Config editing controls are not wired yet."));
+                lines.push(Line::from(format!(
+                    "Draft state: {}",
+                    if self.config_pane.is_dirty() {
+                        "unsaved changes"
+                    } else {
+                        "saved"
+                    }
+                )));
+                lines.push(Line::from(
+                    "j/k select | enter toggle/cycle | e edit text | s save | n reset | esc cancel edit",
+                ));
+                lines.push(Line::from(""));
+                for (index, field) in ConfigField::ALL.iter().enumerate() {
+                    let marker = if self.config_pane.selected_field == index {
+                        "›"
+                    } else {
+                        " "
+                    };
+                    let mut value = self.render_config_field_value(*field);
+                    if self
+                        .config_pane
+                        .edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.field == *field)
+                    {
+                        value = format!(
+                            "{} (editing)",
+                            self.config_pane
+                                .edit
+                                .as_ref()
+                                .map(|edit| edit.value.clone())
+                                .unwrap_or(value)
+                        );
+                    }
+                    lines.push(Line::from(format!("{marker} {}: {}", field.label(), value)));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "Only curated settings are editable in this slice. Addon dir, intervals, and concurrency stay read-only for now.",
+                ));
             }
             DetailMode::Backup => {
                 lines.push(Line::from("Backup area"));
+                lines.push(Line::from(format!(
+                    "Target path: {}",
+                    self.rendered_target_path()
+                )));
+                lines.push(Line::from(format!(
+                    "Backup root: {}",
+                    self.backup_dir.display()
+                )));
+                lines.push(Line::from(format!(
+                    "Backup enabled: {} | retention: {}",
+                    self.config_pane.draft.backup_wtf, self.config_pane.draft.backup_retention
+                )));
+                lines.push(Line::from(format!(
+                    "State: {}",
+                    if self.backup_pane.in_progress {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                )));
                 lines.push(Line::from(
-                    "WTF backup and restore actions will be integrated here later.",
+                    "Press r or enter to create a WTF backup now. Restore is intentionally deferred to a later slice.",
                 ));
-                lines.push(Line::from(
-                    "This pane currently exists to validate the unified layout.",
-                ));
+                lines.push(Line::from(""));
+                lines.push(Line::from("Recent backups"));
+                if self.backup_pane.backups.is_empty() {
+                    lines.push(Line::from("No backups created yet."));
+                } else {
+                    for entry in self.backup_pane.backups.iter().take(8) {
+                        lines.push(Line::from(format!(
+                            "{} | {} bytes | {}",
+                            entry.label, entry.size_bytes, entry.file_name
+                        )));
+                    }
+                    if self.backup_pane.backups.len() > 8 {
+                        let remaining = self.backup_pane.backups.len() - 8;
+                        lines.push(Line::from(format!(
+                            "... {} more backup{}",
+                            remaining,
+                            plural_suffix(remaining)
+                        )));
+                    }
+                }
             }
         }
 
@@ -3196,6 +3735,37 @@ impl App {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<unconfigured>".to_string())
+    }
+
+    fn render_config_field_value(&self, field: ConfigField) -> String {
+        match field {
+            ConfigField::WagoApiKey => self
+                .config_pane
+                .draft
+                .wago_api_key
+                .as_ref()
+                .map(|value| {
+                    if value.is_empty() {
+                        "<empty>".to_string()
+                    } else {
+                        format!("set ({} chars)", value.len())
+                    }
+                })
+                .unwrap_or_else(|| "<unset>".to_string()),
+            ConfigField::BackupWtf => self.config_pane.draft.backup_wtf.to_string(),
+            ConfigField::BackupRetention => self.config_pane.draft.backup_retention.to_string(),
+            ConfigField::Theme => match self.config_pane.draft.theme {
+                ThemeMode::Dark => "dark".to_string(),
+                ThemeMode::Light => "light".to_string(),
+            },
+            ConfigField::ShowLibs => self.config_pane.draft.show_libs.to_string(),
+            ConfigField::DefaultScreen => match self.config_pane.draft.default_screen {
+                DefaultScreen::Manage => "manage".to_string(),
+                DefaultScreen::Install => "install".to_string(),
+                DefaultScreen::Config => "config".to_string(),
+                DefaultScreen::WagoSearch => "wago_search".to_string(),
+            },
+        }
     }
 
     fn is_guarded_path(&self, candidate: &Path) -> bool {
@@ -3794,26 +4364,28 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, DashboardChildConnector,
-        DashboardDeleteOutcome, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
-        InstallPaneState, PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode,
-        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
-        child_row_detail_prefix, child_row_prefix, summarize_owned_folders,
-        visible_search_result_window,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState,
+        ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardRow,
+        DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState,
+        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, WagoInstallConfirmation,
+        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
+        child_row_prefix, summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
+    use crate::backup::{BackupEntry, BackupRunOutcome};
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
     use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
     use crate::update::LiveUpdateSummary;
     use crate::wago::{WagoInstallInspection, WagoSearchResult};
     use lemonup_core::{
-        AddonKind, AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, OwnedFolder,
-        ScanSummary, SourceKind, StateDatabase,
+        AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
+        OwnedFolder, ScanSummary, SourceKind, StateDatabase,
     };
 
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
+        let config = AppConfig::new_unconfigured();
         let mut first = AddonRecord::new("First", "First", SourceKind::Manual);
         first.kind = AddonKind::Addon;
         first.version = Some("1.0.0".to_string());
@@ -3839,10 +4411,17 @@ mod tests {
             quit_requested: false,
             status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
             config_present: true,
+            config_pane: ConfigPaneState::new({
+                let mut config = config.clone();
+                config.wago_api_key = Some("test-wago-key".to_string());
+                config
+            }),
+            backup_pane: BackupPaneState::default(),
             wago_api_key: Some("test-wago-key".to_string()),
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
+            backup_dir: std::env::temp_dir().join("lemonup-test-backups"),
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
@@ -4146,6 +4725,140 @@ mod tests {
                 )),
             ]
         );
+    }
+
+    #[test]
+    fn config_mode_navigation_and_edit_keys_are_routed_to_config_pane() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Config;
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
+            vec![AppMessage::ConfigSelectionNext]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('e'))),
+            vec![AppMessage::ConfigBeginEditing]
+        );
+
+        app.config_pane.selected_field = 0;
+        app.apply(AppAction::SetConfigPaneState(
+            app.config_pane.begin_editing(),
+        ));
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Backspace)),
+            vec![AppMessage::ConfigBackspace]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::ConfigCommitEdit]
+        );
+    }
+
+    #[test]
+    fn config_mode_allows_global_quit_and_escape_when_not_editing() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.apply(AppAction::SelectAllDashboardParents);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::QuitRequested]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardClearSelection]
+        );
+    }
+
+    #[test]
+    fn backup_mode_allows_global_quit_and_escape_when_idle() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Backup;
+        app.apply(AppAction::SelectAllDashboardParents);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::QuitRequested]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardClearSelection]
+        );
+    }
+
+    #[test]
+    fn config_save_updates_runtime_wago_api_key_and_marks_config_present() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_present = false;
+        app.wago_api_key = None;
+        app.config_store = ConfigStore::new(config_path.clone());
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.draft.wago_api_key = Some("new-wago-key".to_string());
+
+        let actions = app.update(AppMessage::ConfigSave);
+        assert!(matches!(actions[0], AppAction::SetPersistedConfig(_)));
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert_eq!(app.wago_api_key.as_deref(), Some("new-wago-key"));
+        assert!(app.config_present);
+
+        let saved = app.config_store.load().expect("load config");
+        match saved {
+            ConfigLoad::Loaded(config) => {
+                assert_eq!(config.wago_api_key.as_deref(), Some("new-wago-key"));
+            }
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+    }
+
+    #[test]
+    fn backup_run_now_starts_background_backup_task() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Backup;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+
+        let actions = app.update(AppMessage::BackupRunNow);
+
+        assert_eq!(actions.len(), 3);
+        assert!(matches!(actions[0], AppAction::SetBackupPaneState(_)));
+        assert!(matches!(actions[1], AppAction::StartBackupNow { .. }));
+        assert!(matches!(actions[2], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn backup_finished_updates_backup_history_and_status() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Backup;
+        app.backup_pane.in_progress = true;
+
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::BackupFinished(
+            Ok(BackupRunOutcome {
+                backup: BackupEntry {
+                    file_name: "WTF-20260324T120000Z.zip".to_string(),
+                    path: PathBuf::from("C:\\Temp\\WTF-20260324T120000Z.zip"),
+                    label: "2026-03-24 12:00:00Z".to_string(),
+                    size_bytes: 1024,
+                },
+                pruned_files: vec!["WTF-20260323T120000Z.zip".to_string()],
+                backups: vec![BackupEntry {
+                    file_name: "WTF-20260324T120000Z.zip".to_string(),
+                    path: PathBuf::from("C:\\Temp\\WTF-20260324T120000Z.zip"),
+                    label: "2026-03-24 12:00:00Z".to_string(),
+                    size_bytes: 1024,
+                }],
+            }),
+        )));
+
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], AppAction::SetBackupPaneState(_)));
+        assert!(matches!(actions[1], AppAction::SetStatus(_)));
     }
 
     #[test]

@@ -76,9 +76,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- no active unverified slice in the worktree
-- current focus:
-  - richer config/backup workflows
+- active unverified slice in the worktree:
+  - curated config editing in the TUI
+  - WTF backup-now plus history/retention in the TUI
+- current focus after verification:
+  - checkpoint config/backup workflows
   - then final TUI polish and production UX pass
 
 ## Newly Completed
@@ -255,13 +257,27 @@ These are implemented and manually verified in addition to the earlier chunks:
   - `rust/docs/manual-testing.md` is the source of truth for how and when to use those scripts
   - use this harness before broad ad hoc TUI verification so manual coverage stays repeatable
   - seeded `manual-smoke` validation was manually verified end to end, including TUI check/update/delete/undo flows
+- first real config/backup UX now exists in the TUI:
+  - Config pane now edits a curated field set:
+    - `wago_api_key`
+    - `backup_wtf`
+    - `backup_retention`
+    - `theme`
+    - `show_libs`
+    - `default_screen`
+  - config writes now use a safe read-modify-write path instead of onboarding-only save logic
+  - Backup pane can now create a real WTF backup on demand
+  - backup history is listed from a profile-scoped app-managed backup directory
+  - backup retention is enforced after successful backup creation
+  - restore remains intentionally deferred to a later slice
 ## Next Up
 
 Next phase:
 
-1. richer config/backup workflows
-2. final TUI polish and production UX pass
-3. any remaining source-parity cleanup after those slices are proven
+1. manually verify config save + backup-now flows on `manual-smoke`
+2. checkpoint richer config/backup workflows
+3. final TUI polish and production UX pass
+4. any remaining source-parity cleanup after those slices are proven
 
 ### Goal
 
@@ -282,8 +298,7 @@ Still missing or incomplete:
 - richer tree view for parent/child relationships
 - broader install flows beyond Wago, canonical TukUI, WoWInterface, and GitHub
 - remote-backed update checks beyond Wago, canonical TukUI, WoWInterface, and GitHub
-- config editing
-- backup workflows
+- backup restore workflows
 - final TUI polish and production UX pass
 
 ## Minimum MVP

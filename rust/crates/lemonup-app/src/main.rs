@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod backup;
 mod cli;
 mod drift;
 mod event;

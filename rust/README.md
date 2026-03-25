@@ -27,6 +27,7 @@ Start here before continuing the rewrite:
 
 Read `docs/final-ui-polish-plan.md` only when the rewrite explicitly enters the late-stage polish/design phase.
 Read `docs/manual-testing.md` when you need the seeded sandbox manual-smoke workflow.
+The current unverified slice is curated config editing plus backup-now/history in the TUI; restore is intentionally deferred.
 
 For future agents: prefer the scripted manual-test harness before ad hoc provider installs when broad manual coverage is needed.
 
@@ -71,3 +72,14 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - CLI install by canonical repo URL
   - CLI live check for tracked GitHub addons
   - CLI live update for tracked GitHub addons
+
+## Current Config / Backup Slice
+
+- `Config` pane:
+  - curated editable settings only
+  - explicit save/reset workflow
+- `Backup` pane:
+  - real WTF backup-now action
+  - profile-scoped backup history
+  - retention pruning after successful backup creation
+  - restore deferred to a later slice
