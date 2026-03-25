@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: curated config editing plus backup-now/history wiring implemented on top of the TUI shell
-- current worktree status at handoff pass: dirty with an unverified config/backup slice
+- latest local milestone at handoff pass: config editing plus backup-now/history wiring implemented, verified, checkpointed, and pushed
+- current worktree status at handoff pass: clean after the config/backup checkpoint
 
 ## Current State
 
@@ -198,8 +198,8 @@ Use this as the active ledger for:
 - testing rules
 - current MVP target
 
-### `rust/docs/final-ui-polish-plan.md`
-Keep this placeholder-only until the project explicitly enters the late-stage TUI polish phase.
+### `rust/docs/production-tui-design-plan.md`
+Keep this out of normal feature context until the project explicitly enters the production TUI design/build phase.
 
 Do not pull it into normal implementation context early.
 
@@ -311,15 +311,15 @@ Already proven in some form:
 - relationship-safe parent/child handling in managed flows
 
 Still missing or incomplete for MVP:
+- production TUI design/build phase
 - backup restore workflows
-- final TUI polish and production UX pass
 - any remaining non-MVP source parity cleanup after those slices land
 
 ## Next Recommended Slice
 
 Next real phase:
-1. manually verify and checkpoint the current config/backup slice
-2. run a dedicated late-stage TUI polish and production UX pass
+1. enter the dedicated production TUI design/build phase
+2. add backup restore workflows
 3. clean up any remaining source-parity or workflow gaps after those slices are proven
 
 Why this is next:
@@ -353,4 +353,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, and TUI-selected live updates are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. The current unverified slice is curated config editing plus backup-now/history in the TUI; restore is still deferred. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, TUI-selected live updates, and config/backup-now flows are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. The next phase is the dedicated production TUI design/build phase described in rust/docs/production-tui-design-plan.md. Respect existing safety/relationship invariants and commit only after my manual verification.`

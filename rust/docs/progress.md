@@ -76,12 +76,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- active unverified slice in the worktree:
-  - curated config editing in the TUI
-  - WTF backup-now plus history/retention in the TUI
-- current focus after verification:
-  - checkpoint config/backup workflows
-  - then final TUI polish and production UX pass
+- no active unverified slice in the worktree
+- current focus:
+  - production TUI design/build phase planning
+  - then backup restore workflows
 
 ## Newly Completed
 
@@ -276,8 +274,9 @@ Next phase:
 
 1. manually verify config save + backup-now flows on `manual-smoke`
 2. checkpoint richer config/backup workflows
-3. final TUI polish and production UX pass
-4. any remaining source-parity cleanup after those slices are proven
+3. production TUI design/build phase
+4. backup restore workflows
+5. any remaining source-parity cleanup after those slices are proven
 
 ### Goal
 
@@ -288,8 +287,9 @@ Next phase:
 ### Planned order
 
 1. continue filling remaining config/backup gaps
-2. run one dedicated late-stage TUI polish and production UX pass
-3. clean up any remaining source-parity or workflow gaps after those slices land
+2. run the dedicated production TUI design/build phase
+3. add backup restore workflows
+4. clean up any remaining source-parity or workflow gaps after those slices land
 
 ## Remaining Major Work
 
@@ -299,7 +299,7 @@ Still missing or incomplete:
 - broader install flows beyond Wago, canonical TukUI, WoWInterface, and GitHub
 - remote-backed update checks beyond Wago, canonical TukUI, WoWInterface, and GitHub
 - backup restore workflows
-- final TUI polish and production UX pass
+- production TUI design/build phase
 
 ## Minimum MVP
 
@@ -401,4 +401,4 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 - `rust/docs/acceptance-matrix.md`
 - `rust/docs/known-v1-gaps.md`
 - `rust/docs/single-surface-shell-plan.md`
-- `rust/docs/final-ui-polish-plan.md`
+- `rust/docs/production-tui-design-plan.md`

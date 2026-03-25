@@ -25,9 +25,9 @@ Start here before continuing the rewrite:
 4. `docs/known-v1-gaps.md`
 5. `docs/single-surface-shell-plan.md`
 
-Read `docs/final-ui-polish-plan.md` only when the rewrite explicitly enters the late-stage polish/design phase.
+Read `docs/production-tui-design-plan.md` only when the rewrite explicitly enters the production TUI design/build phase.
 Read `docs/manual-testing.md` when you need the seeded sandbox manual-smoke workflow.
-The current unverified slice is curated config editing plus backup-now/history in the TUI; restore is intentionally deferred.
+The current functional MVP work is ahead of the real production TUI design/build phase; keep that design doc out of normal implementation context until we explicitly switch to it.
 
 For future agents: prefer the scripted manual-test harness before ad hoc provider installs when broad manual coverage is needed.
 
