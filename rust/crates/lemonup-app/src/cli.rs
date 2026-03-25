@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::github::parse_github_target;
 use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
 use crate::wowinterface::parse_wowinterface_target;
@@ -65,6 +66,13 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Install a GitHub-hosted addon by repo URL
+    InstallGithub {
+        #[arg(value_name = "GITHUB_REPO", value_parser = parse_github_install_target)]
+        addon: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -118,13 +126,17 @@ fn parse_wowinterface_install_target(value: &str) -> Result<String, String> {
     parse_wowinterface_target(value)
 }
 
+fn parse_github_install_target(value: &str) -> Result<String, String> {
+    parse_github_target(value)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Commands, parse_addon_selector, parse_tukui_install_target, parse_wago_install_target,
-        parse_wowinterface_install_target,
+        Cli, Commands, parse_addon_selector, parse_github_install_target,
+        parse_tukui_install_target, parse_wago_install_target, parse_wowinterface_install_target,
     };
 
     #[test]
@@ -237,6 +249,36 @@ mod tests {
                 assert!(dry_run);
             }
             other => panic!("expected install-wowinterface command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn github_target_accepts_repo_url_only() {
+        assert_eq!(
+            parse_github_install_target("https://github.com/WeakAuras/WeakAuras2")
+                .expect("github url"),
+            "https://github.com/WeakAuras/WeakAuras2"
+        );
+        assert!(parse_github_install_target("WeakAuras/WeakAuras2").is_err());
+        assert!(parse_github_install_target("https://example.com/owner/repo").is_err());
+    }
+
+    #[test]
+    fn install_github_command_parses_repo_url() {
+        let cli = Cli::try_parse_from([
+            "lemonup",
+            "install-github",
+            "https://github.com/WeakAuras/WeakAuras2",
+            "--dry-run",
+        ])
+        .expect("parse install-github");
+
+        match cli.command.expect("subcommand") {
+            Commands::InstallGithub { addon, dry_run } => {
+                assert_eq!(addon, "https://github.com/WeakAuras/WeakAuras2");
+                assert!(dry_run);
+            }
+            other => panic!("expected install-github command, got {other:?}"),
         }
     }
 }

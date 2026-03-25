@@ -39,8 +39,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest commit at handoff pass: `45571f6` `feat(rust): add TukUI provider parity for ElvUI and Tukui`
-- current worktree status at handoff pass: dirty with local Rust v2 WoWInterface CLI parity implementation ready to checkpoint
+- latest local milestone at handoff pass: GitHub CLI parity implemented and manually verified
+- current worktree status at handoff pass: clean after checkpoint
 
 ## Current State
 
@@ -89,11 +89,12 @@ Implemented, committed, and pushed:
 - explicit TUI update-pane refresh wording to distinguish tracked-state refresh from live apply/update
 - Wago search plus TUI install UX is implemented, manually verified, and checkpointed
 - TukUI provider parity is implemented, manually verified, and checkpointed
-- WoWInterface CLI parity is implemented and manually verified in the current worktree:
-  - `install-wowinterface` installs from WoWInterface addon page URLs only
-  - tracked WoWInterface `check` now uses the WoWInterface filedetails API
-  - tracked WoWInterface `update` now uses the WoWInterface filedetails API
-  - WoWInterface package parent selection follows Rust-local heuristics modeled on v1 product behavior
+- WoWInterface provider parity is implemented, manually verified, and checkpointed
+- GitHub CLI parity is implemented, manually verified, and checkpointed:
+  - `install-github` installs from canonical GitHub repo URLs only
+  - tracked GitHub `check` now resolves remote default-branch HEAD commits live
+  - tracked GitHub `update` now reapplies managed folders from the current default-branch HEAD commit
+  - GitHub package parent selection follows Rust-local repo-name heuristics and managed ownership rules
 
 ## Recent Important Commits
 
@@ -260,21 +261,22 @@ Already proven in some form:
 
 Still missing or incomplete for MVP:
 - update selected against real provider-backed updates in the TUI
-- broader provider/source parity beyond Wago + TukUI + WoWInterface
 - richer config/backup workflows
+- any remaining non-MVP source parity cleanup after the TUI update path lands
 
 ## Next Recommended Slice
 
 Next real phase:
-1. checkpoint the in-worktree WoWInterface CLI parity slice
-2. broaden provider/source coverage using the same managed ownership contract
-3. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+1. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+2. preserve the same managed ownership contract in that TUI-selected update flow
+3. continue richer config/backup workflows after the update path is proven
 
 Why this is next:
 - Wago install/search/check/update is now proven
 - canonical TukUI install/check/update is now proven
-- WoWInterface install/check/update is now proven in the worktree
-- after checkpointing, the biggest remaining MVP gap is broader provider coverage beyond Wago + TukUI + WoWInterface
+- WoWInterface install/check/update is now proven
+- GitHub install/check/update is now proven
+- the biggest remaining MVP gap is replacing tracked refresh in the TUI with real provider-backed selected updates
 - the ownership model is already hardened enough to build on
 
 ## Suggested First Commands In A New Windows-Rooted Thread
@@ -298,4 +300,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Suggested First Prompt In A New Thread
 
-`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install, TukUI CLI parity, and WoWInterface CLI parity are already landed and verified. Move next to broader provider parity and then real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`
+`Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, and GitHub CLI parity are already landed and verified. Move next to real provider-backed selected updates in the TUI. Respect existing safety/relationship invariants and commit only after my manual verification.`

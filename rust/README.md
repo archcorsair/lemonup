@@ -33,6 +33,7 @@ cargo run -p lemonup-app --bin lemonup -- update --dry-run
 cargo run -p lemonup-app --bin lemonup -- update WeakAuras --dry-run
 cargo run -p lemonup-app --bin lemonup -- update-all --dry-run
 cargo run -p lemonup-app --bin lemonup -- install-tukui ElvUI --dry-run
+cargo run -p lemonup-app --bin lemonup -- install-github https://github.com/WeakAuras/WeakAuras2 --dry-run
 ```
 
 ## Current Wago Shell Slice
@@ -56,3 +57,7 @@ cargo run -p lemonup-app --bin lemonup -- install-tukui ElvUI --dry-run
   - CLI install by addon page URL
   - CLI live check for tracked WoWInterface addons
   - CLI live update for tracked WoWInterface addons
+- GitHub:
+  - CLI install by canonical repo URL
+  - CLI live check for tracked GitHub addons
+  - CLI live update for tracked GitHub addons

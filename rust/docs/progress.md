@@ -76,8 +76,8 @@ Current checkpoint state:
 
 - no active unverified slice in the worktree
 - current focus:
-  - broaden provider/source parity beyond Wago + TukUI + WoWInterface
-  - then move next into real provider-backed selected updates in the TUI
+  - real provider-backed selected updates in the TUI
+  - then richer config/backup workflows
 
 ## Newly Completed
 
@@ -238,13 +238,20 @@ These are implemented and manually verified in addition to the earlier chunks:
   - WoWInterface live `update` downloads from `UIDownload` and preserves managed ownership metadata
   - tracked WoWInterface source URLs are canonical public addon URLs that round-trip back to addon ids
 - WoWInterface CLI parity was manually verified and checkpointed
+- first real GitHub provider-backed CLI parity now exists:
+  - `install-github` accepts canonical GitHub repo URLs only
+  - GitHub install resolves the repo default branch dynamically and installs from the zipball at that branch HEAD commit
+  - tracked GitHub `check` now resolves remote default-branch HEAD commits live
+  - tracked GitHub `update` now reapplies managed folders from the current default-branch HEAD commit
+  - tracked GitHub records persist canonical repo URL identity plus full commit metadata in `git_commit` and `remote_version`
+- GitHub CLI parity was manually verified and checkpointed
 ## Next Up
 
 Next phase:
 
-1. broaden provider/source parity beyond Wago + TukUI + WoWInterface
-2. real provider-backed selected updates in the TUI
-3. richer config/backup workflows
+1. real provider-backed selected updates in the TUI
+2. richer config/backup workflows
+3. any remaining source-parity cleanup after the TUI update path is proven
 
 ### Goal
 
@@ -254,8 +261,8 @@ Next phase:
 
 ### Planned order
 
-1. broaden provider/source coverage using the same managed ownership contract
-2. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+1. replace tracked-state refresh in the TUI update pane with real provider-backed selected updates
+2. carry the same managed ownership contract into that TUI-selected update path
 3. continue filling remaining config/backup gaps
 
 ## Remaining Major Work
@@ -263,11 +270,10 @@ Next phase:
 Still missing or incomplete:
 
 - richer tree view for parent/child relationships
-- broader install flows beyond Wago, canonical TukUI, and WoWInterface
-- remote-backed update checks beyond Wago, canonical TukUI, and WoWInterface
+- broader install flows beyond Wago, canonical TukUI, WoWInterface, and GitHub
+- remote-backed update checks beyond Wago, canonical TukUI, WoWInterface, and GitHub
 - config editing
 - backup workflows
-- broader source parity behavior
 - real provider-backed selected updates in the TUI
 
 ## Minimum MVP

@@ -210,17 +210,31 @@ where
                     }
                 }
             }
-            SourceKind::GitHub => {
-                results.push(CheckResult {
-                    addon_name: addon.folder.clone(),
-                    status: UpdateStatus::Unknown,
-                    remote_version: addon.remote_version.clone(),
-                    message: Some(format!(
-                        "live checks are not implemented yet for {} addons",
-                        serialize_source_kind(addon.source)
-                    )),
-                });
-            }
+            SourceKind::GitHub => match crate::github::fetch_github_remote_version(&addon).await {
+                Ok(remote) => {
+                    let mut refreshed = addon.clone();
+                    refreshed.remote_version = remote.version;
+                    refreshed.source_url = remote.source_url.or(refreshed.source_url);
+                    refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
+                    database.upsert_addon(&refreshed)?;
+
+                    let (status, message) = determine_update_status(&refreshed);
+                    results.push(CheckResult {
+                        addon_name: refreshed.folder.clone(),
+                        status,
+                        remote_version: refreshed.remote_version.clone(),
+                        message,
+                    });
+                }
+                Err(error) => {
+                    results.push(CheckResult {
+                        addon_name: addon.folder.clone(),
+                        status: UpdateStatus::Error,
+                        remote_version: addon.remote_version.clone(),
+                        message: Some(error),
+                    });
+                }
+            },
         }
     }
 
@@ -421,18 +435,47 @@ pub(crate) async fn apply_live_updates(
                 }
             }
             SourceKind::GitHub => {
-                summary.skipped_unsupported += 1;
-                results.push(LiveUpdateResult {
-                    addon_name: addon.folder.clone(),
-                    source: addon.source,
-                    status: LiveUpdateStatus::SkippedUnsupported,
-                    previous_version: addon.version.clone(),
-                    remote_version: addon.remote_version.clone(),
-                    message: Some(format!(
-                        "live updates are not implemented yet for {} addons",
-                        serialize_source_kind(addon.source)
-                    )),
-                });
+                match crate::github::update_github_addon(
+                    database, addon_dir, &addon, force, dry_run,
+                )
+                .await
+                {
+                    Ok(result) if result.updated => {
+                        summary.updated_addons += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Updated,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: None,
+                        });
+                    }
+                    Ok(result) => {
+                        summary.up_to_date += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::UpToDate,
+                            previous_version: result.previous_version,
+                            remote_version: result.remote_version,
+                            message: Some(
+                                "remote package already matches installed version".to_string(),
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        summary.errors += 1;
+                        results.push(LiveUpdateResult {
+                            addon_name: addon.folder.clone(),
+                            source: addon.source,
+                            status: LiveUpdateStatus::Error,
+                            previous_version: addon.version.clone(),
+                            remote_version: addon.remote_version.clone(),
+                            message: Some(error),
+                        });
+                    }
+                }
             }
         }
     }
@@ -446,6 +489,31 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
             UpdateStatus::Unknown,
             Some("manual addons cannot be checked yet".to_string()),
         );
+    }
+
+    if addon.source == lemonup_core::SourceKind::GitHub {
+        return match (
+            addon.git_commit.as_deref().or(addon.version.as_deref()),
+            addon.remote_version.as_deref(),
+        ) {
+            (Some(installed_commit), Some(remote_commit))
+                if crate::github::commits_match(Some(installed_commit), Some(remote_commit)) =>
+            {
+                (UpdateStatus::UpToDate, None)
+            }
+            (Some(_), Some(_)) => (
+                UpdateStatus::UpdateAvailable,
+                Some("tracked remote commit differs from installed commit".to_string()),
+            ),
+            (_, None) => (
+                UpdateStatus::Unknown,
+                Some("no tracked remote version yet".to_string()),
+            ),
+            (None, Some(_)) => (
+                UpdateStatus::Unknown,
+                Some("no installed version metadata is tracked yet".to_string()),
+            ),
+        };
     }
 
     match (addon.version.as_deref(), addon.remote_version.as_deref()) {
@@ -640,16 +708,6 @@ fn normalize_version(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-fn serialize_source_kind(source: SourceKind) -> &'static str {
-    match source {
-        SourceKind::GitHub => "GitHub",
-        SourceKind::Tukui => "TukUI",
-        SourceKind::WowInterface => "WoWInterface",
-        SourceKind::Wago => "Wago",
-        SourceKind::Manual => "manual",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -735,7 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_checks_mark_non_provider_backed_sources_as_unsupported_for_now() {
+    async fn live_checks_report_github_provider_errors_when_tracking_is_incomplete() {
         let temp = tempdir().expect("tempdir");
         let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
 
@@ -761,10 +819,10 @@ mod tests {
         .expect("refresh checks");
 
         assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].status, UpdateStatus::Unknown);
+        assert_eq!(checks[0].status, UpdateStatus::Error);
         assert_eq!(
             checks[0].message.as_deref(),
-            Some("live checks are not implemented yet for GitHub addons")
+            Some("tracked GitHub addon 'DBM-Core' is missing a source URL")
         );
     }
 
@@ -796,11 +854,11 @@ mod tests {
 
         assert_eq!(run.summary.target_addons, 2);
         assert_eq!(run.summary.skipped_manual, 1);
-        assert_eq!(run.summary.skipped_unsupported, 1);
-        assert_eq!(run.summary.errors, 0);
+        assert_eq!(run.summary.skipped_unsupported, 0);
+        assert_eq!(run.summary.errors, 1);
         assert_eq!(run.results.len(), 2);
         assert_eq!(run.results[0].status, LiveUpdateStatus::SkippedManual);
-        assert_eq!(run.results[1].status, LiveUpdateStatus::SkippedUnsupported);
+        assert_eq!(run.results[1].status, LiveUpdateStatus::Error);
     }
 
     #[test]
