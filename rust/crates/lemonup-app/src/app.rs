@@ -10,8 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
@@ -34,7 +35,117 @@ use crate::wago::{
     search_wago_addons,
 };
 
-const DASHBOARD_COMMANDS: &str = "q quit | j/k list | space select | a all | esc clear | x delete | y confirm | n cancel | z undo-delete | r update-selected | v select-updateable | enter tree | h collapse | ] expand-all | [ collapse-all | o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_COMMANDS_LINE: &str =
+    "nav j/k | select space/a/esc | tree enter/h/[/] | actions x/y/n/z/r/v";
+const DASHBOARD_MODES_LINE: &str =
+    "modes o overview | i install | s search | u update | c config | b backup";
+const DASHBOARD_BRIDGE_MIN_WIDTH: u16 = 170;
+const LOGO_FULL: [&str; 2] = [
+    "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
+    "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
+];
+const LOGO_COMPACT: &str = "LEMONUP";
+const MOTION_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellLayoutMode {
+    Standard,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderVariant {
+    FullLogo,
+    CompactLogo,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    Inspect,
+    SearchInstall,
+    Config,
+    Backup,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct OverlayState {
+    active: Option<OverlayKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MotionPreset {
+    Tasteful,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MotionState {
+    preset: MotionPreset,
+    tick_count: usize,
+}
+
+impl Default for MotionState {
+    fn default() -> Self {
+        Self {
+            preset: MotionPreset::Tasteful,
+            tick_count: 0,
+        }
+    }
+}
+
+impl MotionState {
+    fn advance(self) -> Self {
+        Self {
+            preset: self.preset,
+            tick_count: self.tick_count.wrapping_add(1),
+        }
+    }
+
+    fn spinner_frame(self) -> &'static str {
+        MOTION_SPINNER_FRAMES[self.tick_count % MOTION_SPINNER_FRAMES.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ShellUiState {
+    overlay: OverlayState,
+    motion: MotionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShellFrame {
+    header: Rect,
+    body: Rect,
+    footer: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardLayout {
+    table: Rect,
+    bridge: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiTheme {
+    header_accent: Color,
+    warning: Color,
+    error: Color,
+    highlight: Color,
+    muted: Color,
+}
+
+impl Default for UiTheme {
+    fn default() -> Self {
+        Self {
+            header_accent: Color::Yellow,
+            warning: Color::LightYellow,
+            error: Color::Red,
+            highlight: Color::Yellow,
+            muted: Color::DarkGray,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMode {
@@ -93,6 +204,8 @@ enum AppMessage {
     Tick,
     QuitRequested,
     TerminalResized { width: u16, height: u16 },
+    DashboardOpenInspect,
+    DashboardCloseOverlay,
     DashboardSelectionNext,
     DashboardSelectionPrevious,
     DashboardPointerSelect { column: u16, row: u16 },
@@ -515,10 +628,30 @@ struct DashboardRow {
     child_connector: Option<DashboardChildConnector>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardStateBadge {
+    UpToDate,
+    Update,
+    Unknown,
+    Manual,
+    Unmanaged,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddonTableRowViewModel {
+    name: Line<'static>,
+    source: String,
+    version: String,
+    state: Line<'static>,
+    flags: Line<'static>,
+    row_style: Style,
+}
+
 struct DashboardState {
     items: Vec<DashboardItem>,
     rows: Vec<DashboardRow>,
-    list_state: ListState,
+    list_state: TableState,
     detail_mode: DetailMode,
     expanded_folders: HashSet<String>,
     selected_parents: HashSet<String>,
@@ -572,7 +705,7 @@ impl DashboardState {
         let mut state = Self {
             items,
             rows: Vec::new(),
-            list_state: ListState::default(),
+            list_state: TableState::default(),
             detail_mode: DetailMode::Overview,
             expanded_folders: HashSet::new(),
             selected_parents: HashSet::new(),
@@ -632,7 +765,7 @@ impl DashboardState {
             selected = Some(0);
         }
         let max_offset = self.rows.len().saturating_sub(1);
-        self.list_state = ListState::default()
+        self.list_state = TableState::default()
             .with_offset(previous_offset.min(max_offset))
             .with_selected(selected);
     }
@@ -1130,6 +1263,8 @@ pub struct App {
     shell_mode: ShellMode,
     quit_requested: bool,
     status_line: String,
+    ui_theme: UiTheme,
+    shell_ui: ShellUiState,
     config_present: bool,
     config_pane: ConfigPaneState,
     backup_pane: BackupPaneState,
@@ -1223,6 +1358,8 @@ impl App {
             shell_mode,
             quit_requested: false,
             status_line: String::new(),
+            ui_theme: UiTheme::default(),
+            shell_ui: ShellUiState::default(),
             config_present,
             config_pane: ConfigPaneState::new(loaded_config),
             backup_pane: BackupPaneState {
@@ -1318,7 +1455,12 @@ impl App {
             return None;
         }
 
-        let row_in_view = usize::from(row.saturating_sub(inner_top));
+        let table_body_top = inner_top.saturating_add(1);
+        if row < table_body_top || row > inner_bottom {
+            return None;
+        }
+
+        let row_in_view = usize::from(row.saturating_sub(table_body_top));
         let absolute = self
             .dashboard
             .list_state
@@ -1363,6 +1505,10 @@ impl App {
             return vec![];
         }
 
+        if self.shell_ui.overlay.active.is_some() {
+            return vec![];
+        }
+
         if self.dashboard.pending_delete_folders().is_some() {
             return vec![];
         }
@@ -1399,6 +1545,14 @@ impl App {
             };
         }
 
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+            return match key.code {
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                _ => vec![],
+            };
+        }
+
         if let Some(messages) = self.search_messages_for_key(key) {
             return messages;
         }
@@ -1421,7 +1575,10 @@ impl App {
             KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
             KeyCode::Char('a') => vec![AppMessage::DashboardSelectAll],
             KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Enter if self.dashboard.detail_mode == DetailMode::Overview => {
+                vec![AppMessage::DashboardOpenInspect]
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
                 vec![AppMessage::DashboardToggleExpanded]
             }
             KeyCode::Left | KeyCode::Char('h') => vec![AppMessage::DashboardCollapseExpanded],
@@ -1587,26 +1744,29 @@ impl App {
     fn update(&self, message: AppMessage) -> Vec<AppAction> {
         match message {
             AppMessage::Tick => {
+                let mut actions = vec![AppAction::AdvanceMotionTick];
                 if self.shell_mode == ShellMode::Onboarding
                     && matches!(self.onboarding.phase, OnboardingPhase::Bootstrapping)
                 {
-                    vec![
+                    actions.extend([
                         AppAction::SetOnboardingState(self.onboarding.begin_quick_check()),
                         AppAction::SetStatus(
                             self.with_base_status("checking common install locations"),
                         ),
                         AppAction::StartOnboardingQuickCheck,
-                    ]
+                    ]);
+                    actions
                 } else if self.shell_mode == ShellMode::Dashboard
                     && matches!(self.scan_state, ScanState::Pending)
                 {
-                    self.effective_addon_dir
-                        .clone()
-                        .map(AppAction::StartAddonScan)
-                        .into_iter()
-                        .collect()
+                    actions.extend(
+                        self.effective_addon_dir
+                            .clone()
+                            .map(AppAction::StartAddonScan),
+                    );
+                    actions
                 } else {
-                    vec![AppAction::None]
+                    actions
                 }
             }
             AppMessage::QuitRequested => vec![AppAction::Quit],
@@ -1631,6 +1791,27 @@ impl App {
                     ),
                 ]
             }
+            AppMessage::DashboardOpenInspect => {
+                if self.dashboard.selected_row().is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Overview,
+                        "select an addon row before opening inspect",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetInspectOverlay(true),
+                        AppAction::SetStatus(
+                            self.with_base_status("inspect overlay open | esc close"),
+                        ),
+                    ]
+                }
+            }
+            AppMessage::DashboardCloseOverlay => vec![
+                AppAction::SetInspectOverlay(false),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(self.dashboard.detail_mode, "inspect closed"),
+                ),
+            ],
             AppMessage::DashboardPointerSelect { column, row } => {
                 match self.dashboard_selection_for_pointer(column, row) {
                     Some(selection) if self.dashboard.list_state.selected() != Some(selection) => {
@@ -1857,6 +2038,7 @@ impl App {
                 ),
             ],
             AppMessage::SetDetailMode(detail_mode) => vec![
+                AppAction::SetInspectOverlay(false),
                 AppAction::SetDetailMode(detail_mode),
                 AppAction::SetStatus(self.dashboard_status_for(
                     detail_mode,
@@ -2573,8 +2755,13 @@ impl App {
 
     fn apply(&mut self, action: AppAction) {
         match action {
-            AppAction::None => {}
             AppAction::Quit => self.quit_requested = true,
+            AppAction::AdvanceMotionTick => {
+                self.shell_ui.motion = self.shell_ui.motion.advance();
+            }
+            AppAction::SetInspectOverlay(active) => {
+                self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
+            }
             AppAction::SetStatus(status) => self.status_line = status,
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
@@ -2930,62 +3117,281 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8),
-                Constraint::Min(12),
-                Constraint::Length(3),
-            ])
-            .split(frame.area());
-
-        let header = Paragraph::new(self.header_lines())
-            .block(Block::default().borders(Borders::ALL).title("Header"));
-
-        let footer = Paragraph::new(self.status_line.clone())
-            .block(Block::default().borders(Borders::ALL).title("Status"));
-
-        frame.render_widget(header, layout[0]);
+        let layout_mode = self.shell_layout_mode(frame.area());
+        let shell = self.shell_frame(frame.area(), layout_mode);
+        self.render_header(frame, shell.header, layout_mode);
         match self.shell_mode {
-            ShellMode::Onboarding => frame.render_widget(self.onboarding_body(), layout[1]),
-            ShellMode::Dashboard => self.render_dashboard(frame, layout[1]),
+            ShellMode::Onboarding => frame.render_widget(self.onboarding_body(), shell.body),
+            ShellMode::Dashboard => self.render_dashboard(frame, shell.body),
         }
-        frame.render_widget(footer, layout[2]);
+        self.render_overlay_host(frame, shell.body);
+        self.render_footer(frame, shell.footer);
     }
 
-    fn header_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                "LemonUp v2",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  single-surface shell"),
-        ])];
-        lines.push(Line::from(format!(
-            "Profile: {}",
-            self.runtime.profile_name
-        )));
-        lines.push(Line::from(format!(
-            "Target: {}",
-            self.rendered_target_path()
-        )));
-        lines.push(Line::from(format!("Scan: {}", self.scan_status_label())));
-        lines.push(Line::from(format!(
-            "Surface: {}",
-            match self.shell_mode {
-                ShellMode::Onboarding => "setup takeover",
-                ShellMode::Dashboard => detail_mode_label(self.dashboard.detail_mode),
+    fn shell_layout_mode(&self, area: Rect) -> ShellLayoutMode {
+        if area.width < 110 || area.height < 28 {
+            ShellLayoutMode::Compact
+        } else {
+            ShellLayoutMode::Standard
+        }
+    }
+
+    fn header_variant(&self, mode: ShellLayoutMode) -> HeaderVariant {
+        match mode {
+            ShellLayoutMode::Standard => HeaderVariant::FullLogo,
+            ShellLayoutMode::Compact => HeaderVariant::CompactLogo,
+        }
+    }
+
+    fn shell_frame(&self, area: Rect, mode: ShellLayoutMode) -> ShellFrame {
+        let header_height = match self.header_variant(mode) {
+            HeaderVariant::FullLogo => 7,
+            HeaderVariant::CompactLogo => 5,
+        };
+        let [header, body, footer] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Min(12),
+                Constraint::Length(4),
+            ])
+            .areas(area);
+        ShellFrame {
+            header,
+            body,
+            footer,
+        }
+    }
+
+    fn render_header(&self, frame: &mut Frame<'_>, area: Rect, mode: ShellLayoutMode) {
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [left, right] = match mode {
+            ShellLayoutMode::Standard => Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(inner),
+            ShellLayoutMode::Compact => [inner, Rect::new(inner.x, inner.y, 0, 0)],
+        };
+
+        let logo = Paragraph::new(self.header_logo_lines(mode));
+        frame.render_widget(logo, left);
+
+        if mode == ShellLayoutMode::Standard {
+            let meta = Paragraph::new(self.header_meta_lines(mode)).wrap(Wrap { trim: false });
+            frame.render_widget(meta, right);
+        }
+    }
+
+    fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
+        let footer = Paragraph::new(self.footer_lines())
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Status"));
+        frame.render_widget(footer, area);
+    }
+
+    fn render_overlay_host(&self, frame: &mut Frame<'_>, area: Rect) {
+        if let Some(kind) = self.shell_ui.overlay.active {
+            let title = match kind {
+                OverlayKind::Inspect => "Inspect",
+                OverlayKind::SearchInstall => "Search/Install",
+                OverlayKind::Config => "Config",
+                OverlayKind::Backup => "Backup",
+                OverlayKind::Confirm => "Confirm",
+            };
+            let overlay = match kind {
+                OverlayKind::Inspect => {
+                    let overlay = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Percentage(18),
+                            Constraint::Percentage(58),
+                            Constraint::Percentage(24),
+                        ])
+                        .split(area)[1];
+                    Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Percentage(18),
+                            Constraint::Percentage(64),
+                            Constraint::Percentage(18),
+                        ])
+                        .split(overlay)[1]
+                }
+                _ => {
+                    let overlay = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Percentage(15),
+                            Constraint::Percentage(70),
+                            Constraint::Percentage(15),
+                        ])
+                        .split(area)[1];
+                    Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Percentage(12),
+                            Constraint::Percentage(76),
+                            Constraint::Percentage(12),
+                        ])
+                        .split(overlay)[1]
+                }
+            };
+            frame.render_widget(Clear, overlay);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_set(symbols::border::ROUNDED)
+                .title(format!(" {title} Overlay "))
+                .title_bottom(" esc close ")
+                .border_style(if kind == OverlayKind::Inspect {
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                })
+                .style(Style::default().bg(Color::Rgb(24, 24, 34)));
+            let inner = block.inner(overlay);
+            frame.render_widget(block, overlay);
+            if kind == OverlayKind::Inspect {
+                let inspect =
+                    Paragraph::new(self.inspect_overlay_lines()).wrap(Wrap { trim: false });
+                frame.render_widget(inspect, inner);
             }
-        )));
+        }
+    }
+
+    fn header_logo_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        match self.header_variant(mode) {
+            HeaderVariant::FullLogo => {
+                lines.push(Line::from(Span::styled(
+                    LOGO_FULL[0],
+                    Style::default()
+                        .fg(self.ui_theme.header_accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    LOGO_FULL[1],
+                    Style::default()
+                        .fg(self.ui_theme.header_accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "v2",
+                        Style::default()
+                            .fg(self.ui_theme.highlight)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  single-surface shell"),
+                ]));
+            }
+            HeaderVariant::CompactLogo => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        LOGO_COMPACT,
+                        Style::default()
+                            .fg(self.ui_theme.header_accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  v2"),
+                    Span::styled(
+                        "  single-surface shell",
+                        Style::default().fg(self.ui_theme.muted),
+                    ),
+                ]));
+            }
+        }
+        if mode == ShellLayoutMode::Compact {
+            lines.extend(self.header_meta_lines(mode));
+        }
+        lines
+    }
+
+    fn header_meta_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            Line::from(format!(
+                "Profile: {}    Surface: {}",
+                self.runtime.profile_name,
+                match self.shell_mode {
+                    ShellMode::Onboarding => "setup",
+                    ShellMode::Dashboard => self.dashboard_surface_label(),
+                }
+            )),
+            Line::from(format!("Target: {}", self.rendered_target_path())),
+            Line::from(format!("Scan: {}", self.scan_status_with_motion())),
+        ];
+        if mode == ShellLayoutMode::Compact {
+            return lines;
+        }
         if let Some(warning) = self.profile_warning() {
             lines.push(Line::from(Span::styled(
                 warning,
-                Style::default().fg(Color::Red),
+                Style::default().fg(self.ui_theme.warning),
             )));
         }
         lines
+    }
+
+    fn footer_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(truncate_text(&self.status_line, 220)),
+            Line::from(vec![
+                Span::styled("Commands: ", Style::default().fg(self.ui_theme.muted)),
+                Span::raw(self.dashboard_commands_line()),
+            ]),
+            Line::from(vec![
+                Span::styled("Panels:   ", Style::default().fg(self.ui_theme.muted)),
+                Span::raw(self.dashboard_panels_line()),
+            ]),
+        ]
+    }
+
+    fn dashboard_surface_label(&self) -> &'static str {
+        match self.shell_ui.overlay.active {
+            Some(OverlayKind::Inspect) => "Inspect",
+            _ => detail_mode_label(self.dashboard.detail_mode),
+        }
+    }
+
+    fn dashboard_commands_line(&self) -> &'static str {
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+            "overlay esc close | q quit"
+        } else {
+            match self.dashboard.detail_mode {
+                DetailMode::Overview => {
+                    "nav j/k | inspect enter | select space/a/esc | tree l/h/[/] | actions x/y/n/z"
+                }
+                DetailMode::Update => {
+                    "nav j/k | select space/a/esc | tree enter/h/[/] | actions x/y/n/z/r/v"
+                }
+                _ => DASHBOARD_COMMANDS_LINE,
+            }
+        }
+    }
+
+    fn dashboard_panels_line(&self) -> &'static str {
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+            "inspect overlay"
+        } else {
+            DASHBOARD_MODES_LINE
+        }
+    }
+
+    fn scan_status_with_motion(&self) -> String {
+        match self.scan_state {
+            ScanState::Pending | ScanState::Running(_) => {
+                format!(
+                    "{} {}",
+                    self.shell_ui.motion.spinner_frame(),
+                    self.scan_status_label()
+                )
+            }
+            _ => self.scan_status_label(),
+        }
     }
 
     fn onboarding_body(&self) -> Paragraph<'static> {
@@ -3089,13 +3495,32 @@ impl App {
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let [list_area, detail_area] = Layout::default()
+        let layout =
+            self.dashboard_layout(area, self.dashboard.detail_mode != DetailMode::Overview);
+
+        self.render_dashboard_list(frame, layout.table);
+        if let Some(bridge_area) = layout.bridge {
+            frame.render_widget(self.detail_panel(), bridge_area);
+        }
+    }
+
+    fn dashboard_layout(&self, area: Rect, show_bridge: bool) -> DashboardLayout {
+        if !show_bridge || area.width < DASHBOARD_BRIDGE_MIN_WIDTH {
+            return DashboardLayout {
+                table: area,
+                bridge: None,
+            };
+        }
+
+        let [table, bridge] = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .areas(area);
 
-        self.render_dashboard_list(frame, list_area);
-        frame.render_widget(self.detail_panel(), detail_area);
+        DashboardLayout {
+            table,
+            bridge: Some(bridge),
+        }
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -3113,56 +3538,60 @@ impl App {
             return;
         }
 
-        let items = self
+        let header = Row::new(vec![
+            Cell::from("Name"),
+            Cell::from("Source"),
+            Cell::from("Version"),
+            Cell::from("State"),
+            Cell::from("Flags"),
+        ])
+        .style(
+            Style::default()
+                .fg(self.ui_theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let rows = self
             .dashboard
             .rows
             .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let prefix = if self.dashboard.list_state.selected() == Some(index) {
-                    "› "
-                } else {
-                    "  "
-                };
-                let selection_marker = match &row.kind {
-                    DashboardRowKind::Parent => {
-                        if self.dashboard.is_parent_selected(&row.folder) {
-                            "[x] "
-                        } else {
-                            "[ ] "
-                        }
-                    }
-                    DashboardRowKind::OwnedChild { .. } => "",
-                };
-                let marker = match &row.kind {
-                    DashboardRowKind::Parent if row.expandable && row.expanded => "▾ ",
-                    DashboardRowKind::Parent if row.expandable => "▸ ",
-                    DashboardRowKind::Parent => "  ",
-                    DashboardRowKind::OwnedChild { .. } => child_row_prefix(row),
-                };
-                let drift_marker = match &row.kind {
-                    DashboardRowKind::Parent if self.parent_has_drift(&row.folder) => "! ",
-                    _ => "",
-                };
-                ListItem::new(vec![Line::from(format!(
-                    "{prefix}{selection_marker}{drift_marker}{marker}{}",
-                    row.name
-                ))])
+            .map(|row| self.dashboard_table_row(row))
+            .map(|view| {
+                Row::new(vec![
+                    Cell::from(view.name),
+                    Cell::from(view.source),
+                    Cell::from(view.version),
+                    Cell::from(view.state),
+                    Cell::from(view.flags),
+                ])
+                .style(view.row_style)
             })
             .collect::<Vec<_>>();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(
-                "Addons ({} selected)",
-                self.dashboard.selected_parent_count()
-            )))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(42),
+                Constraint::Percentage(11),
+                Constraint::Percentage(19),
+                Constraint::Percentage(16),
+                Constraint::Percentage(12),
+            ],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Addons ({} selected)",
+            self.dashboard.selected_parent_count()
+        )))
+        .column_spacing(1)
+        .highlight_symbol("› ")
+        .row_highlight_style(
+            Style::default()
+                .fg(self.ui_theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        );
 
-        frame.render_stateful_widget(list, area, &mut self.dashboard.list_state);
+        frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
     }
 
     fn detail_panel(&self) -> Paragraph<'static> {
@@ -3171,16 +3600,22 @@ impl App {
         let selected_row = self.dashboard.selected_row();
         let selected_owned_child = self.dashboard.selected_owned_child_folder();
 
+        lines.push(Line::from(Span::styled(
+            "Context bridge",
+            Style::default()
+                .fg(self.ui_theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        )));
         lines.push(Line::from(format!(
-            "Mode: {}",
-            detail_mode_label(self.dashboard.detail_mode)
+            "Overview | {} parent{} selected",
+            self.dashboard.selected_parent_count(),
+            plural_suffix(self.dashboard.selected_parent_count())
         )));
         lines.push(Line::from(""));
 
         if let Some(undo_delete) = self.undo_delete.as_ref() {
-            lines.push(Line::from("Undo available"));
             lines.push(Line::from(format!(
-                "Last delete: {} parent addon{}, {} folder{}",
+                "Undo: {} parent{}, {} folder{}",
                 undo_delete.parent_count(),
                 plural_suffix(undo_delete.parent_count()),
                 undo_delete.moved_folder_count(),
@@ -3190,14 +3625,12 @@ impl App {
                 "Targets: {}",
                 undo_delete.target_summary()
             )));
-            lines.push(Line::from("Press z to restore the last delete batch."));
             lines.push(Line::from(""));
         }
 
         if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
-            lines.push(Line::from("Pending delete confirmation"));
             lines.push(Line::from(format!(
-                "{} parent addon{} selected for deletion",
+                "Delete pending: {} parent{}",
                 pending_delete_folders.len(),
                 plural_suffix(pending_delete_folders.len())
             )));
@@ -3205,133 +3638,53 @@ impl App {
                 "Targets: {}",
                 pending_delete_folders.join(", ")
             )));
-            lines.push(Line::from("Press y to confirm or n/esc to cancel."));
             lines.push(Line::from(""));
         }
 
         if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
-            lines.push(Line::from("Pending Wago replace confirmation"));
             lines.push(Line::from(format!(
-                "Addon: {} ({})",
-                confirmation.inspection.addon_name, confirmation.inspection.addon_id
+                "Replace pending: {}",
+                confirmation.inspection.addon_name
             )));
             lines.push(Line::from(format!(
-                "Parent folder: {}",
+                "Parent: {}",
                 confirmation.inspection.parent_folder
             )));
-            if let Some(tracked_parent) = confirmation.inspection.tracked_parent.as_deref() {
-                lines.push(Line::from(format!("Tracked install: {tracked_parent}")));
-            }
-            if !confirmation.inspection.existing_folders.is_empty() {
-                lines.push(Line::from(format!(
-                    "Existing folders on disk: {}",
-                    confirmation.inspection.existing_folders.join(", ")
-                )));
-            }
-            lines.push(Line::from("Press y to replace, n/esc to cancel."));
             lines.push(Line::from(""));
         }
 
         match self.dashboard.detail_mode {
             DetailMode::Overview => {
                 if let (Some(item), Some(child_folder)) = (selected, selected_owned_child) {
-                    lines.push(Line::from("Relationship row: owned child"));
-                    lines.push(Line::from(format!("Child folder: {child_folder}")));
-                    lines.push(Line::from(format!("Parent addon: {}", item.name)));
-                    lines.push(Line::from(format!("Parent folder: {}", item.folder)));
+                    lines.push(Line::from(format!("Child: {child_folder}")));
+                    lines.push(Line::from(format!("Parent: {}", item.name)));
                     lines.push(Line::from(format!(
-                        "Relationship source: {}",
-                        relationship_state_label(item)
+                        "State: {}",
+                        dashboard_item_state_text(item)
                     )));
-                    lines.push(Line::from(format!(
-                        "Parent source: {}",
-                        source_label(item.source)
-                    )));
-                    lines.push(Line::from(format!(
-                        "Parent version: {}",
-                        item.version.as_deref().unwrap_or("unknown")
-                    )));
-                    lines.push(Line::from(
-                        "Child rows are tree-visible from parent ownership data.",
-                    ));
                 } else if let Some(item) = selected {
-                    lines.push(Line::from(format!("Name: {}", item.name)));
-                    lines.push(Line::from(format!("Folder: {}", item.folder)));
-                    lines.push(Line::from(format!("Kind: {}", addon_kind_label(item.kind))));
-                    lines.push(Line::from(format!("Source: {}", source_label(item.source))));
+                    lines.push(Line::from(item.name.clone()));
                     lines.push(Line::from(format!(
-                        "Version: {}",
-                        item.version.as_deref().unwrap_or("unknown")
+                        "{} | {} | {}",
+                        source_label(item.source),
+                        dashboard_item_version_label(item),
+                        dashboard_item_state_text(item)
                     )));
                     lines.push(Line::from(format!(
-                        "Author: {}",
-                        item.author.as_deref().unwrap_or("unknown")
-                    )));
-                    lines.push(Line::from(format!(
-                        "Interface: {}",
-                        item.interface.as_deref().unwrap_or("unknown")
-                    )));
-                    lines.push(Line::from(format!(
-                        "Git commit: {}",
-                        item.git_commit.as_deref().unwrap_or("n/a")
-                    )));
-                    lines.push(Line::from(format!(
-                        "Owned folders: {}",
-                        item.owned_folder_count
-                    )));
-                    lines.push(Line::from(format!(
-                        "Relationship source: {}",
-                        relationship_state_label(item)
-                    )));
-                    lines.push(Line::from(format!(
-                        "Tree state: {}",
-                        if self.dashboard.expanded_folders.contains(&item.folder) {
-                            "expanded"
-                        } else {
-                            "collapsed"
-                        }
-                    )));
-                    lines.push(Line::from(format!(
-                        "Required deps: {}",
-                        join_or_unknown(&item.required_deps)
-                    )));
-                    lines.push(Line::from(format!(
-                        "Optional deps: {}",
-                        join_or_unknown(&item.optional_deps)
-                    )));
-                    lines.push(Line::from(format!(
-                        "Embedded libs: {}",
-                        join_or_unknown(&item.embedded_libs)
-                    )));
-                    lines.push(Line::from(format!(
-                        "Selected for bulk actions: {}",
-                        if self.dashboard.is_parent_selected(&item.folder) {
-                            "yes"
-                        } else {
-                            "no"
-                        }
+                        "Flags: {}",
+                        dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
                     )));
                     let missing_owned_children =
                         self.dashboard_parent_missing_owned_children(&item.folder);
-                    lines.push(Line::from(format!(
-                        "Drift marker: {}",
-                        if missing_owned_children.is_empty() {
-                            "clear"
-                        } else {
-                            "attention"
-                        }
-                    )));
                     if !missing_owned_children.is_empty() {
                         lines.push(Line::from(format!(
-                            "Missing owned children: {}",
+                            "Missing: {}",
                             missing_owned_children.join(", ")
                         )));
                     }
-                    if item.owned_folders.is_empty() {
-                        lines.push(Line::from("Child folders: none"));
-                    } else {
+                    if !item.owned_folders.is_empty() {
                         lines.push(Line::from(format!(
-                            "Child folders: {}",
+                            "Children: {}",
                             summarize_owned_folders(&item.owned_folders)
                         )));
                     }
@@ -3340,25 +3693,25 @@ impl App {
                     lines.push(Line::from("Waiting for scan results."));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!(
-                    "Selected parents: {}",
-                    self.dashboard.selected_parent_count()
-                )));
                 if let Some(row) = selected_row {
                     lines.push(Line::from(format!(
-                        "Selected row: {}",
+                        "Row: {}",
                         match row.kind {
                             DashboardRowKind::Parent => "parent",
                             DashboardRowKind::OwnedChild { .. } => "owned child",
                         }
                     )));
                 }
-                lines.push(Line::from(format!(
-                    "Scan status: {}",
-                    self.scan_status_label()
-                )));
+                lines.push(Line::from(format!("Scan: {}", self.scan_status_label())));
                 for line in self.last_scan_drift_lines() {
                     lines.push(line);
+                }
+                if let Some(summary) = self.dashboard.last_update_summary() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!(
+                        "Last update: updated {}, up-to-date {}, errors {}",
+                        summary.updated_addons, summary.up_to_date, summary.errors
+                    )));
                 }
             }
             DetailMode::Install => {
@@ -3706,15 +4059,152 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title("Detail"))
     }
 
+    fn inspect_overlay_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let selected = self.dashboard.selected_item();
+        let selected_row = self.dashboard.selected_row();
+        let selected_owned_child = self.dashboard.selected_owned_child_folder();
+
+        if let Some(undo_delete) = self.undo_delete.as_ref() {
+            lines.push(Line::from(format!(
+                "Undo ready: {} parent{}, {} folder{}",
+                undo_delete.parent_count(),
+                plural_suffix(undo_delete.parent_count()),
+                undo_delete.moved_folder_count(),
+                plural_suffix(undo_delete.moved_folder_count())
+            )));
+            lines.push(Line::from(""));
+        }
+
+        if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
+            lines.push(Line::from(format!(
+                "Delete pending: {}",
+                pending_delete_folders.join(", ")
+            )));
+            lines.push(Line::from(""));
+        }
+
+        if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
+            lines.push(Line::from(format!(
+                "Replace pending: {} -> {}",
+                confirmation.inspection.addon_name, confirmation.inspection.parent_folder
+            )));
+            lines.push(Line::from(""));
+        }
+
+        if let (Some(item), Some(child_folder)) = (selected, selected_owned_child) {
+            lines.push(Line::from(format!("Owned child: {child_folder}")));
+            lines.push(Line::from(format!("Parent: {}", item.name)));
+            lines.push(Line::from(format!("Source: {}", source_label(item.source))));
+            lines.push(Line::from(format!(
+                "Version: {}",
+                dashboard_item_version_label(item)
+            )));
+            lines.push(Line::from(format!(
+                "State: {}",
+                dashboard_item_state_text(item)
+            )));
+            lines.push(Line::from(format!(
+                "Flags: {}",
+                dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
+            )));
+        } else if let Some(item) = selected {
+            lines.push(Line::from(item.name.clone()));
+            lines.push(Line::from(format!("Folder: {}", item.folder)));
+            lines.push(Line::from(format!("Source: {}", source_label(item.source))));
+            lines.push(Line::from(format!(
+                "Version: {}",
+                dashboard_item_version_label(item)
+            )));
+            lines.push(Line::from(format!(
+                "State: {}",
+                dashboard_item_state_text(item)
+            )));
+            lines.push(Line::from(format!(
+                "Flags: {}",
+                dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
+            )));
+
+            let missing_owned_children = self.dashboard_parent_missing_owned_children(&item.folder);
+            if !missing_owned_children.is_empty() {
+                lines.push(Line::from(format!(
+                    "Missing owned: {}",
+                    missing_owned_children.join(", ")
+                )));
+            }
+
+            if !item.owned_folders.is_empty() {
+                lines.push(Line::from(format!(
+                    "Children: {}",
+                    summarize_owned_folders(&item.owned_folders)
+                )));
+            }
+
+            if let Some(author) = item.author.as_deref()
+                && !author.trim().is_empty()
+            {
+                lines.push(Line::from(format!("Author: {author}")));
+            }
+
+            if let Some(interface) = item.interface.as_deref()
+                && !interface.trim().is_empty()
+            {
+                lines.push(Line::from(format!("Interface: {interface}")));
+            }
+
+            if !item.required_deps.is_empty() {
+                lines.push(Line::from(format!(
+                    "Required deps: {}",
+                    item.required_deps.join(", ")
+                )));
+            }
+
+            if !item.optional_deps.is_empty() {
+                lines.push(Line::from(format!(
+                    "Optional deps: {}",
+                    item.optional_deps.join(", ")
+                )));
+            }
+        } else {
+            lines.push(Line::from("No addon selected."));
+            lines.push(Line::from("Select a row, then press Enter to inspect."));
+        }
+
+        lines.push(Line::from(""));
+        if let Some(row) = selected_row {
+            lines.push(Line::from(format!(
+                "Row kind: {}",
+                match row.kind {
+                    DashboardRowKind::Parent => "parent",
+                    DashboardRowKind::OwnedChild { .. } => "owned child",
+                }
+            )));
+        }
+        lines.push(Line::from(format!(
+            "Selection: {} parent{}",
+            self.dashboard.selected_parent_count(),
+            plural_suffix(self.dashboard.selected_parent_count())
+        )));
+        lines.push(Line::from(format!("Scan: {}", self.scan_status_label())));
+        lines.extend(self.last_scan_drift_lines());
+
+        if let Some(summary) = self.dashboard.last_update_summary() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Last update: updated {}, up-to-date {}, errors {}",
+                summary.updated_addons, summary.up_to_date, summary.errors
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("Esc closes inspect. q still quits."));
+        lines
+    }
+
     fn base_status_line(&self) -> String {
         match self.shell_mode {
             ShellMode::Onboarding => format!("profile {} | q quit", self.runtime.profile_name),
-            ShellMode::Dashboard => {
-                format!(
-                    "profile {} | {}",
-                    self.runtime.profile_name, DASHBOARD_COMMANDS
-                )
-            }
+            ShellMode::Dashboard => format!("profile {}", self.runtime.profile_name),
         }
     }
 
@@ -3855,6 +4345,51 @@ impl App {
                 summary.upserted_addons, summary.removed_addons
             ),
             ScanState::Failed(error) => format!("failed ({error})"),
+        }
+    }
+
+    fn dashboard_table_row(&self, row: &DashboardRow) -> AddonTableRowViewModel {
+        let selected = self.dashboard.is_parent_selected(&row.folder);
+        let item = self.dashboard.items.iter().find(|item| match &row.kind {
+            DashboardRowKind::Parent => item.folder == row.folder,
+            DashboardRowKind::OwnedChild { parent_folder } => item.folder == *parent_folder,
+        });
+        let is_child = matches!(row.kind, DashboardRowKind::OwnedChild { .. });
+        let is_drift = match &row.kind {
+            DashboardRowKind::Parent => self.parent_has_drift(&row.folder),
+            DashboardRowKind::OwnedChild { parent_folder } => self.parent_has_drift(parent_folder),
+        };
+
+        let name = Line::from(vec![
+            Span::raw(dashboard_row_name_prefix(row, selected && !is_child)),
+            Span::raw(truncate_text(&row.name, 34)),
+        ]);
+
+        let source = item
+            .map(|item| source_short_label(item.source).to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let version = item
+            .map(dashboard_item_version_label)
+            .unwrap_or_else(|| "-".to_string());
+        let state = item
+            .map(dashboard_item_state_line)
+            .unwrap_or_else(|| Line::from("-"));
+        let flags = item
+            .map(|item| dashboard_item_flags_line(item, is_drift))
+            .unwrap_or_else(|| Line::from("-"));
+        let row_style = if is_child {
+            Style::default().fg(self.ui_theme.muted)
+        } else {
+            Style::default()
+        };
+
+        AddonTableRowViewModel {
+            name,
+            source,
+            version,
+            state,
+            flags,
+            row_style,
         }
     }
 }
@@ -4233,14 +4768,186 @@ fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
     )
 }
 
-fn relationship_state_label(item: &DashboardItem) -> &'static str {
-    if item.owned_folder_count == 0 {
-        "none"
-    } else if item.has_authoritative_owned_folders {
-        "managed"
-    } else {
-        "scan-inferred"
+fn dashboard_row_name_prefix(row: &DashboardRow, selected: bool) -> String {
+    let selection_marker = match &row.kind {
+        DashboardRowKind::Parent => {
+            if selected {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        }
+        DashboardRowKind::OwnedChild { .. } => "",
+    };
+    let marker = match &row.kind {
+        DashboardRowKind::Parent if row.expandable && row.expanded => "▾ ",
+        DashboardRowKind::Parent if row.expandable => "▸ ",
+        DashboardRowKind::Parent => "  ",
+        DashboardRowKind::OwnedChild { .. } => child_row_prefix(row),
+    };
+    format!("{selection_marker}{marker}")
+}
+
+fn dashboard_item_version_label(item: &DashboardItem) -> String {
+    match item.source {
+        SourceKind::GitHub => {
+            if let Some(commit) = item.git_commit.as_deref() {
+                return shorten_commit(commit);
+            }
+            if item
+                .version
+                .as_deref()
+                .is_some_and(|value| value.trim_start().starts_with('@'))
+                && item
+                    .remote_version
+                    .as_deref()
+                    .is_some_and(looks_like_commit_hash)
+            {
+                return shorten_commit(item.remote_version.as_deref().unwrap_or_default());
+            }
+            item.version.clone().unwrap_or_else(|| {
+                item.remote_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            })
+        }
+        _ => item
+            .version
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
     }
+}
+
+fn dashboard_item_state_line(item: &DashboardItem) -> Line<'static> {
+    let badge = dashboard_item_state_badge(item);
+    let text = dashboard_item_state_text(item);
+    let color = match badge {
+        DashboardStateBadge::UpToDate => Color::Green,
+        DashboardStateBadge::Update => Color::Yellow,
+        DashboardStateBadge::Unknown => Color::DarkGray,
+        DashboardStateBadge::Manual => Color::Blue,
+        DashboardStateBadge::Unmanaged => Color::Magenta,
+        DashboardStateBadge::Error => Color::Red,
+    };
+
+    Line::from(vec![
+        Span::styled(
+            dashboard_state_badge_text(badge),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::raw(text),
+    ])
+}
+
+fn dashboard_item_state_badge(item: &DashboardItem) -> DashboardStateBadge {
+    if item.source == SourceKind::Manual {
+        return DashboardStateBadge::Manual;
+    }
+    if !item.has_authoritative_owned_folders {
+        return DashboardStateBadge::Unmanaged;
+    }
+
+    match dashboard_item_update_status(item) {
+        UpdateStatus::UpToDate => DashboardStateBadge::UpToDate,
+        UpdateStatus::UpdateAvailable => DashboardStateBadge::Update,
+        UpdateStatus::Unknown => DashboardStateBadge::Unknown,
+        UpdateStatus::Error => DashboardStateBadge::Error,
+    }
+}
+
+fn dashboard_item_state_text(item: &DashboardItem) -> &'static str {
+    match dashboard_item_state_badge(item) {
+        DashboardStateBadge::UpToDate => "current",
+        DashboardStateBadge::Update => "update",
+        DashboardStateBadge::Unknown => "unknown",
+        DashboardStateBadge::Manual => "manual",
+        DashboardStateBadge::Unmanaged => "unmgd",
+        DashboardStateBadge::Error => "error",
+    }
+}
+
+fn dashboard_state_badge_text(badge: DashboardStateBadge) -> &'static str {
+    match badge {
+        DashboardStateBadge::UpToDate => "[OK]",
+        DashboardStateBadge::Update => "[UP]",
+        DashboardStateBadge::Unknown => "[??]",
+        DashboardStateBadge::Manual => "[M]",
+        DashboardStateBadge::Unmanaged => "[U]",
+        DashboardStateBadge::Error => "[!]",
+    }
+}
+
+fn dashboard_item_flags_line(item: &DashboardItem, has_drift: bool) -> Line<'static> {
+    Line::from(dashboard_item_flags_text(item, has_drift))
+}
+
+fn dashboard_item_flags_text(item: &DashboardItem, has_drift: bool) -> String {
+    let mut flags = Vec::new();
+    if has_drift {
+        flags.push("drv");
+    }
+    if item.has_authoritative_owned_folders {
+        flags.push("mgd");
+    } else if item.owned_folder_count > 0 {
+        flags.push("inf");
+    }
+    if item.kind == AddonKind::Library {
+        flags.push("lib");
+    }
+    if item.owned_folder_count > 0 {
+        flags.push("tr");
+    }
+
+    if flags.is_empty() {
+        "-".to_string()
+    } else {
+        flags.join(" ")
+    }
+}
+
+fn dashboard_item_update_status(item: &DashboardItem) -> UpdateStatus {
+    let mut addon = AddonRecord::new(item.name.clone(), item.folder.clone(), item.source);
+    addon.version = item.version.clone();
+    addon.remote_version = item.remote_version.clone();
+    addon.git_commit = item.git_commit.clone();
+    let (status, _) = crate::update::determine_update_status(&addon);
+    status
+}
+
+fn source_short_label(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::GitHub => "GitHub",
+        SourceKind::Tukui => "TukUI",
+        SourceKind::WowInterface => "WoWI",
+        SourceKind::Wago => "Wago",
+        SourceKind::Manual => "manual",
+    }
+}
+
+fn shorten_commit(value: &str) -> String {
+    value.chars().take(7).collect()
+}
+
+fn looks_like_commit_hash(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 7
+        && trimmed.len() <= 40
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let visible = value.chars().take(max_chars - 1).collect::<String>();
+    format!("{visible}…")
 }
 
 fn child_row_prefix(row: &DashboardRow) -> &'static str {
@@ -4317,21 +5024,6 @@ fn source_label(source: SourceKind) -> &'static str {
     }
 }
 
-fn addon_kind_label(kind: AddonKind) -> &'static str {
-    match kind {
-        AddonKind::Addon => "Addon",
-        AddonKind::Library => "Library",
-    }
-}
-
-fn join_or_unknown(values: &[String]) -> String {
-    if values.is_empty() {
-        "none".to_string()
-    } else {
-        values.join(", ")
-    }
-}
-
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -4359,17 +5051,18 @@ mod tests {
         MouseEventKind,
     };
     use ratatui::layout::Rect;
-    use ratatui::widgets::ListState;
+    use ratatui::widgets::TableState;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState,
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardRow,
-        DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState,
-        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, WagoInstallConfirmation,
-        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
-        child_row_prefix, summarize_owned_folders, visible_search_result_window,
+        DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState, OverlayKind,
+        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
+        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
+        child_row_detail_prefix, child_row_prefix, dashboard_item_state_line,
+        dashboard_item_version_label, summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -4410,6 +5103,8 @@ mod tests {
             shell_mode,
             quit_requested: false,
             status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
+            ui_theme: UiTheme::default(),
+            shell_ui: ShellUiState::default(),
             config_present: true,
             config_pane: ConfigPaneState::new({
                 let mut config = config.clone();
@@ -4510,9 +5205,9 @@ mod tests {
     fn pointer_selection_maps_click_inside_list_to_visible_row() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.last_dashboard_list_area = Some(Rect::new(0, 0, 20, 10));
-        app.dashboard.list_state = ListState::default().with_offset(1).with_selected(Some(1));
+        app.dashboard.list_state = TableState::default().with_offset(1).with_selected(Some(1));
 
-        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 2 });
+        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 3 });
 
         assert_eq!(
             actions,
@@ -4539,9 +5234,9 @@ mod tests {
     fn pointer_selection_is_noop_when_clicking_already_selected_row() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.last_dashboard_list_area = Some(Rect::new(0, 0, 20, 10));
-        app.dashboard.list_state = ListState::default().with_selected(Some(2));
+        app.dashboard.list_state = TableState::default().with_selected(Some(2));
 
-        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 3 });
+        let actions = app.update(AppMessage::DashboardPointerSelect { column: 2, row: 4 });
 
         assert!(actions.is_empty());
     }
@@ -4560,6 +5255,10 @@ mod tests {
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::DashboardOpenInspect]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Right)),
             vec![AppMessage::DashboardToggleExpanded]
         );
         assert_eq!(
@@ -4600,6 +5299,32 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('['))),
             vec![AppMessage::DashboardCollapseAllRelationships]
         );
+    }
+
+    #[test]
+    fn inspect_overlay_closes_on_escape_and_does_not_trap_quit() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardCloseOverlay]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::QuitRequested]
+        );
+    }
+
+    #[test]
+    fn switching_detail_modes_closes_inspect_overlay() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+
+        let actions = app.update(AppMessage::SetDetailMode(DetailMode::Install));
+
+        assert_eq!(actions[0], AppAction::SetInspectOverlay(false));
+        assert_eq!(actions[1], AppAction::SetDetailMode(DetailMode::Install));
     }
 
     #[test]
@@ -5567,7 +6292,7 @@ mod tests {
     #[test]
     fn replacing_addons_preserves_selected_row_and_scroll_offset() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.list_state = ListState::default().with_offset(2).with_selected(Some(2));
+        app.dashboard.list_state = TableState::default().with_offset(2).with_selected(Some(2));
 
         let updated = vec![
             AddonRecord::new("First", "First", SourceKind::Manual),
@@ -5638,6 +6363,43 @@ mod tests {
     }
 
     #[test]
+    fn github_version_label_uses_short_commit() {
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::GitHub);
+        addon.git_commit = Some("1234567890abcdef".to_string());
+        let dashboard = DashboardState::from_addons(vec![addon]);
+
+        let item = dashboard.items.first().expect("dashboard item");
+        assert_eq!(dashboard_item_version_label(item), "1234567");
+    }
+
+    #[test]
+    fn github_version_label_falls_back_to_remote_commit_when_version_is_placeholder() {
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::GitHub);
+        addon.version = Some("@project-version@".to_string());
+        addon.remote_version = Some("abcdef1234567890".to_string());
+        let dashboard = DashboardState::from_addons(vec![addon]);
+
+        let item = dashboard.items.first().expect("dashboard item");
+        assert_eq!(dashboard_item_version_label(item), "abcdef1");
+    }
+
+    #[test]
+    fn table_state_line_renders_badge_and_text_for_manual_addons() {
+        let addon = AddonRecord::new("ManualSmokeAddon", "ManualSmokeAddon", SourceKind::Manual);
+        let dashboard = DashboardState::from_addons(vec![addon]);
+
+        let item = dashboard.items.first().expect("dashboard item");
+        let rendered = dashboard_item_state_line(item);
+        let text = rendered
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "[M] manual");
+    }
+
+    #[test]
     fn onboarding_tick_bootstraps_quick_check() {
         let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.phase = OnboardingPhase::Bootstrapping;
@@ -5647,6 +6409,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                AppAction::AdvanceMotionTick,
                 AppAction::SetOnboardingState(app.onboarding.begin_quick_check()),
                 AppAction::SetStatus(app.with_base_status("checking common install locations")),
                 AppAction::StartOnboardingQuickCheck,
@@ -5829,9 +6592,12 @@ mod tests {
 
         assert_eq!(
             actions,
-            vec![AppAction::StartAddonScan(PathBuf::from(
-                "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
-            ))]
+            vec![
+                AppAction::AdvanceMotionTick,
+                AppAction::StartAddonScan(PathBuf::from(
+                    "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+                )),
+            ]
         );
     }
 

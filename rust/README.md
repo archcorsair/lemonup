@@ -83,3 +83,16 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - profile-scoped backup history
   - retention pruning after successful backup creation
   - restore deferred to a later slice
+
+## Current Production TUI Checkpoint
+
+- production TUI design/build is now active
+- current verified checkpoint includes:
+  - Phase 1 shell foundation
+  - Phase 2 dense addon table
+  - Phase 2 layout/header/footer rebalance
+  - Phase 3 inspect overlay
+- current shell shape:
+  - overview uses a full-width addon table
+  - `enter` opens inspect as a modal overlay
+  - task-specific surfaces (`Install`, `Search`, `Update`, `Config`, `Backup`) still use the temporary side-panel model until Phase 4

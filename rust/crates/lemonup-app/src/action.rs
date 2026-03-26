@@ -12,8 +12,9 @@ use crate::onboarding::OnboardingState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
-    None,
     Quit,
+    AdvanceMotionTick,
+    SetInspectOverlay(bool),
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
     SetPendingDelete(Option<Vec<String>>),

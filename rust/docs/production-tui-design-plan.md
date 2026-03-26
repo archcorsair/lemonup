@@ -10,7 +10,7 @@ The current TUI is a functional wireframe for proving workflows. This doc exists
 
 Do not front-load this doc into normal feature slices.
 
-Use it only when the rewrite explicitly enters the production TUI design/build phase.
+Use it when the rewrite is actively working through the production TUI design/build phases.
 
 ## Locked Direction
 
@@ -18,6 +18,8 @@ Use it only when the rewrite explicitly enters the production TUI design/build p
 - move from persistent split-pane prose UI to a list-first shell with overlays
 - make the main surface a dense compact table
 - keep branding moderate, with the v1 ASCII `LEMONUP` logo explicitly carried forward
+- use tasteful microinteractions, not decorative animation
+- keep the main addon table visually stable with only minimal motion
 
 ## Design Contract
 
@@ -70,6 +72,123 @@ Requirements:
 - hierarchy from spacing, alignment, contrast, and badges
 - replace verbose temporary text output with concise production copy
 
+### Motion
+
+Animation is supporting feedback, not decoration.
+
+Allowed motion:
+- one-shot header/logo reveal on startup
+- loading spinners or shimmers for scan/search/install/update/backup work
+- subtle row-selection pulse
+- brief badge emphasis for update/error/drift state changes
+- short overlay open/close transitions
+- brief success/error status emphasis
+
+Not allowed:
+- constant idle logo animation
+- animated table reflow
+- bouncing cursors
+- decorative background motion
+- anything that obscures operational data
+
+## Phased Build Plan
+
+### Phase 1 — shell foundation
+
+Goal:
+- extract shell chrome from the monolithic render path without changing workflow behavior
+
+Implement:
+- shell layout helpers for header/body/footer
+- theme and motion tokens
+- full + compact ASCII `LEMONUP` header variants
+- overlay host/controller scaffold
+- centralized status/copy formatting helpers
+- motion primitives for spinners, pulses, and transient feedback timing
+
+Acceptance:
+- current flows still work
+- header/footer/layout are no longer hardcoded inline in a single render branch
+- ASCII logo variants render
+- overlay host exists structurally
+- animation primitives exist and are safe, but restrained
+
+### Phase 2 — dense addon table
+
+Goal:
+- replace the current list-first dashboard with the compact operational table
+
+Implement:
+- canonical columns for name, source, version/remote state, relationship state, drift/actionability
+- preserve current tree, multi-select, delete, and update behaviors
+- keep the old detail area temporarily while table behavior settles
+
+Acceptance:
+- table is faster to scan than the current list
+- parent/child behavior still works
+- common widths remain readable
+
+### Phase 3 — inspect overlay
+
+Goal:
+- replace the persistent verbose detail pane
+
+Implement:
+- addon inspect overlay for metadata, relationship detail, drift detail, and action summary
+- route inspect behavior through the overlay
+- remove the persistent right-side detail pane after parity
+
+Acceptance:
+- list context is preserved while inspecting
+- `q` and `esc` never get trapped
+- no persistent paragraph-heavy detail pane remains
+
+### Phase 4 — task overlays
+
+Goal:
+- move task-specific modes onto overlays while keeping the list as the main shell
+
+Implement:
+- search/install overlay
+- config overlay
+- backup overlay
+- confirm/alert overlays
+- footer legend becomes context-aware
+
+Acceptance:
+- task flows work through overlays
+- destructive and replace flows are explicit and consistent
+- provider logic remains unchanged underneath
+
+### Phase 5 — production copy and interaction cleanup
+
+Goal:
+- remove wireframe verbosity and make the shell feel deliberate
+
+Implement:
+- concise badge and status vocabulary
+- compact footer grouping
+- better empty/loading/error states
+- final microinteraction timing pass
+
+Acceptance:
+- operational data dominates the screen
+- branding is visible but restrained
+- repeated use feels crisp, not noisy
+
+### Phase 6 — onboarding adaptation and responsive finish
+
+Goal:
+- bring setup into the same production shell language after the dashboard is proven
+
+Implement:
+- adapt onboarding/location finder to the new shell and overlay model
+- finalize narrow-width behavior and compact logo handling
+
+Acceptance:
+- onboarding no longer feels like a separate app
+- narrow terminals degrade intentionally, not accidentally
+
 ## Phase Deliverables
 
 When this phase starts, the implementation should define:
@@ -80,6 +199,7 @@ When this phase starts, the implementation should define:
 - status badge vocabulary
 - responsive behavior for narrow terminal widths
 - ASCII logo/header variants
+- motion tokens and approved microinteraction surfaces
 
 ## Acceptance Criteria
 
@@ -94,6 +214,10 @@ The design/build phase is done when:
 
 ## Status
 
-- intentional planning doc
-- not active implementation context until the project explicitly enters this phase
-
+- active implementation context
+- current checkpoint state:
+  - Phase 1 implemented
+  - Phase 2 implemented
+  - Phase 2 layout follow-up implemented
+  - Phase 3 implemented
+  - Phase 4 is next

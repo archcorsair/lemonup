@@ -76,9 +76,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- no active unverified slice in the worktree
+- one active unverified slice in the worktree:
+  - production TUI design/build phases 1-3
 - current focus:
-  - production TUI design/build phase planning
+  - checkpoint production TUI design/build phases 1-3
+  - then Phase 4 task overlays
   - then backup restore workflows
 
 ## Newly Completed
@@ -205,6 +207,26 @@ These are implemented and manually verified in addition to the earlier chunks:
   - the same provider-backed update engine now serves both CLI and TUI
   - post-update runs resync dashboard rows and drift state through the normal scan path
   - update pane copy and summaries now reflect real apply/update behavior
+- production TUI design/build is now active:
+  - Phase 1 shell foundation is implemented:
+    - extracted shell chrome helpers
+    - full + compact ASCII `LEMONUP` header variants
+    - motion tick/spinner primitives
+    - overlay host scaffold
+  - Phase 2 dense addon table is implemented:
+    - main dashboard now uses a compact table instead of prose rows
+    - compact source/version/state/flag columns now exist
+    - tree rows, multi-select, delete, and update workflows remain intact
+  - Phase 2 follow-up layout pass is implemented:
+    - table now dominates the shell width
+    - footer is now grouped and readable
+    - header metadata layout is tighter and more intentional
+  - Phase 3 inspect overlay is implemented:
+    - overview no longer uses a persistent right-side detail pane
+    - `enter` opens inspect from overview
+    - `esc` closes inspect first
+    - inspect now renders as an explicit modal overlay
+  - task-specific surfaces still use the temporary side-panel model until Phase 4
 
 ## Implemented, Awaiting Manual Verification
 

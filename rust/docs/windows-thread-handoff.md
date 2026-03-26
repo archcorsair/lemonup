@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: config editing plus backup-now/history wiring implemented, verified, checkpointed, and pushed
-- current worktree status at handoff pass: clean after the config/backup checkpoint
+- latest local milestone at handoff pass: production TUI design/build phases 1-3 implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready TUI design worktree pending commit
 
 ## Current State
 
@@ -102,11 +102,26 @@ Implemented, committed, and pushed:
   - `manual-test-matrix.toml`
   - `manual-testing.md`
   - seeded `manual-smoke` profile covers TukUI, GitHub, WoWInterface, Wago, and one manual fixture
-- first TUI config/backup slice is now implemented, awaiting manual verification:
+- first TUI config/backup slice is implemented and checkpointed:
   - Config pane edits curated settings with explicit save/reset
   - Backup pane creates real WTF backups into a profile-scoped app-managed backup directory
   - backup history and retention are wired
   - restore is intentionally deferred
+- production TUI design/build phases 1-3 are implemented and user-verified:
+  - Phase 1 shell foundation:
+    - extracted shell layout/header/footer helpers
+    - full + compact ASCII `LEMONUP` branding
+    - motion primitives and overlay host scaffold
+  - Phase 2 dense addon table:
+    - compact operational table replaced prose-style addon rows
+    - table/tree/multi-select/delete/update behaviors remain intact
+    - header/footer/layout rebalanced so the table is the dominant surface
+  - Phase 3 inspect overlay:
+    - overview no longer uses a persistent right-side detail pane
+    - `enter` opens inspect from overview
+    - `esc` closes inspect first
+    - inspect uses an explicit modal-style overlay
+  - task-specific panels are still side-panel based until Phase 4
 
 ## Recent Important Commits
 
