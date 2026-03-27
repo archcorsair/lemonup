@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: production TUI design/build phases 1-3 implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready TUI design worktree pending commit
+- latest local milestone at handoff pass: production TUI design/build Phase 4 implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready Phase 4 worktree pending commit
 
 ## Current State
 
@@ -121,7 +121,11 @@ Implemented, committed, and pushed:
     - `enter` opens inspect from overview
     - `esc` closes inspect first
     - inspect uses an explicit modal-style overlay
-  - task-specific panels are still side-panel based until Phase 4
+- production TUI design/build Phase 4 is implemented and user-verified:
+  - `Install`, `Search`, `Update`, `Config`, and `Backup` render through the overlay host
+  - overview no longer mixes modal inspect with side-panel task surfaces
+  - `esc` closes idle task overlays back to overview
+  - task overlays are functionally correct but still visibly wireframe-grade inside
 
 ## Recent Important Commits
 

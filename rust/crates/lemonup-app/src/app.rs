@@ -39,7 +39,6 @@ const DASHBOARD_COMMANDS_LINE: &str =
     "nav j/k | select space/a/esc | tree enter/h/[/] | actions x/y/n/z/r/v";
 const DASHBOARD_MODES_LINE: &str =
     "modes o overview | i install | s search | u update | c config | b backup";
-const DASHBOARD_BRIDGE_MIN_WIDTH: u16 = 170;
 const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
@@ -63,7 +62,9 @@ enum HeaderVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
     Inspect,
-    SearchInstall,
+    Install,
+    Search,
+    Update,
     Config,
     Backup,
     Confirm,
@@ -118,12 +119,6 @@ struct ShellFrame {
     header: Rect,
     body: Rect,
     footer: Rect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DashboardLayout {
-    table: Rect,
-    bridge: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1566,6 +1561,20 @@ impl App {
             return messages;
         }
 
+        if self.shell_ui.overlay.active.is_some() {
+            return match key.code {
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
+                    vec![AppMessage::DashboardRunUpdateSelected]
+                }
+                KeyCode::Char('v') if self.dashboard.detail_mode == DetailMode::Update => {
+                    vec![AppMessage::DashboardSelectRefreshableUpdates]
+                }
+                KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                _ => vec![],
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
@@ -1807,10 +1816,10 @@ impl App {
                 }
             }
             AppMessage::DashboardCloseOverlay => vec![
-                AppAction::SetInspectOverlay(false),
                 AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "inspect closed"),
+                    self.dashboard_status_for(DetailMode::Overview, "overlay closed"),
                 ),
+                AppAction::SetDetailMode(DetailMode::Overview),
             ],
             AppMessage::DashboardPointerSelect { column, row } => {
                 match self.dashboard_selection_for_pointer(column, row) {
@@ -2038,11 +2047,10 @@ impl App {
                 ),
             ],
             AppMessage::SetDetailMode(detail_mode) => vec![
-                AppAction::SetInspectOverlay(false),
                 AppAction::SetDetailMode(detail_mode),
                 AppAction::SetStatus(self.dashboard_status_for(
                     detail_mode,
-                    &format!("{} panel selected", detail_mode_label(detail_mode)),
+                    &format!("{} selected", detail_mode_label(detail_mode)),
                 )),
             ],
             AppMessage::InstallBeginEditing => vec![
@@ -2877,7 +2885,20 @@ impl App {
                         self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
                 }
             }
-            AppAction::SetDetailMode(detail_mode) => self.dashboard.detail_mode = detail_mode,
+            AppAction::SetDetailMode(detail_mode) => {
+                self.dashboard.detail_mode = detail_mode;
+                self.install_pane = self.install_pane.stop_editing();
+                self.search_pane = self.search_pane.stop_editing();
+                self.config_pane.edit = None;
+                self.shell_ui.overlay.active = match detail_mode {
+                    DetailMode::Overview => None,
+                    DetailMode::Install => Some(OverlayKind::Install),
+                    DetailMode::Search => Some(OverlayKind::Search),
+                    DetailMode::Update => Some(OverlayKind::Update),
+                    DetailMode::Config => Some(OverlayKind::Config),
+                    DetailMode::Backup => Some(OverlayKind::Backup),
+                };
+            }
             AppAction::SetOnboardingState(state) => self.onboarding = state,
             AppAction::StartOnboardingQuickCheck => {
                 let sender = self.task_events_tx.clone();
@@ -3196,7 +3217,9 @@ impl App {
         if let Some(kind) = self.shell_ui.overlay.active {
             let title = match kind {
                 OverlayKind::Inspect => "Inspect",
-                OverlayKind::SearchInstall => "Search/Install",
+                OverlayKind::Install => "Install",
+                OverlayKind::Search => "Search",
+                OverlayKind::Update => "Update",
                 OverlayKind::Config => "Config",
                 OverlayKind::Backup => "Backup",
                 OverlayKind::Confirm => "Confirm",
@@ -3259,6 +3282,9 @@ impl App {
                 let inspect =
                     Paragraph::new(self.inspect_overlay_lines()).wrap(Wrap { trim: false });
                 frame.render_widget(inspect, inner);
+            } else {
+                let content = Paragraph::new(self.task_overlay_lines()).wrap(Wrap { trim: false });
+                frame.render_widget(content, inner);
             }
         }
     }
@@ -3360,6 +3386,19 @@ impl App {
     fn dashboard_commands_line(&self) -> &'static str {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             "overlay esc close | q quit"
+        } else if self.shell_ui.overlay.active.is_some() {
+            match self.dashboard.detail_mode {
+                DetailMode::Install => "overlay e edit | enter install | esc close | q quit",
+                DetailMode::Search => {
+                    "overlay e edit | j/k results | enter action | esc close | q quit"
+                }
+                DetailMode::Update => "overlay r update | v select-ready | esc close | q quit",
+                DetailMode::Config => {
+                    "overlay j/k | enter toggle | e edit | s save | n reset | esc close"
+                }
+                DetailMode::Backup => "overlay r run backup | esc close | q quit",
+                DetailMode::Overview => "overlay esc close | q quit",
+            }
         } else {
             match self.dashboard.detail_mode {
                 DetailMode::Overview => {
@@ -3376,6 +3415,8 @@ impl App {
     fn dashboard_panels_line(&self) -> &'static str {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             "inspect overlay"
+        } else if self.shell_ui.overlay.active.is_some() {
+            "task overlay"
         } else {
             DASHBOARD_MODES_LINE
         }
@@ -3495,32 +3536,7 @@ impl App {
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let layout =
-            self.dashboard_layout(area, self.dashboard.detail_mode != DetailMode::Overview);
-
-        self.render_dashboard_list(frame, layout.table);
-        if let Some(bridge_area) = layout.bridge {
-            frame.render_widget(self.detail_panel(), bridge_area);
-        }
-    }
-
-    fn dashboard_layout(&self, area: Rect, show_bridge: bool) -> DashboardLayout {
-        if !show_bridge || area.width < DASHBOARD_BRIDGE_MIN_WIDTH {
-            return DashboardLayout {
-                table: area,
-                bridge: None,
-            };
-        }
-
-        let [table, bridge] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .areas(area);
-
-        DashboardLayout {
-            table,
-            bridge: Some(bridge),
-        }
+        self.render_dashboard_list(frame, area);
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -3594,24 +3610,11 @@ impl App {
         frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
     }
 
-    fn detail_panel(&self) -> Paragraph<'static> {
+    fn task_overlay_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let selected = self.dashboard.selected_item();
         let selected_row = self.dashboard.selected_row();
         let selected_owned_child = self.dashboard.selected_owned_child_folder();
-
-        lines.push(Line::from(Span::styled(
-            "Context bridge",
-            Style::default()
-                .fg(self.ui_theme.highlight)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!(
-            "Overview | {} parent{} selected",
-            self.dashboard.selected_parent_count(),
-            plural_suffix(self.dashboard.selected_parent_count())
-        )));
-        lines.push(Line::from(""));
 
         if let Some(undo_delete) = self.undo_delete.as_ref() {
             lines.push(Line::from(format!(
@@ -4036,27 +4039,7 @@ impl App {
             }
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from("Modes"));
-        for (mode, key, label) in [
-            (DetailMode::Overview, "o", "Overview"),
-            (DetailMode::Install, "i", "Install"),
-            (DetailMode::Search, "s", "Search"),
-            (DetailMode::Update, "u", "Update"),
-            (DetailMode::Config, "c", "Config"),
-            (DetailMode::Backup, "b", "Backup"),
-        ] {
-            let marker = if self.dashboard.detail_mode == mode {
-                "•"
-            } else {
-                " "
-            };
-            lines.push(Line::from(format!("{marker} {key} {label}")));
-        }
-
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Detail"))
+        lines
     }
 
     fn inspect_overlay_lines(&self) -> Vec<Line<'static>> {
@@ -5323,8 +5306,30 @@ mod tests {
 
         let actions = app.update(AppMessage::SetDetailMode(DetailMode::Install));
 
-        assert_eq!(actions[0], AppAction::SetInspectOverlay(false));
-        assert_eq!(actions[1], AppAction::SetDetailMode(DetailMode::Install));
+        assert_eq!(actions[0], AppAction::SetDetailMode(DetailMode::Install));
+    }
+
+    #[test]
+    fn install_overlay_idle_escape_returns_to_overview() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetDetailMode(DetailMode::Install));
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardCloseOverlay]
+        );
+    }
+
+    #[test]
+    fn install_overlay_edit_escape_stops_edit_before_closing_overlay() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetDetailMode(DetailMode::Install));
+        app.install_pane = app.install_pane.begin_editing();
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::InstallStopEditing]
+        );
     }
 
     #[test]

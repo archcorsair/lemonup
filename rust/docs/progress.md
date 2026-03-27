@@ -77,10 +77,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - production TUI design/build phases 1-3
+  - production TUI design/build Phase 4 task overlays
 - current focus:
-  - checkpoint production TUI design/build phases 1-3
-  - then Phase 4 task overlays
+  - checkpoint production TUI design/build Phase 4 task overlays
+  - then Phase 5 production overlay UX/content cleanup
   - then backup restore workflows
 
 ## Newly Completed
@@ -226,7 +226,11 @@ These are implemented and manually verified in addition to the earlier chunks:
     - `enter` opens inspect from overview
     - `esc` closes inspect first
     - inspect now renders as an explicit modal overlay
-  - task-specific surfaces still use the temporary side-panel model until Phase 4
+  - Phase 4 task overlays are implemented:
+    - `Install`, `Search`, `Update`, `Config`, and `Backup` now render through the overlay host
+    - overview no longer mixes modal inspect with side-panel task surfaces
+    - `esc` closes idle task overlays back to overview
+    - task overlays keep existing workflow logic but still use wireframe-grade content/layout internally
 
 ## Implemented, Awaiting Manual Verification
 
