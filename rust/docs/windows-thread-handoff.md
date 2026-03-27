@@ -130,6 +130,10 @@ Implemented, committed, and pushed:
   - primary actions and current state are more explicit inside each overlay
   - overlays are more readable, but still below the final production design bar
   - expect a later deeper overlay revamp/polish pass
+- v1-inspired shell visual pass is implemented and user-verified:
+  - ASCII `LEMONUP` header now uses a smooth fruit-style gradient
+  - shell border/title chrome uses a stronger production palette
+  - the original striped-logo first attempt is intentionally preserved in code as a legacy fallback reference
 
 ## Recent Important Commits
 

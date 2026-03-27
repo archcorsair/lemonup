@@ -60,6 +60,13 @@ enum HeaderVariant {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogoStyle {
+    FruitGradient,
+    StripedLegacy,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
     Inspect,
     Install,
@@ -123,21 +130,33 @@ struct ShellFrame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UiTheme {
-    header_accent: Color,
+    brand_hot: Color,
+    brand_warm: Color,
+    brand_gold: Color,
     warning: Color,
     error: Color,
+    success: Color,
+    info: Color,
     highlight: Color,
     muted: Color,
+    border: Color,
+    panel_title: Color,
 }
 
 impl Default for UiTheme {
     fn default() -> Self {
         Self {
-            header_accent: Color::Yellow,
-            warning: Color::LightYellow,
-            error: Color::Red,
-            highlight: Color::Yellow,
-            muted: Color::DarkGray,
+            brand_hot: Color::Rgb(255, 95, 95),
+            brand_warm: Color::Rgb(255, 158, 100),
+            brand_gold: Color::Rgb(224, 175, 104),
+            warning: Color::Rgb(224, 175, 104),
+            error: Color::Rgb(247, 118, 142),
+            success: Color::Rgb(158, 206, 106),
+            info: Color::Rgb(125, 207, 255),
+            highlight: Color::Rgb(255, 158, 100),
+            muted: Color::Rgb(115, 122, 162),
+            border: Color::Rgb(84, 92, 126),
+            panel_title: Color::Rgb(122, 162, 247),
         }
     }
 }
@@ -3185,7 +3204,9 @@ impl App {
     }
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect, mode: ShellLayoutMode) {
-        let block = Block::default().borders(Borders::ALL);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -3209,7 +3230,17 @@ impl App {
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
         let footer = Paragraph::new(self.footer_lines())
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Status"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.ui_theme.border))
+                    .title(Span::styled(
+                        "Status",
+                        Style::default()
+                            .fg(self.ui_theme.panel_title)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            );
         frame.render_widget(footer, area);
     }
 
@@ -3270,10 +3301,10 @@ impl App {
                 .title_bottom(" esc close ")
                 .border_style(if kind == OverlayKind::Inspect {
                     Style::default()
-                        .fg(self.ui_theme.highlight)
+                        .fg(self.ui_theme.panel_title)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(self.ui_theme.muted)
+                    Style::default().fg(self.ui_theme.border)
                 })
                 .style(Style::default().bg(Color::Rgb(24, 24, 34)));
             let inner = block.inner(overlay);
@@ -3293,26 +3324,19 @@ impl App {
         let mut lines = Vec::new();
         match self.header_variant(mode) {
             HeaderVariant::FullLogo => {
-                lines.push(Line::from(Span::styled(
-                    LOGO_FULL[0],
-                    Style::default()
-                        .fg(self.ui_theme.header_accent)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(Span::styled(
-                    LOGO_FULL[1],
-                    Style::default()
-                        .fg(self.ui_theme.header_accent)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                lines.push(self.logo_line(LOGO_FULL[0], LogoStyle::FruitGradient));
+                lines.push(self.logo_line(LOGO_FULL[1], LogoStyle::FruitGradient));
                 lines.push(Line::from(vec![
                     Span::styled(
                         "v2",
                         Style::default()
-                            .fg(self.ui_theme.highlight)
+                            .fg(self.ui_theme.brand_gold)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("  single-surface shell"),
+                    Span::styled(
+                        "  single-surface shell",
+                        Style::default().fg(self.ui_theme.info),
+                    ),
                 ]));
             }
             HeaderVariant::CompactLogo => {
@@ -3320,13 +3344,13 @@ impl App {
                     Span::styled(
                         LOGO_COMPACT,
                         Style::default()
-                            .fg(self.ui_theme.header_accent)
+                            .fg(self.ui_theme.brand_warm)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("  v2"),
+                    Span::styled("  v2", Style::default().fg(self.ui_theme.brand_gold)),
                     Span::styled(
                         "  single-surface shell",
-                        Style::default().fg(self.ui_theme.muted),
+                        Style::default().fg(self.ui_theme.info),
                     ),
                 ]));
             }
@@ -3339,16 +3363,38 @@ impl App {
 
     fn header_meta_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!(
-                "Profile: {}    Surface: {}",
-                self.runtime.profile_name,
-                match self.shell_mode {
-                    ShellMode::Onboarding => "setup",
-                    ShellMode::Dashboard => self.dashboard_surface_label(),
-                }
-            )),
-            Line::from(format!("Target: {}", self.rendered_target_path())),
-            Line::from(format!("Scan: {}", self.scan_status_with_motion())),
+            Line::from(vec![
+                Span::styled("Profile: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    self.runtime.profile_name.clone(),
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("    "),
+                Span::styled("Surface: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    match self.shell_mode {
+                        ShellMode::Onboarding => "setup".to_string(),
+                        ShellMode::Dashboard => self.dashboard_surface_label().to_string(),
+                    },
+                    Style::default().fg(self.ui_theme.panel_title),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Target: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    self.rendered_target_path(),
+                    Style::default().fg(self.ui_theme.highlight),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Scan: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    self.scan_status_with_motion(),
+                    Style::default().fg(self.scan_status_color()),
+                ),
+            ]),
         ];
         if mode == ShellLayoutMode::Compact {
             return lines;
@@ -3356,10 +3402,90 @@ impl App {
         if let Some(warning) = self.profile_warning() {
             lines.push(Line::from(Span::styled(
                 warning,
-                Style::default().fg(self.ui_theme.warning),
+                Style::default()
+                    .fg(self.ui_theme.warning)
+                    .add_modifier(Modifier::BOLD),
             )));
         }
         lines
+    }
+
+    fn logo_line(&self, text: &str, style: LogoStyle) -> Line<'static> {
+        match style {
+            LogoStyle::FruitGradient => self.fruit_gradient_logo_line(text),
+            LogoStyle::StripedLegacy => self.striped_legacy_logo_line(text),
+        }
+    }
+
+    fn fruit_gradient_logo_line(&self, text: &str) -> Line<'static> {
+        let anchors = [
+            self.ui_theme.brand_hot,
+            self.ui_theme.brand_warm,
+            self.ui_theme.brand_gold,
+        ];
+        let visible_count = text.chars().filter(|ch| !ch.is_whitespace()).count();
+        if visible_count == 0 {
+            return Line::from(text.to_string());
+        }
+
+        let mut spans = Vec::with_capacity(text.len());
+        let mut visible_index = 0usize;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                spans.push(Span::raw(ch.to_string()));
+                continue;
+            }
+
+            let t = if visible_count <= 1 {
+                0.0
+            } else {
+                visible_index as f32 / (visible_count - 1) as f32
+            };
+            let color = interpolate_palette(&anchors, t);
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+            visible_index = visible_index.wrapping_add(1);
+        }
+
+        Line::from(spans)
+    }
+
+    fn striped_legacy_logo_line(&self, text: &str) -> Line<'static> {
+        let palette = [
+            self.ui_theme.brand_hot,
+            self.ui_theme.brand_hot,
+            self.ui_theme.brand_warm,
+            self.ui_theme.brand_warm,
+            self.ui_theme.brand_gold,
+            self.ui_theme.brand_gold,
+        ];
+        let mut spans = Vec::with_capacity(text.len());
+        let mut visible_index = 0usize;
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                spans.push(Span::raw(ch.to_string()));
+            } else {
+                let color = palette[visible_index % palette.len()];
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ));
+                visible_index = visible_index.wrapping_add(1);
+            }
+        }
+        Line::from(spans)
+    }
+
+    fn scan_status_color(&self) -> Color {
+        if matches!(self.scan_state, ScanState::Pending | ScanState::Running(_)) {
+            self.ui_theme.warning
+        } else if self.scan_status_label().starts_with("synced") {
+            self.ui_theme.success
+        } else {
+            self.ui_theme.info
+        }
     }
 
     fn footer_lines(&self) -> Vec<Line<'static>> {
@@ -3532,7 +3658,17 @@ impl App {
             ));
         }
 
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Setup"))
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.ui_theme.border))
+                .title(Span::styled(
+                    "Setup",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -3549,7 +3685,17 @@ impl App {
                     "If this is your first launch on this profile, wait for the background scan.",
                 ),
             ])
-            .block(Block::default().borders(Borders::ALL).title("Addons"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.ui_theme.border))
+                    .title(Span::styled(
+                        "Addons",
+                        Style::default()
+                            .fg(self.ui_theme.panel_title)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            );
             frame.render_widget(body, area);
             return;
         }
@@ -3595,10 +3741,20 @@ impl App {
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(format!(
-            "Addons ({} selected)",
-            self.dashboard.selected_parent_count()
-        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.ui_theme.border))
+                .title(Span::styled(
+                    format!(
+                        "Addons ({} selected)",
+                        self.dashboard.selected_parent_count()
+                    ),
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
         .column_spacing(1)
         .highlight_symbol("› ")
         .row_highlight_style(
@@ -5054,6 +5210,44 @@ fn visible_search_result_window(
     let start = selected.saturating_sub(visible.saturating_sub(1));
     let end = (start + visible).min(result_count);
     (start, end)
+}
+
+fn interpolate_palette(colors: &[Color], t: f32) -> Color {
+    if colors.is_empty() {
+        return Color::Reset;
+    }
+    if colors.len() == 1 {
+        return colors[0];
+    }
+
+    let clamped = t.clamp(0.0, 1.0);
+    let scaled = clamped * (colors.len() - 1) as f32;
+    let left_index = scaled.floor() as usize;
+    let right_index = scaled.ceil() as usize;
+
+    if left_index == right_index {
+        return colors[left_index];
+    }
+
+    let local_t = scaled - left_index as f32;
+    lerp_color(colors[left_index], colors[right_index], local_t)
+}
+
+fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
+            lerp_channel(r1, r2, t),
+            lerp_channel(g1, g2, t),
+            lerp_channel(b1, b2, t),
+        ),
+        _ => to,
+    }
+}
+
+fn lerp_channel(from: u8, to: u8, t: f32) -> u8 {
+    let start = from as f32;
+    let end = to as f32;
+    (start + ((end - start) * t)).round().clamp(0.0, 255.0) as u8
 }
 
 fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
