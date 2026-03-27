@@ -41,7 +41,7 @@ Before making changes:
 
 - active branch: `codex/rusty-lemon`
 - latest local milestone at handoff pass: production TUI design/build Phase 4 implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready Phase 4 worktree pending commit
+- current worktree status at handoff pass: checkpoint-ready Phase 5 overlay UX/content cleanup pending commit
 
 ## Current State
 
@@ -125,7 +125,11 @@ Implemented, committed, and pushed:
   - `Install`, `Search`, `Update`, `Config`, and `Backup` render through the overlay host
   - overview no longer mixes modal inspect with side-panel task surfaces
   - `esc` closes idle task overlays back to overview
-  - task overlays are functionally correct but still visibly wireframe-grade inside
+- production TUI design/build Phase 5 first pass is implemented and user-verified:
+  - task overlays now use clearer grouped sections and denser production-oriented copy
+  - primary actions and current state are more explicit inside each overlay
+  - overlays are more readable, but still below the final production design bar
+  - expect a later deeper overlay revamp/polish pass
 
 ## Recent Important Commits
 

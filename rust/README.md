@@ -93,8 +93,9 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - Phase 2 layout/header/footer rebalance
   - Phase 3 inspect overlay
   - Phase 4 task overlays
+  - Phase 5 first-pass overlay UX/content cleanup
 - current shell shape:
   - overview uses a full-width addon table
   - `enter` opens inspect as a modal overlay
   - `Install`, `Search`, `Update`, `Config`, and `Backup` now open through the overlay host
-  - current gap is overlay UX/content polish, not overlay routing
+  - current gap is a deeper overlay revamp/polish pass, not overlay routing

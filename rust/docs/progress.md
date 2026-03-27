@@ -77,10 +77,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - production TUI design/build Phase 4 task overlays
+  - production TUI design/build Phase 5 overlay UX/content cleanup
 - current focus:
-  - checkpoint production TUI design/build Phase 4 task overlays
-  - then Phase 5 production overlay UX/content cleanup
+  - checkpoint production TUI design/build Phase 5 overlay UX/content cleanup
+  - then return later for a deeper overlay revamp/polish pass
   - then backup restore workflows
 
 ## Newly Completed
@@ -230,7 +230,11 @@ These are implemented and manually verified in addition to the earlier chunks:
     - `Install`, `Search`, `Update`, `Config`, and `Backup` now render through the overlay host
     - overview no longer mixes modal inspect with side-panel task surfaces
     - `esc` closes idle task overlays back to overview
-    - task overlays keep existing workflow logic but still use wireframe-grade content/layout internally
+  - Phase 5 first-pass overlay UX/content cleanup is implemented:
+    - task overlays now use clearer grouped sections instead of raw wireframe paragraphs
+    - primary actions and current state are more explicit inside each overlay
+    - search, install, update, config, and backup overlays are materially more readable
+    - overlays are still not at the final production design bar and should get a deeper revamp later
 
 ## Implemented, Awaiting Manual Verification
 

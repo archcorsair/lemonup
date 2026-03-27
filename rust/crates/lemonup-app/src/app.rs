@@ -3617,42 +3617,41 @@ impl App {
         let selected_owned_child = self.dashboard.selected_owned_child_folder();
 
         if let Some(undo_delete) = self.undo_delete.as_ref() {
-            lines.push(Line::from(format!(
-                "Undo: {} parent{}, {} folder{}",
-                undo_delete.parent_count(),
-                plural_suffix(undo_delete.parent_count()),
-                undo_delete.moved_folder_count(),
-                plural_suffix(undo_delete.moved_folder_count())
-            )));
-            lines.push(Line::from(format!(
-                "Targets: {}",
-                undo_delete.target_summary()
-            )));
+            lines.push(self.overlay_section_title("Undo ready"));
+            lines.push(self.overlay_kv_line(
+                "Batch",
+                format!(
+                    "{} parent{}, {} folder{}",
+                    undo_delete.parent_count(),
+                    plural_suffix(undo_delete.parent_count()),
+                    undo_delete.moved_folder_count(),
+                    plural_suffix(undo_delete.moved_folder_count())
+                ),
+            ));
+            lines.push(self.overlay_kv_line("Targets", undo_delete.target_summary()));
             lines.push(Line::from(""));
         }
 
         if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
-            lines.push(Line::from(format!(
-                "Delete pending: {} parent{}",
-                pending_delete_folders.len(),
-                plural_suffix(pending_delete_folders.len())
-            )));
-            lines.push(Line::from(format!(
-                "Targets: {}",
-                pending_delete_folders.join(", ")
-            )));
+            lines.push(self.overlay_section_title("Delete pending"));
+            lines.push(self.overlay_kv_line(
+                "Batch",
+                format!(
+                    "{} parent{}",
+                    pending_delete_folders.len(),
+                    plural_suffix(pending_delete_folders.len())
+                ),
+            ));
+            lines.push(self.overlay_kv_line("Targets", pending_delete_folders.join(", ")));
             lines.push(Line::from(""));
         }
 
         if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
-            lines.push(Line::from(format!(
-                "Replace pending: {}",
-                confirmation.inspection.addon_name
-            )));
-            lines.push(Line::from(format!(
-                "Parent: {}",
-                confirmation.inspection.parent_folder
-            )));
+            lines.push(self.overlay_section_title("Replace pending"));
+            lines.push(self.overlay_kv_line("Addon", confirmation.inspection.addon_name.clone()));
+            lines.push(
+                self.overlay_kv_line("Parent", confirmation.inspection.parent_folder.clone()),
+            );
             lines.push(Line::from(""));
         }
 
@@ -3718,86 +3717,100 @@ impl App {
                 }
             }
             DetailMode::Install => {
-                lines.push(Line::from("Wago direct install"));
-                lines.push(Line::from(format!(
-                    "Target: {}",
+                lines.push(self.overlay_section_title("Direct install"));
+                lines.push(self.overlay_kv_line("Provider", "Wago"));
+                lines.push(self.overlay_kv_line(
+                    "Target",
                     if self.install_pane.input.trim().is_empty() {
                         "<empty>".to_string()
                     } else {
                         self.install_pane.input.clone()
-                    }
-                )));
-                lines.push(Line::from(format!(
-                    "Editing: {}",
-                    if self.install_pane.is_editing {
-                        "active"
-                    } else {
-                        "idle"
-                    }
-                )));
-                lines.push(Line::from(format!(
-                    "Install state: {}",
+                    },
+                ));
+                lines.push(self.overlay_kv_line(
+                    "State",
                     if self.wago_install_in_progress {
                         "running"
+                    } else if self.install_pane.is_editing {
+                        "editing"
                     } else {
-                        "idle"
-                    }
-                )));
+                        "ready"
+                    },
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Auth",
+                    if self.wago_api_key.is_some() {
+                        "ready"
+                    } else {
+                        "missing"
+                    },
+                ));
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Actions"));
                 if self.wago_api_key.is_none() {
-                    lines.push(Line::from("Wago API key required before install can run."));
-                    lines.push(Line::from(
-                        "Configure it in profile config, WAGO_API_KEY, or repo-root .env.",
+                    lines.push(self.overlay_hint_line("Set Wago API key before install can run."));
+                    lines.push(self.overlay_hint_line(
+                        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env.",
                     ));
                 } else {
-                    lines.push(Line::from(
-                        "Accepts a Wago addon slug or https://addons.wago.io/addons/<slug> URL.",
-                    ));
-                    lines.push(Line::from("Retail + stable only in this slice."));
-                    lines.push(Line::from(if self.install_pane.is_editing {
-                        "Commands: type target | backspace delete | enter install | esc stop editing"
+                    lines.push(
+                        self.overlay_hint_line("Accepts a slug or addons.wago.io addon URL."),
+                    );
+                    lines.push(self.overlay_hint_line("Retail and stable only."));
+                    lines.push(self.overlay_hint_line(if self.install_pane.is_editing {
+                        "Type target, then Enter to install. Esc stops editing."
                     } else {
-                        "Commands: e edit target | enter install"
+                        "Press e to edit target. Enter installs current target."
                     }));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from("Other providers stay deferred here for now."));
+                lines.push(self.overlay_section_title("Notes"));
+                lines.push(self.overlay_hint_line(
+                    "Other providers stay out of this direct-install surface for now.",
+                ));
             }
             DetailMode::Search => {
-                lines.push(Line::from("Wago search"));
-                lines.push(Line::from(format!(
-                    "Query: {}",
+                lines.push(self.overlay_section_title("Search"));
+                lines.push(self.overlay_kv_line("Provider", "Wago"));
+                lines.push(self.overlay_kv_line(
+                    "Query",
                     if self.search_pane.query.trim().is_empty() {
                         "<empty>".to_string()
                     } else {
                         self.search_pane.query.clone()
-                    }
-                )));
-                lines.push(Line::from(format!(
-                    "Search state: {}",
+                    },
+                ));
+                lines.push(self.overlay_kv_line(
+                    "State",
                     if self.search_pane.in_progress {
                         "running"
+                    } else if self.search_pane.is_editing {
+                        "editing"
                     } else {
-                        "idle"
-                    }
-                )));
-                lines.push(Line::from(format!(
-                    "Results: {}",
-                    self.search_pane.results.len()
-                )));
+                        "ready"
+                    },
+                ));
+                lines.push(
+                    self.overlay_kv_line("Results", self.search_pane.results.len().to_string()),
+                );
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Actions"));
                 if self.wago_api_key.is_none() {
-                    lines.push(Line::from("Wago API key required before search can run."));
-                    lines.push(Line::from(
-                        "Configure it in profile config, WAGO_API_KEY, or repo-root .env.",
+                    lines.push(self.overlay_hint_line("Set Wago API key before search can run."));
+                    lines.push(self.overlay_hint_line(
+                        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env.",
                     ));
                 } else {
-                    lines.push(Line::from("Retail + stable only in this slice."));
-                    lines.push(Line::from(if self.search_pane.is_editing {
-                        "Commands: type query | backspace delete | enter search | esc stop editing"
+                    lines.push(self.overlay_hint_line("Retail and stable only."));
+                    lines.push(self.overlay_hint_line(if self.search_pane.is_editing {
+                        "Type query, then Enter to search. Esc stops editing."
                     } else {
-                        "Commands: e edit query | j/k select result | enter install selected"
+                        "Press e to edit query. j/k changes result. Enter installs selected result."
                     }));
                     if self.search_pane.results.is_empty() {
-                        lines.push(Line::from("No results loaded yet."));
+                        lines.push(Line::from(""));
+                        lines.push(self.overlay_section_title("Results"));
+                        lines.push(self.overlay_hint_line("No results loaded yet."));
                     } else {
                         let (window_start, window_end) = visible_search_result_window(
                             self.search_pane.results.len(),
@@ -3805,10 +3818,10 @@ impl App {
                             8,
                         );
                         lines.push(Line::from(""));
-                        lines.push(Line::from("Results"));
+                        lines.push(self.overlay_section_title("Results"));
                         if window_start > 0 {
-                            lines.push(Line::from(format!(
-                                "... {} more result{} above",
+                            lines.push(self.overlay_hint_line(&format!(
+                                "{} more result{} above",
                                 window_start,
                                 plural_suffix(window_start)
                             )));
@@ -3825,7 +3838,7 @@ impl App {
                                 " "
                             };
                             lines.push(Line::from(format!(
-                                "{marker} {} | {} | downloads {} | version {}",
+                                "{marker} {} | {} | dl {} | v {}",
                                 result.display_name,
                                 result
                                     .owner
@@ -3842,39 +3855,40 @@ impl App {
                         let remaining_below =
                             self.search_pane.results.len().saturating_sub(window_end);
                         if remaining_below > 0 {
-                            lines.push(Line::from(format!(
-                                "... {} more result{} below",
+                            lines.push(self.overlay_hint_line(&format!(
+                                "{} more result{} below",
                                 remaining_below,
                                 plural_suffix(remaining_below)
                             )));
                         }
                         if let Some(result) = self.search_pane.selected_result() {
                             lines.push(Line::from(""));
-                            lines.push(Line::from("Selected result"));
-                            lines.push(Line::from(format!("Addon: {}", result.display_name)));
-                            lines.push(Line::from(format!("Slug: {}", result.id)));
-                            lines.push(Line::from(format!(
-                                "Author: {}",
-                                result
-                                    .owner
-                                    .as_deref()
-                                    .or_else(|| result.authors.first().map(String::as_str))
-                                    .unwrap_or("unknown")
-                            )));
-                            lines.push(Line::from(format!(
-                                "Summary: {}",
-                                result.summary.as_deref().unwrap_or("<none>")
-                            )));
-                            lines.push(Line::from(format!(
-                                "Website: {}",
-                                result.website_url.as_deref().unwrap_or("<unknown>")
-                            )));
+                            lines.push(self.overlay_section_title("Selected"));
+                            lines.push(self.overlay_kv_line("Addon", result.display_name.clone()));
+                            lines.push(self.overlay_kv_line("Slug", result.id.clone()));
+                            lines.push(
+                                self.overlay_kv_line(
+                                    "Author",
+                                    result
+                                        .owner
+                                        .as_deref()
+                                        .or_else(|| result.authors.first().map(String::as_str))
+                                        .unwrap_or("unknown"),
+                                ),
+                            );
+                            lines.push(self.overlay_kv_line(
+                                "Version",
+                                result.version.as_deref().unwrap_or("<unknown>"),
+                            ));
+                            lines.push(self.overlay_kv_line(
+                                "Summary",
+                                result.summary.as_deref().unwrap_or("<none>"),
+                            ));
                         }
                     }
                 }
             }
             DetailMode::Update => {
-                lines.push(Line::from("Update area"));
                 let all_items = self.dashboard.items.iter().collect::<Vec<_>>();
                 let selected_items = self.dashboard.selected_parent_items();
                 let selected_folders = self.dashboard.selected_parent_folders();
@@ -3882,86 +3896,107 @@ impl App {
                 let summary = summarize_checks(&checks);
                 let inventory = summarize_refreshability(&all_items);
                 let selection = summarize_refreshability(&selected_items);
-                lines.push(Line::from(format!(
-                    "Inventory: parents={}, refreshable={}, manual={}, unmanaged={}",
-                    inventory.total, inventory.refreshable, inventory.manual, inventory.unmanaged
-                )));
-                lines.push(Line::from(format!(
-                    "Selected parents: {}",
-                    selected_items.len()
-                )));
-                lines.push(Line::from(format!(
-                    "Selection readiness: refreshable={}, manual={}, unmanaged={}",
-                    selection.refreshable, selection.manual, selection.unmanaged
-                )));
-                lines.push(Line::from(format!(
-                    "Targets: {}",
+                lines.push(self.overlay_section_title("Selected updates"));
+                lines.push(self.overlay_kv_line(
+                    "State",
+                    if self.dashboard.update_in_progress() {
+                        "running"
+                    } else {
+                        "ready"
+                    },
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Selected",
+                    format!(
+                        "{} parent{}",
+                        selected_items.len(),
+                        plural_suffix(selected_items.len())
+                    ),
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Targets",
                     if selected_folders.is_empty() {
                         "<none>".to_string()
                     } else {
                         selected_folders.join(", ")
-                    }
-                )));
-                lines.push(Line::from(format!(
-                    "Tracked status: up_to_date={}, update_available={}, unknown={}, errors={}",
-                    summary.up_to_date, summary.update_available, summary.unknown, summary.errors
-                )));
-                lines.push(Line::from(format!(
-                    "Selected update state: {}",
-                    if self.dashboard.update_in_progress() {
-                        "running"
-                    } else {
-                        "idle"
-                    }
-                )));
-                lines.push(Line::from(
-                    "Press v to select updateable tracked parents, r to apply provider-backed updates for the current selection.",
+                    },
+                ));
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Readiness"));
+                lines.push(self.overlay_kv_line(
+                    "Inventory",
+                    format!(
+                        "{} tracked | {} ready | {} manual | {} unmgd",
+                        inventory.total,
+                        inventory.refreshable,
+                        inventory.manual,
+                        inventory.unmanaged
+                    ),
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Selection",
+                    format!(
+                        "{} ready | {} manual | {} unmgd",
+                        selection.refreshable, selection.manual, selection.unmanaged
+                    ),
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Remote",
+                    format!(
+                        "{} current | {} update | {} unknown | {} errors",
+                        summary.up_to_date,
+                        summary.update_available,
+                        summary.unknown,
+                        summary.errors
+                    ),
+                ));
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Actions"));
+                lines.push(
+                    self.overlay_hint_line("Press v to select update-ready tracked parents."),
+                );
+                lines.push(self.overlay_hint_line(
+                    "Press r to apply provider-backed updates for the current selection.",
                 ));
                 if let Some(last_summary) = self.dashboard.last_update_summary() {
                     lines.push(Line::from(""));
-                    lines.push(Line::from("Last selected update"));
-                    lines.push(Line::from(format!(
-                        "Targets={}, updated={}, up_to_date={}, skipped_manual={}, skipped_unmanaged={}, skipped_unsupported={}, errors={}, scanned={}",
-                        last_summary.targets,
-                        last_summary.updated_addons,
-                        last_summary.up_to_date,
-                        last_summary.skipped_manual,
-                        last_summary.skipped_unmanaged,
-                        last_summary.skipped_unsupported,
-                        last_summary.errors,
-                        last_summary.scanned_addons
-                    )));
-                    lines.push(Line::from(format!(
-                        "Tracked status snapshot: up_to_date={}, update_available={}, unknown={}, errors={}",
-                        last_summary.up_to_date,
-                        last_summary.update_available,
-                        last_summary.unknown,
-                        last_summary.errors
-                    )));
+                    lines.push(self.overlay_section_title("Last run"));
+                    lines.push(self.overlay_kv_line(
+                        "Results",
+                        format!(
+                            "{} targets | {} updated | {} current | {} manual | {} unmgd | {} unsupported | {} errors",
+                            last_summary.targets,
+                            last_summary.updated_addons,
+                            last_summary.up_to_date,
+                            last_summary.skipped_manual,
+                            last_summary.skipped_unmanaged,
+                            last_summary.skipped_unsupported,
+                            last_summary.errors
+                        ),
+                    ));
                 }
             }
             DetailMode::Config => {
-                lines.push(Line::from("Config area"));
-                lines.push(Line::from(format!(
-                    "Target path: {}",
-                    self.rendered_target_path()
-                )));
-                lines.push(Line::from(format!(
-                    "Config present: {}",
-                    self.config_present
-                )));
-                lines.push(Line::from(format!(
-                    "Draft state: {}",
+                lines.push(self.overlay_section_title("Config"));
+                lines.push(self.overlay_kv_line("Target", self.rendered_target_path()));
+                lines.push(self.overlay_kv_line(
+                    "Config",
+                    if self.config_present {
+                        "present"
+                    } else {
+                        "missing"
+                    },
+                ));
+                lines.push(self.overlay_kv_line(
+                    "Draft",
                     if self.config_pane.is_dirty() {
                         "unsaved changes"
                     } else {
                         "saved"
-                    }
-                )));
-                lines.push(Line::from(
-                    "j/k select | enter toggle/cycle | e edit text | s save | n reset | esc cancel edit",
+                    },
                 ));
                 lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Fields"));
                 for (index, field) in ConfigField::ALL.iter().enumerate() {
                     let marker = if self.config_pane.selected_field == index {
                         "›"
@@ -3987,50 +4022,59 @@ impl App {
                     lines.push(Line::from(format!("{marker} {}: {}", field.label(), value)));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(
-                    "Only curated settings are editable in this slice. Addon dir, intervals, and concurrency stay read-only for now.",
+                lines.push(self.overlay_section_title("Actions"));
+                lines.push(self.overlay_hint_line(
+                    "j/k move | enter toggle/cycle | e edit text | s save | n reset | esc stop edit",
+                ));
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Notes"));
+                lines.push(self.overlay_hint_line(
+                    "Only curated settings are editable here. Addon dir and runtime intervals stay read-only.",
                 ));
             }
             DetailMode::Backup => {
-                lines.push(Line::from("Backup area"));
-                lines.push(Line::from(format!(
-                    "Target path: {}",
-                    self.rendered_target_path()
-                )));
-                lines.push(Line::from(format!(
-                    "Backup root: {}",
-                    self.backup_dir.display()
-                )));
-                lines.push(Line::from(format!(
-                    "Backup enabled: {} | retention: {}",
-                    self.config_pane.draft.backup_wtf, self.config_pane.draft.backup_retention
-                )));
-                lines.push(Line::from(format!(
-                    "State: {}",
+                lines.push(self.overlay_section_title("Backup now"));
+                lines.push(self.overlay_kv_line("Target", self.rendered_target_path()));
+                lines.push(self.overlay_kv_line("Store", self.backup_dir.display().to_string()));
+                lines.push(self.overlay_kv_line(
+                    "Policy",
+                    format!(
+                        "enabled={} | retention={}",
+                        self.config_pane.draft.backup_wtf, self.config_pane.draft.backup_retention
+                    ),
+                ));
+                lines.push(self.overlay_kv_line(
+                    "State",
                     if self.backup_pane.in_progress {
                         "running"
                     } else {
-                        "idle"
-                    }
-                )));
-                lines.push(Line::from(
-                    "Press r or enter to create a WTF backup now. Restore is intentionally deferred to a later slice.",
+                        "ready"
+                    },
                 ));
                 lines.push(Line::from(""));
-                lines.push(Line::from("Recent backups"));
+                lines.push(self.overlay_section_title("Actions"));
+                lines.push(self.overlay_hint_line("Press r or Enter to create a WTF backup now."));
+                lines.push(
+                    self.overlay_hint_line(
+                        "Restore stays intentionally deferred to a later slice.",
+                    ),
+                );
+                lines.push(Line::from(""));
+                lines.push(self.overlay_section_title("Recent backups"));
                 if self.backup_pane.backups.is_empty() {
-                    lines.push(Line::from("No backups created yet."));
+                    lines.push(self.overlay_hint_line("No backups created yet."));
                 } else {
                     for entry in self.backup_pane.backups.iter().take(8) {
                         lines.push(Line::from(format!(
-                            "{} | {} bytes | {}",
-                            entry.label, entry.size_bytes, entry.file_name
+                            "{} | {} bytes",
+                            entry.label, entry.size_bytes
                         )));
+                        lines.push(self.overlay_hint_line(&entry.file_name));
                     }
                     if self.backup_pane.backups.len() > 8 {
                         let remaining = self.backup_pane.backups.len() - 8;
-                        lines.push(Line::from(format!(
-                            "... {} more backup{}",
+                        lines.push(self.overlay_hint_line(&format!(
+                            "{} more backup{}",
                             remaining,
                             plural_suffix(remaining)
                         )));
@@ -4040,6 +4084,32 @@ impl App {
         }
 
         lines
+    }
+
+    fn overlay_section_title(&self, title: &str) -> Line<'static> {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(self.ui_theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        ))
+    }
+
+    fn overlay_kv_line(&self, label: impl Into<String>, value: impl Into<String>) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("{}: ", label.into()),
+                Style::default().fg(self.ui_theme.muted),
+            ),
+            Span::raw(value.into()),
+        ])
+    }
+
+    fn overlay_hint_line(&self, text: &str) -> Line<'static> {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(self.ui_theme.muted),
+        ))
     }
 
     fn inspect_overlay_lines(&self) -> Vec<Line<'static>> {
