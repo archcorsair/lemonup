@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: production TUI design/build Phase 4 implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready Phase 5 overlay UX/content cleanup pending commit
+- latest local milestone at handoff pass: production TUI overview table refinement implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready overview table refinement pending commit
 
 ## Current State
 
@@ -134,6 +134,11 @@ Implemented, committed, and pushed:
   - ASCII `LEMONUP` header now uses a smooth fruit-style gradient
   - shell border/title chrome uses a stronger production palette
   - the original striped-logo first attempt is intentionally preserved in code as a legacy fallback reference
+- production overview table refinement is implemented and user-verified:
+  - overview table now uses `Name`, `Version`, `Author`, `Source`
+  - update and attention state now live in the `Version` column instead of a standalone status column
+  - selection uses a fixed-width gutter bar plus a persistent selected-row tint
+  - current-row focus remains visually distinct from bulk-selected rows
 
 ## Recent Important Commits
 

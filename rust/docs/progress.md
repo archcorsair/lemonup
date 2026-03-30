@@ -83,9 +83,9 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - production TUI design/build Phase 5 overlay UX/content cleanup
+  - production TUI overview table refinement against v1 scanability feedback
 - current focus:
-  - checkpoint production TUI design/build Phase 5 overlay UX/content cleanup
+  - checkpoint the refined overview table model and selection treatment
   - then return later for a deeper overlay revamp/polish pass
   - then backup restore workflows
 
@@ -245,6 +245,11 @@ These are implemented and manually verified in addition to the earlier chunks:
     - ASCII `LEMONUP` header now uses a smooth fruit-style left-to-right gradient instead of striped glyph coloring
     - shell chrome uses a stronger blue/purple border-title palette
     - the first striped logo attempt is intentionally preserved in code as a legacy fallback reference
+  - overview table refinement is implemented:
+    - overview table now uses `Name`, `Version`, `Author`, `Source`
+    - update and attention state now live in the `Version` column instead of a standalone status column
+    - selection uses a fixed-width gutter bar plus a persistent selected-row tint
+    - current-row focus remains visually distinct from bulk-selected rows
 
 ## Implemented, Awaiting Manual Verification
 

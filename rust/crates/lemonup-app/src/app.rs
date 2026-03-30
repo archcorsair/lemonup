@@ -656,23 +656,12 @@ struct DashboardRow {
     child_connector: Option<DashboardChildConnector>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DashboardStateBadge {
-    UpToDate,
-    Update,
-    Unknown,
-    Manual,
-    Unmanaged,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AddonTableRowViewModel {
     name: Line<'static>,
-    source: String,
-    version: String,
-    state: Line<'static>,
-    flags: Line<'static>,
+    version: Line<'static>,
+    author: String,
+    source: Line<'static>,
     row_style: Style,
 }
 
@@ -4241,14 +4230,13 @@ impl App {
 
         let header = Row::new(vec![
             Cell::from("Name"),
-            Cell::from("Source"),
             Cell::from("Version"),
-            Cell::from("State"),
-            Cell::from("Flags"),
+            Cell::from("Author"),
+            Cell::from("Source"),
         ])
         .style(
             Style::default()
-                .fg(self.ui_theme.highlight)
+                .fg(self.ui_theme.panel_title)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -4260,10 +4248,9 @@ impl App {
             .map(|view| {
                 Row::new(vec![
                     Cell::from(view.name),
-                    Cell::from(view.source),
                     Cell::from(view.version),
-                    Cell::from(view.state),
-                    Cell::from(view.flags),
+                    Cell::from(view.author),
+                    Cell::from(view.source),
                 ])
                 .style(view.row_style)
             })
@@ -4272,10 +4259,9 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(42),
-                Constraint::Percentage(11),
-                Constraint::Percentage(19),
-                Constraint::Percentage(16),
+                Constraint::Percentage(43),
+                Constraint::Percentage(23),
+                Constraint::Percentage(22),
                 Constraint::Percentage(12),
             ],
         )
@@ -4295,10 +4281,9 @@ impl App {
                 )),
         )
         .column_spacing(1)
-        .highlight_symbol("› ")
         .row_highlight_style(
             Style::default()
-                .fg(self.ui_theme.highlight)
+                .bg(Color::Rgb(36, 40, 56))
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -4356,20 +4341,23 @@ impl App {
                     lines.push(Line::from(format!("Child: {child_folder}")));
                     lines.push(Line::from(format!("Parent: {}", item.name)));
                     lines.push(Line::from(format!(
-                        "State: {}",
-                        dashboard_item_state_text(item)
+                        "Status: {}",
+                        dashboard_item_status_text(item)
                     )));
                 } else if let Some(item) = selected {
                     lines.push(Line::from(item.name.clone()));
                     lines.push(Line::from(format!(
-                        "{} | {} | {}",
-                        source_label(item.source),
-                        dashboard_item_version_label(item),
-                        dashboard_item_state_text(item)
+                        "{} | {}",
+                        dashboard_item_status_text(item),
+                        dashboard_item_version_label(item)
                     )));
+                    lines.push(Line::from(format!("Source: {}", source_label(item.source))));
                     lines.push(Line::from(format!(
-                        "Flags: {}",
-                        dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
+                        "Management: {}",
+                        dashboard_item_management_summary(
+                            item,
+                            self.parent_has_drift(&item.folder)
+                        )
                     )));
                     let missing_owned_children =
                         self.dashboard_parent_missing_owned_children(&item.folder);
@@ -4852,12 +4840,12 @@ impl App {
                 dashboard_item_version_label(item)
             )));
             lines.push(Line::from(format!(
-                "State: {}",
-                dashboard_item_state_text(item)
+                "Status: {}",
+                dashboard_item_status_text(item)
             )));
             lines.push(Line::from(format!(
-                "Flags: {}",
-                dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
+                "Management: {}",
+                dashboard_item_management_summary(item, self.parent_has_drift(&item.folder))
             )));
         } else if let Some(item) = selected {
             lines.push(Line::from(item.name.clone()));
@@ -4868,12 +4856,12 @@ impl App {
                 dashboard_item_version_label(item)
             )));
             lines.push(Line::from(format!(
-                "State: {}",
-                dashboard_item_state_text(item)
+                "Status: {}",
+                dashboard_item_status_text(item)
             )));
             lines.push(Line::from(format!(
-                "Flags: {}",
-                dashboard_item_flags_text(item, self.parent_has_drift(&item.folder))
+                "Management: {}",
+                dashboard_item_management_summary(item, self.parent_has_drift(&item.folder))
             )));
 
             let missing_owned_children = self.dashboard_parent_missing_owned_children(&item.folder);
@@ -5123,40 +5111,38 @@ impl App {
             DashboardRowKind::OwnedChild { parent_folder } => item.folder == *parent_folder,
         });
         let is_child = matches!(row.kind, DashboardRowKind::OwnedChild { .. });
-        let is_drift = match &row.kind {
-            DashboardRowKind::Parent => self.parent_has_drift(&row.folder),
-            DashboardRowKind::OwnedChild { parent_folder } => self.parent_has_drift(parent_folder),
+        let name = dashboard_row_name_line(row, selected);
+        let version = if is_child {
+            Line::from("")
+        } else {
+            item.map(dashboard_item_version_line)
+                .unwrap_or_else(|| Line::from(""))
         };
-
-        let name = Line::from(vec![
-            Span::raw(dashboard_row_name_prefix(row, selected && !is_child)),
-            Span::raw(truncate_text(&row.name, 34)),
-        ]);
-
-        let source = item
-            .map(|item| source_short_label(item.source).to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let version = item
-            .map(dashboard_item_version_label)
-            .unwrap_or_else(|| "-".to_string());
-        let state = item
-            .map(dashboard_item_state_line)
-            .unwrap_or_else(|| Line::from("-"));
-        let flags = item
-            .map(|item| dashboard_item_flags_line(item, is_drift))
-            .unwrap_or_else(|| Line::from("-"));
+        let author = if is_child {
+            String::new()
+        } else {
+            item.map(dashboard_item_author_label)
+                .unwrap_or_else(String::new)
+        };
+        let source = if is_child {
+            Line::from("")
+        } else {
+            item.map(dashboard_item_source_line)
+                .unwrap_or_else(|| Line::from(""))
+        };
         let row_style = if is_child {
             Style::default().fg(self.ui_theme.muted)
+        } else if selected {
+            Style::default().bg(Color::Rgb(28, 34, 48))
         } else {
             Style::default()
         };
 
         AddonTableRowViewModel {
             name,
-            source,
             version,
-            state,
-            flags,
+            author,
+            source,
             row_style,
         }
     }
@@ -5536,16 +5522,11 @@ fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
     )
 }
 
-fn dashboard_row_name_prefix(row: &DashboardRow, selected: bool) -> String {
-    let selection_marker = match &row.kind {
-        DashboardRowKind::Parent => {
-            if selected {
-                "[x] "
-            } else {
-                "[ ] "
-            }
-        }
-        DashboardRowKind::OwnedChild { .. } => "",
+fn dashboard_row_name_line(row: &DashboardRow, selected: bool) -> Line<'static> {
+    let gutter = match &row.kind {
+        DashboardRowKind::Parent if selected => Span::styled("▎", Style::default().fg(Color::Cyan)),
+        DashboardRowKind::Parent => Span::raw(" "),
+        DashboardRowKind::OwnedChild { .. } => Span::raw(" "),
     };
     let marker = match &row.kind {
         DashboardRowKind::Parent if row.expandable && row.expanded => "▾ ",
@@ -5553,7 +5534,12 @@ fn dashboard_row_name_prefix(row: &DashboardRow, selected: bool) -> String {
         DashboardRowKind::Parent => "  ",
         DashboardRowKind::OwnedChild { .. } => child_row_prefix(row),
     };
-    format!("{selection_marker}{marker}")
+
+    Line::from(vec![
+        gutter,
+        Span::raw(marker),
+        Span::raw(truncate_text(&row.name, 40)),
+    ])
 }
 
 fn dashboard_item_version_label(item: &DashboardItem) -> String {
@@ -5586,91 +5572,152 @@ fn dashboard_item_version_label(item: &DashboardItem) -> String {
     }
 }
 
-fn dashboard_item_state_line(item: &DashboardItem) -> Line<'static> {
-    let badge = dashboard_item_state_badge(item);
-    let text = dashboard_item_state_text(item);
-    let color = match badge {
-        DashboardStateBadge::UpToDate => Color::Green,
-        DashboardStateBadge::Update => Color::Yellow,
-        DashboardStateBadge::Unknown => Color::DarkGray,
-        DashboardStateBadge::Manual => Color::Blue,
-        DashboardStateBadge::Unmanaged => Color::Magenta,
-        DashboardStateBadge::Error => Color::Red,
-    };
-
-    Line::from(vec![
-        Span::styled(
-            dashboard_state_badge_text(badge),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::raw(text),
-    ])
+fn dashboard_item_remote_label(item: &DashboardItem) -> Option<String> {
+    match item.source {
+        SourceKind::GitHub => item
+            .remote_version
+            .as_deref()
+            .filter(|value| looks_like_commit_hash(value))
+            .map(shorten_commit),
+        _ => item
+            .remote_version
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToString::to_string),
+    }
 }
 
-fn dashboard_item_state_badge(item: &DashboardItem) -> DashboardStateBadge {
+fn dashboard_item_version_line(item: &DashboardItem) -> Line<'static> {
+    let installed = truncate_text(&dashboard_item_version_label(item), 16);
+    let installed_style = Style::default().fg(Color::Rgb(172, 182, 220));
+
     if item.source == SourceKind::Manual {
-        return DashboardStateBadge::Manual;
+        return Line::from(Span::styled(installed, installed_style));
     }
+
     if !item.has_authoritative_owned_folders {
-        return DashboardStateBadge::Unmanaged;
+        return Line::from(vec![
+            Span::styled(installed, installed_style),
+            Span::raw(" "),
+            Span::styled(
+                "unmanaged",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
     }
 
     match dashboard_item_update_status(item) {
-        UpdateStatus::UpToDate => DashboardStateBadge::UpToDate,
-        UpdateStatus::UpdateAvailable => DashboardStateBadge::Update,
-        UpdateStatus::Unknown => DashboardStateBadge::Unknown,
-        UpdateStatus::Error => DashboardStateBadge::Error,
+        UpdateStatus::UpToDate => Line::from(Span::styled(installed, installed_style)),
+        UpdateStatus::UpdateAvailable => {
+            let remote = truncate_text(
+                &dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string()),
+                12,
+            );
+            Line::from(vec![
+                Span::styled(installed, installed_style),
+                Span::raw(" "),
+                Span::styled("→", Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled(
+                    remote,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled("📦", Style::default().fg(Color::Rgb(212, 175, 55))),
+            ])
+        }
+        UpdateStatus::Unknown => Line::from(vec![
+            Span::styled(installed, installed_style),
+            Span::raw(" "),
+            Span::styled(
+                "unknown",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        UpdateStatus::Error => Line::from(vec![
+            Span::styled(installed, installed_style),
+            Span::raw(" "),
+            Span::styled(
+                "error",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]),
     }
 }
 
-fn dashboard_item_state_text(item: &DashboardItem) -> &'static str {
-    match dashboard_item_state_badge(item) {
-        DashboardStateBadge::UpToDate => "current",
-        DashboardStateBadge::Update => "update",
-        DashboardStateBadge::Unknown => "unknown",
-        DashboardStateBadge::Manual => "manual",
-        DashboardStateBadge::Unmanaged => "unmgd",
-        DashboardStateBadge::Error => "error",
-    }
+fn dashboard_item_author_label(item: &DashboardItem) -> String {
+    item.author
+        .as_deref()
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .map(|author| truncate_text(author, 24))
+        .unwrap_or_else(|| "-".to_string())
 }
 
-fn dashboard_state_badge_text(badge: DashboardStateBadge) -> &'static str {
-    match badge {
-        DashboardStateBadge::UpToDate => "[OK]",
-        DashboardStateBadge::Update => "[UP]",
-        DashboardStateBadge::Unknown => "[??]",
-        DashboardStateBadge::Manual => "[M]",
-        DashboardStateBadge::Unmanaged => "[U]",
-        DashboardStateBadge::Error => "[!]",
-    }
+fn dashboard_item_source_line(item: &DashboardItem) -> Line<'static> {
+    let label = source_compact_label(item.source);
+    let color = match item.source {
+        SourceKind::GitHub => Color::Cyan,
+        SourceKind::Tukui => Color::Yellow,
+        SourceKind::WowInterface => Color::Magenta,
+        SourceKind::Wago => Color::Blue,
+        SourceKind::Manual => Color::DarkGray,
+    };
+
+    Line::from(vec![
+        Span::styled("[", Style::default().fg(self::Color::DarkGray)),
+        Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("]", Style::default().fg(self::Color::DarkGray)),
+    ])
 }
 
-fn dashboard_item_flags_line(item: &DashboardItem, has_drift: bool) -> Line<'static> {
-    Line::from(dashboard_item_flags_text(item, has_drift))
-}
-
-fn dashboard_item_flags_text(item: &DashboardItem, has_drift: bool) -> String {
-    let mut flags = Vec::new();
+fn dashboard_item_management_summary(item: &DashboardItem, has_drift: bool) -> String {
+    let mut parts = Vec::new();
     if has_drift {
-        flags.push("drv");
+        parts.push("drift");
     }
     if item.has_authoritative_owned_folders {
-        flags.push("mgd");
+        parts.push("managed");
     } else if item.owned_folder_count > 0 {
-        flags.push("inf");
+        parts.push("inferred");
     }
     if item.kind == AddonKind::Library {
-        flags.push("lib");
+        parts.push("library");
     }
     if item.owned_folder_count > 0 {
-        flags.push("tr");
+        parts.push("tree");
     }
 
-    if flags.is_empty() {
-        "-".to_string()
+    if parts.is_empty() {
+        "none".to_string()
     } else {
-        flags.join(" ")
+        parts.join(", ")
+    }
+}
+
+fn dashboard_item_status_text(item: &DashboardItem) -> String {
+    if item.source == SourceKind::Manual {
+        return "Manual".to_string();
+    }
+    if !item.has_authoritative_owned_folders {
+        return "Unmanaged".to_string();
+    }
+    match dashboard_item_update_status(item) {
+        UpdateStatus::UpToDate => "Up to date".to_string(),
+        UpdateStatus::UpdateAvailable => dashboard_item_remote_label(item)
+            .map(|version| format!("Update: {version}"))
+            .unwrap_or_else(|| "Update".to_string()),
+        UpdateStatus::Unknown => "Unknown".to_string(),
+        UpdateStatus::Error => "Error".to_string(),
     }
 }
 
@@ -5683,13 +5730,13 @@ fn dashboard_item_update_status(item: &DashboardItem) -> UpdateStatus {
     status
 }
 
-fn source_short_label(source: SourceKind) -> &'static str {
+fn source_compact_label(source: SourceKind) -> &'static str {
     match source {
-        SourceKind::GitHub => "GitHub",
+        SourceKind::GitHub => "Git",
         SourceKind::Tukui => "TukUI",
         SourceKind::WowInterface => "WoWI",
         SourceKind::Wago => "Wago",
-        SourceKind::Manual => "manual",
+        SourceKind::Manual => "Manual",
     }
 }
 
@@ -5867,8 +5914,8 @@ mod tests {
         DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState, OverlayKind,
         PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
         WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
-        child_row_detail_prefix, child_row_prefix, dashboard_item_state_line,
-        dashboard_item_version_label, summarize_owned_folders, visible_search_result_window,
+        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        dashboard_item_version_line, summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -7245,19 +7292,21 @@ mod tests {
     }
 
     #[test]
-    fn table_state_line_renders_badge_and_text_for_manual_addons() {
+    fn version_line_renders_plain_version_for_manual_addons() {
         let addon = AddonRecord::new("ManualSmokeAddon", "ManualSmokeAddon", SourceKind::Manual);
         let dashboard = DashboardState::from_addons(vec![addon]);
 
         let item = dashboard.items.first().expect("dashboard item");
-        let rendered = dashboard_item_state_line(item);
+        let rendered = dashboard_item_version_line(item);
         let text = rendered
             .spans
             .iter()
             .map(|span| span.content.as_ref())
-            .collect::<String>();
+            .collect::<String>()
+            .trim()
+            .to_string();
 
-        assert_eq!(text, "[M] manual");
+        assert_eq!(text, "unknown");
     }
 
     #[test]

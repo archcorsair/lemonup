@@ -95,8 +95,12 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - Phase 4 task overlays
   - Phase 5 first-pass overlay UX/content cleanup
   - v1-inspired shell visual/header pass
+  - overview table refinement against v1 scanability feedback
 - current shell shape:
   - overview uses a full-width addon table
+  - overview table now uses `Name`, `Version`, `Author`, `Source`
+  - update and attention state are folded into the `Version` column
+  - selected rows use a fixed-width gutter bar plus a persistent tint
   - `enter` opens inspect as a modal overlay
   - `Install`, `Search`, `Update`, `Config`, and `Backup` now open through the overlay host
   - the header uses a smooth fruit-style gradient logo treatment inspired by v1
