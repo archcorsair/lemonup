@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
@@ -26,7 +26,10 @@ use crate::action::AppAction;
 use crate::backup::{BackupEntry, BackupRunOutcome, backup_root, create_wtf_backup, list_backups};
 use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
-use crate::onboarding::{FoundAction, OnboardingPhase, OnboardingState, OnboardingTaskEvent};
+use crate::onboarding::{
+    FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
+    OnboardingTaskEvent,
+};
 use crate::tui::Backend;
 use crate::update::{CheckResult, LiveUpdateSummary, apply_live_updates};
 use crate::wago::{
@@ -263,6 +266,13 @@ enum AppMessage {
     ConfigSave,
     ConfigResetDraft,
     BackupRunNow,
+    OnboardingNextStep,
+    OnboardingPreviousStep,
+    OnboardingToggleTheme,
+    OnboardingSettingsNext,
+    OnboardingSettingsPrevious,
+    OnboardingSettingIncrease,
+    OnboardingSettingDecrease,
     OnboardingBeginEditing,
     OnboardingStopEditing,
     OnboardingInputChar(char),
@@ -332,16 +342,18 @@ enum ConfigField {
     Theme,
     ShowLibs,
     DefaultScreen,
+    RunOnboardingAgain,
 }
 
 impl ConfigField {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::WagoApiKey,
         Self::BackupWtf,
         Self::BackupRetention,
         Self::Theme,
         Self::ShowLibs,
         Self::DefaultScreen,
+        Self::RunOnboardingAgain,
     ];
 
     fn label(self) -> &'static str {
@@ -352,6 +364,7 @@ impl ConfigField {
             Self::Theme => "Theme",
             Self::ShowLibs => "Show libs",
             Self::DefaultScreen => "Default screen",
+            Self::RunOnboardingAgain => "Run onboarding again",
         }
     }
 
@@ -489,6 +502,7 @@ impl ConfigPaneState {
                     DefaultScreen::WagoSearch => DefaultScreen::Manage,
                 };
             }
+            ConfigField::RunOnboardingAgain => {}
             _ => {}
         }
         next
@@ -1351,8 +1365,12 @@ impl App {
         let onboarding = runtime
             .addon_dir_override
             .as_ref()
-            .map(|path| OnboardingState::with_input(path.display().to_string()))
-            .unwrap_or_else(OnboardingState::new);
+            .map(|path| {
+                let mut config = loaded_config.clone();
+                config.addon_dir = Some(path.clone());
+                OnboardingState::from_config_with_input(config, path.display().to_string())
+            })
+            .unwrap_or_else(|| OnboardingState::from_config(loaded_config.clone()));
 
         let shell_mode = match effective_addon_dir.as_ref() {
             Some(path) if validate_addons_path(path).is_ok() && !runtime.is_guarded_path(path) => {
@@ -1717,55 +1735,95 @@ impl App {
     }
 
     fn onboarding_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
-        match &self.onboarding.phase {
-            OnboardingPhase::Bootstrapping | OnboardingPhase::QuickChecking => match key.code {
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+        if self.onboarding.is_editing {
+            return match key.code {
+                KeyCode::Enter => match self.onboarding.step {
+                    OnboardingStep::Directory => vec![AppMessage::OnboardingValidateInput],
+                    OnboardingStep::Wago => vec![AppMessage::OnboardingStopEditing],
+                    _ => vec![],
+                },
+                KeyCode::Esc => vec![AppMessage::OnboardingStopEditing],
+                KeyCode::Backspace => vec![AppMessage::OnboardingBackspace],
+                KeyCode::Char(character) => vec![AppMessage::OnboardingInputChar(character)],
                 _ => vec![],
-            },
-            OnboardingPhase::DeepScanning(_) => match key.code {
+            };
+        }
+
+        match self.onboarding.step {
+            OnboardingStep::Theme => match key.code {
+                KeyCode::Left | KeyCode::Right => vec![AppMessage::OnboardingToggleTheme],
+                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
                 KeyCode::Esc => vec![AppMessage::OnboardingCancel],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 _ => vec![],
             },
-            OnboardingPhase::Found(_) => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingFoundActionNext],
-                KeyCode::Up | KeyCode::Char('k') => {
-                    vec![AppMessage::OnboardingFoundActionPrevious]
-                }
-                KeyCode::Enter => vec![AppMessage::OnboardingFoundConfirm],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                _ => vec![],
-            },
-            OnboardingPhase::Ready | OnboardingPhase::Error(_) | OnboardingPhase::Cancelled => {
-                if self.onboarding.is_editing {
-                    return match key.code {
-                        KeyCode::Enter => vec![AppMessage::OnboardingValidateInput],
-                        KeyCode::Esc => vec![AppMessage::OnboardingStopEditing],
-                        KeyCode::Backspace => vec![AppMessage::OnboardingBackspace],
-                        KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
-                        KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                        KeyCode::Char(character) => {
-                            vec![AppMessage::OnboardingInputChar(character)]
-                        }
-                        _ => vec![],
-                    };
-                }
-
-                match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        vec![AppMessage::OnboardingSuggestionNext]
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        vec![AppMessage::OnboardingSuggestionPrevious]
-                    }
-                    KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
-                    KeyCode::Enter => vec![AppMessage::OnboardingValidateInput],
-                    KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
+            OnboardingStep::Directory => match &self.onboarding.phase {
+                OnboardingPhase::Bootstrapping | OnboardingPhase::QuickChecking => match key.code {
+                    KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                    KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                    _ => vec![],
+                },
+                OnboardingPhase::DeepScanning(_) => match key.code {
                     KeyCode::Esc => vec![AppMessage::OnboardingCancel],
                     KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                     _ => vec![],
+                },
+                OnboardingPhase::Found(_) => match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        vec![AppMessage::OnboardingFoundActionNext]
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        vec![AppMessage::OnboardingFoundActionPrevious]
+                    }
+                    KeyCode::Enter => vec![AppMessage::OnboardingFoundConfirm],
+                    KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                    KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                    _ => vec![],
+                },
+                OnboardingPhase::Ready | OnboardingPhase::Error(_) | OnboardingPhase::Cancelled => {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            vec![AppMessage::OnboardingSuggestionNext]
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            vec![AppMessage::OnboardingSuggestionPrevious]
+                        }
+                        KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
+                        KeyCode::Enter => vec![AppMessage::OnboardingValidateInput],
+                        KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
+                        KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                        KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                        _ => vec![],
+                    }
                 }
-            }
+            },
+            OnboardingStep::Wago => match key.code {
+                KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
+                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
+                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                _ => vec![],
+            },
+            OnboardingStep::Settings => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingSettingsNext],
+                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::OnboardingSettingsPrevious],
+                KeyCode::Left | KeyCode::Char('h') => {
+                    vec![AppMessage::OnboardingSettingDecrease]
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    vec![AppMessage::OnboardingSettingIncrease]
+                }
+                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
+                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                _ => vec![],
+            },
+            OnboardingStep::Review => match key.code {
+                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
+                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                _ => vec![],
+            },
         }
     }
 
@@ -2361,14 +2419,18 @@ impl App {
                 ),
             ],
             AppMessage::ConfigToggleSelected => vec![
-                if self.config_pane.selected_field().is_textual() {
+                if self.config_pane.selected_field() == ConfigField::RunOnboardingAgain {
+                    AppAction::ReenterOnboarding
+                } else if self.config_pane.selected_field().is_textual() {
                     AppAction::SetConfigPaneState(self.config_pane.begin_editing())
                 } else {
                     AppAction::SetConfigPaneState(self.config_pane.toggle_selected())
                 },
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Config,
-                    if self.config_pane.selected_field().is_textual() {
+                    if self.config_pane.selected_field() == ConfigField::RunOnboardingAgain {
+                        "re-entering onboarding"
+                    } else if self.config_pane.selected_field().is_textual() {
                         "editing config field | enter apply | esc cancel"
                     } else {
                         "config field updated locally | s save | n reset"
@@ -2439,21 +2501,94 @@ impl App {
                     ]
                 }
             }
-            AppMessage::OnboardingBeginEditing => vec![
-                AppAction::SetOnboardingState(self.onboarding.begin_editing()),
-                AppAction::SetStatus(self.with_base_status(
-                    "editing path | enter validate | d deep scan | esc stop editing",
-                )),
+            AppMessage::OnboardingNextStep => match self.onboarding.step {
+                OnboardingStep::Theme => vec![
+                    AppAction::SetOnboardingState(self.onboarding.next_step()),
+                    AppAction::SetStatus(
+                        self.with_base_status("step 2/5 | choose or validate an AddOns path"),
+                    ),
+                ],
+                OnboardingStep::Directory => vec![AppAction::SetStatus(
+                    self.with_base_status("validate or confirm a directory before continuing"),
+                )],
+                OnboardingStep::Wago => vec![
+                    AppAction::SetOnboardingState(self.onboarding.next_step()),
+                    AppAction::SetStatus(self.with_base_status("step 4/5 | adjust core settings")),
+                ],
+                OnboardingStep::Settings => vec![
+                    AppAction::SetOnboardingState(self.onboarding.next_step()),
+                    AppAction::SetStatus(self.with_base_status("step 5/5 | review setup")),
+                ],
+                OnboardingStep::Review => {
+                    vec![AppAction::SaveOnboardingConfig(
+                        self.onboarding.apply_directory_to_draft().draft,
+                    )]
+                }
+            },
+            AppMessage::OnboardingPreviousStep => {
+                if self.onboarding.step == OnboardingStep::Theme {
+                    vec![AppAction::Quit]
+                } else {
+                    vec![
+                        AppAction::SetOnboardingState(self.onboarding.previous_step()),
+                        AppAction::SetStatus(self.with_base_status(&format!(
+                            "step {}/5",
+                            self.onboarding.step.previous().index() + 1
+                        ))),
+                    ]
+                }
+            }
+            AppMessage::OnboardingToggleTheme => vec![
+                AppAction::SetOnboardingState(self.onboarding.toggle_theme()),
+                AppAction::SetStatus(self.with_base_status("theme updated | enter next")),
             ],
+            AppMessage::OnboardingSettingsNext => vec![
+                AppAction::SetOnboardingState(self.onboarding.next_settings_field()),
+                AppAction::SetStatus(self.with_base_status("settings selection moved")),
+            ],
+            AppMessage::OnboardingSettingsPrevious => vec![
+                AppAction::SetOnboardingState(self.onboarding.previous_settings_field()),
+                AppAction::SetStatus(self.with_base_status("settings selection moved")),
+            ],
+            AppMessage::OnboardingSettingIncrease => vec![
+                AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(1)),
+                AppAction::SetStatus(self.with_base_status("setting updated")),
+            ],
+            AppMessage::OnboardingSettingDecrease => vec![
+                AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(-1)),
+                AppAction::SetStatus(self.with_base_status("setting updated")),
+            ],
+            AppMessage::OnboardingBeginEditing => {
+                let next_state = match self.onboarding.step {
+                    OnboardingStep::Directory => self.onboarding.begin_directory_editing(),
+                    OnboardingStep::Wago => self.onboarding.begin_wago_editing(),
+                    _ => self.onboarding.clone(),
+                };
+                let status = match self.onboarding.step {
+                    OnboardingStep::Directory => {
+                        "editing path | enter validate | d deep scan | esc stop editing"
+                    }
+                    OnboardingStep::Wago => "editing Wago API key | enter apply | esc cancel",
+                    _ => "editing",
+                };
+                vec![
+                    AppAction::SetOnboardingState(next_state),
+                    AppAction::SetStatus(self.with_base_status(status)),
+                ]
+            }
             AppMessage::OnboardingStopEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.stop_editing()),
-                AppAction::SetStatus(self.location_finder_status()),
+                AppAction::SetStatus(match self.onboarding.step {
+                    OnboardingStep::Directory => self.location_finder_status(),
+                    OnboardingStep::Wago => {
+                        self.with_base_status("wago step ready | e edit key | enter next")
+                    }
+                    _ => self.with_base_status("editing stopped"),
+                }),
             ],
-            AppMessage::OnboardingInputChar(character) => {
-                vec![AppAction::SetOnboardingState(
-                    self.onboarding.insert_char(character),
-                )]
-            }
+            AppMessage::OnboardingInputChar(character) => vec![AppAction::SetOnboardingState(
+                self.onboarding.insert_char(character),
+            )],
             AppMessage::OnboardingBackspace => {
                 vec![AppAction::SetOnboardingState(self.onboarding.backspace())]
             }
@@ -2506,10 +2641,9 @@ impl App {
                         )),
                     ]
                 } else {
-                    vec![
-                        AppAction::SetOnboardingState(self.onboarding.clear_status_to_ready()),
-                        AppAction::SetStatus(self.location_finder_status()),
-                    ]
+                    vec![AppAction::SetOnboardingState(
+                        self.onboarding.stop_editing(),
+                    )]
                 }
             }
             AppMessage::OnboardingSuggestionNext => vec![
@@ -2529,19 +2663,18 @@ impl App {
                 AppAction::SetStatus(self.found_status_for_input()),
             ],
             AppMessage::OnboardingFoundConfirm => match self.onboarding.selected_found_action() {
-                FoundAction::UseThisPath => vec![AppAction::SaveAddonDir(PathBuf::from(
-                    self.onboarding.input.trim(),
-                ))],
-                FoundAction::ScanAnotherLocation => vec![
-                    AppAction::SetOnboardingState(self.onboarding.ready()),
-                    AppAction::SetStatus(self.with_base_status(
-                        "choose another root | enter validate | d deep scan | e edit path",
-                    )),
+                FoundAction::UseThisPath => vec![
+                    AppAction::SetOnboardingState(
+                        self.onboarding.apply_directory_to_draft().next_step(),
+                    ),
+                    AppAction::SetStatus(
+                        self.with_base_status("directory confirmed | step 3/5 Wago setup"),
+                    ),
                 ],
-                FoundAction::EditPathManually => vec![
-                    AppAction::SetOnboardingState(self.onboarding.begin_editing()),
+                FoundAction::EnterDifferentPath => vec![
+                    AppAction::SetOnboardingState(self.onboarding.begin_directory_editing()),
                     AppAction::SetStatus(self.with_base_status(
-                        "editing found path | enter validate | d deep scan | esc stop editing",
+                        "editing path | enter validate | d deep scan | esc stop editing",
                     )),
                 ],
             },
@@ -2918,6 +3051,23 @@ impl App {
                     DetailMode::Backup => Some(OverlayKind::Backup),
                 };
             }
+            AppAction::ReenterOnboarding => {
+                self.shell_mode = ShellMode::Onboarding;
+                self.dashboard.detail_mode = DetailMode::Overview;
+                self.shell_ui.overlay.active = None;
+                self.install_pane = self.install_pane.stop_editing();
+                self.search_pane = self.search_pane.stop_editing();
+                self.config_pane.edit = None;
+                let mut config = self.config_pane.draft.clone();
+                if let Some(path) = &self.effective_addon_dir {
+                    config.addon_dir = Some(path.clone());
+                    self.onboarding =
+                        OnboardingState::from_config_with_input(config, path.display().to_string())
+                            .ready();
+                } else {
+                    self.onboarding = OnboardingState::from_config(config).ready();
+                }
+            }
             AppAction::SetOnboardingState(state) => self.onboarding = state,
             AppAction::StartOnboardingQuickCheck => {
                 let sender = self.task_events_tx.clone();
@@ -2970,7 +3120,16 @@ impl App {
                 }
                 self.active_onboarding_cancel = None;
             }
-            AppAction::SaveAddonDir(path) => {
+            AppAction::SaveOnboardingConfig(config) => {
+                let Some(path) = config.addon_dir.clone() else {
+                    self.onboarding = self
+                        .onboarding
+                        .error("wizard cannot finish without a valid AddOns directory");
+                    self.status_line =
+                        self.with_base_status("finish blocked | select a valid AddOns directory");
+                    self.shell_mode = ShellMode::Onboarding;
+                    return;
+                };
                 if self.is_guarded_path(&path) {
                     self.onboarding = self
                         .onboarding
@@ -2981,12 +3140,6 @@ impl App {
                     self.shell_mode = ShellMode::Onboarding;
                     return;
                 }
-
-                let mut config = match self.config_store.load() {
-                    Ok(ConfigLoad::Loaded(config)) => config,
-                    _ => AppConfig::new_unconfigured(),
-                };
-                config.addon_dir = Some(path.clone());
 
                 match self.config_store.write_new_config(&config) {
                     Ok(()) => {
@@ -3001,7 +3154,10 @@ impl App {
                             self.scan_state = ScanState::Pending;
                             self.status_line = self.dashboard_status_for(
                                 self.dashboard.detail_mode,
-                                &format!("saved addon directory {} | scan queued", path.display()),
+                                &format!(
+                                    "saved onboarding config {} | scan queued",
+                                    path.display()
+                                ),
                             );
                         }
                     }
@@ -3161,7 +3317,7 @@ impl App {
         let shell = self.shell_frame(frame.area(), layout_mode);
         self.render_header(frame, shell.header, layout_mode);
         match self.shell_mode {
-            ShellMode::Onboarding => frame.render_widget(self.onboarding_body(), shell.body),
+            ShellMode::Onboarding => self.render_onboarding(frame, shell.body),
             ShellMode::Dashboard => self.render_dashboard(frame, shell.body),
         }
         self.render_overlay_host(frame, shell.body);
@@ -3184,9 +3340,13 @@ impl App {
     }
 
     fn shell_frame(&self, area: Rect, mode: ShellLayoutMode) -> ShellFrame {
-        let header_height = match self.header_variant(mode) {
-            HeaderVariant::FullLogo => 7,
-            HeaderVariant::CompactLogo => 5,
+        let header_height = if self.shell_mode == ShellMode::Onboarding {
+            4
+        } else {
+            match self.header_variant(mode) {
+                HeaderVariant::FullLogo => 7,
+                HeaderVariant::CompactLogo => 5,
+            }
         };
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
@@ -3204,6 +3364,10 @@ impl App {
     }
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect, mode: ShellLayoutMode) {
+        if self.shell_mode == ShellMode::Onboarding {
+            self.render_onboarding_header(frame, area);
+            return;
+        }
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.ui_theme.border));
@@ -3489,6 +3653,19 @@ impl App {
     }
 
     fn footer_lines(&self) -> Vec<Line<'static>> {
+        if self.shell_mode == ShellMode::Onboarding {
+            return vec![
+                Line::from(truncate_text(&self.status_line, 220)),
+                Line::from(vec![
+                    Span::styled("Wizard: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::raw(self.onboarding_commands_line()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Step:   ", Style::default().fg(self.ui_theme.muted)),
+                    Span::raw(self.onboarding_step_footer_line()),
+                ]),
+            ];
+        }
         vec![
             Line::from(truncate_text(&self.status_line, 220)),
             Line::from(vec![
@@ -3548,6 +3725,33 @@ impl App {
         }
     }
 
+    fn onboarding_commands_line(&self) -> &'static str {
+        if self.onboarding.is_editing {
+            "type text | backspace delete | enter apply | esc cancel | q quit"
+        } else {
+            match self.onboarding.step {
+                OnboardingStep::Theme => "toggle ←/→ | enter next | esc exit | q quit",
+                OnboardingStep::Directory => match self.onboarding.phase {
+                    OnboardingPhase::Found(_) => "choose ↑/↓ | enter next | esc back | q quit",
+                    OnboardingPhase::DeepScanning(_) => "esc cancel scan | q quit",
+                    _ => "choose ↑/↓ | enter validate | d deep-scan | e edit | esc back",
+                },
+                OnboardingStep::Wago => "e edit key | enter next | esc back | q quit",
+                OnboardingStep::Settings => "choose ↑/↓ | change ←/→ | enter next | esc back",
+                OnboardingStep::Review => "enter finish | esc back | q quit",
+            }
+        }
+    }
+
+    fn onboarding_step_footer_line(&self) -> String {
+        format!(
+            "{} of {} · {}",
+            self.onboarding.step.index() + 1,
+            OnboardingStep::ALL.len(),
+            self.onboarding.step.label()
+        )
+    }
+
     fn scan_status_with_motion(&self) -> String {
         match self.scan_state {
             ScanState::Pending | ScanState::Running(_) => {
@@ -3561,12 +3765,198 @@ impl App {
         }
     }
 
-    fn onboarding_body(&self) -> Paragraph<'static> {
+    fn render_onboarding_header(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [left, right] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .areas(inner);
+
+        let left_widget = Paragraph::new(Line::from(vec![
+            Span::styled("🍋 ", Style::default().fg(self.ui_theme.brand_gold)),
+            Span::styled(
+                "LemonUp Setup",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        frame.render_widget(left_widget, left);
+
+        let right_widget = Paragraph::new(Line::from(Span::styled(
+            format!(
+                "Step {} of {}",
+                self.onboarding.step.index() + 1,
+                OnboardingStep::ALL.len()
+            ),
+            Style::default()
+                .fg(self.ui_theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right);
+        frame.render_widget(right_widget, right);
+    }
+
+    fn render_onboarding(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [stepper_area, content_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(12)])
+            .areas(inner);
+
+        let stepper = Paragraph::new(self.onboarding_stepper_lines()).wrap(Wrap { trim: false });
+        frame.render_widget(stepper, stepper_area);
+
+        let content = Paragraph::new(self.onboarding_content_lines()).wrap(Wrap { trim: false });
+        frame.render_widget(content, content_area);
+    }
+
+    fn onboarding_stepper_lines(&self) -> Vec<Line<'static>> {
+        let label_width = 16usize;
+        let segment_width = 6usize;
+        let marker_width = 4usize;
+        let progress_spans = OnboardingStep::ALL
+            .iter()
+            .enumerate()
+            .flat_map(|(index, step)| {
+                let step_index = step.index();
+                let is_completed = step_index < self.onboarding.step.index();
+                let is_current = *step == self.onboarding.step;
+                let marker = if is_completed {
+                    "✓"
+                } else if is_current {
+                    "●"
+                } else {
+                    "○"
+                };
+                let marker_style = if is_completed {
+                    Style::default()
+                        .fg(self.ui_theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_current {
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                };
+                let left_connector_style = if index == 0 {
+                    Style::default().fg(self.ui_theme.muted)
+                } else if index - 1 < self.onboarding.step.index() {
+                    Style::default().fg(self.ui_theme.success)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                };
+                let right_connector_style = if index >= OnboardingStep::ALL.len() - 1 {
+                    Style::default().fg(self.ui_theme.muted)
+                } else if index < self.onboarding.step.index() {
+                    Style::default().fg(self.ui_theme.success)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                };
+
+                let leading = if index == 0 {
+                    " ".repeat(segment_width)
+                } else {
+                    "━".repeat(segment_width)
+                };
+                let trailing = if index == OnboardingStep::ALL.len() - 1 {
+                    " ".repeat(segment_width)
+                } else {
+                    "━".repeat(segment_width)
+                };
+
+                vec![
+                    Span::styled(leading, left_connector_style),
+                    Span::styled(
+                        format!("{:^width$}", marker, width = marker_width),
+                        marker_style,
+                    ),
+                    Span::styled(trailing, right_connector_style),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        let labels = OnboardingStep::ALL
+            .iter()
+            .map(|step| {
+                let style = if step.index() < self.onboarding.step.index() {
+                    Style::default().fg(self.ui_theme.success)
+                } else if *step == self.onboarding.step {
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                };
+                Span::styled(
+                    format!("{:^width$}", step.label(), width = label_width),
+                    style,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        vec![Line::from(progress_spans), Line::from(labels)]
+    }
+
+    fn onboarding_content_lines(&self) -> Vec<Line<'static>> {
+        match self.onboarding.step {
+            OnboardingStep::Theme => self.onboarding_theme_lines(),
+            OnboardingStep::Directory => self.onboarding_directory_lines(),
+            OnboardingStep::Wago => self.onboarding_wago_lines(),
+            OnboardingStep::Settings => self.onboarding_settings_lines(),
+            OnboardingStep::Review => self.onboarding_review_lines(),
+        }
+    }
+
+    fn onboarding_theme_lines(&self) -> Vec<Line<'static>> {
+        let label = match self.onboarding.draft.theme {
+            ThemeMode::Dark => "Dark",
+            ThemeMode::Light => "Light",
+        };
+        vec![
+            Line::from(Span::styled(
+                "Choose your theme:",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("◀ ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    format!("[ {label} ]"),
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ▶", Style::default().fg(self.ui_theme.muted)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Use ←/→ to toggle. Enter continues.",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+        ]
+    }
+
+    fn onboarding_directory_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from("Locate your World of Warcraft AddOns folder"),
-            Line::from("This is an inline takeover inside the single-screen shell."),
-            Line::from(format!("Current path: {}", self.onboarding.input)),
-            Line::from(format!("Config present: {}", self.config_present)),
+            Line::from(Span::styled(
+                "Where is your WoW AddOns folder?",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(""),
         ];
 
@@ -3576,99 +3966,248 @@ impl App {
             }
             OnboardingPhase::QuickChecking => {
                 lines.push(Line::from("Checking common install locations..."));
-                lines.push(Line::from(
-                    "This runs automatically before deeper scanning.",
-                ));
             }
             OnboardingPhase::Ready => {
-                lines.push(Line::from("No WoW install selected yet."));
-                lines.push(Line::from(
-                    "j/k choose suggestion | enter validate | d deep scan | e edit",
-                ));
                 if let Some(warning) = self.profile_warning() {
                     lines.push(Line::from(Span::styled(
                         warning,
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(self.ui_theme.warning),
                     )));
+                    lines.push(Line::from(""));
                 }
-                for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
-                    let prefix = if self.onboarding.selected_suggestion == Some(index) {
-                        "›"
-                    } else {
-                        " "
-                    };
-                    lines.push(Line::from(format!("{prefix} {suggestion}")));
-                }
-            }
-            OnboardingPhase::DeepScanning(progress) => {
                 lines.push(Line::from(format!(
-                    "Deep scanning... ({} directories checked)",
-                    progress.dirs_scanned
+                    "Current path: {}",
+                    self.onboarding.input
                 )));
-                lines.push(Line::from(progress.current_path.clone()));
-                lines.push(Line::from("Esc cancels immediately."));
-            }
-            OnboardingPhase::Found(found) => {
-                lines.push(Line::from("Found a retail WoW AddOns folder."));
-                lines.push(Line::from(found.path.clone()));
-                lines.push(Line::from("Verified using install artifacts."));
-                if self.is_guarded_path(Path::new(&found.path)) {
-                    lines.push(Line::from(Span::styled(
-                        "Warning: this matches the default profile target; use a sandbox path instead.",
-                        Style::default().fg(Color::Red),
-                    )));
+                lines.push(Line::from(""));
+                for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
+                    let selected = self.onboarding.selected_suggestion == Some(index);
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            Style::default().fg(self.ui_theme.highlight),
+                        ),
+                        Span::styled(
+                            suggestion.clone(),
+                            if selected {
+                                Style::default().fg(self.ui_theme.highlight)
+                            } else {
+                                Style::default().fg(self.ui_theme.info)
+                            },
+                        ),
+                    ]));
                 }
                 lines.push(Line::from(""));
-
-                for (index, label) in [
-                    "Use this path",
-                    "Scan another location",
-                    "Edit path manually",
-                ]
-                .iter()
-                .enumerate()
-                {
-                    let prefix = if found.selected_action == index {
-                        "›"
-                    } else {
-                        " "
-                    };
-                    lines.push(Line::from(format!("{prefix} {label}")));
+                lines.push(Line::from(Span::styled(
+                    "Enter validates. d runs a deep scan. e edits the path manually.",
+                    Style::default().fg(self.ui_theme.muted),
+                )));
+            }
+            OnboardingPhase::DeepScanning(progress) => {
+                lines.push(Line::from(Span::styled(
+                    format!("Scanning... {} directories checked", progress.dirs_scanned),
+                    Style::default().fg(self.ui_theme.warning),
+                )));
+                lines.push(Line::from(progress.current_path.clone()));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Esc cancels the deep scan.",
+                    Style::default().fg(self.ui_theme.muted),
+                )));
+            }
+            OnboardingPhase::Found(found) => {
+                lines.push(Line::from(vec![
+                    Span::styled("✓ Detected: ", Style::default().fg(self.ui_theme.success)),
+                    Span::styled(found.path.clone(), Style::default().fg(self.ui_theme.info)),
+                ]));
+                lines.push(Line::from(""));
+                for (index, label) in ["Use this path", "Enter different path"].iter().enumerate() {
+                    let selected = found.selected_action == index;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            Style::default().fg(self.ui_theme.highlight),
+                        ),
+                        Span::styled(
+                            (*label).to_string(),
+                            if selected {
+                                Style::default()
+                                    .fg(self.ui_theme.highlight)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(self.ui_theme.info)
+                            },
+                        ),
+                    ]));
                 }
             }
             OnboardingPhase::Error(message) => {
-                lines.push(Line::from(format!("Validation or scan failed: {message}")));
-                lines.push(Line::from(
-                    "Enter validate | d deep scan | e edit | esc clear",
-                ));
+                lines.push(Line::from(Span::styled(
+                    format!("Validation failed: {message}"),
+                    Style::default().fg(self.ui_theme.warning),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Edit the path, pick another suggestion, or scan again.",
+                    Style::default().fg(self.ui_theme.muted),
+                )));
             }
             OnboardingPhase::Cancelled => {
-                lines.push(Line::from("Deep scan cancelled."));
-                lines.push(Line::from(
-                    "Choose a different root, edit the path, or scan again.",
-                ));
+                lines.push(Line::from(Span::styled(
+                    "Deep scan cancelled.",
+                    Style::default().fg(self.ui_theme.warning),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Pick another root or edit the path manually.",
+                    Style::default().fg(self.ui_theme.muted),
+                )));
             }
         }
 
         if self.onboarding.is_editing {
             lines.push(Line::from(""));
-            lines.push(Line::from("Editing mode active."));
-            lines.push(Line::from(
-                "Type a path, Backspace to delete, Enter validate, d deep scan, Esc stop editing.",
-            ));
+            lines.push(Line::from(Span::styled(
+                format!("Editing: {}", self.onboarding.input),
+                Style::default().fg(self.ui_theme.highlight),
+            )));
         }
 
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.ui_theme.border))
-                .title(Span::styled(
-                    "Setup",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
+        lines
+    }
+
+    fn onboarding_wago_lines(&self) -> Vec<Line<'static>> {
+        let value = self.onboarding.wago_api_key_value();
+        vec![
+            Line::from(Span::styled(
+                "Connect Wago (optional)",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                if value.is_empty() {
+                    "No API key configured yet."
+                } else {
+                    "API key saved in draft."
+                },
+                Style::default().fg(self.ui_theme.info),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Key: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    if value.is_empty() {
+                        "<empty>".to_string()
+                    } else {
+                        format!("set ({} chars)", value.len())
+                    },
+                    Style::default().fg(self.ui_theme.highlight),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                if self.onboarding.is_editing {
+                    "Editing active. Type the key, Enter applies, Esc cancels."
+                } else {
+                    "Press e to edit, or Enter to continue without a key."
+                },
+                Style::default().fg(self.ui_theme.muted),
+            )),
+        ]
+    }
+
+    fn onboarding_settings_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Choose your core settings:",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+
+        for field in OnboardingSettingsField::ALL {
+            let selected = field == self.onboarding.settings_selection;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(self.ui_theme.highlight),
+                ),
+                Span::styled(
+                    format!("{:<18}", field.label()),
+                    if selected {
+                        Style::default()
+                            .fg(self.ui_theme.highlight)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.ui_theme.info)
+                    },
+                ),
+                Span::styled(
+                    self.onboarding_setting_value(field),
+                    Style::default().fg(self.ui_theme.panel_title),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Use ↑/↓ to choose a setting. ←/→ changes the value. Enter continues.",
+            Style::default().fg(self.ui_theme.muted),
+        )));
+        lines
+    }
+
+    fn onboarding_review_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(Span::styled(
+                "Review your setup:",
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!(
+                "Theme: {}",
+                match self.onboarding.draft.theme {
+                    ThemeMode::Dark => "dark",
+                    ThemeMode::Light => "light",
+                }
+            )),
+            Line::from(format!("AddOns path: {}", self.onboarding.input)),
+            Line::from(format!(
+                "Wago: {}",
+                if self.onboarding.wago_api_key_value().is_empty() {
+                    "not configured".to_string()
+                } else {
+                    format!(
+                        "configured ({} chars)",
+                        self.onboarding.wago_api_key_value().len()
+                    )
+                }
+            )),
+            Line::from(format!("Back up WTF: {}", self.onboarding.draft.backup_wtf)),
+            Line::from(format!(
+                "Backup retention: {}",
+                self.onboarding.draft.backup_retention
+            )),
+            Line::from(format!(
+                "Show libraries: {}",
+                self.onboarding.draft.show_libs
+            )),
+            Line::from(format!(
+                "Default screen: {}",
+                self.onboarding_setting_value(OnboardingSettingsField::DefaultScreen)
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Enter saves the config and starts the first scan. Esc goes back.",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+        ]
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -4187,6 +4726,9 @@ impl App {
                 lines.push(self.overlay_hint_line(
                     "Only curated settings are editable here. Addon dir and runtime intervals stay read-only.",
                 ));
+                lines.push(self.overlay_hint_line(
+                    "Use 'Run onboarding again' to reopen the location finder manually.",
+                ));
             }
             DetailMode::Backup => {
                 lines.push(self.overlay_section_title("Backup now"));
@@ -4464,6 +5006,23 @@ impl App {
                 DefaultScreen::Config => "config".to_string(),
                 DefaultScreen::WagoSearch => "wago_search".to_string(),
             },
+            ConfigField::RunOnboardingAgain => "press Enter".to_string(),
+        }
+    }
+
+    fn onboarding_setting_value(&self, field: OnboardingSettingsField) -> String {
+        match field {
+            OnboardingSettingsField::BackupWtf => self.onboarding.draft.backup_wtf.to_string(),
+            OnboardingSettingsField::BackupRetention => {
+                self.onboarding.draft.backup_retention.to_string()
+            }
+            OnboardingSettingsField::ShowLibs => self.onboarding.draft.show_libs.to_string(),
+            OnboardingSettingsField::DefaultScreen => match self.onboarding.draft.default_screen {
+                DefaultScreen::Manage => "manage".to_string(),
+                DefaultScreen::Install => "install".to_string(),
+                DefaultScreen::Config => "config".to_string(),
+                DefaultScreen::WagoSearch => "wago_search".to_string(),
+            },
         }
     }
 
@@ -4508,7 +5067,7 @@ impl App {
         if self.is_guarded_path(path) {
             self.with_base_status("found default profile target | choose another location")
         } else {
-            self.with_base_status("found WoW installation | select action with j/k, enter confirm")
+            self.with_base_status("found WoW installation | choose an action, then press enter")
         }
     }
 
@@ -5303,7 +5862,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardRow,
         DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState, OverlayKind,
         PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
@@ -5315,7 +5874,9 @@ mod tests {
     use crate::backup::{BackupEntry, BackupRunOutcome};
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
-    use crate::onboarding::{FoundAction, FoundState, OnboardingPhase, OnboardingState};
+    use crate::onboarding::{
+        FoundAction, FoundState, OnboardingPhase, OnboardingState, OnboardingStep,
+    };
     use crate::update::LiveUpdateSummary;
     use crate::wago::{WagoInstallInspection, WagoSearchResult};
     use lemonup_core::{
@@ -5808,6 +6369,37 @@ mod tests {
             }
             ConfigLoad::Missing(_) => panic!("config should have been written"),
         }
+    }
+
+    #[test]
+    fn config_onboarding_field_reenters_location_finder_with_current_path() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.shell_ui.overlay.active = Some(OverlayKind::Config);
+        app.effective_addon_dir = Some(PathBuf::from(
+            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::RunOnboardingAgain)
+            .expect("onboarding field index");
+
+        let actions = app.update(AppMessage::ConfigToggleSelected);
+        assert!(matches!(actions[0], AppAction::ReenterOnboarding));
+        assert!(matches!(actions[1], AppAction::SetStatus(_)));
+
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert_eq!(app.shell_mode, ShellMode::Onboarding);
+        assert_eq!(app.dashboard.detail_mode, DetailMode::Overview);
+        assert_eq!(app.shell_ui.overlay.active, None);
+        assert_eq!(
+            app.onboarding.input,
+            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+        );
+        assert!(matches!(app.onboarding.phase, OnboardingPhase::Ready));
     }
 
     #[test]
@@ -6691,6 +7283,7 @@ mod tests {
         let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.input =
             "C:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns".to_string();
+        app.onboarding.step = OnboardingStep::Directory;
         app.onboarding.phase = OnboardingPhase::Found(FoundState {
             path: app.onboarding.input.clone(),
             selected_action: 0,
@@ -6699,9 +7292,38 @@ mod tests {
         let actions = app.update(AppMessage::OnboardingFoundConfirm);
         assert_eq!(
             actions,
-            vec![AppAction::SaveAddonDir(PathBuf::from(
-                "C:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns"
-            ))]
+            vec![
+                AppAction::SetOnboardingState(
+                    app.onboarding.apply_directory_to_draft().next_step()
+                ),
+                AppAction::SetStatus(
+                    app.with_base_status("directory confirmed | step 3/5 Wago setup")
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn onboarding_edit_mode_treats_command_letters_as_input() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding = app.onboarding.begin_directory_editing();
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('d'))),
+            vec![AppMessage::OnboardingInputChar('d')]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::OnboardingInputChar('q')]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::OnboardingValidateInput]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::OnboardingStopEditing]
         );
     }
 
@@ -6768,7 +7390,7 @@ mod tests {
         );
         assert_eq!(
             app.onboarding_found_state(path).selected_found_action(),
-            FoundAction::ScanAnotherLocation
+            FoundAction::EnterDifferentPath
         );
     }
 
@@ -6783,9 +7405,11 @@ mod tests {
             )),
         );
 
-        app.apply(AppAction::SaveAddonDir(PathBuf::from(
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(PathBuf::from(
             "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
-        )));
+        ));
+        app.apply(AppAction::SaveOnboardingConfig(config));
 
         assert_eq!(app.shell_mode, ShellMode::Onboarding);
         assert!(matches!(app.onboarding.phase, OnboardingPhase::Error(_)));

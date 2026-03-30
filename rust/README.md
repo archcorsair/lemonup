@@ -101,3 +101,18 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - `Install`, `Search`, `Update`, `Config`, and `Backup` now open through the overlay host
   - the header uses a smooth fruit-style gradient logo treatment inspired by v1
   - current gap is a deeper overlay revamp/polish pass, not overlay routing
+
+## Current Onboarding Checkpoint
+
+- onboarding is now a dedicated fullscreen stepper wizard
+- current implemented steps:
+  - Theme
+  - Directory
+  - Wago
+  - Settings
+  - Review
+- the Directory step reuses the validated Rust location-finder logic:
+  - quick-check
+  - manual path edit
+  - deep scan with progress and cancel
+- config `Run onboarding again` re-enters the wizard with current values prefilled

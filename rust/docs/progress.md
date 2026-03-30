@@ -31,10 +31,16 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 ### Onboarding and safety rails
 
-- Location Finder onboarding flow
+- stepper-style onboarding wizard
 - auto-detect first
 - editable root
 - deep scan with progress and cancel
+- steps:
+  - Theme
+  - Directory
+  - Wago
+  - Settings
+  - Review
 - strict `--addon-dir <path>` validation
 - non-default profile guard against targeting the default/prod AddOns path
 - profile-isolated sandbox mode via `--profile <name>`

@@ -39,11 +39,12 @@ pub enum AppAction {
     CollapseAllDashboardRelationships,
     CollapseDashboardExpanded,
     SetDetailMode(DetailMode),
+    ReenterOnboarding,
     SetOnboardingState(OnboardingState),
     StartOnboardingQuickCheck,
     StartOnboardingDeepScan(PathBuf),
     CancelOnboardingScan,
-    SaveAddonDir(PathBuf),
+    SaveOnboardingConfig(AppConfig),
     StartAddonScan(PathBuf),
     StartDashboardDelete {
         addon_dir: PathBuf,

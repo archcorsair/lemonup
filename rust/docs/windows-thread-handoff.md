@@ -54,7 +54,7 @@ Implemented, committed, and pushed:
 - Ratatui app shell
 - panic-safe terminal restore
 - typed event/action flow
-- onboarding Location Finder
+- onboarding stepper wizard
 - profile-isolated sandbox mode via `--profile <name>`
 - strict `--addon-dir <path>` precondition
 - non-default profile guard against using the default/prod AddOns path
@@ -176,14 +176,22 @@ Keep these stable unless the user asks to revisit them.
 - Do **not** spend time re-evaluating the whole v1 codebase unless the user explicitly asks.
 
 ### Scan/onboarding UX contract
-Preserve the v1 scan experience, with the refined single-screen Location Finder flow:
-- auto-detect first
-- editable search root
-- deep scan with live progress and cancel
-- success actions:
-  - `Use this path`
-  - `Scan another location`
-  - `Edit path manually`
+Preserve the v1 setup spirit, now through a dedicated fullscreen stepper wizard:
+- top-left `LemonUp Setup` header with small lemon icon
+- top-right `Step X of 5`
+- slim steps:
+  - `Theme`
+  - `Directory`
+  - `Wago`
+  - `Settings`
+  - `Review`
+- directory step keeps the proven location-finder behavior:
+  - auto-detect first
+  - editable search root
+  - deep scan with live progress and cancel
+  - success actions:
+    - `Use this path`
+    - `Enter different path`
 
 ### CLI override rule
 - `--addon-dir` is **strict**, not a hint.
