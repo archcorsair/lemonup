@@ -147,6 +147,11 @@ Implemented, committed, and pushed:
   - shimmer is used for action text only; the logo remains static
   - adaptive tick now drops to `100ms` only during active animation/job states and otherwise stays at `250ms`
   - false-positive same-version updates from leading `v` prefixes and lost GitHub commit metadata are fixed
+- footer control dock is implemented and user-verified:
+  - footer is now a fixed two-line split rail rather than a titled status panel
+  - left rail stays quiet by default and only shows meaningful progress, results, errors, or explicit selection summaries
+  - right rail shows grouped command hints with sticky context emphasis and keypress pulse feedback
+  - footer copy is deliberately humanized; internal/debug-style summaries are suppressed
 
 ## Recent Important Commits
 

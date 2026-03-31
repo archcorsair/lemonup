@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
@@ -43,9 +43,6 @@ use crate::wago::{
 };
 use time::{Duration, OffsetDateTime};
 
-const DASHBOARD_COMMANDS_LINE: &str =
-    "nav j/k | inspect enter | select space/a/esc | tree l/h/[/] | actions c/u/x/y/n/z";
-const DASHBOARD_MODES_LINE: &str = "modes o overview | i install | s search | , config | b backup";
 const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
@@ -128,6 +125,61 @@ impl MotionState {
 struct ShellUiState {
     overlay: OverlayState,
     motion: MotionState,
+    footer_pulse: Option<FooterKeyPulse>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FooterKeyPulse {
+    hint: FooterHintId,
+    expires_at_tick: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterHintTier {
+    Primary,
+    Secondary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterHintId {
+    Nav,
+    Inspect,
+    Select,
+    Clear,
+    Tree,
+    Check,
+    Update,
+    Delete,
+    Undo,
+    Install,
+    Search,
+    Config,
+    Backup,
+    Confirm,
+    Cancel,
+    Close,
+    Edit,
+    Run,
+    Toggle,
+    SettingsNav,
+    ThemeToggle,
+    Next,
+    Back,
+    DeepScan,
+    Validate,
+    Fields,
+    Results,
+    Change,
+    Save,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FooterCommandHint {
+    id: FooterHintId,
+    key: &'static str,
+    label: &'static str,
+    tier: FooterHintTier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1506,6 +1558,9 @@ impl App {
             };
 
             let messages = self.messages_for_event(event);
+            if let Some(pulse) = self.footer_pulse_for_event(event, &messages) {
+                self.apply(AppAction::SetFooterKeyPulse(Some(pulse)));
+            }
             for message in messages {
                 let actions = self.update(message);
                 for action in actions {
@@ -1618,6 +1673,214 @@ impl App {
             }
             TerminalEvent::Key(key) => self.messages_for_key(key),
             TerminalEvent::Mouse(mouse) => self.messages_for_mouse(mouse),
+        }
+    }
+
+    fn footer_pulse_for_event(
+        &self,
+        event: TerminalEvent,
+        messages: &[AppMessage],
+    ) -> Option<FooterKeyPulse> {
+        if messages.is_empty() {
+            return None;
+        }
+
+        let TerminalEvent::Key(key) = event else {
+            return None;
+        };
+
+        self.footer_hint_for_key(key).map(|hint| FooterKeyPulse {
+            hint,
+            expires_at_tick: self.shell_ui.motion.tick_count + 2,
+        })
+    }
+
+    fn footer_hint_for_key(&self, key: KeyEvent) -> Option<FooterHintId> {
+        if self.shell_mode == ShellMode::Onboarding {
+            if self.onboarding.is_editing {
+                return match key.code {
+                    KeyCode::Enter => Some(FooterHintId::Save),
+                    KeyCode::Esc => Some(FooterHintId::Cancel),
+                    KeyCode::Backspace => Some(FooterHintId::Back),
+                    _ => None,
+                };
+            }
+
+            return match self.onboarding.step {
+                OnboardingStep::Theme => match key.code {
+                    KeyCode::Left | KeyCode::Right => Some(FooterHintId::ThemeToggle),
+                    KeyCode::Enter => Some(FooterHintId::Next),
+                    KeyCode::Esc => Some(FooterHintId::Cancel),
+                    _ => None,
+                },
+                OnboardingStep::Directory => match self.onboarding.phase {
+                    OnboardingPhase::Found(_) => match key.code {
+                        KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
+                            Some(FooterHintId::Nav)
+                        }
+                        KeyCode::Enter => Some(FooterHintId::Next),
+                        KeyCode::Esc => Some(FooterHintId::Back),
+                        _ => None,
+                    },
+                    OnboardingPhase::DeepScanning(_) => match key.code {
+                        KeyCode::Esc => Some(FooterHintId::Cancel),
+                        _ => None,
+                    },
+                    _ => match key.code {
+                        KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
+                            Some(FooterHintId::Nav)
+                        }
+                        KeyCode::Enter => Some(FooterHintId::Validate),
+                        KeyCode::Char('d') => Some(FooterHintId::DeepScan),
+                        KeyCode::Char('e') => Some(FooterHintId::Edit),
+                        KeyCode::Esc => Some(FooterHintId::Back),
+                        _ => None,
+                    },
+                },
+                OnboardingStep::Wago => match key.code {
+                    KeyCode::Char('e') => Some(FooterHintId::Edit),
+                    KeyCode::Enter => Some(FooterHintId::Next),
+                    KeyCode::Esc => Some(FooterHintId::Back),
+                    _ => None,
+                },
+                OnboardingStep::Settings => match key.code {
+                    KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
+                        Some(FooterHintId::SettingsNav)
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                        Some(FooterHintId::Change)
+                    }
+                    KeyCode::Enter => Some(FooterHintId::Next),
+                    KeyCode::Esc => Some(FooterHintId::Back),
+                    _ => None,
+                },
+                OnboardingStep::Review => match key.code {
+                    KeyCode::Enter => Some(FooterHintId::Next),
+                    KeyCode::Esc => Some(FooterHintId::Back),
+                    _ => None,
+                },
+            };
+        }
+
+        if self.dashboard.pending_delete_folders().is_some()
+            || self.pending_wago_install_confirmation.is_some()
+        {
+            return match key.code {
+                KeyCode::Char('y') => Some(FooterHintId::Confirm),
+                KeyCode::Char('n') | KeyCode::Esc => Some(FooterHintId::Cancel),
+                _ => None,
+            };
+        }
+
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+            return match key.code {
+                KeyCode::Esc => Some(FooterHintId::Close),
+                _ => None,
+            };
+        }
+
+        if self.shell_ui.overlay.active.is_some() {
+            return match self.dashboard.detail_mode {
+                DetailMode::Install => {
+                    if self.install_pane.is_editing {
+                        match key.code {
+                            KeyCode::Enter => Some(FooterHintId::Save),
+                            KeyCode::Esc => Some(FooterHintId::Cancel),
+                            _ => None,
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('e') => Some(FooterHintId::Edit),
+                            KeyCode::Enter => Some(FooterHintId::Run),
+                            KeyCode::Esc => Some(FooterHintId::Close),
+                            _ => None,
+                        }
+                    }
+                }
+                DetailMode::Search => {
+                    if self.search_pane.is_editing {
+                        match key.code {
+                            KeyCode::Enter => Some(FooterHintId::Save),
+                            KeyCode::Esc => Some(FooterHintId::Cancel),
+                            KeyCode::Backspace => Some(FooterHintId::Back),
+                            _ => None,
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('e') | KeyCode::Char('/') => Some(FooterHintId::Edit),
+                            KeyCode::Down
+                            | KeyCode::Up
+                            | KeyCode::Char('j')
+                            | KeyCode::Char('k') => Some(FooterHintId::Results),
+                            KeyCode::Enter => Some(FooterHintId::Install),
+                            KeyCode::Esc => Some(FooterHintId::Close),
+                            _ => None,
+                        }
+                    }
+                }
+                DetailMode::Update => match key.code {
+                    KeyCode::Char('u') | KeyCode::Char('r') => Some(FooterHintId::Update),
+                    KeyCode::Char('c') | KeyCode::Char('v') => Some(FooterHintId::Check),
+                    KeyCode::Esc => Some(FooterHintId::Close),
+                    _ => None,
+                },
+                DetailMode::Config => {
+                    if self.config_pane.edit.is_some() {
+                        match key.code {
+                            KeyCode::Enter => Some(FooterHintId::Save),
+                            KeyCode::Esc => Some(FooterHintId::Cancel),
+                            KeyCode::Backspace => Some(FooterHintId::Back),
+                            _ => None,
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Down
+                            | KeyCode::Up
+                            | KeyCode::Char('j')
+                            | KeyCode::Char('k') => Some(FooterHintId::Fields),
+                            KeyCode::Enter => Some(FooterHintId::Toggle),
+                            KeyCode::Char('e') => Some(FooterHintId::Edit),
+                            KeyCode::Char('s') => Some(FooterHintId::Save),
+                            KeyCode::Char('n') => Some(FooterHintId::Reset),
+                            KeyCode::Esc => Some(FooterHintId::Close),
+                            _ => None,
+                        }
+                    }
+                }
+                DetailMode::Backup => match key.code {
+                    KeyCode::Char('r') | KeyCode::Enter => Some(FooterHintId::Run),
+                    KeyCode::Esc => Some(FooterHintId::Close),
+                    _ => None,
+                },
+                DetailMode::Overview => match key.code {
+                    KeyCode::Esc => Some(FooterHintId::Close),
+                    _ => None,
+                },
+            };
+        }
+
+        match key.code {
+            KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
+                Some(FooterHintId::Nav)
+            }
+            KeyCode::Enter => Some(FooterHintId::Inspect),
+            KeyCode::Char(' ') | KeyCode::Char('a') => Some(FooterHintId::Select),
+            KeyCode::Esc => Some(FooterHintId::Clear),
+            KeyCode::Right
+            | KeyCode::Left
+            | KeyCode::Char('l')
+            | KeyCode::Char('h')
+            | KeyCode::Char(']')
+            | KeyCode::Char('[') => Some(FooterHintId::Tree),
+            KeyCode::Char('c') => Some(FooterHintId::Check),
+            KeyCode::Char('u') => Some(FooterHintId::Update),
+            KeyCode::Char('x') => Some(FooterHintId::Delete),
+            KeyCode::Char('z') => Some(FooterHintId::Undo),
+            KeyCode::Char('i') => Some(FooterHintId::Install),
+            KeyCode::Char('s') | KeyCode::Char('/') => Some(FooterHintId::Search),
+            KeyCode::Char(',') => Some(FooterHintId::Config),
+            KeyCode::Char('b') => Some(FooterHintId::Backup),
+            _ => None,
         }
     }
 
@@ -2937,9 +3200,10 @@ impl App {
                     AppAction::SetDashboardJobUi(None),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
-                        &format!(
-                            "check complete: live {}, cached {}, errors {}",
-                            outcome.live_checked, outcome.cached, outcome.errors
+                        &dashboard_check_status_message(
+                            outcome.live_checked,
+                            outcome.cached,
+                            outcome.errors,
                         ),
                     )),
                 ],
@@ -3081,7 +3345,15 @@ impl App {
             AppAction::Quit => self.quit_requested = true,
             AppAction::AdvanceMotionTick => {
                 self.shell_ui.motion = self.shell_ui.motion.advance();
+                if self
+                    .shell_ui
+                    .footer_pulse
+                    .is_some_and(|pulse| self.shell_ui.motion.tick_count >= pulse.expires_at_tick)
+                {
+                    self.shell_ui.footer_pulse = None;
+                }
             }
+            AppAction::SetFooterKeyPulse(pulse) => self.shell_ui.footer_pulse = pulse,
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
             }
@@ -3567,12 +3839,7 @@ impl App {
                 }
             }
         };
-        let footer_height =
-            if self.shell_mode == ShellMode::Dashboard && self.dashboard.job_ui().is_some() {
-                5
-            } else {
-                4
-            };
+        let footer_height = 4;
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -3617,20 +3884,58 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
-        let footer = Paragraph::new(self.footer_lines())
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.ui_theme.border))
-                    .title(Span::styled(
-                        "Status",
-                        Style::default()
-                            .fg(self.ui_theme.panel_title)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-            );
-        frame.render_widget(footer, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let padded = if inner.width > 8 {
+            inner.inner(Margin {
+                horizontal: 2,
+                vertical: 0,
+            })
+        } else {
+            inner
+        };
+
+        let command_lines = self.footer_command_lines();
+        let status_lines = self.footer_status_lines();
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(padded);
+
+        let right_width = command_lines
+            .iter()
+            .map(|line| self.footer_hint_line_width(line) as u16)
+            .max()
+            .unwrap_or(0)
+            .min(padded.width.saturating_sub(20));
+
+        for (index, hints) in command_lines.iter().enumerate() {
+            let row = rows[index];
+            let [left, _, right] = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Fill(1),
+                    Constraint::Length(if right_width > 0 { 3 } else { 0 }),
+                    Constraint::Length(right_width),
+                ])
+                .areas(row);
+
+            let status = Paragraph::new(status_lines[index].clone())
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(status, left);
+
+            if !hints.is_empty() {
+                let commands = Paragraph::new(self.footer_hint_line(hints))
+                    .alignment(Alignment::Right)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(commands, right);
+            }
+        }
     }
 
     fn render_overlay_host(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -3880,43 +4185,6 @@ impl App {
         }
     }
 
-    fn footer_lines(&self) -> Vec<Line<'static>> {
-        if self.shell_mode == ShellMode::Onboarding {
-            return vec![
-                Line::from(truncate_text(&self.status_line, 220)),
-                Line::from(vec![
-                    Span::styled("Wizard: ", Style::default().fg(self.ui_theme.muted)),
-                    Span::raw(self.onboarding_commands_line()),
-                ]),
-                Line::from(vec![
-                    Span::styled("Step:   ", Style::default().fg(self.ui_theme.muted)),
-                    Span::raw(self.onboarding_step_footer_line()),
-                ]),
-            ];
-        }
-        if let Some(job_line) = self.dashboard_job_footer_line() {
-            return vec![
-                job_line,
-                Line::from(truncate_text(&self.status_line, 220)),
-                Line::from(vec![
-                    Span::styled("Commands: ", Style::default().fg(self.ui_theme.muted)),
-                    Span::raw(self.dashboard_commands_line()),
-                ]),
-            ];
-        }
-        vec![
-            Line::from(truncate_text(&self.status_line, 220)),
-            Line::from(vec![
-                Span::styled("Commands: ", Style::default().fg(self.ui_theme.muted)),
-                Span::raw(self.dashboard_commands_line()),
-            ]),
-            Line::from(vec![
-                Span::styled("Panels:   ", Style::default().fg(self.ui_theme.muted)),
-                Span::raw(self.dashboard_panels_line()),
-            ]),
-        ]
-    }
-
     fn dashboard_surface_label(&self) -> &'static str {
         match self.shell_ui.overlay.active {
             Some(OverlayKind::Inspect) => "Inspect",
@@ -3924,70 +4192,669 @@ impl App {
         }
     }
 
-    fn dashboard_commands_line(&self) -> &'static str {
-        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
-            "overlay esc close | q quit"
-        } else if self.shell_ui.overlay.active.is_some() {
-            match self.dashboard.detail_mode {
-                DetailMode::Install => "overlay e edit | enter install | esc close | q quit",
-                DetailMode::Search => {
-                    "overlay e edit | j/k results | enter action | esc close | q quit"
-                }
-                DetailMode::Update => "overlay r update | v select-ready | esc close | q quit",
-                DetailMode::Config => {
-                    "overlay j/k | enter toggle | e edit | s save | n reset | esc close"
-                }
-                DetailMode::Backup => "overlay r run backup | esc close | q quit",
-                DetailMode::Overview => "overlay esc close | q quit",
-            }
-        } else {
-            match self.dashboard.detail_mode {
-                DetailMode::Overview => {
-                    "nav j/k | inspect enter | select space/a/esc | tree l/h/[/] | actions x/y/n/z"
-                }
-                DetailMode::Update => {
-                    "nav j/k | select space/a/esc | tree enter/h/[/] | actions x/y/n/z/r/v"
-                }
-                _ => DASHBOARD_COMMANDS_LINE,
-            }
+    fn footer_status_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.footer_primary_status_line(),
+            self.footer_secondary_status_line(),
+        ]
+    }
+
+    fn footer_primary_status_line(&self) -> Line<'static> {
+        if self.shell_mode == ShellMode::Dashboard
+            && let Some(job_line) = self.dashboard_job_footer_line()
+        {
+            return job_line;
+        }
+
+        Line::from(vec![Span::styled(
+            truncate_text(&self.footer_status_text(), 120),
+            Style::default().fg(self.ui_theme.info),
+        )])
+    }
+
+    fn footer_secondary_status_line(&self) -> Line<'static> {
+        Line::from(vec![Span::styled(
+            truncate_text(&self.footer_secondary_status_text(), 120),
+            Style::default().fg(self.ui_theme.muted),
+        )])
+    }
+
+    fn footer_status_text(&self) -> String {
+        match self.shell_mode {
+            ShellMode::Dashboard => self.dashboard_footer_status_text(),
+            ShellMode::Onboarding => self.onboarding_footer_status_text(),
         }
     }
 
-    fn dashboard_panels_line(&self) -> &'static str {
-        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
-            "inspect overlay"
-        } else if self.shell_ui.overlay.active.is_some() {
-            "task overlay"
-        } else {
-            DASHBOARD_MODES_LINE
+    fn footer_secondary_status_text(&self) -> String {
+        match self.shell_mode {
+            ShellMode::Dashboard => self.dashboard_footer_secondary_text(),
+            ShellMode::Onboarding => String::new(),
         }
     }
 
-    fn onboarding_commands_line(&self) -> &'static str {
-        if self.onboarding.is_editing {
-            "type text | backspace delete | enter apply | esc cancel | q quit"
+    fn dashboard_footer_status_text(&self) -> String {
+        if let Some(summary) = self.sanitized_footer_status_text() {
+            return summary;
+        }
+
+        String::new()
+    }
+
+    fn dashboard_footer_secondary_text(&self) -> String {
+        if self.shell_ui.overlay.active.is_none() {
+            let selected = self.dashboard.selected_parent_count();
+            if selected > 0 {
+                return format!("{selected} selected");
+            }
+        }
+
+        String::new()
+    }
+
+    fn onboarding_footer_status_text(&self) -> String {
+        if let Some(summary) = self.sanitized_footer_status_text() {
+            return summary;
+        }
+
+        String::new()
+    }
+
+    fn sanitized_footer_status_text(&self) -> Option<String> {
+        let mut parts: Vec<String> = self
+            .status_line
+            .split('|')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .filter(|part| !part.starts_with("profile "))
+            .map(ToString::to_string)
+            .collect();
+
+        if self.shell_mode == ShellMode::Dashboard
+            && parts
+                .first()
+                .is_some_and(|first| *first == self.dashboard_surface_label())
+        {
+            parts.remove(0);
+        }
+
+        let summary = parts.join(" · ");
+        self.humanized_footer_status(&summary)
+    }
+
+    fn humanized_footer_status(&self, summary: &str) -> Option<String> {
+        if summary.is_empty()
+            || summary.starts_with("terminal resized")
+            || summary.contains("selection moved")
+            || summary.contains("overlay closed")
+            || summary.contains("inspect overlay open")
+            || summary.contains("tree state updated")
+            || summary.contains("dashboard ready")
+            || summary.contains("location finder")
+            || summary.contains("theme updated")
+            || summary.contains("setting updated")
+            || summary.contains("settings selection moved")
+            || summary.contains("config field selection moved")
+            || summary.contains("result selection moved")
+        {
+            None
         } else {
-            match self.onboarding.step {
-                OnboardingStep::Theme => "toggle ←/→ | enter next | esc exit | q quit",
+            Some(summary.to_string())
+        }
+    }
+
+    fn footer_command_lines(&self) -> Vec<Vec<FooterCommandHint>> {
+        let hints = self.footer_command_hints();
+        if hints.is_empty() {
+            return vec![Vec::new(), Vec::new()];
+        }
+
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        for hint in hints {
+            match hint.tier {
+                FooterHintTier::Primary => primary.push(hint),
+                FooterHintTier::Secondary => secondary.push(hint),
+            }
+        }
+
+        if secondary.is_empty() {
+            return vec![primary, Vec::new()];
+        }
+
+        vec![primary, secondary]
+    }
+
+    fn footer_command_hints(&self) -> Vec<FooterCommandHint> {
+        let primary = FooterHintTier::Primary;
+        let secondary = FooterHintTier::Secondary;
+
+        if self.shell_mode == ShellMode::Onboarding {
+            if self.onboarding.is_editing {
+                return vec![
+                    FooterCommandHint {
+                        id: FooterHintId::Save,
+                        key: "enter",
+                        label: "apply",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Cancel,
+                        key: "esc",
+                        label: "cancel",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Back,
+                        key: "backspace",
+                        label: "delete",
+                        tier: secondary,
+                    },
+                ];
+            }
+
+            return match self.onboarding.step {
+                OnboardingStep::Theme => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::ThemeToggle,
+                        key: "←/→",
+                        label: "theme",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Next,
+                        key: "enter",
+                        label: "next",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Cancel,
+                        key: "esc",
+                        label: "exit",
+                        tier: secondary,
+                    },
+                ],
                 OnboardingStep::Directory => match self.onboarding.phase {
-                    OnboardingPhase::Found(_) => "choose ↑/↓ | enter next | esc back | q quit",
-                    OnboardingPhase::DeepScanning(_) => "esc cancel scan | q quit",
-                    _ => "choose ↑/↓ | enter validate | d deep-scan | e edit | esc back",
+                    OnboardingPhase::Found(_) => vec![
+                        FooterCommandHint {
+                            id: FooterHintId::Nav,
+                            key: "j/k",
+                            label: "choice",
+                            tier: primary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::Next,
+                            key: "enter",
+                            label: "next",
+                            tier: primary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::Back,
+                            key: "esc",
+                            label: "back",
+                            tier: secondary,
+                        },
+                    ],
+                    OnboardingPhase::DeepScanning(_) => vec![FooterCommandHint {
+                        id: FooterHintId::Cancel,
+                        key: "esc",
+                        label: "cancel scan",
+                        tier: primary,
+                    }],
+                    _ => vec![
+                        FooterCommandHint {
+                            id: FooterHintId::Nav,
+                            key: "j/k",
+                            label: "choice",
+                            tier: primary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::Validate,
+                            key: "enter",
+                            label: "validate",
+                            tier: primary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::DeepScan,
+                            key: "d",
+                            label: "deep scan",
+                            tier: primary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::Edit,
+                            key: "e",
+                            label: "edit",
+                            tier: secondary,
+                        },
+                        FooterCommandHint {
+                            id: FooterHintId::Back,
+                            key: "esc",
+                            label: "back",
+                            tier: secondary,
+                        },
+                    ],
                 },
-                OnboardingStep::Wago => "e edit key | enter next | esc back | q quit",
-                OnboardingStep::Settings => "choose ↑/↓ | change ←/→ | enter next | esc back",
-                OnboardingStep::Review => "enter finish | esc back | q quit",
-            }
+                OnboardingStep::Wago => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::Edit,
+                        key: "e",
+                        label: "edit key",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Next,
+                        key: "enter",
+                        label: "next",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Back,
+                        key: "esc",
+                        label: "back",
+                        tier: secondary,
+                    },
+                ],
+                OnboardingStep::Settings => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::SettingsNav,
+                        key: "j/k",
+                        label: "settings",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Change,
+                        key: "←/→",
+                        label: "change",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Next,
+                        key: "enter",
+                        label: "next",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Back,
+                        key: "esc",
+                        label: "back",
+                        tier: secondary,
+                    },
+                ],
+                OnboardingStep::Review => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::Next,
+                        key: "enter",
+                        label: "finish",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Back,
+                        key: "esc",
+                        label: "back",
+                        tier: primary,
+                    },
+                ],
+            };
         }
+
+        if self.dashboard.pending_delete_folders().is_some()
+            || self.pending_wago_install_confirmation.is_some()
+        {
+            return vec![
+                FooterCommandHint {
+                    id: FooterHintId::Confirm,
+                    key: "y",
+                    label: "confirm",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Cancel,
+                    key: "n/esc",
+                    label: "cancel",
+                    tier: primary,
+                },
+            ];
+        }
+
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+            return vec![FooterCommandHint {
+                id: FooterHintId::Close,
+                key: "esc",
+                label: "close",
+                tier: primary,
+            }];
+        }
+
+        if self.shell_ui.overlay.active.is_some() {
+            return match self.dashboard.detail_mode {
+                DetailMode::Install => {
+                    if self.install_pane.is_editing {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Save,
+                                key: "enter",
+                                label: "apply",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Cancel,
+                                key: "esc",
+                                label: "cancel",
+                                tier: primary,
+                            },
+                        ]
+                    } else {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Edit,
+                                key: "e",
+                                label: "edit",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Run,
+                                key: "enter",
+                                label: "install",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Close,
+                                key: "esc",
+                                label: "close",
+                                tier: secondary,
+                            },
+                        ]
+                    }
+                }
+                DetailMode::Search => {
+                    if self.search_pane.is_editing {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Save,
+                                key: "enter",
+                                label: "search",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Cancel,
+                                key: "esc",
+                                label: "cancel",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Back,
+                                key: "backspace",
+                                label: "delete",
+                                tier: secondary,
+                            },
+                        ]
+                    } else {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Edit,
+                                key: "e",
+                                label: "edit",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Results,
+                                key: "j/k",
+                                label: "results",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Install,
+                                key: "enter",
+                                label: "install",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Close,
+                                key: "esc",
+                                label: "close",
+                                tier: secondary,
+                            },
+                        ]
+                    }
+                }
+                DetailMode::Update => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::Update,
+                        key: "u",
+                        label: "update",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Check,
+                        key: "c",
+                        label: "check",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Close,
+                        key: "esc",
+                        label: "close",
+                        tier: secondary,
+                    },
+                ],
+                DetailMode::Config => {
+                    if self.config_pane.edit.is_some() {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Save,
+                                key: "enter",
+                                label: "apply",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Cancel,
+                                key: "esc",
+                                label: "cancel",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Back,
+                                key: "backspace",
+                                label: "delete",
+                                tier: secondary,
+                            },
+                        ]
+                    } else {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Fields,
+                                key: "j/k",
+                                label: "fields",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Toggle,
+                                key: "enter",
+                                label: "toggle",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Edit,
+                                key: "e",
+                                label: "edit",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Save,
+                                key: "s",
+                                label: "save",
+                                tier: secondary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Reset,
+                                key: "n",
+                                label: "reset",
+                                tier: secondary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Close,
+                                key: "esc",
+                                label: "close",
+                                tier: secondary,
+                            },
+                        ]
+                    }
+                }
+                DetailMode::Backup => vec![
+                    FooterCommandHint {
+                        id: FooterHintId::Run,
+                        key: "r",
+                        label: "backup",
+                        tier: primary,
+                    },
+                    FooterCommandHint {
+                        id: FooterHintId::Close,
+                        key: "esc",
+                        label: "close",
+                        tier: secondary,
+                    },
+                ],
+                DetailMode::Overview => vec![FooterCommandHint {
+                    id: FooterHintId::Close,
+                    key: "esc",
+                    label: "close",
+                    tier: primary,
+                }],
+            };
+        }
+
+        vec![
+            FooterCommandHint {
+                id: FooterHintId::Nav,
+                key: "j/k",
+                label: "nav",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Inspect,
+                key: "enter",
+                label: "inspect",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Select,
+                key: "space/a",
+                label: "select",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Clear,
+                key: "esc",
+                label: "clear",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Tree,
+                key: "l/h/[/]",
+                label: "tree",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Check,
+                key: "c",
+                label: "check",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Update,
+                key: "u",
+                label: "update",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Delete,
+                key: "x",
+                label: "delete",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Undo,
+                key: "z",
+                label: "undo",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Install,
+                key: "i",
+                label: "install",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Search,
+                key: "/",
+                label: "search",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Config,
+                key: ",",
+                label: "config",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Backup,
+                key: "b",
+                label: "backup",
+                tier: secondary,
+            },
+        ]
     }
 
-    fn onboarding_step_footer_line(&self) -> String {
-        format!(
-            "{} of {} · {}",
-            self.onboarding.step.index() + 1,
-            OnboardingStep::ALL.len(),
-            self.onboarding.step.label()
+    fn footer_hint_line(&self, hints: &[FooterCommandHint]) -> Line<'static> {
+        let mut spans = Vec::new();
+        for (index, hint) in hints.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(
+                    "  ·  ",
+                    Style::default().fg(self.ui_theme.muted),
+                ));
+            }
+            let (key_style, label_style) = self.footer_hint_styles(hint.id);
+            spans.push(Span::styled(hint.key, key_style));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(hint.label, label_style));
+        }
+        Line::from(spans)
+    }
+
+    fn footer_hint_styles(&self, id: FooterHintId) -> (Style, Style) {
+        if self
+            .shell_ui
+            .footer_pulse
+            .is_some_and(|pulse| pulse.hint == id)
+        {
+            return (
+                Style::default()
+                    .fg(self.ui_theme.brand_gold)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+
+        (
+            Style::default()
+                .fg(self.ui_theme.info)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(self.ui_theme.panel_title),
         )
+    }
+
+    fn footer_hint_line_width(&self, hints: &[FooterCommandHint]) -> usize {
+        hints
+            .iter()
+            .enumerate()
+            .map(|(index, hint)| {
+                let base = hint.key.len() + 1 + hint.label.len();
+                if index == 0 { base } else { base + 5 }
+            })
+            .sum()
     }
 
     fn scan_status_with_motion(&self) -> String {
@@ -4035,16 +4902,12 @@ impl App {
     fn dashboard_job_footer_line(&self) -> Option<Line<'static>> {
         let job = self.dashboard.job_ui()?;
         let accent = job.kind.accent(self.ui_theme);
-        let completed = job.current_index.saturating_sub(1);
         let label = format!(
             "{} {}",
             self.shell_ui.motion.spinner_frame(),
             job.kind.label()
         );
-        let mut spans = vec![Span::styled(
-            "Job: ",
-            Style::default().fg(self.ui_theme.muted),
-        )];
+        let mut spans = Vec::new();
         spans.extend(shimmer_text_spans(
             &label,
             accent,
@@ -4053,15 +4916,14 @@ impl App {
         ));
         spans.extend([
             Span::styled(
-                format!("  {} of {}", job.current_index, job.total),
+                format!("  {}/{}", job.current_index, job.total),
                 Style::default().fg(self.ui_theme.info),
             ),
-            Span::styled(
-                format!("  ·  {} done", completed),
-                Style::default().fg(self.ui_theme.success),
-            ),
             Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
-            Span::raw(truncate_text(&job.current_addon, 64)),
+            Span::styled(
+                truncate_text(&job.current_addon, 48),
+                Style::default().fg(accent),
+            ),
         ]);
         Some(Line::from(spans))
     }
@@ -5948,15 +6810,78 @@ fn dashboard_update_run_summary_from_live(summary: LiveUpdateSummary) -> Dashboa
 }
 
 fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
-    format!(
-        "selected update complete: updated {}, up_to_date {}, skipped_manual {}, skipped_unmanaged {}, skipped_unsupported {}, errors {}, sync complete",
-        summary.updated_addons,
-        summary.up_to_date,
-        summary.skipped_manual,
-        summary.skipped_unmanaged,
-        summary.skipped_unsupported,
-        summary.errors
-    )
+    let headline = if summary.updated_addons > 0 {
+        format!("Updated {}", addon_count_label(summary.updated_addons))
+    } else if summary.up_to_date > 0
+        && summary.skipped_manual == 0
+        && summary.skipped_unmanaged == 0
+        && summary.skipped_unsupported == 0
+        && summary.errors == 0
+    {
+        "Already up to date".to_string()
+    } else {
+        "No changes".to_string()
+    };
+
+    let mut details = Vec::new();
+    if summary.up_to_date > 0 {
+        details.push(format!("{} current", summary.up_to_date));
+    }
+    if summary.skipped_manual > 0 {
+        details.push(format!("{} manual skipped", summary.skipped_manual));
+    }
+    if summary.skipped_unmanaged > 0 {
+        details.push(format!("{} unmanaged skipped", summary.skipped_unmanaged));
+    }
+    if summary.skipped_unsupported > 0 {
+        details.push(format!(
+            "{} unsupported skipped",
+            summary.skipped_unsupported
+        ));
+    }
+    if summary.errors > 0 {
+        details.push(format!(
+            "{} error{}",
+            summary.errors,
+            if summary.errors == 1 { "" } else { "s" }
+        ));
+    }
+
+    if details.is_empty() {
+        headline
+    } else {
+        format!("{headline} · {}", details.join(" · "))
+    }
+}
+
+fn dashboard_check_status_message(live_checked: usize, cached: usize, errors: usize) -> String {
+    let mut details = Vec::new();
+    if live_checked > 0 {
+        details.push(format!("{live_checked} live"));
+    }
+    if cached > 0 {
+        details.push(format!("{cached} cached"));
+    }
+    if errors > 0 {
+        details.push(format!(
+            "{errors} error{}",
+            if errors == 1 { "" } else { "s" }
+        ));
+    }
+
+    if details.is_empty() {
+        "Nothing to check".to_string()
+    } else {
+        format!("Check complete · {}", details.join(" · "))
+    }
+}
+
+fn addon_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 addon".to_string()
+    } else {
+        format!("{count} addons")
+    }
 }
 
 fn dashboard_row_name_line(row: &DashboardRow, selected: bool) -> Line<'static> {
@@ -6383,11 +7308,11 @@ mod tests {
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
         DashboardJobUiState, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
-        InstallPaneState, MotionState, OverlayKind, PendingWagoInstallRequest, ScanState,
-        SearchPaneState, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
-        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
-        child_row_prefix, dashboard_item_version_label, dashboard_item_version_line,
-        summarize_owned_folders, visible_search_result_window,
+        FooterHintId, FooterKeyPulse, InstallPaneState, MotionState, OverlayKind,
+        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
+        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
+        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        dashboard_item_version_line, summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -6638,6 +7563,69 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('['))),
             vec![AppMessage::DashboardCollapseAllRelationships]
         );
+    }
+
+    #[test]
+    fn footer_status_text_hides_redundant_resize_noise() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.status_line = "terminal resized to 132x45 | profile manual-smoke".to_string();
+
+        assert_eq!(app.footer_status_text(), "");
+    }
+
+    #[test]
+    fn footer_status_text_shows_selection_count_when_helpful() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::ToggleDashboardSelection);
+
+        assert_eq!(app.footer_status_text(), "selected 1 addon");
+    }
+
+    #[test]
+    fn footer_command_lines_split_on_narrow_width() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        let wide = app.footer_command_lines();
+        let narrow = app.footer_command_lines();
+
+        assert_eq!(wide.len(), 2);
+        assert_eq!(narrow.len(), 2);
+        assert!(wide[0].iter().any(|hint| hint.id == FooterHintId::Check));
+        assert!(wide[1].iter().any(|hint| hint.id == FooterHintId::Config));
+        assert!(narrow[0].iter().any(|hint| hint.id == FooterHintId::Check));
+        assert!(narrow[1].iter().any(|hint| hint.id == FooterHintId::Config));
+    }
+
+    #[test]
+    fn recognized_key_sets_matching_footer_pulse() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let event = TerminalEvent::Key(KeyEvent::from(KeyCode::Char('c')));
+        let messages = app.messages_for_event(event);
+
+        let pulse = app.footer_pulse_for_event(event, &messages);
+
+        assert_eq!(
+            pulse,
+            Some(FooterKeyPulse {
+                hint: FooterHintId::Check,
+                expires_at_tick: app.shell_ui.motion.tick_count + 2,
+            })
+        );
+    }
+
+    #[test]
+    fn footer_pulse_expires_after_motion_ticks() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetFooterKeyPulse(Some(FooterKeyPulse {
+            hint: FooterHintId::Check,
+            expires_at_tick: 2,
+        })));
+
+        app.apply(AppAction::AdvanceMotionTick);
+        assert!(app.shell_ui.footer_pulse.is_some());
+
+        app.apply(AppAction::AdvanceMotionTick);
+        assert!(app.shell_ui.footer_pulse.is_none());
     }
 
     #[test]
@@ -7701,10 +8689,9 @@ mod tests {
 
         assert_eq!(
             actions[6],
-            AppAction::SetStatus(app.dashboard_status_for(
-                DetailMode::Update,
-                "selected update complete: updated 0, up_to_date 0, skipped_manual 1, skipped_unmanaged 0, skipped_unsupported 0, errors 0, sync complete",
-            ))
+            AppAction::SetStatus(
+                app.dashboard_status_for(DetailMode::Update, "No changes · 1 manual skipped",)
+            )
         );
     }
 

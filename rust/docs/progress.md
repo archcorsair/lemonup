@@ -83,11 +83,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - inline overview check/update actions with live progress feedback and adaptive tick
+  - footer control-dock redesign with split rails, key pulses, and quieter humanized status copy
 - current focus:
-  - checkpoint inline `c`/`u` overview actions
+  - checkpoint the footer redesign
   - preserve shimmer for action text only; logo shimmer removed
-  - then return later for a deeper overlay revamp/polish pass
+  - then return later for deeper overlay and onboarding polish
   - then backup restore workflows
 
 ## Newly Completed
@@ -95,6 +95,12 @@ Current checkpoint state:
 These are implemented and manually verified in addition to the earlier chunks:
 
 - relationship-safe reconcile rules for managed parents
+- split-rail footer redesign:
+  - footer is now a fixed two-line control dock instead of a raw status/debug panel
+  - left rail stays quiet by default and only shows meaningful progress, results, or errors
+  - right rail shows grouped command hints with sticky context emphasis
+  - recognized keys now pulse the matching footer hint
+  - footer copy is humanized; internal strings like `selected update complete...` no longer surface verbatim
 - parent delete cascade through owned descendants
 - first tree-ready shell expansion and collapse for owned child rows
 - tightened MVP and drift-detection requirements in Rust docs

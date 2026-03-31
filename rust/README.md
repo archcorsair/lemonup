@@ -110,6 +110,7 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - the header uses a smooth fruit-style gradient logo treatment inspired by v1
   - header/footer action text shimmer during active jobs; logo stays static
   - adaptive tick is `250ms` idle and `100ms` during active animation/job states
+  - the footer is now a fixed two-line control dock with quiet left-rail feedback and grouped command hints on the right
   - current gap is a deeper overlay revamp/polish pass, not overlay routing
 
 ## Current Onboarding Checkpoint
