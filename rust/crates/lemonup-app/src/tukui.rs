@@ -562,9 +562,19 @@ fn validate_tukui_download_url(value: &str) -> Result<Url, String> {
 
 fn versions_match(installed: Option<&str>, remote: Option<&str>) -> bool {
     match (installed, remote) {
-        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        (Some(left), Some(right)) => normalize_version(left) == normalize_version(right),
         _ => false,
     }
+}
+
+fn normalize_version(value: &str) -> String {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(trimmed);
+    normalized.to_ascii_lowercase()
 }
 
 fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
@@ -701,7 +711,7 @@ fn rollback_updated_folders(
 mod tests {
     use super::{
         build_managed_tukui_record, canonical_install_folders, inspect_tukui_package_layout,
-        parse_tukui_target, update_downloaded_tukui_addon,
+        parse_tukui_target, update_downloaded_tukui_addon, versions_match,
     };
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -862,5 +872,12 @@ mod tests {
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("20.463"));
         assert_eq!(stored.source, SourceKind::Tukui);
+    }
+
+    #[test]
+    fn versions_match_ignores_leading_v_prefix() {
+        assert!(versions_match(Some("v15.10"), Some("15.10")));
+        assert!(versions_match(Some("15.10"), Some("V15.10")));
+        assert!(!versions_match(Some("v15.09"), Some("15.10")));
     }
 }

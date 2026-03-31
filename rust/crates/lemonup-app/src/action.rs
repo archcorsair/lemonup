@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::{
-    BackupPaneState, ConfigPaneState, DashboardUndoDeleteState, DashboardUpdateRunSummary,
-    DetailMode, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
-    WagoInstallConfirmation,
+    BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardUndoDeleteState,
+    DashboardUpdateRunSummary, DetailMode, InstallPaneState, PendingWagoInstallRequest,
+    SearchPaneState, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -22,6 +22,7 @@ pub enum AppAction {
     SetDashboardDriftReport(Option<DriftReport>),
     SetDashboardUndoInProgress(bool),
     SetDashboardUpdateInProgress(bool),
+    SetDashboardJobUi(Option<DashboardJobUiState>),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
     SetSelectedDashboardParents(Vec<String>),
     SetInstallPaneState(InstallPaneState),
@@ -58,6 +59,12 @@ pub enum AppAction {
         addon_dir: PathBuf,
         folders: Vec<String>,
         wago_api_key: Option<String>,
+        check_interval_secs: u64,
+    },
+    StartDashboardCheckSelected {
+        folders: Vec<String>,
+        wago_api_key: Option<String>,
+        check_interval_secs: u64,
     },
     StartBackupNow {
         addon_dir: PathBuf,

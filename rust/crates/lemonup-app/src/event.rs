@@ -1,3 +1,7 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,15 +18,20 @@ pub enum TerminalEvent {
 
 pub struct EventHandler {
     receiver: mpsc::UnboundedReceiver<TerminalEvent>,
+    tick_rate_ms: Arc<AtomicU64>,
 }
 
 impl EventHandler {
     pub fn new(tick_rate: Duration) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let tick_rate_ms = Arc::new(AtomicU64::new(tick_rate.as_millis() as u64));
+        let worker_tick_rate_ms = tick_rate_ms.clone();
 
         thread::spawn(move || {
             let mut last_tick = Instant::now();
             loop {
+                let tick_rate =
+                    Duration::from_millis(worker_tick_rate_ms.load(Ordering::Relaxed).max(1));
                 let timeout = tick_rate.saturating_sub(last_tick.elapsed());
                 match event::poll(timeout) {
                     Ok(true) => match event::read() {
@@ -57,7 +66,15 @@ impl EventHandler {
             }
         });
 
-        Self { receiver }
+        Self {
+            receiver,
+            tick_rate_ms,
+        }
+    }
+
+    pub fn set_tick_rate(&self, tick_rate: Duration) {
+        self.tick_rate_ms
+            .store(tick_rate.as_millis().max(1) as u64, Ordering::Relaxed);
     }
 
     pub async fn next(&mut self) -> Option<TerminalEvent> {

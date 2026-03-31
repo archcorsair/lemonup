@@ -729,9 +729,19 @@ fn release_version(addon: &WagoAddonSummary, stability: WagoStability) -> Option
 
 fn versions_match(installed: Option<&str>, remote: Option<&str>) -> bool {
     match (installed, remote) {
-        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        (Some(left), Some(right)) => normalize_version(left) == normalize_version(right),
         _ => false,
     }
+}
+
+fn normalize_version(value: &str) -> String {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(trimmed);
+    normalized.to_ascii_lowercase()
 }
 
 fn build_wago_client() -> Result<Client, String> {
@@ -1636,6 +1646,7 @@ mod tests {
     fn versions_match_ignores_case_and_whitespace() {
         assert!(versions_match(Some(" 5.21.1 "), Some("5.21.1")));
         assert!(versions_match(Some("V5.21.1"), Some("v5.21.1")));
+        assert!(versions_match(Some("v5.21.1"), Some("5.21.1")));
         assert!(!versions_match(Some("5.21.0"), Some("5.21.1")));
     }
 }

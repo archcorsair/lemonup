@@ -6,6 +6,7 @@ mod drift;
 mod event;
 mod github;
 mod onboarding;
+mod shimmer;
 mod tui;
 mod tukui;
 mod update;
@@ -96,7 +97,7 @@ fn configure_tracing() {
 async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::bootstrap(paths, runtime)?;
     let mut tui = Tui::enter()?;
-    let events = EventHandler::new(Duration::from_millis(250));
+    let events = EventHandler::new(Duration::from_millis(100));
     let result = app.run(tui.terminal_mut(), events).await;
     tui.exit()?;
     result?;
@@ -226,6 +227,7 @@ async fn run_update(
                 api_key.as_deref(),
                 force,
                 dry_run,
+                |_, _, _| {},
             )
             .await?;
             let summary = run.summary;

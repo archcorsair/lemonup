@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -30,24 +30,30 @@ use crate::onboarding::{
     FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
     OnboardingTaskEvent,
 };
+use crate::shimmer::{ShimmerConfig, shimmer_text_spans};
 use crate::tui::Backend;
-use crate::update::{CheckResult, LiveUpdateSummary, apply_live_updates};
+use crate::update::{
+    CheckResult, LiveUpdateSummary, apply_live_updates, build_update_checks,
+    refresh_live_update_checks,
+};
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
     inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
     search_wago_addons,
 };
+use time::{Duration, OffsetDateTime};
 
 const DASHBOARD_COMMANDS_LINE: &str =
-    "nav j/k | select space/a/esc | tree enter/h/[/] | actions x/y/n/z/r/v";
-const DASHBOARD_MODES_LINE: &str =
-    "modes o overview | i install | s search | u update | c config | b backup";
+    "nav j/k | inspect enter | select space/a/esc | tree l/h/[/] | actions c/u/x/y/n/z";
+const DASHBOARD_MODES_LINE: &str = "modes o overview | i install | s search | , config | b backup";
 const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
 ];
 const LOGO_COMPACT: &str = "LEMONUP";
 const MOTION_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
+const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
+const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellLayoutMode {
@@ -230,6 +236,7 @@ enum AppMessage {
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
     DashboardUndoDelete,
+    DashboardRunCheckSelected,
     DashboardRunUpdateSelected,
     DashboardSelectRefreshableUpdates,
     DashboardToggleSelected,
@@ -294,6 +301,8 @@ enum AppTaskEvent {
     AddonScanFinished(std::result::Result<AddonScanOutcome, String>),
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
     DashboardUndoFinished(std::result::Result<DashboardUndoOutcome, String>),
+    DashboardJobProgress(DashboardJobUiState),
+    DashboardCheckFinished(std::result::Result<DashboardCheckOutcome, String>),
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
     BackupFinished(std::result::Result<BackupRunOutcome, String>),
     WagoSearchFinished(std::result::Result<WagoSearchOutcome, String>),
@@ -317,6 +326,15 @@ struct DashboardDeleteOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardCheckOutcome {
+    addons: Vec<AddonRecord>,
+    total: usize,
+    live_checked: usize,
+    cached: usize,
+    errors: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardUpdateOutcome {
     summary: LiveUpdateSummary,
     sync: AddonScanOutcome,
@@ -332,6 +350,37 @@ struct WagoSearchOutcome {
 struct WagoInstallOutcome {
     summary: WagoInstallSummary,
     sync: AddonScanOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardJobKind {
+    #[allow(dead_code)]
+    Check,
+    Update,
+}
+
+impl DashboardJobKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Check => "Checking",
+            Self::Update => "Updating",
+        }
+    }
+
+    fn accent(self, theme: UiTheme) -> Color {
+        match self {
+            Self::Check => theme.info,
+            Self::Update => theme.warning,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DashboardJobUiState {
+    kind: DashboardJobKind,
+    current_index: usize,
+    total: usize,
+    current_addon: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -675,6 +724,7 @@ struct DashboardState {
     pending_delete_folders: Option<Vec<String>>,
     drift_report: Option<DriftReport>,
     update_in_progress: bool,
+    job_ui: Option<DashboardJobUiState>,
     last_update_summary: Option<DashboardUpdateRunSummary>,
 }
 
@@ -729,6 +779,7 @@ impl DashboardState {
             pending_delete_folders: None,
             drift_report: None,
             update_in_progress: false,
+            job_ui: None,
             last_update_summary: None,
         };
         state.rebuild_rows();
@@ -1003,6 +1054,26 @@ impl DashboardState {
         folders
     }
 
+    fn actionable_parent_targets(&self) -> Result<Vec<String>, &'static str> {
+        let selected = self.selected_parent_folders();
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
+
+        match self.selected_row() {
+            Some(DashboardRow {
+                kind: DashboardRowKind::Parent,
+                folder,
+                ..
+            }) => Ok(vec![folder.clone()]),
+            Some(DashboardRow {
+                kind: DashboardRowKind::OwnedChild { .. },
+                ..
+            }) => Err("focus a parent row or select one or more parent addons first"),
+            None => Err("focus a parent row or select one or more parent addons first"),
+        }
+    }
+
     fn set_selected_parents(&mut self, folders: Vec<String>) {
         self.selected_parents = folders
             .into_iter()
@@ -1036,6 +1107,14 @@ impl DashboardState {
 
     fn update_in_progress(&self) -> bool {
         self.update_in_progress
+    }
+
+    fn set_job_ui(&mut self, job_ui: Option<DashboardJobUiState>) {
+        self.job_ui = job_ui;
+    }
+
+    fn job_ui(&self) -> Option<&DashboardJobUiState> {
+        self.job_ui.as_ref()
     }
 
     fn set_last_update_summary(&mut self, summary: Option<DashboardUpdateRunSummary>) {
@@ -1419,6 +1498,7 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         while !self.quit_requested {
             self.process_background_events();
+            events.set_tick_rate(self.desired_tick_rate());
             terminal.draw(|frame| self.draw(frame))?;
 
             let Some(event) = events.next().await else {
@@ -1435,6 +1515,37 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn desired_tick_rate(&self) -> StdDuration {
+        if self.has_active_animation() {
+            ANIMATED_TICK_RATE
+        } else {
+            IDLE_TICK_RATE
+        }
+    }
+
+    fn has_active_animation(&self) -> bool {
+        if self.dashboard.job_ui().is_some() {
+            return true;
+        }
+
+        if matches!(self.scan_state, ScanState::Pending | ScanState::Running(_)) {
+            return true;
+        }
+
+        if self.shell_mode == ShellMode::Onboarding
+            && matches!(
+                self.onboarding.phase,
+                OnboardingPhase::Bootstrapping
+                    | OnboardingPhase::QuickChecking
+                    | OnboardingPhase::DeepScanning(_)
+            )
+        {
+            return true;
+        }
+
+        false
     }
 
     fn initial_status_line(&self) -> String {
@@ -1630,8 +1741,9 @@ impl App {
             KeyCode::Char('v') if self.dashboard.detail_mode == DetailMode::Update => {
                 vec![AppMessage::DashboardSelectRefreshableUpdates]
             }
-            KeyCode::Char('u') => vec![AppMessage::SetDetailMode(DetailMode::Update)],
-            KeyCode::Char('c') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
+            KeyCode::Char('u') => vec![AppMessage::DashboardRunUpdateSelected],
+            KeyCode::Char('c') => vec![AppMessage::DashboardRunCheckSelected],
+            KeyCode::Char(',') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
             _ => vec![],
         }
@@ -1983,6 +2095,32 @@ impl App {
                     ))]
                 }
             }
+            AppMessage::DashboardRunCheckSelected => {
+                match self.dashboard.actionable_parent_targets() {
+                    Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("{message} before checking for updates"),
+                    ))],
+                    Ok(folders) => {
+                        let target_len = folders.len();
+                        vec![
+                            AppAction::StartDashboardCheckSelected {
+                                folders,
+                                wago_api_key: self.wago_api_key.clone(),
+                                check_interval_secs: self.config_pane.draft.check_interval_secs,
+                            },
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                self.dashboard.detail_mode,
+                                &format!(
+                                    "checking {} addon{} for updates",
+                                    target_len,
+                                    plural_suffix(target_len)
+                                ),
+                            )),
+                        ]
+                    }
+                }
+            }
             AppMessage::DashboardRunUpdateSelected => {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -1995,29 +2133,32 @@ impl App {
                         "confirm or cancel the pending delete before applying selected updates",
                     ))]
                 } else {
-                    let selected = self.dashboard.selected_parent_folders();
-                    match (self.effective_addon_dir.clone(), selected.is_empty()) {
-                        (_, true) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    match (
+                        self.effective_addon_dir.clone(),
+                        self.dashboard.actionable_parent_targets(),
+                    ) {
+                        (_, Err(message)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
-                            "select one or more parent addons before applying selected updates",
+                            &format!("{message} before applying updates"),
                         ))],
-                        (None, false) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        (None, Ok(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
                             "addon directory is not configured",
                         ))],
-                        (Some(addon_dir), false) => {
-                            let selected_len = selected.len();
+                        (Some(addon_dir), Ok(folders)) => {
+                            let selected_len = folders.len();
                             vec![
                                 AppAction::SetDashboardUpdateInProgress(true),
                                 AppAction::StartDashboardUpdateSelected {
                                     addon_dir,
-                                    folders: selected,
+                                    folders,
                                     wago_api_key: self.wago_api_key.clone(),
+                                    check_interval_secs: self.config_pane.draft.check_interval_secs,
                                 },
                                 AppAction::SetStatus(self.dashboard_status_for(
                                     self.dashboard.detail_mode,
                                     &format!(
-                                        "applying updates for {} selected addon{}",
+                                        "updating {} addon{}",
                                         selected_len,
                                         plural_suffix(selected_len)
                                     ),
@@ -2778,6 +2919,37 @@ impl App {
                         &format!("undo delete failed: {error}"),
                     )),
                 ],
+                AppTaskEvent::DashboardJobProgress(progress) => vec![
+                    AppAction::SetDashboardJobUi(Some(progress.clone())),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "{} {} of {} | {}",
+                            progress.kind.label().to_ascii_lowercase(),
+                            progress.current_index,
+                            progress.total,
+                            progress.current_addon
+                        ),
+                    )),
+                ],
+                AppTaskEvent::DashboardCheckFinished(Ok(outcome)) => vec![
+                    AppAction::ReplaceDashboardAddons(outcome.addons),
+                    AppAction::SetDashboardJobUi(None),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!(
+                            "check complete: live {}, cached {}, errors {}",
+                            outcome.live_checked, outcome.cached, outcome.errors
+                        ),
+                    )),
+                ],
+                AppTaskEvent::DashboardCheckFinished(Err(error)) => vec![
+                    AppAction::SetDashboardJobUi(None),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("check failed: {error}"),
+                    )),
+                ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                     AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
@@ -2786,6 +2958,7 @@ impl App {
                         summary: outcome.sync.summary,
                     },
                     AppAction::SetDashboardUpdateInProgress(false),
+                    AppAction::SetDashboardJobUi(None),
                     AppAction::SetDashboardUpdateSummary(Some(
                         dashboard_update_run_summary_from_live(outcome.summary),
                     )),
@@ -2796,6 +2969,7 @@ impl App {
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
                     AppAction::SetDashboardUpdateInProgress(false),
+                    AppAction::SetDashboardJobUi(None),
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &format!("selected addon update failed: {error}"),
@@ -2939,6 +3113,9 @@ impl App {
             }
             AppAction::SetDashboardUpdateInProgress(in_progress) => {
                 self.dashboard.set_update_in_progress(in_progress);
+            }
+            AppAction::SetDashboardJobUi(job_ui) => {
+                self.dashboard.set_job_ui(job_ui);
             }
             AppAction::SetDashboardUpdateSummary(summary) => {
                 self.dashboard.set_last_update_summary(summary);
@@ -3210,6 +3387,7 @@ impl App {
                 addon_dir,
                 folders,
                 wago_api_key,
+                check_interval_secs,
             } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
@@ -3219,10 +3397,56 @@ impl App {
                         &addon_dir,
                         &folders,
                         wago_api_key,
+                        check_interval_secs,
+                        {
+                            let sender = sender.clone();
+                            move |kind, current_index, total, addon_name| {
+                                let _ = sender.send(AppTaskEvent::DashboardJobProgress(
+                                    DashboardJobUiState {
+                                        kind,
+                                        current_index,
+                                        total,
+                                        current_addon: addon_name,
+                                    },
+                                ));
+                            }
+                        },
                     )
                     .await;
 
                     let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
+                });
+            }
+            AppAction::StartDashboardCheckSelected {
+                folders,
+                wago_api_key,
+                check_interval_secs,
+            } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let result = run_dashboard_check_task(
+                        &state_db_file,
+                        &folders,
+                        wago_api_key,
+                        check_interval_secs,
+                        {
+                            let sender = sender.clone();
+                            move |kind, current_index, total, addon_name| {
+                                let _ = sender.send(AppTaskEvent::DashboardJobProgress(
+                                    DashboardJobUiState {
+                                        kind,
+                                        current_index,
+                                        total,
+                                        current_addon: addon_name,
+                                    },
+                                ));
+                            }
+                        },
+                    )
+                    .await;
+
+                    let _ = sender.send(AppTaskEvent::DashboardCheckFinished(result));
                 });
             }
             AppAction::StartBackupNow {
@@ -3334,15 +3558,27 @@ impl App {
         } else {
             match self.header_variant(mode) {
                 HeaderVariant::FullLogo => 7,
-                HeaderVariant::CompactLogo => 5,
+                HeaderVariant::CompactLogo => {
+                    if self.dashboard.job_ui().is_some() {
+                        7
+                    } else {
+                        5
+                    }
+                }
             }
         };
+        let footer_height =
+            if self.shell_mode == ShellMode::Dashboard && self.dashboard.job_ui().is_some() {
+                5
+            } else {
+                4
+            };
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(header_height),
                 Constraint::Min(12),
-                Constraint::Length(4),
+                Constraint::Length(footer_height),
             ])
             .areas(area);
         ShellFrame {
@@ -3549,6 +3785,9 @@ impl App {
                 ),
             ]),
         ];
+        if let Some(job_line) = self.dashboard_job_header_line() {
+            lines.push(job_line);
+        }
         if mode == ShellLayoutMode::Compact {
             return lines;
         }
@@ -3655,6 +3894,16 @@ impl App {
                 ]),
             ];
         }
+        if let Some(job_line) = self.dashboard_job_footer_line() {
+            return vec![
+                job_line,
+                Line::from(truncate_text(&self.status_line, 220)),
+                Line::from(vec![
+                    Span::styled("Commands: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::raw(self.dashboard_commands_line()),
+                ]),
+            ];
+        }
         vec![
             Line::from(truncate_text(&self.status_line, 220)),
             Line::from(vec![
@@ -3752,6 +4001,69 @@ impl App {
             }
             _ => self.scan_status_label(),
         }
+    }
+
+    fn dashboard_job_header_line(&self) -> Option<Line<'static>> {
+        let job = self.dashboard.job_ui()?;
+        let accent = job.kind.accent(self.ui_theme);
+        let label = format!(
+            "{} {}",
+            self.shell_ui.motion.spinner_frame(),
+            job.kind.label()
+        );
+        let mut spans = vec![
+            Span::styled(job.kind.label(), Style::default().fg(self.ui_theme.muted)),
+            Span::raw(" "),
+        ];
+        spans.extend(shimmer_text_spans(
+            &label,
+            accent,
+            Color::Rgb(255, 244, 214),
+            ShimmerConfig::action(),
+        ));
+        spans.extend([
+            Span::styled(
+                format!("  {}/{}", job.current_index, job.total),
+                Style::default().fg(self.ui_theme.info),
+            ),
+            Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(job.current_addon.clone(), Style::default().fg(accent)),
+        ]);
+        Some(Line::from(spans))
+    }
+
+    fn dashboard_job_footer_line(&self) -> Option<Line<'static>> {
+        let job = self.dashboard.job_ui()?;
+        let accent = job.kind.accent(self.ui_theme);
+        let completed = job.current_index.saturating_sub(1);
+        let label = format!(
+            "{} {}",
+            self.shell_ui.motion.spinner_frame(),
+            job.kind.label()
+        );
+        let mut spans = vec![Span::styled(
+            "Job: ",
+            Style::default().fg(self.ui_theme.muted),
+        )];
+        spans.extend(shimmer_text_spans(
+            &label,
+            accent,
+            Color::Rgb(255, 244, 214),
+            ShimmerConfig::action(),
+        ));
+        spans.extend([
+            Span::styled(
+                format!("  {} of {}", job.current_index, job.total),
+                Style::default().fg(self.ui_theme.info),
+            ),
+            Span::styled(
+                format!("  ·  {} done", completed),
+                Style::default().fg(self.ui_theme.success),
+            ),
+            Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
+            Span::raw(truncate_text(&job.current_addon, 64)),
+        ]);
+        Some(Line::from(spans))
     }
 
     fn render_onboarding_header(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -5111,12 +5423,18 @@ impl App {
             DashboardRowKind::OwnedChild { parent_folder } => item.folder == *parent_folder,
         });
         let is_child = matches!(row.kind, DashboardRowKind::OwnedChild { .. });
+        let active_job = self
+            .dashboard
+            .job_ui()
+            .filter(|job| job.current_addon == row.folder);
         let name = dashboard_row_name_line(row, selected);
         let version = if is_child {
             Line::from("")
         } else {
-            item.map(dashboard_item_version_line)
-                .unwrap_or_else(|| Line::from(""))
+            item.map(|item| {
+                dashboard_item_version_line(item, active_job, self.shell_ui.motion, self.ui_theme)
+            })
+            .unwrap_or_else(|| Line::from(""))
         };
         let author = if is_child {
             String::new()
@@ -5132,6 +5450,12 @@ impl App {
         };
         let row_style = if is_child {
             Style::default().fg(self.ui_theme.muted)
+        } else if let Some(job) = active_job {
+            let tint = match job.kind {
+                DashboardJobKind::Check => Color::Rgb(25, 41, 56),
+                DashboardJobKind::Update => Color::Rgb(48, 38, 28),
+            };
+            Style::default().bg(tint)
         } else if selected {
             Style::default().bg(Color::Rgb(28, 34, 48))
         } else {
@@ -5380,8 +5704,18 @@ async fn run_dashboard_update_task(
     addon_dir: &Path,
     folders: &[String],
     wago_api_key: Option<String>,
+    check_interval_secs: u64,
+    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
 ) -> std::result::Result<DashboardUpdateOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    preflight_stale_update_checks(
+        &mut database,
+        folders,
+        wago_api_key.as_deref(),
+        check_interval_secs,
+        &mut on_progress,
+    )
+    .await?;
     let summary = apply_live_updates(
         &mut database,
         addon_dir,
@@ -5389,6 +5723,9 @@ async fn run_dashboard_update_task(
         wago_api_key.as_deref(),
         false,
         false,
+        |current_index, total, addon_name| {
+            on_progress(DashboardJobKind::Update, current_index, total, addon_name)
+        },
     )
     .await
     .map_err(|error| error.to_string())?
@@ -5396,6 +5733,105 @@ async fn run_dashboard_update_task(
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
     Ok(DashboardUpdateOutcome { summary, sync })
+}
+
+async fn run_dashboard_check_task(
+    state_db_file: &Path,
+    folders: &[String],
+    wago_api_key: Option<String>,
+    check_interval_secs: u64,
+    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
+) -> std::result::Result<DashboardCheckOutcome, String> {
+    let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
+    let installed = database.list_addons().map_err(|error| error.to_string())?;
+    let stale = stale_target_selectors(&installed, folders, check_interval_secs);
+
+    for (index, folder) in stale.iter().enumerate() {
+        on_progress(
+            DashboardJobKind::Check,
+            index + 1,
+            stale.len(),
+            folder.clone(),
+        );
+        refresh_live_update_checks(
+            &mut database,
+            std::slice::from_ref(folder),
+            wago_api_key.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    let refreshed = database.list_addons().map_err(|error| error.to_string())?;
+    let results = build_update_checks(&refreshed, folders).map_err(|error| error.to_string())?;
+    let errors = results
+        .iter()
+        .filter(|result| result.status == UpdateStatus::Error)
+        .count();
+
+    Ok(DashboardCheckOutcome {
+        addons: refreshed,
+        total: folders.len(),
+        live_checked: stale.len(),
+        cached: folders.len().saturating_sub(stale.len()),
+        errors,
+    })
+}
+
+async fn preflight_stale_update_checks(
+    database: &mut StateDatabase,
+    folders: &[String],
+    wago_api_key: Option<&str>,
+    check_interval_secs: u64,
+    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
+) -> std::result::Result<(), String> {
+    let installed = database.list_addons().map_err(|error| error.to_string())?;
+    let stale = stale_target_selectors(&installed, folders, check_interval_secs);
+
+    for (index, folder) in stale.iter().enumerate() {
+        on_progress(
+            DashboardJobKind::Check,
+            index + 1,
+            stale.len(),
+            folder.clone(),
+        );
+        refresh_live_update_checks(database, std::slice::from_ref(folder), wago_api_key)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn stale_target_selectors(
+    installed: &[AddonRecord],
+    folders: &[String],
+    check_interval_secs: u64,
+) -> Vec<String> {
+    folders
+        .iter()
+        .filter_map(|folder| {
+            let addon = installed.iter().find(|addon| addon.folder == *folder)?;
+            if !is_remote_check_refreshable(addon.source)
+                || !is_check_stale(addon, check_interval_secs)
+            {
+                return None;
+            }
+            Some(folder.clone())
+        })
+        .collect()
+}
+
+fn is_remote_check_refreshable(source: SourceKind) -> bool {
+    !matches!(source, SourceKind::Manual)
+}
+
+fn is_check_stale(addon: &AddonRecord, check_interval_secs: u64) -> bool {
+    let Some(last_checked_at) = addon.last_checked_at else {
+        return true;
+    };
+    let interval = Duration::seconds(check_interval_secs.min(i64::MAX as u64) as i64);
+    OffsetDateTime::now_utc() - last_checked_at >= interval
 }
 
 fn sync_dashboard_state(
@@ -5427,6 +5863,7 @@ fn build_update_checks_for_dashboard(items: &[&DashboardItem]) -> Vec<CheckResul
             let mut addon = AddonRecord::new(&item.name, &item.folder, item.source);
             addon.version = item.version.clone();
             addon.remote_version = item.remote_version.clone();
+            addon.git_commit = item.git_commit.clone();
             let (status, message) = crate::update::determine_update_status(&addon);
             CheckResult {
                 addon_name: addon.folder,
@@ -5548,22 +5985,17 @@ fn dashboard_item_version_label(item: &DashboardItem) -> String {
             if let Some(commit) = item.git_commit.as_deref() {
                 return shorten_commit(commit);
             }
-            if item
-                .version
+            item.version
                 .as_deref()
-                .is_some_and(|value| value.trim_start().starts_with('@'))
-                && item
-                    .remote_version
-                    .as_deref()
-                    .is_some_and(looks_like_commit_hash)
-            {
-                return shorten_commit(item.remote_version.as_deref().unwrap_or_default());
-            }
-            item.version.clone().unwrap_or_else(|| {
-                item.remote_version
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string())
-            })
+                .filter(|value| !is_placeholder_version(value))
+                .map(|value| {
+                    if looks_like_commit_hash(value) {
+                        shorten_commit(value)
+                    } else {
+                        value.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string())
         }
         _ => item
             .version
@@ -5587,16 +6019,35 @@ fn dashboard_item_remote_label(item: &DashboardItem) -> Option<String> {
     }
 }
 
-fn dashboard_item_version_line(item: &DashboardItem) -> Line<'static> {
+fn dashboard_item_version_line(
+    item: &DashboardItem,
+    active_job: Option<&DashboardJobUiState>,
+    motion: MotionState,
+    ui_theme: UiTheme,
+) -> Line<'static> {
     let installed = truncate_text(&dashboard_item_version_label(item), 16);
     let installed_style = Style::default().fg(Color::Rgb(172, 182, 220));
+    let active_prefix = active_job.map(|job| {
+        vec![
+            Span::styled(
+                motion.spinner_frame(),
+                Style::default()
+                    .fg(job.kind.accent(ui_theme))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]
+    });
 
     if item.source == SourceKind::Manual {
-        return Line::from(Span::styled(installed, installed_style));
+        let mut spans = active_prefix.unwrap_or_default();
+        spans.push(Span::styled(installed, installed_style));
+        return Line::from(spans);
     }
 
     if !item.has_authoritative_owned_folders {
-        return Line::from(vec![
+        let mut spans = active_prefix.unwrap_or_default();
+        spans.extend([
             Span::styled(installed, installed_style),
             Span::raw(" "),
             Span::styled(
@@ -5606,16 +6057,22 @@ fn dashboard_item_version_line(item: &DashboardItem) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
+        return Line::from(spans);
     }
 
     match dashboard_item_update_status(item) {
-        UpdateStatus::UpToDate => Line::from(Span::styled(installed, installed_style)),
+        UpdateStatus::UpToDate => {
+            let mut spans = active_prefix.unwrap_or_default();
+            spans.push(Span::styled(installed, installed_style));
+            Line::from(spans)
+        }
         UpdateStatus::UpdateAvailable => {
             let remote = truncate_text(
                 &dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string()),
                 12,
             );
-            Line::from(vec![
+            let mut spans = active_prefix.unwrap_or_default();
+            spans.extend([
                 Span::styled(installed, installed_style),
                 Span::raw(" "),
                 Span::styled("→", Style::default().fg(Color::Yellow)),
@@ -5628,26 +6085,35 @@ fn dashboard_item_version_line(item: &DashboardItem) -> Line<'static> {
                 ),
                 Span::raw(" "),
                 Span::styled("📦", Style::default().fg(Color::Rgb(212, 175, 55))),
-            ])
+            ]);
+            Line::from(spans)
         }
-        UpdateStatus::Unknown => Line::from(vec![
-            Span::styled(installed, installed_style),
-            Span::raw(" "),
-            Span::styled(
-                "unknown",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        UpdateStatus::Error => Line::from(vec![
-            Span::styled(installed, installed_style),
-            Span::raw(" "),
-            Span::styled(
-                "error",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        UpdateStatus::Unknown => {
+            let mut spans = active_prefix.unwrap_or_default();
+            spans.extend([
+                Span::styled(installed, installed_style),
+                Span::raw(" "),
+                Span::styled(
+                    "unknown",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            Line::from(spans)
+        }
+        UpdateStatus::Error => {
+            let mut spans = active_prefix.unwrap_or_default();
+            spans.extend([
+                Span::styled(installed, installed_style),
+                Span::raw(" "),
+                Span::styled(
+                    "error",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            Line::from(spans)
+        }
     }
 }
 
@@ -5751,6 +6217,11 @@ fn looks_like_commit_hash(value: &str) -> bool {
         && trimmed
             .chars()
             .all(|character| character.is_ascii_hexdigit())
+}
+
+fn is_placeholder_version(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -5910,12 +6381,13 @@ mod tests {
 
     use super::{
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
-        ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardRow,
-        DashboardState, DashboardUpdateOutcome, DetailMode, InstallPaneState, OverlayKind,
-        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
-        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
-        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
-        dashboard_item_version_line, summarize_owned_folders, visible_search_result_window,
+        ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
+        DashboardJobUiState, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
+        InstallPaneState, MotionState, OverlayKind, PendingWagoInstallRequest, ScanState,
+        SearchPaneState, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
+        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
+        child_row_prefix, dashboard_item_version_label, dashboard_item_version_line,
+        summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -6107,6 +6579,18 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
             vec![AppMessage::SetDetailMode(DetailMode::Backup)]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('c'))),
+            vec![AppMessage::DashboardRunCheckSelected]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('u'))),
+            vec![AppMessage::DashboardRunUpdateSelected]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char(','))),
+            vec![AppMessage::SetDetailMode(DetailMode::Config)]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
@@ -6835,15 +7319,18 @@ mod tests {
     #[test]
     fn update_selected_requires_parent_selection() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Update;
+        app.dashboard.detail_mode = DetailMode::Overview;
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardExpanded);
+        app.dashboard.list_state.select(Some(2));
 
         let actions = app.update(AppMessage::DashboardRunUpdateSelected);
 
         assert_eq!(
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
-                DetailMode::Update,
-                "select one or more parent addons before applying selected updates",
+                DetailMode::Overview,
+                "focus a parent row or select one or more parent addons first before applying updates",
             ))]
         );
     }
@@ -6890,7 +7377,7 @@ mod tests {
     #[test]
     fn update_selected_starts_background_refresh_for_selected_parents() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Update;
+        app.dashboard.detail_mode = DetailMode::Overview;
         app.effective_addon_dir = Some(PathBuf::from(
             "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
         ));
@@ -6909,11 +7396,34 @@ mod tests {
                     ),
                     folders: vec!["Second".to_string()],
                     wago_api_key: Some("test-wago-key".to_string()),
+                    check_interval_secs: app.config_pane.draft.check_interval_secs,
                 },
-                AppAction::SetStatus(app.dashboard_status_for(
-                    DetailMode::Update,
-                    "applying updates for 1 selected addon",
-                )),
+                AppAction::SetStatus(
+                    app.dashboard_status_for(DetailMode::Overview, "updating 1 addon",)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_selected_starts_background_check_for_focused_parent() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Overview;
+        app.dashboard.list_state.select(Some(1));
+
+        let actions = app.update(AppMessage::DashboardRunCheckSelected);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::StartDashboardCheckSelected {
+                    folders: vec!["Second".to_string()],
+                    wago_api_key: Some("test-wago-key".to_string()),
+                    check_interval_secs: app.config_pane.draft.check_interval_secs,
+                },
+                AppAction::SetStatus(
+                    app.dashboard_status_for(DetailMode::Overview, "checking 1 addon for updates",)
+                ),
             ]
         );
     }
@@ -7129,7 +7639,7 @@ mod tests {
             })),
         ));
 
-        assert_eq!(actions.len(), 6);
+        assert_eq!(actions.len(), 7);
         assert!(matches!(actions[0], AppAction::ReplaceDashboardAddons(_)));
         assert!(matches!(
             actions[1],
@@ -7143,11 +7653,12 @@ mod tests {
             }
         );
         assert_eq!(actions[3], AppAction::SetDashboardUpdateInProgress(false));
+        assert_eq!(actions[4], AppAction::SetDashboardJobUi(None));
         assert!(matches!(
-            actions[4],
+            actions[5],
             AppAction::SetDashboardUpdateSummary(Some(_))
         ));
-        assert!(matches!(actions[5], AppAction::SetStatus(_)));
+        assert!(matches!(actions[6], AppAction::SetStatus(_)));
     }
 
     #[test]
@@ -7189,12 +7700,49 @@ mod tests {
         ));
 
         assert_eq!(
-            actions[5],
+            actions[6],
             AppAction::SetStatus(app.dashboard_status_for(
                 DetailMode::Update,
                 "selected update complete: updated 0, up_to_date 0, skipped_manual 1, skipped_unmanaged 0, skipped_unsupported 0, errors 0, sync complete",
             ))
         );
+    }
+
+    #[test]
+    fn dashboard_job_progress_event_sets_job_ui_state() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+                kind: DashboardJobKind::Update,
+                current_index: 2,
+                total: 3,
+                current_addon: "Second".to_string(),
+            }),
+        ));
+
+        assert!(matches!(actions[0], AppAction::SetDashboardJobUi(Some(_))));
+        assert!(matches!(actions[1], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn active_update_job_prefixes_spinner_into_version_cell() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.set_job_ui(Some(DashboardJobUiState {
+            kind: DashboardJobKind::Update,
+            current_index: 1,
+            total: 2,
+            current_addon: "Second".to_string(),
+        }));
+        let row = app
+            .dashboard
+            .rows
+            .iter()
+            .find(|row| row.folder == "Second")
+            .expect("second row");
+        let view = app.dashboard_table_row(row);
+        let rendered = view.version.to_string();
+        assert!(rendered.contains("⠋"));
+        assert!(rendered.contains("abcdef"));
     }
 
     #[test]
@@ -7281,14 +7829,14 @@ mod tests {
     }
 
     #[test]
-    fn github_version_label_falls_back_to_remote_commit_when_version_is_placeholder() {
+    fn github_version_label_uses_unknown_when_only_placeholder_metadata_is_available() {
         let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::GitHub);
         addon.version = Some("@project-version@".to_string());
         addon.remote_version = Some("abcdef1234567890".to_string());
         let dashboard = DashboardState::from_addons(vec![addon]);
 
         let item = dashboard.items.first().expect("dashboard item");
-        assert_eq!(dashboard_item_version_label(item), "abcdef1");
+        assert_eq!(dashboard_item_version_label(item), "unknown");
     }
 
     #[test]
@@ -7297,7 +7845,8 @@ mod tests {
         let dashboard = DashboardState::from_addons(vec![addon]);
 
         let item = dashboard.items.first().expect("dashboard item");
-        let rendered = dashboard_item_version_line(item);
+        let rendered =
+            dashboard_item_version_line(item, None, MotionState::default(), UiTheme::default());
         let text = rendered
             .spans
             .iter()

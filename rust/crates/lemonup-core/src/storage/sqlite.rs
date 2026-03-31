@@ -416,6 +416,9 @@ fn merge_scanned_addon(
 ) -> AddonRecord {
     let now = OffsetDateTime::now_utc();
     let kind_override = existing.is_some_and(|addon| addon.kind_override);
+    let merged_source = existing
+        .map(|addon| addon.source)
+        .unwrap_or(scanned_addon.source);
     let ownership_source = if preserve_existing_owned_folders {
         existing
             .expect("preserving owned folders requires existing addon")
@@ -448,13 +451,14 @@ fn merge_scanned_addon(
         },
         kind_override,
         flavor: scanned_addon.flavor,
-        version: scanned_addon.version.clone(),
-        git_commit: scanned_addon.git_commit.clone(),
+        version: merge_scanned_version(scanned_addon, existing, merged_source),
+        git_commit: scanned_addon
+            .git_commit
+            .clone()
+            .or_else(|| existing.and_then(|addon| addon.git_commit.clone())),
         author: scanned_addon.author.clone(),
         interface: scanned_addon.interface.clone(),
-        source: existing
-            .map(|addon| addon.source)
-            .unwrap_or(scanned_addon.source),
+        source: merged_source,
         source_url: existing.and_then(|addon| addon.source_url.clone()),
         required_deps: scanned_addon.required_deps.clone(),
         optional_deps: scanned_addon.optional_deps.clone(),
@@ -464,6 +468,30 @@ fn merge_scanned_addon(
         last_checked_at: existing.and_then(|addon| addon.last_checked_at),
         remote_version: existing.and_then(|addon| addon.remote_version.clone()),
     }
+}
+
+fn merge_scanned_version(
+    scanned_addon: &ScannedAddon,
+    existing: Option<&AddonRecord>,
+    source: SourceKind,
+) -> Option<String> {
+    if source == SourceKind::GitHub
+        && scanned_addon
+            .version
+            .as_deref()
+            .is_some_and(is_placeholder_version)
+    {
+        return existing
+            .and_then(|addon| addon.version.clone())
+            .or_else(|| scanned_addon.version.clone());
+    }
+
+    scanned_addon.version.clone()
+}
+
+fn is_placeholder_version(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
 fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -> AddonRecord {
@@ -899,6 +927,63 @@ mod tests {
                 .get_addon_by_folder("DBM-Naxx")
                 .expect("get child row")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_managed_github_commit_when_scan_has_no_commit() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut existing = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::GitHub);
+        existing.version = Some("364f625".to_string());
+        existing.git_commit = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
+        existing.remote_version = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
+        existing.source_url = Some("https://github.com/WeakAuras/WeakAuras2".to_string());
+        existing.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "WeakAurasArchive".to_string(),
+            },
+            OwnedFolder {
+                name: "WeakAurasModelPaths".to_string(),
+            },
+        ]);
+        database
+            .record_managed_addon(&existing)
+            .expect("seed github addon");
+
+        let scanned = vec![ScannedAddon {
+            name: "WeakAuras".to_string(),
+            folder: "WeakAuras".to_string(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: Some("@project-version@".to_string()),
+            git_commit: None,
+            author: Some("The WeakAuras Team".to_string()),
+            interface: Some("110205".to_string()),
+            source: SourceKind::Manual,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+        }];
+
+        database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile scanned addons");
+
+        let stored = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get github addon")
+            .expect("github addon exists");
+        assert_eq!(stored.version.as_deref(), Some("364f625"));
+        assert_eq!(
+            stored.git_commit.as_deref(),
+            Some("364f625cf8c4f2f1c0785ab12da2121e880ec560")
+        );
+        assert_eq!(
+            stored.remote_version.as_deref(),
+            Some("364f625cf8c4f2f1c0785ab12da2121e880ec560")
         );
     }
 

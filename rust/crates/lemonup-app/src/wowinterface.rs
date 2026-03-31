@@ -651,9 +651,19 @@ fn normalize_folder_like(value: &str) -> String {
 
 fn versions_match(installed: Option<&str>, remote: Option<&str>) -> bool {
     match (installed, remote) {
-        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        (Some(left), Some(right)) => normalize_version(left) == normalize_version(right),
         _ => false,
     }
+}
+
+fn normalize_version(value: &str) -> String {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(trimmed);
+    normalized.to_ascii_lowercase()
 }
 
 fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
@@ -791,7 +801,7 @@ mod tests {
     use super::{
         WowinterfaceResponse, build_managed_wowinterface_record, determine_parent_folder,
         parse_wowinterface_id_from_url, parse_wowinterface_target,
-        update_downloaded_wowinterface_addon,
+        update_downloaded_wowinterface_addon, versions_match,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -962,5 +972,12 @@ mod tests {
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("4.16"));
         assert_eq!(stored.source, SourceKind::WowInterface);
+    }
+
+    #[test]
+    fn versions_match_ignores_leading_v_prefix() {
+        assert!(versions_match(Some("v4.16"), Some("4.16")));
+        assert!(versions_match(Some("4.16"), Some("V4.16")));
+        assert!(!versions_match(Some("v4.15"), Some("4.16")));
     }
 }

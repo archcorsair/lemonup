@@ -679,8 +679,14 @@ fn normalize_folder_like(value: &str) -> String {
 
 fn install_version(parent_version: Option<&str>, commit: &str) -> Option<String> {
     parent_version
+        .filter(|value| !is_placeholder_version(value))
         .map(ToOwned::to_owned)
         .or_else(|| Some(short_commit(commit)))
+}
+
+fn is_placeholder_version(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
 pub(crate) fn commits_match(left: Option<&str>, right: Option<&str>) -> bool {
@@ -946,6 +952,42 @@ mod tests {
         assert_eq!(record.remote_version.as_deref(), Some("abcdef0123456789"));
         assert_eq!(record.owned_folders.len(), 1);
         assert_eq!(record.owned_folders[0].name, "AdiBags_Config");
+    }
+
+    #[test]
+    fn build_managed_github_record_uses_short_commit_when_version_is_placeholder() {
+        let resolved = super::GithubResolvedRepo {
+            metadata: super::GithubRepoMetadata {
+                owner: "WeakAuras".to_string(),
+                repo: "WeakAuras2".to_string(),
+                default_branch: "main".to_string(),
+                html_url: "https://github.com/WeakAuras/WeakAuras2".to_string(),
+                owner_login: "WeakAuras".to_string(),
+            },
+            head_sha: "364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string(),
+        };
+        let scanned = ScannedAddon {
+            name: "WeakAuras".to_string(),
+            folder: "WeakAuras".to_string(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: Some("@project-version@".to_string()),
+            git_commit: None,
+            author: None,
+            interface: Some("110205".to_string()),
+            source: SourceKind::Manual,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+        };
+
+        let record = build_managed_github_record(&resolved, &scanned, &["WeakAuras".to_string()]);
+        assert_eq!(record.version.as_deref(), Some("364f625"));
+        assert_eq!(
+            record.git_commit.as_deref(),
+            Some("364f625cf8c4f2f1c0785ab12da2121e880ec560")
+        );
     }
 
     #[test]

@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: production TUI overview table refinement implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready overview table refinement pending commit
+- latest local milestone at handoff pass: inline overview check/update plus live action feedback implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready inline overview action slice pending commit
 
 ## Current State
 
@@ -139,6 +139,14 @@ Implemented, committed, and pushed:
   - update and attention state now live in the `Version` column instead of a standalone status column
   - selection uses a fixed-width gutter bar plus a persistent selected-row tint
   - current-row focus remains visually distinct from bulk-selected rows
+- inline overview actions are implemented and user-verified:
+  - `c` now performs freshness-aware check directly from overview
+  - `u` now performs update directly from overview after stale-target preflight
+  - `,` now opens config after reclaiming `c`
+  - header/footer job rail plus row-local update feedback are active during inline actions
+  - shimmer is used for action text only; the logo remains static
+  - adaptive tick now drops to `100ms` only during active animation/job states and otherwise stays at `250ms`
+  - false-positive same-version updates from leading `v` prefixes and lost GitHub commit metadata are fixed
 
 ## Recent Important Commits
 

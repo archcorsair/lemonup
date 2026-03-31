@@ -61,7 +61,6 @@ pub(crate) struct LiveUpdateRun {
     pub(crate) results: Vec<LiveUpdateResult>,
 }
 
-#[cfg(test)]
 pub(crate) fn build_update_checks(
     installed: &[AddonRecord],
     selectors: &[String],
@@ -248,6 +247,7 @@ pub(crate) async fn apply_live_updates(
     wago_api_key: Option<&str>,
     force: bool,
     dry_run: bool,
+    mut on_progress: impl FnMut(usize, usize, String),
 ) -> Result<LiveUpdateRun, LemonupError> {
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?
@@ -266,7 +266,9 @@ pub(crate) async fn apply_live_updates(
     };
     let mut results = Vec::with_capacity(selected.len());
 
-    for addon in selected {
+    let total = selected.len();
+    for (index, addon) in selected.into_iter().enumerate() {
+        on_progress(index + 1, total, addon.folder.clone());
         match addon.source {
             SourceKind::Manual => {
                 summary.skipped_manual += 1;
@@ -493,8 +495,11 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
 
     if addon.source == lemonup_core::SourceKind::GitHub {
         return match (
-            addon.git_commit.as_deref().or(addon.version.as_deref()),
-            addon.remote_version.as_deref(),
+            installed_github_commit(addon),
+            addon
+                .remote_version
+                .as_deref()
+                .filter(|value| is_commit_hash(value)),
         ) {
             (Some(installed_commit), Some(remote_commit))
                 if crate::github::commits_match(Some(installed_commit), Some(remote_commit)) =>
@@ -511,7 +516,7 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
             ),
             (None, Some(_)) => (
                 UpdateStatus::Unknown,
-                Some("no installed version metadata is tracked yet".to_string()),
+                Some("no installed Git commit metadata is tracked yet".to_string()),
             ),
         };
     }
@@ -535,6 +540,27 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
             Some("no installed version metadata is tracked yet".to_string()),
         ),
     }
+}
+
+fn installed_github_commit(addon: &AddonRecord) -> Option<&str> {
+    addon
+        .git_commit
+        .as_deref()
+        .filter(|value| is_commit_hash(value))
+        .or_else(|| {
+            addon
+                .version
+                .as_deref()
+                .filter(|value| is_commit_hash(value))
+        })
+}
+
+fn is_commit_hash(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 7
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 pub(crate) fn serialize_update_status(status: UpdateStatus) -> &'static str {
@@ -707,14 +733,20 @@ fn normalize_selector(value: &str) -> String {
 }
 
 fn normalize_version(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or(trimmed);
+    normalized.to_ascii_lowercase()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveUpdateStatus, apply_live_updates, refresh_live_update_checks_with,
-        serialize_live_update_status,
+        LiveUpdateStatus, apply_live_updates, determine_update_status,
+        refresh_live_update_checks_with, serialize_live_update_status,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
     use tempfile::tempdir;
@@ -850,6 +882,7 @@ mod tests {
             Some("unused"),
             false,
             true,
+            |_, _, _| {},
         )
         .await
         .expect("apply live updates");
@@ -872,6 +905,33 @@ mod tests {
         assert_eq!(
             serialize_live_update_status(LiveUpdateStatus::SkippedUnsupported),
             "skipped_unsupported"
+        );
+    }
+
+    #[test]
+    fn determine_update_status_ignores_leading_v_for_non_github_versions() {
+        let mut addon = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        addon.version = Some("v15.10".to_string());
+        addon.remote_version = Some("15.10".to_string());
+
+        let (status, message) = determine_update_status(&addon);
+
+        assert_eq!(status, UpdateStatus::UpToDate);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn determine_update_status_for_github_requires_real_commit_metadata() {
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::GitHub);
+        addon.version = Some("@project-version@".to_string());
+        addon.remote_version = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
+
+        let (status, message) = determine_update_status(&addon);
+
+        assert_eq!(status, UpdateStatus::Unknown);
+        assert_eq!(
+            message.as_deref(),
+            Some("no installed Git commit metadata is tracked yet")
         );
     }
 }

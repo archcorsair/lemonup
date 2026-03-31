@@ -83,9 +83,10 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - production TUI overview table refinement against v1 scanability feedback
+  - inline overview check/update actions with live progress feedback and adaptive tick
 - current focus:
-  - checkpoint the refined overview table model and selection treatment
+  - checkpoint inline `c`/`u` overview actions
+  - preserve shimmer for action text only; logo shimmer removed
   - then return later for a deeper overlay revamp/polish pass
   - then backup restore workflows
 
@@ -218,6 +219,18 @@ These are implemented and manually verified in addition to the earlier chunks:
     - extracted shell chrome helpers
     - full + compact ASCII `LEMONUP` header variants
     - motion tick/spinner primitives
+    - adaptive tick now runs idle at `250ms` and animation/job states at `100ms`
+  - overview now supports inline action-first workflow for the two highest-frequency operations:
+    - `c` performs a live/cached freshness-aware check from overview
+    - `u` performs update from overview without opening the update overlay
+    - `,` opens config after `c` was reclaimed for check
+  - live action feedback now exists in-shell:
+    - shimmer is used for header/footer action text
+    - row-local progress spinner/tint is used while update jobs run
+    - the large `LEMONUP` logo remains static
+  - false-positive same-version update regressions are fixed:
+    - non-GitHub providers normalize leading `v` prefixes consistently
+    - GitHub sync now preserves commit metadata instead of erasing it during scan reconcile
     - overlay host scaffold
   - Phase 2 dense addon table is implemented:
     - main dashboard now uses a compact table instead of prose rows
