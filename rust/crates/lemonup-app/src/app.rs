@@ -299,6 +299,7 @@ enum AppMessage {
     DashboardCollapseAllRelationships,
     DashboardCollapseExpanded,
     SetDetailMode(DetailMode),
+    OpenSearch(SearchPresentationMode),
     InstallBeginEditing,
     InstallStopEditing,
     InstallInputChar(char),
@@ -1272,9 +1273,17 @@ impl InstallPaneState {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPresentationMode {
+    ComposeFirst,
+    TwoState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchPaneState {
     query: String,
+    presentation_mode: SearchPresentationMode,
     is_editing: bool,
     in_progress: bool,
     results: Vec<WagoSearchResult>,
@@ -1286,6 +1295,7 @@ impl Default for SearchPaneState {
     fn default() -> Self {
         Self {
             query: String::new(),
+            presentation_mode: SearchPresentationMode::ComposeFirst,
             is_editing: true,
             in_progress: false,
             results: Vec::new(),
@@ -1296,6 +1306,13 @@ impl Default for SearchPaneState {
 }
 
 impl SearchPaneState {
+    fn open_with_mode(&self, presentation_mode: SearchPresentationMode) -> Self {
+        let mut next = self.clone();
+        next.presentation_mode = presentation_mode;
+        next.is_editing = true;
+        next
+    }
+
     fn begin_editing(&self) -> Self {
         let mut next = self.clone();
         next.is_editing = true;
@@ -1996,7 +2013,7 @@ impl App {
             KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
             KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
             KeyCode::Char('s') | KeyCode::Char('/') => {
-                vec![AppMessage::SetDetailMode(DetailMode::Search)]
+                vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
             }
             KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
                 vec![AppMessage::DashboardRunUpdateSelected]
@@ -2032,7 +2049,10 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::SearchResultNext]),
             KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::SearchResultPrevious]),
             KeyCode::Enter => Some(vec![AppMessage::SearchInstallSelected]),
-            KeyCode::Char('e') | KeyCode::Char('/') => Some(vec![AppMessage::SearchBeginEditing]),
+            KeyCode::Char('/') => Some(vec![AppMessage::OpenSearch(
+                SearchPresentationMode::ComposeFirst,
+            )]),
+            KeyCode::Char('e') => Some(vec![AppMessage::SearchBeginEditing]),
             _ => None,
         }
     }
@@ -2596,12 +2616,17 @@ impl App {
                     "editing Wago query | enter search | esc stop editing",
                 )),
             ],
-            AppMessage::SearchStopEditing => vec![
-                AppAction::SetSearchPaneState(self.search_pane.stop_editing()),
+            AppMessage::OpenSearch(mode) => vec![
+                AppAction::SetSearchPaneState(self.search_pane.open_with_mode(mode)),
+                AppAction::SetDetailMode(DetailMode::Search),
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Search,
-                    "Wago search ready | e edit query | enter install selected result",
+                    "search Wago | type a query and press enter",
                 )),
+            ],
+            AppMessage::SearchStopEditing => vec![
+                AppAction::SetSearchPaneState(self.search_pane.stop_editing()),
+                AppAction::SetStatus(self.dashboard_status_for(DetailMode::Search, "search ready")),
             ],
             AppMessage::SearchInputChar(character) => vec![AppAction::SetSearchPaneState(
                 self.search_pane.insert_char(character),
@@ -3478,7 +3503,9 @@ impl App {
             AppAction::SetDetailMode(detail_mode) => {
                 self.dashboard.detail_mode = detail_mode;
                 self.install_pane = self.install_pane.stop_editing();
-                self.search_pane = self.search_pane.stop_editing();
+                if detail_mode != DetailMode::Search {
+                    self.search_pane = self.search_pane.stop_editing();
+                }
                 self.config_pane.edit = None;
                 self.shell_ui.overlay.active = match detail_mode {
                     DetailMode::Overview => None,
@@ -4007,11 +4034,407 @@ impl App {
                 let inspect =
                     Paragraph::new(self.inspect_overlay_lines()).wrap(Wrap { trim: false });
                 frame.render_widget(inspect, inner);
+            } else if kind == OverlayKind::Search {
+                self.render_search_overlay(frame, inner);
             } else {
                 let content = Paragraph::new(self.task_overlay_lines()).wrap(Wrap { trim: false });
                 frame.render_widget(content, inner);
             }
         }
+    }
+
+    fn render_search_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Min(8),
+            ])
+            .split(area);
+
+        let badge = Line::from(vec![
+            Span::styled("Source ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(
+                "Wago",
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .bg(Color::Rgb(31, 37, 58))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(badge), sections[0]);
+
+        self.render_search_input(frame, sections[1]);
+
+        let helper = Paragraph::new(self.search_helper_line()).wrap(Wrap { trim: false });
+        frame.render_widget(helper, sections[2]);
+
+        let body = sections[3];
+        match self.search_pane.presentation_mode {
+            SearchPresentationMode::ComposeFirst => {
+                self.render_search_compose_first_body(frame, body);
+            }
+            SearchPresentationMode::TwoState => {
+                if self.search_pane.is_editing || self.search_pane.last_query.is_none() {
+                    self.render_search_empty_state(frame, body);
+                } else {
+                    self.render_search_workspace_body(frame, body);
+                }
+            }
+        }
+    }
+
+    fn render_search_input(&self, frame: &mut Frame<'_>, area: Rect) {
+        let active = self.search_pane.is_editing || self.search_pane.in_progress;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(if active {
+                Style::default().fg(self.ui_theme.highlight)
+            } else {
+                Style::default().fg(self.ui_theme.border)
+            })
+            .title(" Query ");
+
+        let mut spans = Vec::new();
+        if self.search_pane.query.trim().is_empty() {
+            spans.push(Span::styled(
+                "Type an addon name and press Enter",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        } else {
+            spans.push(Span::styled(
+                self.search_pane.query.clone(),
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        if self.search_pane.in_progress {
+            spans.push(Span::raw("  "));
+            spans.extend(shimmer_text_spans(
+                "searching…",
+                self.ui_theme.warning,
+                Color::Rgb(255, 244, 214),
+                ShimmerConfig::action(),
+            ));
+        } else if self.search_pane.is_editing {
+            spans.push(Span::styled(
+                " ▌",
+                Style::default().fg(self.ui_theme.brand_gold),
+            ));
+        }
+
+        let query = Paragraph::new(Line::from(spans))
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(query, area);
+    }
+
+    fn render_search_compose_first_body(&self, frame: &mut Frame<'_>, area: Rect) {
+        if self.search_pane.results.is_empty() {
+            self.render_search_empty_state(frame, area);
+            return;
+        }
+
+        let [results, preview] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(7)])
+            .areas(area);
+        self.render_search_results_list(frame, results);
+        self.render_search_selected_preview(frame, preview);
+    }
+
+    fn render_search_workspace_body(&self, frame: &mut Frame<'_>, area: Rect) {
+        if self.search_pane.results.is_empty() {
+            self.render_search_empty_state(frame, area);
+            return;
+        }
+
+        let [results, preview] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .areas(area);
+        self.render_search_results_list(frame, results);
+        self.render_search_selected_preview(frame, preview);
+    }
+
+    fn render_search_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
+        let message = if self.wago_api_key.is_none() {
+            vec![
+                Line::from(Span::styled(
+                    "Wago API key required",
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Add your key in Config, then come back here to search.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]
+        } else if self.search_pane.in_progress {
+            vec![
+                Line::from(Span::styled(
+                    "Searching Wago…",
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Results will appear here when the search completes.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]
+        } else if let Some(last_query) = &self.search_pane.last_query {
+            vec![
+                Line::from(Span::styled(
+                    format!("No results for “{last_query}”"),
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Try a broader name or a known addon title.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "Search Wago addons",
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Type a query above, then press Enter.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]
+        };
+
+        let paragraph = Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_search_results_list(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(" Results ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let visible_rows = inner.height.saturating_sub(2).max(1) as usize;
+        let (window_start, window_end) = visible_search_result_window(
+            self.search_pane.results.len(),
+            self.search_pane.selected_result,
+            visible_rows,
+        );
+
+        let header = Row::new([
+            Cell::from(Span::styled(
+                "Name",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+            Cell::from(Span::styled(
+                "Author",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+            Cell::from(Span::styled(
+                "Version",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+            Cell::from(Span::styled("DL", Style::default().fg(self.ui_theme.muted))),
+        ]);
+        let mut rows = Vec::new();
+        let mut selected_row = None;
+
+        for (index, result) in self.search_pane.results[window_start..window_end]
+            .iter()
+            .enumerate()
+        {
+            let absolute_index = window_start + index;
+            let selected = self.search_pane.selected_result == Some(absolute_index);
+            let author = result
+                .owner
+                .as_deref()
+                .or_else(|| result.authors.first().map(String::as_str))
+                .unwrap_or("unknown");
+            let version = result.version.as_deref().unwrap_or("unknown");
+            let name_style = if selected {
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.ui_theme.info)
+            };
+            let row_style = if selected {
+                selected_row = Some(index);
+                Style::default().bg(Color::Rgb(36, 40, 56))
+            } else {
+                Style::default()
+            };
+
+            rows.push(
+                Row::new([
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            Style::default().fg(self.ui_theme.highlight),
+                        ),
+                        Span::styled(truncate_text(&result.display_name, 34), name_style),
+                    ])),
+                    Cell::from(Span::styled(
+                        truncate_text(author, 18),
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                    Cell::from(Span::styled(
+                        truncate_text(version, 18),
+                        Style::default().fg(self.ui_theme.panel_title),
+                    )),
+                    Cell::from(Span::styled(
+                        result
+                            .download_count
+                            .map(|downloads| downloads.to_string())
+                            .unwrap_or_else(|| "—".to_string()),
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                ])
+                .style(row_style),
+            );
+        }
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(48),
+                Constraint::Percentage(22),
+                Constraint::Percentage(20),
+                Constraint::Percentage(10),
+            ],
+        )
+        .header(header)
+        .column_spacing(2)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(36, 40, 56))
+                .add_modifier(Modifier::BOLD),
+        );
+        let mut state = TableState::default().with_selected(selected_row);
+        frame.render_stateful_widget(table, inner, &mut state);
+    }
+
+    fn render_search_selected_preview(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(" Selected ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let lines = if let Some(result) = self.search_pane.selected_result() {
+            let author = result
+                .owner
+                .as_deref()
+                .or_else(|| result.authors.first().map(String::as_str))
+                .unwrap_or("unknown");
+            vec![
+                Line::from(Span::styled(
+                    result.display_name.clone(),
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                self.overlay_kv_line("Author", author),
+                self.overlay_kv_line("Version", result.version.as_deref().unwrap_or("unknown")),
+                self.overlay_kv_line("Slug", result.id.as_str()),
+                self.overlay_kv_line(
+                    "Summary",
+                    result.summary.as_deref().unwrap_or("No summary provided."),
+                ),
+            ]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "No result selected",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Run a search, then use j/k to choose a result.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]
+        };
+
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
+    }
+
+    fn search_helper_line(&self) -> Line<'static> {
+        if self.wago_api_key.is_none() {
+            return Line::from(Span::styled(
+                "Config needs a Wago API key before search can run.",
+                Style::default().fg(self.ui_theme.warning),
+            ));
+        }
+
+        if self.search_pane.is_editing {
+            return Line::from(vec![
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" search", Style::default().fg(self.ui_theme.muted)),
+                Span::raw("  ·  "),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" stop editing", Style::default().fg(self.ui_theme.muted)),
+            ]);
+        }
+
+        Line::from(vec![
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" install", Style::default().fg(self.ui_theme.muted)),
+            Span::raw("  ·  "),
+            Span::styled(
+                "j/k",
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" results", Style::default().fg(self.ui_theme.muted)),
+            Span::raw("  ·  "),
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" edit query", Style::default().fg(self.ui_theme.muted)),
+        ])
     }
 
     fn header_logo_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
@@ -4587,13 +5010,19 @@ impl App {
                                 label: "delete",
                                 tier: secondary,
                             },
+                            FooterCommandHint {
+                                id: FooterHintId::Close,
+                                key: "esc",
+                                label: "stop",
+                                tier: secondary,
+                            },
                         ]
                     } else {
                         vec![
                             FooterCommandHint {
                                 id: FooterHintId::Edit,
-                                key: "e",
-                                label: "edit",
+                                key: "/ ?",
+                                label: "query",
                                 tier: primary,
                             },
                             FooterCommandHint {
@@ -7309,9 +7738,9 @@ mod tests {
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
         DashboardJobUiState, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
         FooterHintId, FooterKeyPulse, InstallPaneState, MotionState, OverlayKind,
-        PendingWagoInstallRequest, ScanState, SearchPaneState, ShellMode, ShellUiState, UiTheme,
-        WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
-        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        PendingWagoInstallRequest, ScanState, SearchPaneState, SearchPresentationMode, ShellMode,
+        ShellUiState, UiTheme, WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome,
+        WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
         dashboard_item_version_line, summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
@@ -7700,6 +8129,54 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_search_keys_open_expected_ab_variants() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
+        );
+        assert!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('?')))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn open_search_preserves_shared_state_and_enters_editing() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.search_pane.query = "WeakAuras".to_string();
+        app.search_pane.is_editing = false;
+        app.search_pane.results = vec![WagoSearchResult {
+            id: "VBNBxKx5".to_string(),
+            display_name: "WeakAuras".to_string(),
+            summary: Some("Aura framework".to_string()),
+            owner: Some("WeakAuras Team".to_string()),
+            authors: vec!["WeakAuras Team".to_string()],
+            website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+            download_count: Some(500_000),
+            version: Some("5.21.1".to_string()),
+        }];
+        app.search_pane.selected_result = Some(0);
+        app.search_pane.last_query = Some("WeakAuras".to_string());
+
+        let actions = app.update(AppMessage::OpenSearch(SearchPresentationMode::TwoState));
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert_eq!(app.dashboard.detail_mode, DetailMode::Search);
+        assert_eq!(
+            app.search_pane.presentation_mode,
+            SearchPresentationMode::TwoState
+        );
+        assert!(app.search_pane.is_editing);
+        assert_eq!(app.search_pane.query, "WeakAuras");
+        assert_eq!(app.search_pane.results.len(), 1);
+        assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    #[test]
     fn search_mode_without_api_key_reports_blocked_status() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
@@ -7726,6 +8203,7 @@ mod tests {
         ));
         app.search_pane = SearchPaneState {
             query: "WeakAuras".to_string(),
+            presentation_mode: SearchPresentationMode::ComposeFirst,
             is_editing: false,
             in_progress: false,
             results: vec![WagoSearchResult {

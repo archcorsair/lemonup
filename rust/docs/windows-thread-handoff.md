@@ -130,6 +130,11 @@ Implemented, committed, and pushed:
   - primary actions and current state are more explicit inside each overlay
   - overlays are more readable, but still below the final production design bar
   - expect a later deeper overlay revamp/polish pass
+- search overlay compose-first redesign is implemented and user-verified:
+  - `/` opens search directly in typing mode
+  - source is explicit as `Wago`
+  - the dominant search bar replaces the old pre-search wall of text
+  - results now render in aligned columns; `?` is no longer used for search and is available for future help
 - v1-inspired shell visual pass is implemented and user-verified:
   - ASCII `LEMONUP` header now uses a smooth fruit-style gradient
   - shell border/title chrome uses a stronger production palette

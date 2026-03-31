@@ -260,6 +260,11 @@ These are implemented and manually verified in addition to the earlier chunks:
     - primary actions and current state are more explicit inside each overlay
     - search, install, update, config, and backup overlays are materially more readable
     - overlays are still not at the final production design bar and should get a deeper revamp later
+  - search overlay compose-first revamp is implemented:
+    - `/` opens search directly into query editing
+    - source is explicit as `Wago`
+    - the dominant search bar replaces the previous pre-search wall of text
+    - search results now render in aligned table columns instead of freeform text rows
   - v1-inspired shell visual pass is implemented:
     - ASCII `LEMONUP` header now uses a smooth fruit-style left-to-right gradient instead of striped glyph coloring
     - shell chrome uses a stronger blue/purple border-title palette

@@ -107,6 +107,9 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - `,` opens config
   - `enter` opens inspect as a modal overlay
   - `Install`, `Search`, `Update`, `Config`, and `Backup` now open through the overlay host
+  - `/` opens a compose-first Wago search overlay directly in typing mode
+  - search uses a dominant input-first layout and aligned table results
+  - `?` is no longer used for search and is reserved for a future help overlay
   - the header uses a smooth fruit-style gradient logo treatment inspired by v1
   - header/footer action text shimmer during active jobs; logo stays static
   - adaptive tick is `250ms` idle and `100ms` during active animation/job states
