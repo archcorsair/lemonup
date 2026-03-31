@@ -146,6 +146,7 @@ enum FooterHintId {
     Inspect,
     Select,
     Clear,
+    Sort,
     Tree,
     Check,
     Update,
@@ -291,6 +292,7 @@ enum AppMessage {
     DashboardRunCheckSelected,
     DashboardRunUpdateSelected,
     DashboardSelectRefreshableUpdates,
+    DashboardToggleSort(DashboardSortColumn),
     DashboardToggleSelected,
     DashboardSelectAll,
     DashboardClearSelection,
@@ -767,10 +769,83 @@ struct AddonTableRowViewModel {
     row_style: Style,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DashboardSortColumn {
+    Name,
+    Version,
+    Author,
+    Source,
+}
+
+impl DashboardSortColumn {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Version => "Version",
+            Self::Author => "Author",
+            Self::Source => "Source",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardSortDirection {
+    Asc,
+    Desc,
+}
+
+impl DashboardSortDirection {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+
+    fn indicator(self) -> &'static str {
+        match self {
+            Self::Asc => "▲",
+            Self::Desc => "▼",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardSortConfig {
+    column: DashboardSortColumn,
+    direction: DashboardSortDirection,
+}
+
+impl Default for DashboardSortConfig {
+    fn default() -> Self {
+        Self {
+            column: DashboardSortColumn::Name,
+            direction: DashboardSortDirection::Asc,
+        }
+    }
+}
+
+impl DashboardSortConfig {
+    fn toggled(self, column: DashboardSortColumn) -> Self {
+        if self.column == column {
+            Self {
+                column,
+                direction: self.direction.toggle(),
+            }
+        } else {
+            Self {
+                column,
+                direction: DashboardSortDirection::Asc,
+            }
+        }
+    }
+}
+
 struct DashboardState {
     items: Vec<DashboardItem>,
     rows: Vec<DashboardRow>,
     list_state: TableState,
+    sort_config: DashboardSortConfig,
     detail_mode: DetailMode,
     expanded_folders: HashSet<String>,
     selected_parents: HashSet<String>,
@@ -783,7 +858,7 @@ struct DashboardState {
 
 impl DashboardState {
     fn from_addons(addons: Vec<AddonRecord>) -> Self {
-        let mut items = addons
+        let items = addons
             .into_iter()
             .map(|addon| {
                 let owned_folder_count = addon.owned_folders.len();
@@ -811,21 +886,12 @@ impl DashboardState {
                 }
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
-                .then_with(|| {
-                    left.folder
-                        .to_ascii_lowercase()
-                        .cmp(&right.folder.to_ascii_lowercase())
-                })
-        });
 
         let mut state = Self {
             items,
             rows: Vec::new(),
             list_state: TableState::default(),
+            sort_config: DashboardSortConfig::default(),
             detail_mode: DetailMode::Overview,
             expanded_folders: HashSet::new(),
             selected_parents: HashSet::new(),
@@ -835,6 +901,7 @@ impl DashboardState {
             job_ui: None,
             last_update_summary: None,
         };
+        state.sort_items();
         state.rebuild_rows();
         if !state.rows.is_empty() {
             state.list_state.select(Some(0));
@@ -847,11 +914,13 @@ impl DashboardState {
         let previous_offset = self.list_state.offset();
         let previous_expanded = self.expanded_folders.clone();
         let previous_selected = self.selected_parents.clone();
+        let previous_sort = self.sort_config;
         let next = DashboardState::from_addons(addons);
 
         self.items = next.items;
         self.rows = next.rows;
         self.list_state = next.list_state;
+        self.sort_config = previous_sort;
         self.expanded_folders = previous_expanded
             .into_iter()
             .filter(|folder| {
@@ -877,6 +946,7 @@ impl DashboardState {
             }
         });
         self.update_in_progress = false;
+        self.sort_items();
         self.rebuild_rows();
 
         let mut selected = selected_key
@@ -1176,6 +1246,57 @@ impl DashboardState {
 
     fn last_update_summary(&self) -> Option<&DashboardUpdateRunSummary> {
         self.last_update_summary.as_ref()
+    }
+
+    fn toggle_sort(&mut self, column: DashboardSortColumn) {
+        let selected_key = self.selected_row().map(|row| row.key.clone());
+        let previous_offset = self.list_state.offset();
+        self.sort_config = self.sort_config.toggled(column);
+        self.sort_items();
+        self.rebuild_rows();
+        if let Some(key) = selected_key {
+            self.restore_selection(&key);
+        } else if !self.rows.is_empty() {
+            self.list_state.select(Some(0));
+        }
+        let max_offset = self.rows.len().saturating_sub(1);
+        self.list_state
+            .offset_mut()
+            .clone_from(&previous_offset.min(max_offset));
+    }
+
+    fn sort_config(&self) -> DashboardSortConfig {
+        self.sort_config
+    }
+
+    fn sort_items(&mut self) {
+        let sort = self.sort_config;
+        self.items.sort_by(|left, right| {
+            let result = match sort.column {
+                DashboardSortColumn::Name => compare_text(&left.name, &right.name)
+                    .then_with(|| compare_text(&left.folder, &right.folder)),
+                DashboardSortColumn::Version => compare_text(
+                    &dashboard_item_sort_version_key(left),
+                    &dashboard_item_sort_version_key(right),
+                )
+                .then_with(|| compare_text(&left.name, &right.name)),
+                DashboardSortColumn::Author => compare_text(
+                    &dashboard_item_author_sort_key(left),
+                    &dashboard_item_author_sort_key(right),
+                )
+                .then_with(|| compare_text(&left.name, &right.name)),
+                DashboardSortColumn::Source => compare_text(
+                    dashboard_item_source_label(left),
+                    dashboard_item_source_label(right),
+                )
+                .then_with(|| compare_text(&left.name, &right.name)),
+            };
+
+            match sort.direction {
+                DashboardSortDirection::Asc => result,
+                DashboardSortDirection::Desc => result.reverse(),
+            }
+        });
     }
 
     fn rebuild_rows(&mut self) {
@@ -1883,6 +2004,9 @@ impl App {
             KeyCode::Enter => Some(FooterHintId::Inspect),
             KeyCode::Char(' ') | KeyCode::Char('a') => Some(FooterHintId::Select),
             KeyCode::Esc => Some(FooterHintId::Clear),
+            KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4') => {
+                Some(FooterHintId::Sort)
+            }
             KeyCode::Right
             | KeyCode::Left
             | KeyCode::Char('l')
@@ -2014,6 +2138,18 @@ impl App {
             KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
             KeyCode::Char('s') | KeyCode::Char('/') => {
                 vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
+            }
+            KeyCode::Char('1') => vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Name)],
+            KeyCode::Char('2') => {
+                vec![AppMessage::DashboardToggleSort(
+                    DashboardSortColumn::Version,
+                )]
+            }
+            KeyCode::Char('3') => {
+                vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Author)]
+            }
+            KeyCode::Char('4') => {
+                vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Source)]
             }
             KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
                 vec![AppMessage::DashboardRunUpdateSelected]
@@ -2261,6 +2397,17 @@ impl App {
                     ),
                 ]
             }
+            AppMessage::DashboardToggleSort(column) => vec![
+                AppAction::ToggleDashboardSort(column),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Overview,
+                    &format!(
+                        "sorted by {} {}",
+                        column.label(),
+                        self.dashboard.sort_config().toggled(column).direction.indicator()
+                    ),
+                )),
+            ],
             AppMessage::DashboardOpenInspect => {
                 if self.dashboard.selected_row().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -3386,6 +3533,7 @@ impl App {
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
             }
+            AppAction::ToggleDashboardSort(column) => self.dashboard.toggle_sort(column),
             AppAction::SetPendingDelete(folders) => {
                 self.dashboard.set_pending_delete_folders(folders);
             }
@@ -5172,6 +5320,12 @@ impl App {
                 tier: primary,
             },
             FooterCommandHint {
+                id: FooterHintId::Sort,
+                key: "1-4",
+                label: "sort",
+                tier: primary,
+            },
+            FooterCommandHint {
                 id: FooterHintId::Clear,
                 key: "esc",
                 label: "clear",
@@ -5832,10 +5986,10 @@ impl App {
         }
 
         let header = Row::new(vec![
-            Cell::from("Name"),
-            Cell::from("Version"),
-            Cell::from("Author"),
-            Cell::from("Source"),
+            Cell::from(self.dashboard_sort_header(DashboardSortColumn::Name)),
+            Cell::from(self.dashboard_sort_header(DashboardSortColumn::Version)),
+            Cell::from(self.dashboard_sort_header(DashboardSortColumn::Author)),
+            Cell::from(self.dashboard_sort_header(DashboardSortColumn::Source)),
         ])
         .style(
             Style::default()
@@ -5891,6 +6045,28 @@ impl App {
         );
 
         frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
+    }
+
+    fn dashboard_sort_header(&self, column: DashboardSortColumn) -> Line<'static> {
+        let sort = self.dashboard.sort_config();
+        let mut spans = vec![Span::styled(
+            column.label(),
+            Style::default()
+                .fg(self.ui_theme.panel_title)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if sort.column == column {
+            spans.extend([
+                Span::raw(" "),
+                Span::styled(
+                    sort.direction.indicator(),
+                    Style::default()
+                        .fg(self.ui_theme.brand_gold)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+        }
+        Line::from(spans)
     }
 
     fn task_overlay_lines(&self) -> Vec<Line<'static>> {
@@ -7373,6 +7549,17 @@ fn dashboard_item_remote_label(item: &DashboardItem) -> Option<String> {
     }
 }
 
+fn dashboard_item_sort_version_key(item: &DashboardItem) -> String {
+    let installed = dashboard_item_version_label(item);
+    let remote = dashboard_item_remote_label(item).unwrap_or_default();
+    match dashboard_item_update_status(item) {
+        UpdateStatus::UpdateAvailable => format!("0:{installed}:{remote}"),
+        UpdateStatus::UpToDate => format!("1:{installed}"),
+        UpdateStatus::Unknown => format!("2:{installed}:{remote}"),
+        UpdateStatus::Error => format!("3:{installed}:{remote}"),
+    }
+}
+
 fn dashboard_item_version_line(
     item: &DashboardItem,
     active_job: Option<&DashboardJobUiState>,
@@ -7478,6 +7665,29 @@ fn dashboard_item_author_label(item: &DashboardItem) -> String {
         .filter(|author| !author.is_empty())
         .map(|author| truncate_text(author, 24))
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn dashboard_item_author_sort_key(item: &DashboardItem) -> String {
+    item.author
+        .as_deref()
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .unwrap_or("~")
+        .to_ascii_lowercase()
+}
+
+fn dashboard_item_source_label(item: &DashboardItem) -> &'static str {
+    match item.source {
+        SourceKind::Wago => "wago",
+        SourceKind::Tukui => "tukui",
+        SourceKind::GitHub => "github",
+        SourceKind::WowInterface => "wowi",
+        SourceKind::Manual => "manual",
+    }
+}
+
+fn compare_text(left: &str, right: &str) -> std::cmp::Ordering {
+    left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
 }
 
 fn dashboard_item_source_line(item: &DashboardItem) -> Line<'static> {
@@ -7736,12 +7946,13 @@ mod tests {
     use super::{
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
-        DashboardJobUiState, DashboardRow, DashboardState, DashboardUpdateOutcome, DetailMode,
-        FooterHintId, FooterKeyPulse, InstallPaneState, MotionState, OverlayKind,
-        PendingWagoInstallRequest, ScanState, SearchPaneState, SearchPresentationMode, ShellMode,
-        ShellUiState, UiTheme, WagoInstallConfirmation, WagoInstallSource, WagoInstallTaskOutcome,
-        WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
-        dashboard_item_version_line, summarize_owned_folders, visible_search_result_window,
+        DashboardJobUiState, DashboardRow, DashboardSortColumn, DashboardState,
+        DashboardUpdateOutcome, DetailMode, FooterHintId, FooterKeyPulse, InstallPaneState,
+        MotionState, OverlayKind, PendingWagoInstallRequest, ScanState, SearchPaneState,
+        SearchPresentationMode, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
+        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
+        child_row_prefix, dashboard_item_version_label, dashboard_item_version_line,
+        summarize_owned_folders, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -7825,6 +8036,64 @@ mod tests {
 
         assert_eq!(next, vec![AppMessage::DashboardSelectionNext]);
         assert_eq!(previous, vec![AppMessage::DashboardSelectionPrevious]);
+    }
+
+    #[test]
+    fn dashboard_sort_keys_emit_sort_messages() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('1'))),
+            vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Name)]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('2'))),
+            vec![AppMessage::DashboardToggleSort(
+                DashboardSortColumn::Version
+            )]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('3'))),
+            vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Author)]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('4'))),
+            vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Source)]
+        );
+    }
+
+    #[test]
+    fn dashboard_sort_toggle_reverses_and_preserves_selection() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+        assert_eq!(
+            app.dashboard.selected_row().map(|row| row.folder.as_str()),
+            Some("Second")
+        );
+
+        for action in app.update(AppMessage::DashboardToggleSort(DashboardSortColumn::Name)) {
+            app.apply(action);
+        }
+        assert_eq!(
+            app.dashboard.selected_row().map(|row| row.folder.as_str()),
+            Some("Second")
+        );
+        assert_eq!(
+            app.dashboard.rows.first().map(|row| row.folder.as_str()),
+            Some("Third")
+        );
+
+        for action in app.update(AppMessage::DashboardToggleSort(DashboardSortColumn::Name)) {
+            app.apply(action);
+        }
+        assert_eq!(
+            app.dashboard.selected_row().map(|row| row.folder.as_str()),
+            Some("Second")
+        );
+        assert_eq!(
+            app.dashboard.rows.first().map(|row| row.folder.as_str()),
+            Some("First")
+        );
     }
 
     #[test]

@@ -157,6 +157,14 @@ Implemented, committed, and pushed:
   - left rail stays quiet by default and only shows meaningful progress, results, errors, or explicit selection summaries
   - right rail shows grouped command hints with sticky context emphasis and keypress pulse feedback
   - footer copy is deliberately humanized; internal/debug-style summaries are suppressed
+- overview table sorting is implemented and user-verified:
+  - `1` sorts by `Name`
+  - `2` sorts by `Version`
+  - `3` sorts by `Author`
+  - `4` sorts by `Source`
+  - pressing the same number again reverses the sort direction for that column
+  - the active sort shows `▲/▼` in the table header
+  - selection survives re-sort and child rows remain attached to their parents
 
 ## Recent Important Commits
 

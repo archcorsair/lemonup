@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::{
-    BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardUndoDeleteState,
-    DashboardUpdateRunSummary, DetailMode, FooterKeyPulse, InstallPaneState,
-    PendingWagoInstallRequest, SearchPaneState, WagoInstallConfirmation,
+    BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
+    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, FooterKeyPulse,
+    InstallPaneState, PendingWagoInstallRequest, SearchPaneState, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -18,6 +18,7 @@ pub enum AppAction {
     SetInspectOverlay(bool),
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
+    ToggleDashboardSort(DashboardSortColumn),
     SetPendingDelete(Option<Vec<String>>),
     SetDashboardUndoDelete(Option<DashboardUndoDeleteState>),
     SetDashboardDriftReport(Option<DriftReport>),

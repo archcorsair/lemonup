@@ -274,6 +274,14 @@ These are implemented and manually verified in addition to the earlier chunks:
     - update and attention state now live in the `Version` column instead of a standalone status column
     - selection uses a fixed-width gutter bar plus a persistent selected-row tint
     - current-row focus remains visually distinct from bulk-selected rows
+  - overview table sorting is implemented:
+    - `1` sorts by `Name`
+    - `2` sorts by `Version`
+    - `3` sorts by `Author`
+    - `4` sorts by `Source`
+    - pressing the same number again reverses the active sort direction
+    - the active sort column shows `▲/▼` in the header
+    - selection is preserved across re-sort and child rows remain attached to parents
 
 ## Implemented, Awaiting Manual Verification
 
