@@ -121,6 +121,11 @@ Implemented, committed, and pushed:
     - `enter` opens inspect from overview
     - `esc` closes inspect first
     - inspect uses an explicit modal-style overlay
+- search overlay polish and tracked-Wago install feedback:
+  - compose-first `/` search retained
+  - aligned results table sorted by highest DL count
+  - tracked-only installed detection with `📦 installed` badge
+  - inline shimmer during install/checking and green-check success state
 - production TUI design/build Phase 4 is implemented and user-verified:
   - `Install`, `Search`, `Update`, `Config`, and `Backup` render through the overlay host
   - overview no longer mixes modal inspect with side-panel task surfaces

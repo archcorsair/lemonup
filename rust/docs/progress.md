@@ -402,6 +402,11 @@ Supporting behavior expected for MVP quality:
 - rescan or reconcile command
 - source and state indicators
 - safer destructive UX, ideally via soft-delete undo after MVP groundwork
+- current search overlay checkpoint:
+  - compose-first `/` search retained as the permanent search entry
+  - Wago results sorted by highest downloads first with compact DL labels
+  - tracked-only installed detection via exact Wago source URL match
+  - tracked results now show `📦 installed` plus inline check/install/success feedback
 
 ## Relationship Rules
 

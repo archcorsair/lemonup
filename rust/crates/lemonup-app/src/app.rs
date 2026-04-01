@@ -715,6 +715,7 @@ struct DashboardItem {
     folder: String,
     owned_folders: Vec<String>,
     source: SourceKind,
+    source_url: Option<String>,
     kind: AddonKind,
     version: Option<String>,
     author: Option<String>,
@@ -872,6 +873,7 @@ impl DashboardState {
                         .map(|owned_folder| owned_folder.name)
                         .collect(),
                     source: addon.source,
+                    source_url: addon.source_url,
                     kind: addon.kind,
                     version: addon.version,
                     author: addon.author,
@@ -1410,6 +1412,35 @@ pub struct SearchPaneState {
     results: Vec<WagoSearchResult>,
     selected_result: Option<usize>,
     last_query: Option<String>,
+    install_state: SearchInstallState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SearchInstallState {
+    Idle,
+    Checking {
+        addon_id: String,
+        addon_name: String,
+    },
+    ConfirmReplace {
+        addon_id: String,
+        addon_name: String,
+        tracked_parent: String,
+    },
+    Installing {
+        addon_id: String,
+        addon_name: String,
+    },
+    Success {
+        addon_id: String,
+        addon_name: String,
+        parent_folder: String,
+    },
+    Error {
+        addon_id: Option<String>,
+        addon_name: Option<String>,
+        message: String,
+    },
 }
 
 impl Default for SearchPaneState {
@@ -1422,6 +1453,7 @@ impl Default for SearchPaneState {
             results: Vec::new(),
             selected_result: None,
             last_query: None,
+            install_state: SearchInstallState::Idle,
         }
     }
 }
@@ -1463,15 +1495,18 @@ impl SearchPaneState {
         next.is_editing = false;
         next.in_progress = true;
         next.last_query = Some(next.query.trim().to_string());
+        next.install_state = SearchInstallState::Idle;
         next
     }
 
-    fn finish_search(&self, query: String, results: Vec<WagoSearchResult>) -> Self {
+    fn finish_search(&self, query: String, mut results: Vec<WagoSearchResult>) -> Self {
         let mut next = self.clone();
         next.in_progress = false;
         next.is_editing = false;
         next.last_query = Some(query);
+        sort_search_results(&mut results);
         next.results = results;
+        next.install_state = SearchInstallState::Idle;
         next.selected_result = if next.results.is_empty() {
             None
         } else {
@@ -1483,6 +1518,7 @@ impl SearchPaneState {
     fn fail_search(&self) -> Self {
         let mut next = self.clone();
         next.in_progress = false;
+        next.install_state = SearchInstallState::Idle;
         next
     }
 
@@ -1515,6 +1551,98 @@ impl SearchPaneState {
     fn selected_result(&self) -> Option<&WagoSearchResult> {
         self.selected_result
             .and_then(|index| self.results.get(index))
+    }
+
+    fn start_install_check(&self, result: &WagoSearchResult) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Checking {
+            addon_id: result.id.clone(),
+            addon_name: result.display_name.clone(),
+        };
+        next
+    }
+
+    fn require_install_confirmation(&self, inspection: &WagoInstallInspection) -> Self {
+        let mut next = self.clone();
+        next.install_state = if let Some(tracked_parent) = &inspection.tracked_parent {
+            SearchInstallState::ConfirmReplace {
+                addon_id: inspection.addon_id.clone(),
+                addon_name: inspection.addon_name.clone(),
+                tracked_parent: tracked_parent.clone(),
+            }
+        } else {
+            SearchInstallState::Idle
+        };
+        next
+    }
+
+    fn start_installing(&self, inspection: &WagoInstallInspection) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Installing {
+            addon_id: inspection.addon_id.clone(),
+            addon_name: inspection.addon_name.clone(),
+        };
+        next
+    }
+
+    fn finish_install(&self, summary: &WagoInstallSummary) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Success {
+            addon_id: summary.addon_id.clone(),
+            addon_name: summary.addon_name.clone(),
+            parent_folder: summary.parent_folder.clone(),
+        };
+        next
+    }
+
+    fn fail_install(
+        &self,
+        addon_id: Option<String>,
+        addon_name: Option<String>,
+        message: String,
+    ) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Error {
+            addon_id,
+            addon_name,
+            message,
+        };
+        next
+    }
+
+    fn clear_install_state(&self) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Idle;
+        next
+    }
+
+    fn install_identity(&self) -> (Option<String>, Option<String>) {
+        match &self.install_state {
+            SearchInstallState::Idle => (None, None),
+            SearchInstallState::Checking {
+                addon_id,
+                addon_name,
+            }
+            | SearchInstallState::ConfirmReplace {
+                addon_id,
+                addon_name,
+                ..
+            }
+            | SearchInstallState::Installing {
+                addon_id,
+                addon_name,
+            }
+            | SearchInstallState::Success {
+                addon_id,
+                addon_name,
+                ..
+            } => (Some(addon_id.clone()), Some(addon_name.clone())),
+            SearchInstallState::Error {
+                addon_id,
+                addon_name,
+                ..
+            } => (addon_id.clone(), addon_name.clone()),
+        }
     }
 }
 
@@ -2175,7 +2303,6 @@ impl App {
                 KeyCode::Enter => vec![AppMessage::SearchSubmit],
                 KeyCode::Esc => vec![AppMessage::SearchStopEditing],
                 KeyCode::Backspace => vec![AppMessage::SearchBackspace],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char(character) => vec![AppMessage::SearchInputChar(character)],
                 _ => vec![],
             });
@@ -2864,6 +2991,7 @@ impl App {
                         source: WagoInstallSource::SearchResult,
                     };
                     vec![
+                        AppAction::SetSearchPaneState(self.search_pane.start_install_check(result)),
                         AppAction::SetWagoInstallInProgress(true),
                         AppAction::StartWagoInstall {
                             addon_dir: self.effective_addon_dir.clone().expect("checked above"),
@@ -2896,8 +3024,9 @@ impl App {
                             "Wago install unavailable: no API key configured",
                         ))]
                     } else if let Some(addon_dir) = self.effective_addon_dir.clone() {
-                        vec![
+                        let mut actions = vec![
                             AppAction::SetPendingWagoInstallConfirmation(None),
+                            AppAction::SetSearchPaneState(self.search_pane.clear_install_state()),
                             AppAction::SetWagoInstallInProgress(true),
                             AppAction::StartWagoInstall {
                                 addon_dir,
@@ -2905,11 +3034,25 @@ impl App {
                                 request: confirmation.request,
                                 allow_replace: true,
                             },
-                            AppAction::SetStatus(self.dashboard_status_for(
-                                self.dashboard.detail_mode,
-                                "replacing existing addon folders from confirmed Wago install",
-                            )),
-                        ]
+                        ];
+                        if self.dashboard.detail_mode == DetailMode::Search {
+                            actions[1] = AppAction::SetSearchPaneState(
+                                self.search_pane.start_installing(&confirmation.inspection),
+                            );
+                        }
+                        let status_message = if self.dashboard.detail_mode == DetailMode::Search {
+                            format!(
+                                "reinstalling tracked addon '{}' from Wago",
+                                confirmation.inspection.addon_name
+                            )
+                        } else {
+                            "replacing existing addon folders from confirmed Wago install"
+                                .to_string()
+                        };
+                        actions.push(AppAction::SetStatus(
+                            self.dashboard_status_for(self.dashboard.detail_mode, &status_message),
+                        ));
+                        actions
                     } else {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
@@ -2925,6 +3068,7 @@ impl App {
             }
             AppMessage::WagoCancelInstall => vec![
                 AppAction::SetPendingWagoInstallConfirmation(None),
+                AppAction::SetSearchPaneState(self.search_pane.clear_install_state()),
                 AppAction::SetStatus(
                     self.dashboard_status_for(self.dashboard.detail_mode, "Wago install cancelled"),
                 ),
@@ -3469,21 +3613,38 @@ impl App {
                         request,
                         inspection,
                     },
-                )) => vec![
-                    AppAction::SetWagoInstallInProgress(false),
-                    AppAction::SetPendingWagoInstallConfirmation(Some(WagoInstallConfirmation {
-                        request,
-                        inspection,
-                    })),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        self.dashboard.detail_mode,
-                        "Wago install needs confirmation: press y to replace, n or esc to cancel",
-                    )),
-                ],
+                )) => {
+                    let confirmation_status = if inspection.tracked_parent.is_some() {
+                        "tracked addon already installed: press y to reinstall, n or esc to cancel"
+                    } else {
+                        "Wago install needs confirmation: press y to replace, n or esc to cancel"
+                    };
+                    vec![
+                        AppAction::SetSearchPaneState(
+                            self.search_pane.require_install_confirmation(&inspection),
+                        ),
+                        AppAction::SetWagoInstallInProgress(false),
+                        AppAction::SetPendingWagoInstallConfirmation(Some(
+                            WagoInstallConfirmation {
+                                request,
+                                inspection,
+                            },
+                        )),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(
+                                self.dashboard.detail_mode,
+                                confirmation_status,
+                            ),
+                        ),
+                    ]
+                }
                 AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::Installed(
                     outcome,
                 ))) => {
                     vec![
+                        AppAction::SetSearchPaneState(
+                            self.search_pane.finish_install(&outcome.summary),
+                        ),
                         AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                         AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
                         AppAction::CompleteAddonScan {
@@ -3501,13 +3662,21 @@ impl App {
                         )),
                     ]
                 }
-                AppTaskEvent::WagoInstallFinished(Err(error)) => vec![
-                    AppAction::SetWagoInstallInProgress(false),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        self.dashboard.detail_mode,
-                        &format!("Wago install failed: {error}"),
-                    )),
-                ],
+                AppTaskEvent::WagoInstallFinished(Err(error)) => {
+                    let (addon_id, addon_name) = self.search_pane.install_identity();
+                    vec![
+                        AppAction::SetSearchPaneState(self.search_pane.fail_install(
+                            addon_id,
+                            addon_name,
+                            error.clone(),
+                        )),
+                        AppAction::SetWagoInstallInProgress(false),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            self.dashboard.detail_mode,
+                            &format!("Wago install failed: {error}"),
+                        )),
+                    ]
+                }
             },
         }
     }
@@ -4413,19 +4582,14 @@ impl App {
         {
             let absolute_index = window_start + index;
             let selected = self.search_pane.selected_result == Some(absolute_index);
+            let tracked_folder = self.tracked_wago_result_folder(result);
+            let install_state = self.search_install_state_for_result(result);
             let author = result
                 .owner
                 .as_deref()
                 .or_else(|| result.authors.first().map(String::as_str))
                 .unwrap_or("unknown");
             let version = result.version.as_deref().unwrap_or("unknown");
-            let name_style = if selected {
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(self.ui_theme.info)
-            };
             let row_style = if selected {
                 selected_row = Some(index);
                 Style::default().bg(Color::Rgb(36, 40, 56))
@@ -4435,25 +4599,28 @@ impl App {
 
             rows.push(
                 Row::new([
-                    Cell::from(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            Style::default().fg(self.ui_theme.highlight),
-                        ),
-                        Span::styled(truncate_text(&result.display_name, 34), name_style),
-                    ])),
+                    Cell::from(self.search_result_name_line(
+                        result,
+                        selected,
+                        tracked_folder.as_deref(),
+                        install_state,
+                    )),
                     Cell::from(Span::styled(
                         truncate_text(author, 18),
                         Style::default().fg(self.ui_theme.muted),
                     )),
                     Cell::from(Span::styled(
                         truncate_text(version, 18),
-                        Style::default().fg(self.ui_theme.panel_title),
+                        if install_state.is_some() {
+                            Style::default().fg(self.ui_theme.warning)
+                        } else {
+                            Style::default().fg(self.ui_theme.panel_title)
+                        },
                     )),
                     Cell::from(Span::styled(
                         result
                             .download_count
-                            .map(|downloads| downloads.to_string())
+                            .map(format_download_count)
                             .unwrap_or_else(|| "—".to_string()),
                         Style::default().fg(self.ui_theme.muted),
                     )),
@@ -4496,14 +4663,91 @@ impl App {
                 .as_deref()
                 .or_else(|| result.authors.first().map(String::as_str))
                 .unwrap_or("unknown");
-            vec![
-                Line::from(Span::styled(
-                    result.display_name.clone(),
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
+            let tracked_folder = self.tracked_wago_result_folder(result);
+            let install_state = self.search_install_state_for_result(result);
+            let mut lines = vec![Line::from(Span::styled(
+                result.display_name.clone(),
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            match install_state {
+                Some(SearchInstallState::Checking { .. }) => {
+                    lines.push(Line::from(shimmer_text_spans(
+                        "Checking tracked state and preparing install…",
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    )));
+                }
+                Some(SearchInstallState::Installing { .. }) => {
+                    lines.push(Line::from(shimmer_text_spans(
+                        "Installing from Wago…",
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    )));
+                }
+                Some(SearchInstallState::Success { parent_folder, .. }) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "✓ ",
+                            Style::default()
+                                .fg(self.ui_theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("Installed successfully into {parent_folder}"),
+                            Style::default()
+                                .fg(self.ui_theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                Some(SearchInstallState::ConfirmReplace { tracked_parent, .. }) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "📦 installed ",
+                            Style::default()
+                                .fg(self.ui_theme.panel_title)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("as {tracked_parent} · y reinstall · n cancel"),
+                            Style::default().fg(self.ui_theme.panel_title),
+                        ),
+                    ]));
+                }
+                Some(SearchInstallState::Error { message, .. }) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "Error ",
+                            Style::default()
+                                .fg(self.ui_theme.error)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(message.clone(), Style::default().fg(self.ui_theme.error)),
+                    ]));
+                }
+                _ => {
+                    if let Some(folder) = tracked_folder.as_deref() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "📦 installed ",
+                                Style::default()
+                                    .fg(self.ui_theme.panel_title)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("already installed as {folder}"),
+                                Style::default().fg(self.ui_theme.panel_title),
+                            ),
+                        ]));
+                    }
+                }
+            }
+            lines.push(Line::from(""));
+            lines.extend([
                 self.overlay_kv_line("Author", author),
                 self.overlay_kv_line("Version", result.version.as_deref().unwrap_or("unknown")),
                 self.overlay_kv_line("Slug", result.id.as_str()),
@@ -4511,7 +4755,8 @@ impl App {
                     "Summary",
                     result.summary.as_deref().unwrap_or("No summary provided."),
                 ),
-            ]
+            ]);
+            lines
         } else {
             vec![
                 Line::from(Span::styled(
@@ -4528,6 +4773,87 @@ impl App {
 
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(paragraph, inner);
+    }
+
+    fn search_result_name_line(
+        &self,
+        result: &WagoSearchResult,
+        selected: bool,
+        tracked_folder: Option<&str>,
+        install_state: Option<&SearchInstallState>,
+    ) -> Line<'static> {
+        let mut spans = vec![Span::styled(
+            if selected { "› " } else { "  " },
+            Style::default().fg(self.ui_theme.highlight),
+        )];
+
+        let name_spans = if install_state.is_some() {
+            shimmer_text_spans(
+                &truncate_text(&result.display_name, 28),
+                self.ui_theme.info,
+                Color::Rgb(255, 244, 214),
+                ShimmerConfig::action(),
+            )
+        } else {
+            vec![Span::styled(
+                truncate_text(&result.display_name, 28),
+                if selected {
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.ui_theme.info)
+                },
+            )]
+        };
+        spans.extend(name_spans);
+
+        if let Some(state) = install_state {
+            spans.push(Span::raw("  "));
+            match state {
+                SearchInstallState::Checking { .. } => spans.extend(shimmer_text_spans(
+                    "checking",
+                    self.ui_theme.warning,
+                    Color::Rgb(255, 244, 214),
+                    ShimmerConfig::action(),
+                )),
+                SearchInstallState::Installing { .. } => spans.extend(shimmer_text_spans(
+                    "installing",
+                    self.ui_theme.warning,
+                    Color::Rgb(255, 244, 214),
+                    ShimmerConfig::action(),
+                )),
+                SearchInstallState::Success { .. } => spans.push(Span::styled(
+                    "✓ installed",
+                    Style::default()
+                        .fg(self.ui_theme.success)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                SearchInstallState::ConfirmReplace { .. } => spans.push(Span::styled(
+                    "📦 installed",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                SearchInstallState::Error { .. } => spans.push(Span::styled(
+                    "error",
+                    Style::default()
+                        .fg(self.ui_theme.error)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                SearchInstallState::Idle => {}
+            }
+        } else if tracked_folder.is_some() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                "📦 installed",
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        Line::from(spans)
     }
 
     fn search_helper_line(&self) -> Line<'static> {
@@ -4558,6 +4884,29 @@ impl App {
             ]);
         }
 
+        if matches!(
+            self.search_pane.install_state,
+            SearchInstallState::ConfirmReplace { .. }
+        ) {
+            return Line::from(vec![
+                Span::styled(
+                    "Y",
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" reinstall", Style::default().fg(self.ui_theme.panel_title)),
+                Span::raw("  ·  "),
+                Span::styled(
+                    "N",
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" cancel", Style::default().fg(self.ui_theme.panel_title)),
+            ]);
+        }
+
         Line::from(vec![
             Span::styled(
                 "Enter",
@@ -4583,6 +4932,37 @@ impl App {
             ),
             Span::styled(" edit query", Style::default().fg(self.ui_theme.muted)),
         ])
+    }
+
+    fn tracked_wago_result_folder(&self, result: &WagoSearchResult) -> Option<String> {
+        let result_slug = wago_result_slug(result)?;
+        self.dashboard
+            .items
+            .iter()
+            .find(|item| {
+                item.source == SourceKind::Wago
+                    && item
+                        .source_url
+                        .as_deref()
+                        .and_then(extract_wago_slug)
+                        .is_some_and(|slug| slug.eq_ignore_ascii_case(&result_slug))
+            })
+            .map(|item| item.folder.clone())
+    }
+
+    fn search_install_state_for_result(
+        &self,
+        result: &WagoSearchResult,
+    ) -> Option<&SearchInstallState> {
+        let (addon_id, _) = self.search_pane.install_identity();
+        if addon_id.as_deref() == Some(result.id.as_str()) {
+            match &self.search_pane.install_state {
+                SearchInstallState::Idle => None,
+                state => Some(state),
+            }
+        } else {
+            None
+        }
     }
 
     fn header_logo_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
@@ -6309,7 +6689,7 @@ impl App {
                                     .unwrap_or("unknown"),
                                 result
                                     .download_count
-                                    .map(|count| count.to_string())
+                                    .map(format_download_count)
                                     .unwrap_or_else(|| "<unknown>".to_string()),
                                 result.version.as_deref().unwrap_or("<unknown>")
                             )));
@@ -7853,6 +8233,74 @@ fn visible_search_result_window(
     (start, end)
 }
 
+fn sort_search_results(results: &mut [WagoSearchResult]) {
+    results.sort_by(|left, right| {
+        right
+            .download_count
+            .unwrap_or(0)
+            .cmp(&left.download_count.unwrap_or(0))
+            .then_with(|| {
+                left.display_name
+                    .to_ascii_lowercase()
+                    .cmp(&right.display_name.to_ascii_lowercase())
+            })
+            .then_with(|| {
+                left.owner
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .cmp(&right.owner.as_deref().unwrap_or("").to_ascii_lowercase())
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn format_download_count(count: u64) -> String {
+    const THOUSAND: u64 = 1_000;
+    const MILLION: u64 = 1_000_000;
+    const BILLION: u64 = 1_000_000_000;
+
+    match count {
+        0..=999 => count.to_string(),
+        THOUSAND..=999_999 => format_compact_count(count, THOUSAND, "K"),
+        MILLION..=999_999_999 => format_compact_count(count, MILLION, "M"),
+        _ => format_compact_count(count, BILLION, "B"),
+    }
+}
+
+fn format_compact_count(count: u64, divisor: u64, suffix: &str) -> String {
+    let scaled_tenths = count.saturating_mul(10) / divisor;
+    let whole = scaled_tenths / 10;
+    let tenth = scaled_tenths % 10;
+
+    if tenth == 0 {
+        format!("{whole}{suffix}")
+    } else {
+        format!("{whole}.{tenth}{suffix}")
+    }
+}
+
+fn wago_result_slug(result: &WagoSearchResult) -> Option<String> {
+    result
+        .website_url
+        .as_deref()
+        .and_then(extract_wago_slug)
+        .map(str::to_string)
+        .or_else(|| {
+            if result.id.trim().is_empty() {
+                None
+            } else {
+                Some(result.id.clone())
+            }
+        })
+}
+
+fn extract_wago_slug(url: &str) -> Option<&str> {
+    let path = url.split_once("/addons/")?.1;
+    let slug = path.split(['/', '?', '#']).next()?.trim();
+    if slug.is_empty() { None } else { Some(slug) }
+}
+
 fn interpolate_palette(colors: &[Color], t: f32) -> Color {
     if colors.is_empty() {
         return Color::Reset;
@@ -7948,11 +8396,12 @@ mod tests {
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
         DashboardJobUiState, DashboardRow, DashboardSortColumn, DashboardState,
         DashboardUpdateOutcome, DetailMode, FooterHintId, FooterKeyPulse, InstallPaneState,
-        MotionState, OverlayKind, PendingWagoInstallRequest, ScanState, SearchPaneState,
-        SearchPresentationMode, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
-        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
-        child_row_prefix, dashboard_item_version_label, dashboard_item_version_line,
-        summarize_owned_folders, visible_search_result_window,
+        MotionState, OverlayKind, PendingWagoInstallRequest, ScanState, SearchInstallState,
+        SearchPaneState, SearchPresentationMode, ShellMode, ShellUiState, UiTheme,
+        WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome,
+        WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        dashboard_item_version_line, format_download_count, summarize_owned_folders,
+        visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -7962,7 +8411,7 @@ mod tests {
         FoundAction, FoundState, OnboardingPhase, OnboardingState, OnboardingStep,
     };
     use crate::update::LiveUpdateSummary;
-    use crate::wago::{WagoInstallInspection, WagoSearchResult};
+    use crate::wago::{WagoInstallInspection, WagoInstallSummary, WagoSearchResult};
     use lemonup_core::{
         AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
         OwnedFolder, ScanSummary, SourceKind, StateDatabase,
@@ -8446,6 +8895,26 @@ mod tests {
     }
 
     #[test]
+    fn search_edit_mode_treats_quit_letter_as_input() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane = app.search_pane.begin_editing();
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::SearchInputChar('q')]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('e'))),
+            vec![AppMessage::SearchInputChar('e')]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::SearchSubmit]
+        );
+    }
+
+    #[test]
     fn search_mode_without_api_key_reports_blocked_status() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
@@ -8487,6 +8956,7 @@ mod tests {
             }],
             selected_result: Some(0),
             last_query: Some("WeakAuras".to_string()),
+            install_state: SearchInstallState::Idle,
         };
 
         let actions = app.update(AppMessage::SearchInstallSelected);
@@ -8494,6 +8964,9 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                AppAction::SetSearchPaneState(app.search_pane.start_install_check(
+                    app.search_pane.selected_result().expect("selected result"),
+                )),
                 AppAction::SetWagoInstallInProgress(true),
                 AppAction::StartWagoInstall {
                     addon_dir: PathBuf::from(
@@ -8776,6 +9249,75 @@ mod tests {
     }
 
     #[test]
+    fn wago_search_finished_sorts_results_by_downloads_descending() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.in_progress = true;
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "details".to_string(),
+                results: vec![
+                    WagoSearchResult {
+                        id: "low".to_string(),
+                        display_name: "Low DL".to_string(),
+                        summary: None,
+                        owner: Some("Owner B".to_string()),
+                        authors: vec!["Owner B".to_string()],
+                        website_url: None,
+                        download_count: Some(10),
+                        version: Some("1.0.0".to_string()),
+                    },
+                    WagoSearchResult {
+                        id: "high".to_string(),
+                        display_name: "High DL".to_string(),
+                        summary: None,
+                        owner: Some("Owner A".to_string()),
+                        authors: vec!["Owner A".to_string()],
+                        website_url: None,
+                        download_count: Some(1_000),
+                        version: Some("2.0.0".to_string()),
+                    },
+                    WagoSearchResult {
+                        id: "none".to_string(),
+                        display_name: "No DL".to_string(),
+                        summary: None,
+                        owner: Some("Owner C".to_string()),
+                        authors: vec!["Owner C".to_string()],
+                        website_url: None,
+                        download_count: None,
+                        version: Some("3.0.0".to_string()),
+                    },
+                ],
+            })),
+        ));
+
+        for action in actions {
+            app.apply(action);
+        }
+
+        let ordered = app
+            .search_pane
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["high", "low", "none"]);
+        assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    #[test]
+    fn format_download_count_uses_compact_suffixes() {
+        assert_eq!(format_download_count(999), "999");
+        assert_eq!(format_download_count(1_000), "1K");
+        assert_eq!(format_download_count(1_500), "1.5K");
+        assert_eq!(format_download_count(15_999), "15.9K");
+        assert_eq!(format_download_count(1_000_000), "1M");
+        assert_eq!(format_download_count(1_290_000), "1.2M");
+        assert_eq!(format_download_count(2_000_000_000), "2B");
+    }
+
+    #[test]
     fn wago_install_confirmation_event_sets_pending_confirmation() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
@@ -8799,13 +9341,79 @@ mod tests {
             })),
         ));
 
-        assert_eq!(actions.len(), 3);
-        assert_eq!(actions[0], AppAction::SetWagoInstallInProgress(false));
+        assert_eq!(actions.len(), 4);
+        assert!(matches!(actions[0], AppAction::SetSearchPaneState(_)));
+        assert_eq!(actions[1], AppAction::SetWagoInstallInProgress(false));
         assert!(matches!(
-            actions[1],
+            actions[2],
             AppAction::SetPendingWagoInstallConfirmation(Some(_))
         ));
-        assert!(matches!(actions[2], AppAction::SetStatus(_)));
+        assert!(matches!(actions[3], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn tracked_wago_result_folder_matches_exact_source_url() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.items[0].source = SourceKind::Wago;
+        app.dashboard.items[0].folder = "WeakAuras".to_string();
+        app.dashboard.items[0].source_url =
+            Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+
+        let result = WagoSearchResult {
+            id: "VBNBxKx5".to_string(),
+            display_name: "WeakAuras".to_string(),
+            summary: None,
+            owner: Some("WeakAuras Team".to_string()),
+            authors: vec!["WeakAuras Team".to_string()],
+            website_url: Some("https://addons.wago.io/addons/VBNBxKx5".to_string()),
+            download_count: Some(500_000),
+            version: Some("5.21.1".to_string()),
+        };
+
+        assert_eq!(
+            app.tracked_wago_result_folder(&result).as_deref(),
+            Some("WeakAuras")
+        );
+    }
+
+    #[test]
+    fn wago_install_success_sets_search_success_state() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.install_state = SearchInstallState::Installing {
+            addon_id: "VBNBxKx5".to_string(),
+            addon_name: "WeakAuras".to_string(),
+        };
+
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::Installed(
+                WagoInstallOutcome {
+                    summary: WagoInstallSummary {
+                        addon_id: "VBNBxKx5".to_string(),
+                        addon_name: "WeakAuras".to_string(),
+                        parent_folder: "WeakAuras".to_string(),
+                        installed_folders: vec!["WeakAuras".to_string()],
+                        stability: crate::wago::WagoStability::Stable,
+                        version: Some("5.21.1".to_string()),
+                        dry_run: false,
+                    },
+                    sync: AddonScanOutcome {
+                        path: PathBuf::from(
+                            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+                        ),
+                        summary: ScanSummary {
+                            scanned_addons: 1,
+                            upserted_addons: 1,
+                            removed_addons: 0,
+                        },
+                        addons: Vec::new(),
+                        drift_report: DriftReport::empty(),
+                    },
+                },
+            ))),
+        ));
+
+        assert!(matches!(actions[0], AppAction::SetSearchPaneState(_)));
     }
 
     #[test]
