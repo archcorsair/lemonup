@@ -136,3 +136,9 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - deep scan with progress and cancel
 - config `Run onboarding again` re-enters the wizard with current values prefilled
 
+- latest inspect checkpoint:
+  - inspect overlay redesigned as a compact command-palette card
+  - child-row inspect resolves to the parent addon with child context
+  - inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
+  - inspect detail sections now collapse behind `r` relations, `d` dependencies, and `t` technical
+  - shared modal shell now shows `esc close` in the top-right

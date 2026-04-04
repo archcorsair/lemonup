@@ -431,3 +431,10 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 `Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, TUI-selected live updates, and config/backup-now flows are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. The next phase is the dedicated production TUI design/build phase described in rust/docs/production-tui-design-plan.md. Respect existing safety/relationship invariants and commit only after my manual verification.`
 
+
+## Latest Checkpoint
+
+- inspect overlay is now a compact command-palette card instead of a raw metadata dump
+- child-row inspect resolves to the parent addon and shows child context inline
+- inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
+- modal close affordance now lives in the top-right of the shared overlay shell

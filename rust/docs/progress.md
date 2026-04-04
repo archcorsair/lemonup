@@ -487,3 +487,12 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 - `rust/docs/single-surface-shell-plan.md`
 - `rust/docs/production-tui-design-plan.md`
 
+
+## Latest Checkpoint
+
+- inspect overlay redesigned into a command-palette card
+- inspect now resolves child rows to the parent addon with child context
+- inspect default view now shows compact source/status/version/folder/author/tracking lines instead of internal scan state
+- inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
+- inspect details moved behind collapsible `r`/`d`/`t` sections
+- overlay close affordance moved to the top-right of the shared modal shell

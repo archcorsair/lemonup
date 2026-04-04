@@ -88,6 +88,62 @@ struct OverlayState {
     active: Option<OverlayKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum InspectSection {
+    Relations,
+    Dependencies,
+    Technical,
+}
+
+impl InspectSection {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Relations => "r",
+            Self::Dependencies => "d",
+            Self::Technical => "t",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Relations => "Relations",
+            Self::Dependencies => "Dependencies",
+            Self::Technical => "Technical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct InspectOverlayState {
+    open_sections: HashSet<InspectSection>,
+}
+
+impl InspectOverlayState {
+    fn toggle(mut self, section: InspectSection) -> Self {
+        if !self.open_sections.insert(section) {
+            self.open_sections.remove(&section);
+        }
+        self
+    }
+
+    fn is_open(&self, section: InspectSection) -> bool {
+        self.open_sections.contains(&section)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InspectResolvedTarget<'a> {
+    item: &'a DashboardItem,
+    opened_from_child: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InspectActionChip {
+    key: &'static str,
+    label: &'static str,
+    enabled: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MotionPreset {
     Tasteful,
@@ -173,6 +229,9 @@ enum FooterHintId {
     Change,
     Save,
     Reset,
+    Relations,
+    Dependencies,
+    Technical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +341,11 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardOpenInspect,
     DashboardCloseOverlay,
+    InspectToggleSection(InspectSection),
+    InspectToggleSelected,
+    InspectRequestDelete,
+    InspectRunCheck,
+    InspectRunUpdate,
     DashboardSelectionNext,
     DashboardSelectionPrevious,
     DashboardPointerSelect { column: u16, row: u16 },
@@ -1126,8 +1190,16 @@ impl DashboardState {
             return false;
         };
 
-        if !self.selected_parents.remove(&parent_folder) {
-            self.selected_parents.insert(parent_folder);
+        self.toggle_selected_parent_folder(&parent_folder)
+    }
+
+    fn toggle_selected_parent_folder(&mut self, folder: &str) -> bool {
+        if !self.items.iter().any(|item| item.folder == folder) {
+            return false;
+        }
+
+        if !self.selected_parents.remove(folder) {
+            self.selected_parents.insert(folder.to_string());
         }
 
         true
@@ -1691,6 +1763,7 @@ pub struct App {
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
     dashboard: DashboardState,
+    inspect_overlay: InspectOverlayState,
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
@@ -1793,6 +1866,7 @@ impl App {
             effective_addon_dir,
             scan_state,
             dashboard: DashboardState::from_addons(addons),
+            inspect_overlay: InspectOverlayState::default(),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
@@ -2040,7 +2114,13 @@ impl App {
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
-                KeyCode::Esc => Some(FooterHintId::Close),
+                KeyCode::Char('c') => Some(FooterHintId::Check),
+                KeyCode::Char('u') => Some(FooterHintId::Update),
+                KeyCode::Char('x') => Some(FooterHintId::Delete),
+                KeyCode::Char(' ') => Some(FooterHintId::Select),
+                KeyCode::Char('r') => Some(FooterHintId::Relations),
+                KeyCode::Char('d') => Some(FooterHintId::Dependencies),
+                KeyCode::Char('t') => Some(FooterHintId::Technical),
                 _ => None,
             };
         }
@@ -2212,6 +2292,21 @@ impl App {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char('c') => vec![AppMessage::InspectRunCheck],
+                KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
+                KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
+                KeyCode::Char(' ') => vec![AppMessage::InspectToggleSelected],
+                KeyCode::Char('r') => {
+                    vec![AppMessage::InspectToggleSection(InspectSection::Relations)]
+                }
+                KeyCode::Char('d') => {
+                    vec![AppMessage::InspectToggleSection(
+                        InspectSection::Dependencies,
+                    )]
+                }
+                KeyCode::Char('t') => {
+                    vec![AppMessage::InspectToggleSection(InspectSection::Technical)]
+                }
                 KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 _ => vec![],
             };
@@ -2544,18 +2639,135 @@ impl App {
                 } else {
                     vec![
                         AppAction::SetInspectOverlay(true),
-                        AppAction::SetStatus(
-                            self.with_base_status("inspect overlay open | esc close"),
-                        ),
+                        AppAction::SetInspectOverlayState(InspectOverlayState::default()),
+                        AppAction::SetStatus(String::new()),
                     ]
                 }
             }
-            AppMessage::DashboardCloseOverlay => vec![
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Overview, "overlay closed"),
-                ),
-                AppAction::SetDetailMode(DetailMode::Overview),
-            ],
+            AppMessage::DashboardCloseOverlay => {
+                if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+                    vec![
+                        AppAction::SetInspectOverlay(false),
+                        AppAction::SetInspectOverlayState(InspectOverlayState::default()),
+                        AppAction::SetStatus(String::new()),
+                    ]
+                } else {
+                    vec![
+                        AppAction::SetStatus(String::new()),
+                        AppAction::SetDetailMode(DetailMode::Overview),
+                    ]
+                }
+            }
+            AppMessage::InspectToggleSection(section) => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay.clone().toggle(section),
+            )],
+            AppMessage::InspectToggleSelected => match self.inspect_resolved_target() {
+                Some(target) => {
+                    let was_selected = self.dashboard.is_parent_selected(&target.item.folder);
+                    let mut folders = self.dashboard.selected_parent_folders();
+                    if was_selected {
+                        folders.retain(|folder| folder != &target.item.folder);
+                    } else {
+                        folders.push(target.item.folder.clone());
+                        folders.sort();
+                        folders.dedup();
+                    }
+                    vec![
+                        AppAction::SetSelectedDashboardParents(folders),
+                        AppAction::SetStatus(if was_selected {
+                            self.dashboard_status_for(
+                                DetailMode::Overview,
+                                &format!("cleared {}", target.item.name),
+                            )
+                        } else {
+                            self.dashboard_status_for(
+                                DetailMode::Overview,
+                                &format!("selected {}", target.item.name),
+                            )
+                        }),
+                    ]
+                }
+                None => vec![],
+            },
+            AppMessage::InspectRequestDelete => match self.inspect_resolved_target() {
+                Some(target) => vec![
+                    AppAction::SetPendingDelete(Some(vec![target.item.folder.clone()])),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Overview,
+                        &format!(
+                            "delete {}? press y to confirm, n to cancel",
+                            target.item.name
+                        ),
+                    )),
+                ],
+                None => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Overview,
+                    "inspect has no addon target",
+                ))],
+            },
+            AppMessage::InspectRunCheck => match self.inspect_resolved_target() {
+                Some(target) => vec![
+                    AppAction::StartDashboardCheckSelected {
+                        folders: vec![target.item.folder.clone()],
+                        wago_api_key: self.wago_api_key.clone(),
+                        check_interval_secs: self.config_pane.draft.check_interval_secs,
+                    },
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Overview,
+                        &format!("checking {} for updates", target.item.name),
+                    )),
+                ],
+                None => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Overview,
+                    "inspect has no addon target",
+                ))],
+            },
+            AppMessage::InspectRunUpdate => {
+                if self.dashboard.update_in_progress() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Overview,
+                        "selected addon update already running",
+                    ))]
+                } else if self.dashboard.pending_delete_folders().is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Overview,
+                        "confirm or cancel the pending delete before applying updates",
+                    ))]
+                } else {
+                    match (
+                        self.effective_addon_dir.clone(),
+                        self.inspect_resolved_target(),
+                    ) {
+                        (_, None) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Overview,
+                            "inspect has no addon target",
+                        ))],
+                        (None, Some(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Overview,
+                            "addon directory is not configured",
+                        ))],
+                        (Some(_), Some(target)) if !is_refreshable_dashboard_item(target.item) => {
+                            vec![AppAction::SetStatus(self.dashboard_status_for(
+                                DetailMode::Overview,
+                                &format!("{} is not updateable", target.item.name),
+                            ))]
+                        }
+                        (Some(addon_dir), Some(target)) => vec![
+                            AppAction::SetDashboardUpdateInProgress(true),
+                            AppAction::StartDashboardUpdateSelected {
+                                addon_dir,
+                                folders: vec![target.item.folder.clone()],
+                                wago_api_key: self.wago_api_key.clone(),
+                                check_interval_secs: self.config_pane.draft.check_interval_secs,
+                            },
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                DetailMode::Overview,
+                                &format!("updating {}", target.item.name),
+                            )),
+                        ],
+                    }
+                }
+            }
             AppMessage::DashboardPointerSelect { column, row } => {
                 match self.dashboard_selection_for_pointer(column, row) {
                     Some(selection) if self.dashboard.list_state.selected() != Some(selection) => {
@@ -3698,6 +3910,9 @@ impl App {
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
             }
+            AppAction::SetInspectOverlayState(state) => {
+                self.inspect_overlay = state;
+            }
             AppAction::SetStatus(status) => self.status_line = status,
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
@@ -4285,14 +4500,18 @@ impl App {
     fn render_overlay_host(&self, frame: &mut Frame<'_>, area: Rect) {
         if let Some(kind) = self.shell_ui.overlay.active {
             let title = match kind {
-                OverlayKind::Inspect => "Inspect",
-                OverlayKind::Install => "Install",
-                OverlayKind::Search => "Search",
-                OverlayKind::Update => "Update",
-                OverlayKind::Config => "Config",
-                OverlayKind::Backup => "Backup",
-                OverlayKind::Confirm => "Confirm",
-            };
+                OverlayKind::Inspect => self
+                    .inspect_resolved_target()
+                    .map(|target| target.item.name.clone())
+                    .unwrap_or_else(|| "Inspect".to_string()),
+                OverlayKind::Install => "Install".to_string(),
+                OverlayKind::Search => "Search".to_string(),
+                OverlayKind::Update => "Update".to_string(),
+                OverlayKind::Config => "Config".to_string(),
+                OverlayKind::Backup => "Backup".to_string(),
+                OverlayKind::Confirm => "Confirm".to_string(),
+            }
+            .to_string();
             let overlay = match kind {
                 OverlayKind::Inspect => {
                     let overlay = Layout::default()
@@ -4335,8 +4554,8 @@ impl App {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(symbols::border::ROUNDED)
-                .title(format!(" {title} Overlay "))
-                .title_bottom(" esc close ")
+                .title(Line::from(format!(" {title} ")).left_aligned())
+                .title(Line::from(" esc close ").right_aligned())
                 .border_style(if kind == OverlayKind::Inspect {
                     Style::default()
                         .fg(self.ui_theme.panel_title)
@@ -4348,9 +4567,7 @@ impl App {
             let inner = block.inner(overlay);
             frame.render_widget(block, overlay);
             if kind == OverlayKind::Inspect {
-                let inspect =
-                    Paragraph::new(self.inspect_overlay_lines()).wrap(Wrap { trim: false });
-                frame.render_widget(inspect, inner);
+                self.render_inspect_overlay(frame, inner);
             } else if kind == OverlayKind::Search {
                 self.render_search_overlay(frame, inner);
             } else {
@@ -5468,12 +5685,60 @@ impl App {
         }
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
-            return vec![FooterCommandHint {
-                id: FooterHintId::Close,
-                key: "esc",
-                label: "close",
-                tier: primary,
-            }];
+            let toggle_label = self
+                .inspect_resolved_target()
+                .map(|target| {
+                    if self.dashboard.is_parent_selected(&target.item.folder) {
+                        "clear"
+                    } else {
+                        "select"
+                    }
+                })
+                .unwrap_or("select");
+            return vec![
+                FooterCommandHint {
+                    id: FooterHintId::Select,
+                    key: "space",
+                    label: toggle_label,
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Check,
+                    key: "c",
+                    label: "check",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Update,
+                    key: "u",
+                    label: "update",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Delete,
+                    key: "x",
+                    label: "delete",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Relations,
+                    key: "r",
+                    label: "relations",
+                    tier: secondary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Dependencies,
+                    key: "d",
+                    label: "deps",
+                    tier: secondary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Technical,
+                    key: "t",
+                    label: "tech",
+                    tier: secondary,
+                },
+            ];
         }
 
         if self.shell_ui.overlay.active.is_some() {
@@ -6957,146 +7222,401 @@ impl App {
         ))
     }
 
-    fn inspect_overlay_lines(&self) -> Vec<Line<'static>> {
+    fn inspect_resolved_target(&self) -> Option<InspectResolvedTarget<'_>> {
+        let item = self.dashboard.selected_item()?;
+        Some(InspectResolvedTarget {
+            item,
+            opened_from_child: self.dashboard.selected_owned_child_folder(),
+        })
+    }
+
+    fn render_inspect_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
+        let content_area = area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let Some(target) = self.inspect_resolved_target() else {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        "No addon selected",
+                        Style::default()
+                            .fg(self.ui_theme.panel_title)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Select a row, then press Enter to inspect.",
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                ])
+                .wrap(Wrap { trim: false }),
+                content_area,
+            );
+            return;
+        };
+
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if target.opened_from_child.is_some() {
+                    2
+                } else {
+                    1
+                }),
+                Constraint::Length(6),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(8),
+            ])
+            .split(content_area);
+
+        let hero = Paragraph::new(self.inspect_hero_lines(target)).wrap(Wrap { trim: false });
+        frame.render_widget(hero, sections[0]);
+
+        let summary_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                " Summary ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        let summary_inner = summary_block.inner(sections[1]);
+        frame.render_widget(summary_block, sections[1]);
+        frame.render_widget(
+            Paragraph::new(self.inspect_summary_lines(target)).wrap(Wrap { trim: false }),
+            summary_inner,
+        );
+
+        frame.render_widget(Paragraph::new(""), sections[2]);
+
+        let actions_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                " Actions ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        let actions_inner = actions_block.inner(sections[3]);
+        frame.render_widget(actions_block, sections[3]);
+        frame.render_widget(
+            Paragraph::new(self.inspect_action_line(target)),
+            actions_inner,
+        );
+
+        let details_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                " Details ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        let details_inner = details_block.inner(sections[4]);
+        frame.render_widget(details_block, sections[4]);
+        frame.render_widget(
+            Paragraph::new(self.inspect_detail_lines(target)).wrap(Wrap { trim: false }),
+            details_inner,
+        );
+    }
+
+    fn inspect_hero_lines(&self, target: InspectResolvedTarget<'_>) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        let selected = self.dashboard.selected_item();
-        let selected_row = self.dashboard.selected_row();
-        let selected_owned_child = self.dashboard.selected_owned_child_folder();
-
-        if let Some(undo_delete) = self.undo_delete.as_ref() {
-            lines.push(Line::from(format!(
-                "Undo ready: {} parent{}, {} folder{}",
-                undo_delete.parent_count(),
-                plural_suffix(undo_delete.parent_count()),
-                undo_delete.moved_folder_count(),
-                plural_suffix(undo_delete.moved_folder_count())
-            )));
-            lines.push(Line::from(""));
-        }
-
-        if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
-            lines.push(Line::from(format!(
-                "Delete pending: {}",
-                pending_delete_folders.join(", ")
-            )));
-            lines.push(Line::from(""));
-        }
-
-        if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
-            lines.push(Line::from(format!(
-                "Replace pending: {} -> {}",
-                confirmation.inspection.addon_name, confirmation.inspection.parent_folder
-            )));
-            lines.push(Line::from(""));
-        }
-
-        if let (Some(item), Some(child_folder)) = (selected, selected_owned_child) {
-            lines.push(Line::from(format!("Owned child: {child_folder}")));
-            lines.push(Line::from(format!("Parent: {}", item.name)));
-            lines.push(Line::from(format!("Source: {}", source_label(item.source))));
-            lines.push(Line::from(format!(
-                "Version: {}",
-                dashboard_item_version_label(item)
-            )));
-            lines.push(Line::from(format!(
-                "Status: {}",
-                dashboard_item_status_text(item)
-            )));
-            lines.push(Line::from(format!(
-                "Management: {}",
-                dashboard_item_management_summary(item, self.parent_has_drift(&item.folder))
-            )));
-        } else if let Some(item) = selected {
-            lines.push(Line::from(item.name.clone()));
-            lines.push(Line::from(format!("Folder: {}", item.folder)));
-            lines.push(Line::from(format!("Source: {}", source_label(item.source))));
-            lines.push(Line::from(format!(
-                "Version: {}",
-                dashboard_item_version_label(item)
-            )));
-            lines.push(Line::from(format!(
-                "Status: {}",
-                dashboard_item_status_text(item)
-            )));
-            lines.push(Line::from(format!(
-                "Management: {}",
-                dashboard_item_management_summary(item, self.parent_has_drift(&item.folder))
-            )));
-
-            let missing_owned_children = self.dashboard_parent_missing_owned_children(&item.folder);
-            if !missing_owned_children.is_empty() {
-                lines.push(Line::from(format!(
-                    "Missing owned: {}",
-                    missing_owned_children.join(", ")
-                )));
-            }
-
-            if !item.owned_folders.is_empty() {
-                lines.push(Line::from(format!(
-                    "Children: {}",
-                    summarize_owned_folders(&item.owned_folders)
-                )));
-            }
-
-            if let Some(author) = item.author.as_deref()
-                && !author.trim().is_empty()
-            {
-                lines.push(Line::from(format!("Author: {author}")));
-            }
-
-            if let Some(interface) = item.interface.as_deref()
-                && !interface.trim().is_empty()
-            {
-                lines.push(Line::from(format!("Interface: {interface}")));
-            }
-
-            if !item.required_deps.is_empty() {
-                lines.push(Line::from(format!(
-                    "Required deps: {}",
-                    item.required_deps.join(", ")
-                )));
-            }
-
-            if !item.optional_deps.is_empty() {
-                lines.push(Line::from(format!(
-                    "Optional deps: {}",
-                    item.optional_deps.join(", ")
-                )));
-            }
-        } else {
-            lines.push(Line::from("No addon selected."));
-            lines.push(Line::from("Select a row, then press Enter to inspect."));
-        }
-
-        lines.push(Line::from(""));
-        if let Some(row) = selected_row {
-            lines.push(Line::from(format!(
-                "Row kind: {}",
-                match row.kind {
-                    DashboardRowKind::Parent => "parent",
-                    DashboardRowKind::OwnedChild { .. } => "owned child",
-                }
+        if let Some(child_folder) = target.opened_from_child {
+            lines.push(Line::from(Span::styled(
+                format!("Opened from child: {child_folder}"),
+                Style::default().fg(self.ui_theme.muted),
             )));
         }
-        lines.push(Line::from(format!(
-            "Selection: {} parent{}",
-            self.dashboard.selected_parent_count(),
-            plural_suffix(self.dashboard.selected_parent_count())
-        )));
-        lines.push(Line::from(format!("Scan: {}", self.scan_status_label())));
-        lines.extend(self.last_scan_drift_lines());
-
-        if let Some(summary) = self.dashboard.last_update_summary() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "Last update: updated {}, up-to-date {}, errors {}",
-                summary.updated_addons, summary.up_to_date, summary.errors
-            )));
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from("Esc closes inspect. q still quits."));
         lines
+    }
+
+    fn inspect_summary_lines(&self, target: InspectResolvedTarget<'_>) -> Vec<Line<'static>> {
+        let mut lines = vec![
+            self.inspect_source_line(target.item),
+            self.inspect_status_line(target.item),
+            self.inspect_version_line(target.item),
+            self.overlay_kv_line("Folder", target.item.folder.clone()),
+        ];
+
+        if let Some(author) = target.item.author.as_deref().map(str::trim)
+            && !author.is_empty()
+            && !author.eq_ignore_ascii_case("unknown")
+        {
+            lines.push(self.overlay_kv_line("Author", author.to_string()));
+        }
+
+        if target.item.has_authoritative_owned_folders && target.item.source != SourceKind::Manual {
+            lines.push(self.overlay_kv_line("Tracking", "Managed by LemonUp"));
+        }
+
+        lines
+    }
+
+    fn inspect_source_line(&self, item: &DashboardItem) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(
+                source_label(item.source).to_string(),
+                Style::default()
+                    .fg(source_badge_color(item.source))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    }
+
+    fn inspect_version_line(&self, item: &DashboardItem) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("Version: ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(
+                dashboard_item_version_label(item),
+                Style::default().fg(Color::Rgb(172, 182, 220)),
+            ),
+        ])
+    }
+
+    fn inspect_action_line(&self, target: InspectResolvedTarget<'_>) -> Line<'static> {
+        let select_label = if self.dashboard.is_parent_selected(&target.item.folder) {
+            "clear"
+        } else {
+            "select"
+        };
+        let chips = [
+            InspectActionChip {
+                key: "space",
+                label: select_label,
+                enabled: true,
+            },
+            InspectActionChip {
+                key: "c",
+                label: "check",
+                enabled: true,
+            },
+            InspectActionChip {
+                key: "u",
+                label: "update",
+                enabled: is_refreshable_dashboard_item(target.item),
+            },
+            InspectActionChip {
+                key: "x",
+                label: "delete",
+                enabled: true,
+            },
+        ];
+
+        let mut spans = Vec::new();
+        for (index, chip) in chips.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            let key_bg = if chip.enabled {
+                Color::Rgb(31, 37, 58)
+            } else {
+                Color::Rgb(27, 30, 45)
+            };
+            let key_fg = if chip.enabled {
+                self.ui_theme.panel_title
+            } else {
+                self.ui_theme.muted
+            };
+            spans.push(Span::styled(
+                format!(" {} ", chip.key),
+                Style::default()
+                    .fg(key_fg)
+                    .bg(key_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                chip.label,
+                Style::default().fg(if chip.enabled {
+                    self.ui_theme.panel_title
+                } else {
+                    self.ui_theme.muted
+                }),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    fn inspect_detail_lines(&self, target: InspectResolvedTarget<'_>) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for section in [
+            InspectSection::Relations,
+            InspectSection::Dependencies,
+            InspectSection::Technical,
+        ] {
+            let is_open = self.inspect_overlay.is_open(section);
+            lines.push(self.inspect_section_header(section, is_open));
+            if is_open {
+                lines.extend(self.inspect_section_body(section, target));
+            }
+        }
+        lines
+    }
+
+    fn inspect_status_line(&self, item: &DashboardItem) -> Line<'static> {
+        let (status_label, status_color) = self.inspect_status_chip(item);
+        let mut spans = vec![Span::styled(
+            "Status: ",
+            Style::default().fg(self.ui_theme.muted),
+        )];
+        let is_update_available = matches!(
+            dashboard_item_update_status(item),
+            UpdateStatus::UpdateAvailable
+        ) && item.source != SourceKind::Manual
+            && item.has_authoritative_owned_folders;
+        let display_color = if is_update_available {
+            self.inspect_pulse_color(status_color)
+        } else {
+            status_color
+        };
+        spans.push(Span::styled(
+            status_label.to_string(),
+            Style::default()
+                .fg(display_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if is_update_available {
+            let remote = dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string());
+            spans.extend([
+                Span::raw(" "),
+                Span::styled("→", Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled(
+                    remote,
+                    Style::default()
+                        .fg(display_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled("📦", Style::default().fg(Color::Rgb(212, 175, 55))),
+            ]);
+        }
+        Line::from(spans)
+    }
+
+    fn inspect_pulse_color(&self, base: Color) -> Color {
+        match (base, self.shell_ui.motion.tick_count % 6) {
+            (Color::Rgb(r, g, b), 0..=2) => Color::Rgb(r, g, b),
+            (Color::Rgb(r, g, b), _) => Color::Rgb(
+                r.saturating_add(22),
+                g.saturating_add(18),
+                b.saturating_add(8),
+            ),
+            (Color::Yellow, 0..=2) => Color::Yellow,
+            (Color::Yellow, _) => Color::Rgb(255, 232, 168),
+            (other, _) => other,
+        }
+    }
+
+    fn inspect_status_chip(&self, item: &DashboardItem) -> (&'static str, Color) {
+        if item.source == SourceKind::Manual {
+            return ("Manual", Color::Magenta);
+        }
+        if !item.has_authoritative_owned_folders {
+            return ("Unmanaged", Color::Magenta);
+        }
+
+        match dashboard_item_update_status(item) {
+            UpdateStatus::UpToDate => ("Up to date", self.ui_theme.success),
+            UpdateStatus::UpdateAvailable => ("Update available", self.ui_theme.warning),
+            UpdateStatus::Unknown => ("Unknown", Color::Magenta),
+            UpdateStatus::Error => ("Error", self.ui_theme.error),
+        }
+    }
+
+    fn inspect_section_header(&self, section: InspectSection, is_open: bool) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                if is_open { "▾ " } else { "▸ " },
+                Style::default().fg(self.ui_theme.muted),
+            ),
+            Span::styled(
+                format!("{} ", section.key()),
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                section.label(),
+                Style::default().fg(self.ui_theme.panel_title),
+            ),
+        ])
+    }
+
+    fn inspect_section_body(
+        &self,
+        section: InspectSection,
+        target: InspectResolvedTarget<'_>,
+    ) -> Vec<Line<'static>> {
+        let indent = "  ";
+        match section {
+            InspectSection::Relations => {
+                let mut lines = Vec::new();
+                if let Some(child_folder) = target.opened_from_child {
+                    lines.push(Line::from(format!(
+                        "{indent}Opened from child: {child_folder}"
+                    )));
+                }
+                if !target.item.owned_folders.is_empty() {
+                    lines.push(Line::from(format!(
+                        "{indent}Children: {}",
+                        summarize_owned_folders(&target.item.owned_folders)
+                    )));
+                }
+                let missing = self.dashboard_parent_missing_owned_children(&target.item.folder);
+                if !missing.is_empty() {
+                    lines.push(Line::from(format!(
+                        "{indent}Missing: {}",
+                        summarize_owned_folders(missing)
+                    )));
+                }
+                if lines.is_empty() {
+                    lines.push(Line::from(format!("{indent}No relationship details")));
+                }
+                lines
+            }
+            InspectSection::Dependencies => {
+                let mut lines = Vec::new();
+                if !target.item.required_deps.is_empty() {
+                    lines.push(Line::from(format!(
+                        "{indent}Required: {}",
+                        summarize_owned_folders(&target.item.required_deps)
+                    )));
+                }
+                if !target.item.optional_deps.is_empty() {
+                    lines.push(Line::from(format!(
+                        "{indent}Optional: {}",
+                        summarize_owned_folders(&target.item.optional_deps)
+                    )));
+                }
+                if lines.is_empty() {
+                    lines.push(Line::from(format!("{indent}No dependency metadata")));
+                }
+                lines
+            }
+            InspectSection::Technical => {
+                let mut lines = Vec::new();
+                if let Some(interface) = target.item.interface.as_deref().map(str::trim)
+                    && !interface.is_empty()
+                {
+                    lines.push(Line::from(format!("{indent}Interface: {interface}")));
+                }
+                if let Some(source_url) = target.item.source_url.as_deref().map(str::trim)
+                    && !source_url.is_empty()
+                {
+                    lines.push(Line::from(format!(
+                        "{indent}Source URL: {}",
+                        truncate_text(source_url, 64)
+                    )));
+                }
+                if lines.is_empty() {
+                    lines.push(Line::from(format!("{indent}No technical details")));
+                }
+                lines
+            }
+        }
     }
 
     fn base_status_line(&self) -> String {
@@ -8092,13 +8612,7 @@ fn compare_text(left: &str, right: &str) -> std::cmp::Ordering {
 
 fn dashboard_item_source_line(item: &DashboardItem) -> Line<'static> {
     let label = source_compact_label(item.source);
-    let color = match item.source {
-        SourceKind::GitHub => Color::Cyan,
-        SourceKind::Tukui => Color::Yellow,
-        SourceKind::WowInterface => Color::Magenta,
-        SourceKind::Wago => Color::Blue,
-        SourceKind::Manual => Color::DarkGray,
-    };
+    let color = source_badge_color(item.source);
 
     Line::from(vec![
         Span::styled("[", Style::default().fg(self::Color::DarkGray)),
@@ -8380,6 +8894,16 @@ fn source_label(source: SourceKind) -> &'static str {
     }
 }
 
+fn source_badge_color(source: SourceKind) -> Color {
+    match source {
+        SourceKind::GitHub => Color::Cyan,
+        SourceKind::Tukui => Color::Yellow,
+        SourceKind::WowInterface => Color::Magenta,
+        SourceKind::Wago => Color::Blue,
+        SourceKind::Manual => Color::DarkGray,
+    }
+}
+
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -8415,11 +8939,12 @@ mod tests {
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
         ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
         DashboardJobUiState, DashboardRow, DashboardSortColumn, DashboardState,
-        DashboardUpdateOutcome, DetailMode, FooterHintId, FooterKeyPulse, InstallPaneState,
-        MotionState, OverlayKind, PendingWagoInstallRequest, ScanState, SearchInstallState,
-        SearchPaneState, SearchPresentationMode, ShellMode, ShellUiState, UiTheme,
-        WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome,
-        WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        DashboardUpdateOutcome, DetailMode, FooterHintId, FooterKeyPulse, InspectOverlayState,
+        InspectResolvedTarget, InspectSection, InstallPaneState, MotionState, OverlayKind,
+        PendingWagoInstallRequest, ScanState, SearchInstallState, SearchPaneState,
+        SearchPresentationMode, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
+        WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
+        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
         dashboard_item_version_line, format_download_count, summarize_owned_folders,
         truncate_middle_text, visible_search_result_window,
     };
@@ -8493,6 +9018,7 @@ mod tests {
             task_events_tx,
             task_events_rx,
             active_onboarding_cancel: None,
+            inspect_overlay: InspectOverlayState::default(),
         }
     }
 
@@ -8807,6 +9333,85 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
             vec![AppMessage::QuitRequested]
+        );
+    }
+
+    #[test]
+    fn inspect_overlay_keys_include_check_action() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('c'))),
+            vec![AppMessage::InspectRunCheck]
+        );
+    }
+
+    #[test]
+    fn inspect_on_child_row_resolves_to_parent_with_child_context() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(1));
+        app.apply(AppAction::ToggleDashboardExpanded);
+        app.dashboard.list_state.select(Some(2));
+
+        let resolved = app.inspect_resolved_target().expect("inspect target");
+
+        assert_eq!(resolved.item.folder, "Second");
+        assert_eq!(resolved.opened_from_child, Some("Second_Config"));
+    }
+
+    #[test]
+    fn inspect_summary_hides_empty_author_placeholder_and_internal_noise() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let target = InspectResolvedTarget {
+            item: &app.dashboard.items[2],
+            opened_from_child: None,
+        };
+
+        let summary = app
+            .inspect_summary_lines(target)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(summary.contains("Version: unknown"));
+        assert!(summary.contains("Folder: Third"));
+        assert!(!summary.contains("Author:"));
+        assert!(!summary.contains("selection"));
+        assert!(!summary.contains("scan"));
+        assert!(!summary.contains("drift"));
+    }
+
+    #[test]
+    fn inspect_section_toggle_message_opens_and_closes_requested_section() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        for action in app.update(AppMessage::InspectToggleSection(InspectSection::Relations)) {
+            app.apply(action);
+        }
+        assert!(app.inspect_overlay.is_open(InspectSection::Relations));
+
+        for action in app.update(AppMessage::InspectToggleSection(InspectSection::Relations)) {
+            app.apply(action);
+        }
+        assert!(!app.inspect_overlay.is_open(InspectSection::Relations));
+    }
+
+    #[test]
+    fn inspect_detail_sections_start_collapsed() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let target = app.inspect_resolved_target().expect("inspect target");
+
+        let details = app
+            .inspect_detail_lines(target)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            details,
+            vec!["▸ r Relations", "▸ d Dependencies", "▸ t Technical"]
         );
     }
 
