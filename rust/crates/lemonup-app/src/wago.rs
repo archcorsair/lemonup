@@ -736,6 +736,7 @@ fn versions_match(installed: Option<&str>, remote: Option<&str>) -> bool {
 
 fn normalize_version(value: &str) -> String {
     let trimmed = value.trim();
+    let trimmed = trimmed.trim_start_matches(|character: char| !character.is_ascii_alphanumeric());
     let normalized = trimmed
         .strip_prefix('v')
         .or_else(|| trimmed.strip_prefix('V'))
@@ -1648,5 +1649,13 @@ mod tests {
         assert!(versions_match(Some("V5.21.1"), Some("v5.21.1")));
         assert!(versions_match(Some("v5.21.1"), Some("5.21.1")));
         assert!(!versions_match(Some("5.21.0"), Some("5.21.1")));
+    }
+
+    #[test]
+    fn versions_match_ignores_leading_hash_prefix() {
+        assert!(versions_match(
+            Some("#Details.20260327.14812.171"),
+            Some("Details.20260327.14812.171")
+        ));
     }
 }

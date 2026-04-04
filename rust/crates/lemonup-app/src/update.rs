@@ -734,6 +734,7 @@ fn normalize_selector(value: &str) -> String {
 
 fn normalize_version(value: &str) -> String {
     let trimmed = value.trim();
+    let trimmed = trimmed.trim_start_matches(|character: char| !character.is_ascii_alphanumeric());
     let normalized = trimmed
         .strip_prefix('v')
         .or_else(|| trimmed.strip_prefix('V'))
@@ -913,6 +914,18 @@ mod tests {
         let mut addon = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
         addon.version = Some("v15.10".to_string());
         addon.remote_version = Some("15.10".to_string());
+
+        let (status, message) = determine_update_status(&addon);
+
+        assert_eq!(status, UpdateStatus::UpToDate);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn determine_update_status_ignores_leading_hash_prefix_for_non_github_versions() {
+        let mut addon = AddonRecord::new("Details", "Details", SourceKind::Wago);
+        addon.version = Some("#Details.20260327.14812.171".to_string());
+        addon.remote_version = Some("Details.20260327.14812.171".to_string());
 
         let (status, message) = determine_update_status(&addon);
 

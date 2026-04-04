@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: inline overview check/update plus live action feedback implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready inline overview action slice pending commit
+- latest local milestone at handoff pass: Wago managed-state and version-normalization fixes implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready Wago managed-state/version-display slice pending commit
 
 ## Current State
 
@@ -163,13 +163,18 @@ Implemented, committed, and pushed:
   - right rail shows grouped command hints with sticky context emphasis and keypress pulse feedback
   - footer copy is deliberately humanized; internal/debug-style summaries are suppressed
 - overview table sorting is implemented and user-verified:
-  - `1` sorts by `Name`
-  - `2` sorts by `Version`
-  - `3` sorts by `Author`
-  - `4` sorts by `Source`
+  - 1 sorts by Name
+  - 2 sorts by Version
+  - 3 sorts by Author
+  - 4 sorts by Source
   - pressing the same number again reverses the sort direction for that column
-  - the active sort shows `▲/▼` in the table header
+  - the active sort shows ▲/▼ in the table header
   - selection survives re-sort and child rows remain attached to their parents
+- Wago tracked-state/version regression fixes are implemented and user-verified:
+  - single-folder Wago installs remain managed instead of rendering as unmanaged
+  - state merges preserve provider-managed authority even with empty owned-folder lists
+  - Wago immediate post-install false updates caused by leading # version labels are normalized away
+  - overview version rendering now preserves suffixes so false same-version arrows are easier to avoid and diagnose
 
 ## Recent Important Commits
 
@@ -425,3 +430,4 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 ## Suggested First Prompt In A New Thread
 
 `Continue LemonUp Rust rewrite on codex/rusty-lemon. Repo root is C:\Users\archc\ghq\github.com\archcorsair\lemonup. Read rust/README.md, rust/docs/windows-thread-handoff.md, and rust/docs/progress.md first. Treat the TS/Bun app as feature-parity reference only; do not extend it. Wago CLI/TUI search-install plus TukUI, WoWInterface, GitHub, TUI-selected live updates, and config/backup-now flows are already landed and verified. Use rust/docs/manual-testing.md and the seeded manual-smoke scripts for broad manual coverage before ad hoc provider setup. The next phase is the dedicated production TUI design/build phase described in rust/docs/production-tui-design-plan.md. Respect existing safety/relationship invariants and commit only after my manual verification.`
+

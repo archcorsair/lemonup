@@ -7946,7 +7946,7 @@ fn dashboard_item_version_line(
     motion: MotionState,
     ui_theme: UiTheme,
 ) -> Line<'static> {
-    let installed = truncate_text(&dashboard_item_version_label(item), 16);
+    let installed = truncate_middle_text(&dashboard_item_version_label(item), 16);
     let installed_style = Style::default().fg(Color::Rgb(172, 182, 220));
     let active_prefix = active_job.map(|job| {
         vec![
@@ -7988,7 +7988,7 @@ fn dashboard_item_version_line(
             Line::from(spans)
         }
         UpdateStatus::UpdateAvailable => {
-            let remote = truncate_text(
+            let remote = truncate_middle_text(
                 &dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string()),
                 12,
             );
@@ -8036,6 +8036,26 @@ fn dashboard_item_version_line(
             Line::from(spans)
         }
     }
+}
+
+fn truncate_middle_text(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+
+    let visible = max_chars - 1;
+    let head = visible / 2;
+    let tail = visible - head;
+
+    let prefix = chars.iter().take(head).collect::<String>();
+    let suffix = chars[chars.len().saturating_sub(tail)..]
+        .iter()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
 }
 
 fn dashboard_item_author_label(item: &DashboardItem) -> String {
@@ -8401,7 +8421,7 @@ mod tests {
         WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome,
         WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
         dashboard_item_version_line, format_download_count, summarize_owned_folders,
-        visible_search_result_window,
+        truncate_middle_text, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -10198,6 +10218,39 @@ mod tests {
             .to_string();
 
         assert_eq!(text, "unknown");
+    }
+
+    #[test]
+    fn version_line_does_not_mark_single_folder_managed_wago_as_unmanaged() {
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.version = Some("5.21.1".to_string());
+        addon.remote_version = Some("5.21.1".to_string());
+        addon.set_managed_owned_folders(Vec::new());
+        let dashboard = DashboardState::from_addons(vec![addon]);
+
+        let item = dashboard.items.first().expect("dashboard item");
+        let rendered =
+            dashboard_item_version_line(item, None, MotionState::default(), UiTheme::default());
+        let text = rendered
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text.trim(), "5.21.1");
+        assert!(!text.contains("unmanaged"));
+    }
+
+    #[test]
+    fn truncate_middle_text_preserves_suffix_for_long_versions() {
+        assert_eq!(
+            truncate_middle_text("Details.20260327.14812.171", 16),
+            "Details…4812.171"
+        );
+        assert_eq!(
+            truncate_middle_text("Details.20260327.14812.999", 16),
+            "Details…4812.999"
+        );
     }
 
     #[test]

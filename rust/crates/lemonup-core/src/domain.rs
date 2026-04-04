@@ -95,7 +95,9 @@ impl AddonRecord {
     }
 
     pub fn effective_ownership_source(&self) -> OwnershipSource {
-        if self.owned_folders.is_empty() {
+        if self.ownership_source == OwnershipSource::Managed {
+            OwnershipSource::Managed
+        } else if self.owned_folders.is_empty() {
             OwnershipSource::None
         } else if self.ownership_source == OwnershipSource::None {
             OwnershipSource::ScanInferred
@@ -115,11 +117,7 @@ impl AddonRecord {
 
     pub fn set_managed_owned_folders(&mut self, owned_folders: Vec<OwnedFolder>) {
         self.owned_folders = owned_folders;
-        self.ownership_source = if self.owned_folders.is_empty() {
-            OwnershipSource::None
-        } else {
-            OwnershipSource::Managed
-        };
+        self.ownership_source = OwnershipSource::Managed;
     }
 
     pub fn clear_owned_folders(&mut self) {
@@ -129,7 +127,20 @@ impl AddonRecord {
 
     pub fn has_authoritative_owned_folders(&self) -> bool {
         self.effective_ownership_source() == OwnershipSource::Managed
-            && !self.owned_folders.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AddonRecord, OwnershipSource, SourceKind};
+
+    #[test]
+    fn managed_empty_owned_folders_remain_authoritative() {
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.set_managed_owned_folders(Vec::new());
+
+        assert_eq!(addon.effective_ownership_source(), OwnershipSource::Managed);
+        assert!(addon.has_authoritative_owned_folders());
     }
 }
 

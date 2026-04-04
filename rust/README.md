@@ -97,7 +97,8 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - v1-inspired shell visual/header pass
   - overview table refinement against v1 scanability feedback
   - overview table sort controls with header indicators
-  - inline overview `c`/`u` action flow with live progress feedback
+  - inline overview c/u action flow with live progress feedback
+  - Wago managed-state/version regression fixes for single-folder installs and leading-# version labels
 - current shell shape:
   - overview uses a full-width addon table
   - overview table now uses `Name`, `Version`, `Author`, `Source`
@@ -134,3 +135,4 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - manual path edit
   - deep scan with progress and cancel
 - config `Run onboarding again` re-enters the wizard with current values prefilled
+

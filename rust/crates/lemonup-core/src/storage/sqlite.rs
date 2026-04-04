@@ -537,11 +537,7 @@ fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -
             .or_else(|| existing.and_then(|addon| addon.remote_version.clone())),
     };
 
-    if merged.owned_folders.is_empty() {
-        merged.clear_owned_folders();
-    } else {
-        merged.ownership_source = OwnershipSource::Managed;
-    }
+    merged.ownership_source = OwnershipSource::Managed;
 
     merged
 }
@@ -1291,5 +1287,28 @@ mod tests {
                 .expect("get new child row")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn record_managed_single_folder_addon_remains_authoritative() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut managed = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        managed.version = Some("5.21.1".to_string());
+        managed.remote_version = Some("5.21.1".to_string());
+        managed.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        managed.set_managed_owned_folders(Vec::new());
+
+        database
+            .record_managed_addon(&managed)
+            .expect("record managed addon");
+
+        let stored = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(stored.has_authoritative_owned_folders());
+        assert!(stored.owned_folders.is_empty());
     }
 }

@@ -83,13 +83,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 Current checkpoint state:
 
 - one active unverified slice in the worktree:
-  - footer control-dock redesign with split rails, key pulses, and quieter humanized status copy
+  - Wago managed-state and version-normalization fixes pending checkpoint
 - current focus:
-  - checkpoint the footer redesign
-  - preserve shimmer for action text only; logo shimmer removed
-  - then return later for deeper overlay and onboarding polish
-  - then backup restore workflows
-
+  - checkpoint the Wago managed-state/version-display fixes
+  - then continue search/install and overlay polish
+  - then return later for deeper onboarding and backup-restore work
 ## Newly Completed
 
 These are implemented and manually verified in addition to the earlier chunks:
@@ -118,6 +116,10 @@ These are implemented and manually verified in addition to the earlier chunks:
 - non-interactive `update` now performs a real managed-state refresh from disk scan
 - `update --dry-run` now computes refresh results without mutating state
 - unmanaged/manual rows are skipped instead of guessed into managed ownership
+- Wago single-folder managed installs now remain authoritative instead of degrading to unmanaged
+- provider-managed ownership no longer depends on owned child folders being present
+- long non-GitHub version labels now use middle truncation so differing suffixes remain visible
+- Wago version normalization now ignores leading punctuation like #, preventing false immediate updates after install
 - CLI-only `check` companion command now exists
 - `check` supports:
   - global check with no addon arguments
@@ -484,3 +486,4 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 - `rust/docs/known-v1-gaps.md`
 - `rust/docs/single-surface-shell-plan.md`
 - `rust/docs/production-tui-design-plan.md`
+
