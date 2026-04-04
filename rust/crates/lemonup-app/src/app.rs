@@ -7266,8 +7266,9 @@ impl App {
                 }),
                 Constraint::Length(6),
                 Constraint::Length(1),
-                Constraint::Length(3),
                 Constraint::Min(8),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(content_area);
 
@@ -7290,20 +7291,6 @@ impl App {
 
         frame.render_widget(Paragraph::new(""), sections[2]);
 
-        let actions_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Actions ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let actions_inner = actions_block.inner(sections[3]);
-        frame.render_widget(actions_block, sections[3]);
-        frame.render_widget(
-            Paragraph::new(self.inspect_action_line(target)),
-            actions_inner,
-        );
-
         let details_block = Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(self.ui_theme.border))
@@ -7311,11 +7298,17 @@ impl App {
                 " Details ",
                 Style::default().fg(self.ui_theme.muted),
             ));
-        let details_inner = details_block.inner(sections[4]);
-        frame.render_widget(details_block, sections[4]);
+        let details_inner = details_block.inner(sections[3]);
+        frame.render_widget(details_block, sections[3]);
         frame.render_widget(
             Paragraph::new(self.inspect_detail_lines(target)).wrap(Wrap { trim: false }),
             details_inner,
+        );
+
+        frame.render_widget(Paragraph::new(""), sections[4]);
+        frame.render_widget(
+            Paragraph::new(self.inspect_action_line(target)).alignment(Alignment::Center),
+            sections[5],
         );
     }
 
