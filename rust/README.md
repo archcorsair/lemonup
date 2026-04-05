@@ -120,7 +120,8 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - adaptive tick is `250ms` idle and `100ms` during active animation/job states
   - the footer is now a fixed control dock for core overview actions only
   - dashboard overlays hide the footer command dock completely
-  - dashboard status now lives in a transient event rail above the table instead of in the footer
+  - dashboard transient feedback now renders as a floating timed toast pill in the header instead of in the footer
+  - dashboard toasts use a simple last-toast-wins model with semantic `ℹ` / `✓` / `×` symbols
   - current gap is continued overlay-by-overlay production polish, not overlay routing
 
 ## Current Onboarding Checkpoint
@@ -142,8 +143,9 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - inspect overlay redesigned as a compact command-palette card
   - child-row inspect resolves to the parent addon with child context
   - inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
-  - inspect detail sections now collapse behind `r` relations, `d` dependencies, and `t` technical
+  - inspect detail sections now collapse behind `r` included addons, `d` dependencies, and `t` addon info
   - shared modal shell now shows `esc close` in the top-right
   - inspect actions now live at the bottom of the card and use split key/action chips
   - inspect details now scroll with `j/k` or `↑/↓`
   - overflow hints now render below the detail content instead of on top of it
+  - selection wording now uses `deselect` instead of `clear`

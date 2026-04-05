@@ -132,6 +132,20 @@ These are implemented and manually verified in addition to the earlier chunks:
   - dashboard footer actions disappear entirely while overlays are open
   - transient dashboard status moved into a single-line event rail above the table
   - core footer actions now render in a width-aware two-row grid instead of a loose flow
+- dashboard toast and wording polish is now checkpointed:
+  - dashboard event feedback now renders as a floating toast pill in the header instead of shifting table layout
+  - only one toast is shown at a time; the latest meaningful toast wins and auto-dismisses after a short timer
+  - toast symbols are semantic and color-tinted:
+    - `ℹ` info
+    - `✓` success
+    - `×` error
+  - inspect wording now uses player-facing labels:
+    - `Included addons`
+    - `Addon info`
+  - inspect and dashboard selection wording now uses `deselect` instead of `clear`
+  - dashboard result copy is more human:
+    - single-addon update success shows the addon name
+    - recently checked rows no longer surface raw `cached` wording
 - CLI-only `check` companion command now exists
 - `check` supports:
   - global check with no addon arguments
@@ -508,3 +522,6 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 - inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
 - inspect details moved behind collapsible `r`/`d`/`t` sections
 - overlay close affordance moved to the top-right of the shared modal shell
+- dashboard now uses a floating timed toast pill for transient feedback instead of a layout-shifting event rail
+- dashboard footer dock uses core actions only and stays stable while the toast appears/disappears
+- inspect and dashboard wording now use player-facing labels like `Included addons`, `Addon info`, and `deselect`

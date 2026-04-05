@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -33,7 +33,7 @@ use crate::onboarding::{
 use crate::shimmer::{ShimmerConfig, shimmer_text_spans};
 use crate::tui::Backend;
 use crate::update::{
-    CheckResult, LiveUpdateSummary, apply_live_updates, build_update_checks,
+    CheckResult, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates, build_update_checks,
     refresh_live_update_checks,
 };
 use crate::wago::{
@@ -90,25 +90,25 @@ struct OverlayState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum InspectSection {
-    Relations,
+    IncludedAddons,
     Dependencies,
-    Technical,
+    AddonInfo,
 }
 
 impl InspectSection {
     fn key(self) -> &'static str {
         match self {
-            Self::Relations => "r",
+            Self::IncludedAddons => "r",
             Self::Dependencies => "d",
-            Self::Technical => "t",
+            Self::AddonInfo => "t",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Relations => "Relations",
+            Self::IncludedAddons => "Included addons",
             Self::Dependencies => "Dependencies",
-            Self::Technical => "Technical",
+            Self::AddonInfo => "Addon info",
         }
     }
 }
@@ -188,17 +188,25 @@ impl MotionState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ShellUiState {
     overlay: OverlayState,
     motion: MotionState,
     footer_pulse: Option<FooterKeyPulse>,
+    dashboard_toast: Option<DashboardToast>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FooterKeyPulse {
     hint: FooterHintId,
     expires_at_tick: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardToast {
+    text: String,
+    kind: DashboardEventKind,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,6 +469,7 @@ struct DashboardDeleteOutcome {
 struct DashboardCheckOutcome {
     addons: Vec<AddonRecord>,
     total: usize,
+    targets: Vec<String>,
     live_checked: usize,
     cached: usize,
     errors: usize,
@@ -469,6 +478,7 @@ struct DashboardCheckOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardUpdateOutcome {
     summary: LiveUpdateSummary,
+    updated_addon_name: Option<String>,
     sync: AddonScanOutcome,
 }
 
@@ -784,6 +794,13 @@ struct DashboardRefreshabilitySummary {
     refreshable: usize,
     manual: usize,
     unmanaged: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardEventKind {
+    Info,
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2312,7 +2329,9 @@ impl App {
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
                 KeyCode::Char(' ') => vec![AppMessage::InspectToggleSelected],
                 KeyCode::Char('r') => {
-                    vec![AppMessage::InspectToggleSection(InspectSection::Relations)]
+                    vec![AppMessage::InspectToggleSection(
+                        InspectSection::IncludedAddons,
+                    )]
                 }
                 KeyCode::Char('d') => {
                     vec![AppMessage::InspectToggleSection(
@@ -2320,7 +2339,7 @@ impl App {
                     )]
                 }
                 KeyCode::Char('t') => {
-                    vec![AppMessage::InspectToggleSection(InspectSection::Technical)]
+                    vec![AppMessage::InspectToggleSection(InspectSection::AddonInfo)]
                 }
                 KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 _ => vec![],
@@ -2361,7 +2380,13 @@ impl App {
             KeyCode::Char('x') => vec![AppMessage::DashboardRequestDelete],
             KeyCode::Char('z') => vec![AppMessage::DashboardUndoDelete],
             KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
-            KeyCode::Char('a') => vec![AppMessage::DashboardSelectAll],
+            KeyCode::Char('a') => {
+                if self.dashboard.selected_parent_count() > 0 {
+                    vec![AppMessage::DashboardClearSelection]
+                } else {
+                    vec![AppMessage::DashboardSelectAll]
+                }
+            }
             KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
             KeyCode::Enter if self.dashboard.detail_mode == DetailMode::Overview => {
                 vec![AppMessage::DashboardOpenInspect]
@@ -2639,7 +2664,7 @@ impl App {
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Overview,
                     &format!(
-                        "sorted by {} {}",
+                        "Sorted by {} {}",
                         column.label(),
                         self.dashboard.sort_config().toggled(column).direction.indicator()
                     ),
@@ -3750,6 +3775,8 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         self.dashboard.detail_mode,
                         &dashboard_check_status_message(
+                            &outcome.targets,
+                            outcome.total,
                             outcome.live_checked,
                             outcome.cached,
                             outcome.errors,
@@ -3763,23 +3790,25 @@ impl App {
                         &format!("check failed: {error}"),
                     )),
                 ],
-                AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => vec![
-                    AppAction::ReplaceDashboardAddons(outcome.sync.addons),
-                    AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
-                    AppAction::CompleteAddonScan {
-                        path: outcome.sync.path,
-                        summary: outcome.sync.summary,
-                    },
-                    AppAction::SetDashboardUpdateInProgress(false),
-                    AppAction::SetDashboardJobUi(None),
-                    AppAction::SetDashboardUpdateSummary(Some(
-                        dashboard_update_run_summary_from_live(outcome.summary),
-                    )),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        self.dashboard.detail_mode,
-                        &dashboard_update_status_message(outcome.summary),
-                    )),
-                ],
+                AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => {
+                    let status_message = dashboard_update_status_message(&outcome);
+                    vec![
+                        AppAction::ReplaceDashboardAddons(outcome.sync.addons),
+                        AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                        AppAction::CompleteAddonScan {
+                            path: outcome.sync.path,
+                            summary: outcome.sync.summary,
+                        },
+                        AppAction::SetDashboardUpdateInProgress(false),
+                        AppAction::SetDashboardJobUi(None),
+                        AppAction::SetDashboardUpdateSummary(Some(
+                            dashboard_update_run_summary_from_live(outcome.summary),
+                        )),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(self.dashboard.detail_mode, &status_message),
+                        ),
+                    ]
+                }
                 AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetDashboardJobUi(None),
@@ -3926,6 +3955,14 @@ impl App {
                 {
                     self.shell_ui.footer_pulse = None;
                 }
+                if self
+                    .shell_ui
+                    .dashboard_toast
+                    .as_ref()
+                    .is_some_and(|toast| Instant::now() >= toast.expires_at)
+                {
+                    self.shell_ui.dashboard_toast = None;
+                }
             }
             AppAction::SetFooterKeyPulse(pulse) => self.shell_ui.footer_pulse = pulse,
             AppAction::SetInspectOverlay(active) => {
@@ -3934,7 +3971,12 @@ impl App {
             AppAction::SetInspectOverlayState(state) => {
                 self.inspect_overlay = state;
             }
-            AppAction::SetStatus(status) => self.status_line = status,
+            AppAction::SetStatus(status) => {
+                if let Some(toast) = self.dashboard_toast_from_status(&status) {
+                    self.shell_ui.dashboard_toast = Some(toast);
+                }
+                self.status_line = status;
+            }
             AppAction::SetDashboardSelection(selection) => {
                 self.dashboard.list_state.select(selection)
             }
@@ -4460,6 +4502,18 @@ impl App {
         if mode == ShellLayoutMode::Standard {
             let meta = Paragraph::new(self.header_meta_lines(mode)).wrap(Wrap { trim: false });
             frame.render_widget(meta, right);
+        }
+
+        if self.shell_mode == ShellMode::Dashboard
+            && self.shell_ui.overlay.active.is_none()
+            && let Some((event_text, event_kind)) = self.dashboard_event_message()
+        {
+            let anchor = if mode == ShellLayoutMode::Standard && right.width > 0 {
+                right
+            } else {
+                inner
+            };
+            self.render_dashboard_toast(frame, anchor, &event_text, event_kind);
         }
     }
 
@@ -5527,20 +5581,45 @@ impl App {
         String::new()
     }
 
-    fn dashboard_event_line(&self) -> Option<Line<'static>> {
-        if let Some(job_line) = self.dashboard_job_footer_line() {
-            return Some(job_line);
-        }
+    fn dashboard_event_message(&self) -> Option<(String, DashboardEventKind)> {
+        self.shell_ui
+            .dashboard_toast
+            .as_ref()
+            .map(|toast| (toast.text.clone(), toast.kind))
+    }
 
-        let summary = self.dashboard_footer_status_text();
-        if summary.is_empty() {
+    fn dashboard_toast_from_status(&self, status: &str) -> Option<DashboardToast> {
+        if self.shell_mode != ShellMode::Dashboard || self.shell_ui.overlay.active.is_some() {
             return None;
         }
 
-        Some(Line::from(vec![Span::styled(
-            truncate_text(&summary, 160),
-            Style::default().fg(self.ui_theme.info),
-        )]))
+        let summary = self.sanitized_status_text(status)?;
+        let kind = if summary.contains("failed")
+            || summary.contains("error")
+            || summary.contains("delete")
+        {
+            DashboardEventKind::Error
+        } else if summary.starts_with("Updated")
+            || summary.starts_with("Saved")
+            || summary.starts_with("Restored")
+            || summary.starts_with("Installed")
+            || summary.starts_with("Backup complete")
+        {
+            DashboardEventKind::Success
+        } else {
+            DashboardEventKind::Info
+        };
+        let duration = match kind {
+            DashboardEventKind::Info => StdDuration::from_millis(2500),
+            DashboardEventKind::Success => StdDuration::from_millis(3000),
+            DashboardEventKind::Error => StdDuration::from_millis(5000),
+        };
+
+        Some(DashboardToast {
+            text: truncate_text(&summary, 160),
+            kind,
+            expires_at: Instant::now() + duration,
+        })
     }
 
     fn onboarding_footer_status_text(&self) -> String {
@@ -5552,8 +5631,11 @@ impl App {
     }
 
     fn sanitized_footer_status_text(&self) -> Option<String> {
-        let mut parts: Vec<String> = self
-            .status_line
+        self.sanitized_status_text(&self.status_line)
+    }
+
+    fn sanitized_status_text(&self, status: &str) -> Option<String> {
+        let mut parts: Vec<String> = status
             .split('|')
             .map(str::trim)
             .filter(|part| !part.is_empty())
@@ -5813,7 +5895,7 @@ impl App {
                 .inspect_resolved_target()
                 .map(|target| {
                     if self.dashboard.is_parent_selected(&target.item.folder) {
-                        "clear"
+                        "deselect"
                     } else {
                         "select"
                     }
@@ -6086,7 +6168,7 @@ impl App {
                 id: FooterHintId::Select,
                 key: "space/a",
                 label: if self.dashboard.selected_parent_count() > 0 {
-                    "clear"
+                    "deselect"
                 } else {
                     "select"
                 },
@@ -6095,11 +6177,7 @@ impl App {
             FooterCommandHint {
                 id: FooterHintId::Check,
                 key: "c",
-                label: if self.dashboard.selected_parent_count() > 0 {
-                    "check sel"
-                } else {
-                    "check"
-                },
+                label: "check",
                 tier: primary,
             },
             FooterCommandHint {
@@ -6699,20 +6777,16 @@ impl App {
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        if let Some(event_line) = self.dashboard_event_line() {
-            let sections = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(area);
-            self.render_dashboard_event_rail(frame, sections[0], event_line);
-            self.render_dashboard_list(frame, sections[1]);
-        } else {
-            self.render_dashboard_list(frame, area);
-        }
+        self.render_dashboard_list(frame, area);
     }
 
-    fn render_dashboard_event_rail(&self, frame: &mut Frame<'_>, area: Rect, line: Line<'static>) {
-        frame.render_widget(Clear, area);
+    fn render_dashboard_toast(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        text: &str,
+        kind: DashboardEventKind,
+    ) {
         let padded = if area.width > 2 {
             area.inner(Margin {
                 horizontal: 1,
@@ -6721,11 +6795,49 @@ impl App {
         } else {
             area
         };
-        let rail = Paragraph::new(line)
-            .style(Style::default().bg(Color::Rgb(28, 31, 46)))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(rail, padded);
+        let (icon_fg, text_fg, bg, prefix) = match kind {
+            DashboardEventKind::Info => (
+                Color::Rgb(185, 231, 255),
+                self.ui_theme.info,
+                Color::Rgb(24, 35, 48),
+                "ℹ",
+            ),
+            DashboardEventKind::Success => (
+                Color::Rgb(196, 235, 144),
+                self.ui_theme.success,
+                Color::Rgb(24, 42, 34),
+                "✓",
+            ),
+            DashboardEventKind::Error => (
+                Color::Rgb(255, 182, 194),
+                self.ui_theme.error,
+                Color::Rgb(50, 28, 33),
+                "×",
+            ),
+        };
+        let toast_y = padded.y.saturating_add(padded.height.saturating_sub(1));
+        let pill_width = (text.chars().count() + 5).min(padded.width as usize) as u16;
+        let pill_area = Rect::new(padded.x, toast_y, pill_width, 1);
+        frame.render_widget(Clear, pill_area);
+        let pill = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {prefix}"),
+                Style::default()
+                    .fg(icon_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {text} "),
+                Style::default()
+                    .fg(text_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: false });
+        frame.render_widget(pill, pill_area);
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -7526,11 +7638,8 @@ impl App {
     }
 
     fn inspect_action_line(&self, target: InspectResolvedTarget<'_>) -> Line<'static> {
-        let select_label = if self.dashboard.is_parent_selected(&target.item.folder) {
-            "clear"
-        } else {
-            "select"
-        };
+        let is_selected = self.dashboard.is_parent_selected(&target.item.folder);
+        let select_label = if is_selected { "deselect" } else { "select" };
         let chips = [
             InspectActionChip {
                 key: "space",
@@ -7559,12 +7668,16 @@ impl App {
             if index > 0 {
                 spans.push(Span::raw("   "));
             }
-            let key_bg = if chip.enabled {
+            let key_bg = if chip.key == "space" && is_selected {
+                Color::Rgb(28, 34, 48)
+            } else if chip.enabled {
                 Color::Rgb(31, 37, 58)
             } else {
                 Color::Rgb(27, 30, 45)
             };
-            let key_fg = if chip.enabled {
+            let key_fg = if chip.key == "space" && is_selected {
+                Color::Rgb(172, 220, 255)
+            } else if chip.enabled {
                 self.ui_theme.panel_title
             } else {
                 self.ui_theme.muted
@@ -7593,9 +7706,9 @@ impl App {
     fn inspect_detail_lines(&self, target: InspectResolvedTarget<'_>) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         for section in [
-            InspectSection::Relations,
+            InspectSection::IncludedAddons,
             InspectSection::Dependencies,
-            InspectSection::Technical,
+            InspectSection::AddonInfo,
         ] {
             let is_open = self.inspect_overlay.is_open(section);
             lines.push(self.inspect_section_header(section, is_open));
@@ -7703,7 +7816,7 @@ impl App {
     ) -> Vec<Line<'static>> {
         let indent = "  ";
         match section {
-            InspectSection::Relations => {
+            InspectSection::IncludedAddons => {
                 let mut lines = Vec::new();
                 if let Some(child_folder) = target.opened_from_child {
                     lines.push(Line::from(format!(
@@ -7747,7 +7860,7 @@ impl App {
                 }
                 lines
             }
-            InspectSection::Technical => {
+            InspectSection::AddonInfo => {
                 let mut lines = Vec::new();
                 if let Some(interface) = target.item.interface.as_deref().map(str::trim)
                     && !interface.is_empty()
@@ -8234,7 +8347,7 @@ async fn run_dashboard_update_task(
         &mut on_progress,
     )
     .await?;
-    let summary = apply_live_updates(
+    let run = apply_live_updates(
         &mut database,
         addon_dir,
         folders,
@@ -8246,11 +8359,23 @@ async fn run_dashboard_update_task(
         },
     )
     .await
-    .map_err(|error| error.to_string())?
-    .summary;
+    .map_err(|error| error.to_string())?;
+    let updated_addon_name = if run.summary.updated_addons == 1 {
+        run.results
+            .iter()
+            .find(|result| result.status == LiveUpdateStatus::Updated)
+            .map(|result| result.addon_name.clone())
+    } else {
+        None
+    };
+    let summary = run.summary;
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
-    Ok(DashboardUpdateOutcome { summary, sync })
+    Ok(DashboardUpdateOutcome {
+        summary,
+        updated_addon_name,
+        sync,
+    })
 }
 
 async fn run_dashboard_check_task(
@@ -8290,6 +8415,7 @@ async fn run_dashboard_check_task(
     Ok(DashboardCheckOutcome {
         addons: refreshed,
         total: folders.len(),
+        targets: folders.to_vec(),
         live_checked: stale.len(),
         cached: folders.len().saturating_sub(stale.len()),
         errors,
@@ -8465,8 +8591,15 @@ fn dashboard_update_run_summary_from_live(summary: LiveUpdateSummary) -> Dashboa
     }
 }
 
-fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
-    let headline = if summary.updated_addons > 0 {
+fn dashboard_update_status_message(outcome: &DashboardUpdateOutcome) -> String {
+    let summary = outcome.summary;
+    let headline = if summary.updated_addons == 1 {
+        if let Some(addon_name) = outcome.updated_addon_name.as_deref() {
+            format!("Updated {addon_name}")
+        } else {
+            "Updated 1 addon".to_string()
+        }
+    } else if summary.updated_addons > 0 {
         format!("Updated {}", addon_count_label(summary.updated_addons))
     } else if summary.up_to_date > 0
         && summary.skipped_manual == 0
@@ -8510,13 +8643,30 @@ fn dashboard_update_status_message(summary: LiveUpdateSummary) -> String {
     }
 }
 
-fn dashboard_check_status_message(live_checked: usize, cached: usize, errors: usize) -> String {
+fn dashboard_check_status_message(
+    targets: &[String],
+    total: usize,
+    live_checked: usize,
+    cached: usize,
+    errors: usize,
+) -> String {
+    if live_checked == 0 && errors == 0 && cached > 0 {
+        return if total == 1 {
+            format!(
+                "{} was checked recently",
+                targets.first().map(String::as_str).unwrap_or("This addon")
+            )
+        } else {
+            format!("{} addons were checked recently", cached)
+        };
+    }
+
     let mut details = Vec::new();
     if live_checked > 0 {
-        details.push(format!("{live_checked} live"));
+        details.push(format!("{live_checked} checked now"));
     }
     if cached > 0 {
-        details.push(format!("{cached} cached"));
+        details.push(format!("{cached} recently checked"));
     }
     if errors > 0 {
         details.push(format!(
@@ -9410,6 +9560,17 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_a_key_clears_selection_when_any_parent_is_selected() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.selected_parents.insert("BigWigs".to_string());
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('a'))),
+            vec![AppMessage::DashboardClearSelection]
+        );
+    }
+
+    #[test]
     fn footer_status_text_hides_redundant_resize_noise() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.status_line = "terminal resized to 132x45 | profile manual-smoke".to_string();
@@ -9422,22 +9583,51 @@ mod tests {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.apply(AppAction::ToggleDashboardSelection);
 
-        assert!(app.dashboard_event_line().is_none());
+        assert!(app.dashboard_event_message().is_none());
     }
 
     #[test]
     fn dashboard_event_line_uses_humanized_status_summary() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.status_line = "scan complete | 6 addons synced, 0 removed".to_string();
+        app.apply(AppAction::SetStatus(
+            "scan complete | 6 addons synced, 0 removed".to_string(),
+        ));
 
-        let line = app.dashboard_event_line().expect("event line");
-        let text = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
+        let (text, kind) = app.dashboard_event_message().expect("event line");
 
         assert_eq!(text, "scan complete · 6 addons synced, 0 removed");
+        assert_eq!(kind, super::DashboardEventKind::Info);
+    }
+
+    #[test]
+    fn dashboard_toast_persists_across_non_toast_status_updates() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetStatus(
+            app.dashboard_status_for(DetailMode::Overview, "Updated BigWigs"),
+        ));
+        let initial = app.dashboard_event_message().expect("toast");
+
+        app.apply(AppAction::SetStatus(
+            app.dashboard_status_for(DetailMode::Overview, "selection moved"),
+        ));
+
+        assert_eq!(app.dashboard_event_message(), Some(initial));
+    }
+
+    #[test]
+    fn dashboard_toast_expires_after_duration() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetStatus(
+            app.dashboard_status_for(DetailMode::Overview, "Updated BigWigs"),
+        ));
+        assert!(app.dashboard_event_message().is_some());
+
+        if let Some(toast) = app.shell_ui.dashboard_toast.as_mut() {
+            toast.expires_at = super::Instant::now() - super::StdDuration::from_millis(1);
+        }
+        app.apply(AppAction::AdvanceMotionTick);
+
+        assert!(app.dashboard_event_message().is_none());
     }
 
     #[test]
@@ -9568,15 +9758,19 @@ mod tests {
     fn inspect_section_toggle_message_opens_and_closes_requested_section() {
         let mut app = app_for_tests(ShellMode::Dashboard);
 
-        for action in app.update(AppMessage::InspectToggleSection(InspectSection::Relations)) {
+        for action in app.update(AppMessage::InspectToggleSection(
+            InspectSection::IncludedAddons,
+        )) {
             app.apply(action);
         }
-        assert!(app.inspect_overlay.is_open(InspectSection::Relations));
+        assert!(app.inspect_overlay.is_open(InspectSection::IncludedAddons));
 
-        for action in app.update(AppMessage::InspectToggleSection(InspectSection::Relations)) {
+        for action in app.update(AppMessage::InspectToggleSection(
+            InspectSection::IncludedAddons,
+        )) {
             app.apply(action);
         }
-        assert!(!app.inspect_overlay.is_open(InspectSection::Relations));
+        assert!(!app.inspect_overlay.is_open(InspectSection::IncludedAddons));
     }
 
     #[test]
@@ -9592,7 +9786,7 @@ mod tests {
 
         assert_eq!(
             details,
-            vec!["▸ r Relations", "▸ d Dependencies", "▸ t Technical"]
+            vec!["▸ r Included addons", "▸ d Dependencies", "▸ t Addon info"]
         );
     }
 
@@ -10784,6 +10978,7 @@ mod tests {
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
                 summary: refresh,
+                updated_addon_name: Some("Second".to_string()),
                 sync: sync.clone(),
             })),
         ));
@@ -10844,6 +11039,7 @@ mod tests {
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
                 summary: refresh,
+                updated_addon_name: None,
                 sync,
             })),
         ));
@@ -10853,6 +11049,45 @@ mod tests {
             AppAction::SetStatus(
                 app.dashboard_status_for(DetailMode::Update, "No changes · 1 manual skipped",)
             )
+        );
+    }
+
+    #[test]
+    fn dashboard_update_status_uses_single_addon_name_when_available() {
+        let outcome = DashboardUpdateOutcome {
+            summary: LiveUpdateSummary {
+                target_addons: 1,
+                updated_addons: 1,
+                up_to_date: 0,
+                skipped_manual: 0,
+                skipped_unmanaged: 0,
+                skipped_unsupported: 0,
+                errors: 0,
+            },
+            updated_addon_name: Some("WeakAuras".to_string()),
+            sync: AddonScanOutcome {
+                path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
+                summary: ScanSummary {
+                    scanned_addons: 1,
+                    upserted_addons: 1,
+                    removed_addons: 0,
+                },
+                addons: vec![],
+                drift_report: DriftReport::empty(),
+            },
+        };
+
+        assert_eq!(
+            super::dashboard_update_status_message(&outcome),
+            "Updated WeakAuras"
+        );
+    }
+
+    #[test]
+    fn dashboard_check_status_humanizes_recently_checked_single_target() {
+        assert_eq!(
+            super::dashboard_check_status_message(&["BigWigs".to_string()], 1, 0, 1, 0),
+            "BigWigs was checked recently"
         );
     }
 

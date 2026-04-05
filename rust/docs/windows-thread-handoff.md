@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: inspect overlay redesign follow-through plus dashboard action-dock cleanup implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready inspect/footer polish slice pending commit
+- latest local milestone at handoff pass: floating timed dashboard toast plus inspect/dashboard wording polish implemented and user-verified
+- current worktree status at handoff pass: clean after checkpoint-ready inspect/footer/toast polish slice
 
 ## Current State
 
@@ -452,3 +452,6 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 - child-row inspect resolves to the parent addon and shows child context inline
 - inspect supports inline `space` select/clear, `c` check, `u` update, and `x` delete actions
 - modal close affordance now lives in the top-right of the shared overlay shell
+- dashboard transient feedback now renders as a floating timed toast pill in the header instead of shifting table layout
+- dashboard toasts use a simple last-toast-wins model with semantic `ℹ` / `✓` / `×` symbols
+- inspect and dashboard wording now use player-facing labels like `Included addons`, `Addon info`, and `deselect`
