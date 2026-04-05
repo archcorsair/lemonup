@@ -1,30 +1,25 @@
-# LemonUp 🍋
+# LemonUp
 
 <div align="center">
   <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
   <h3>World of Warcraft Addon Manager</h3>
-  <p>A fast, lightweight, and beautiful TUI for managing your WoW addons.</p>
-  <img width="1514" height="746" alt="lemonup screenshot" src="https://github.com/user-attachments/assets/f8af4c10-a84a-4ace-b9a6-4806add3294a" />
+  <p>Rust-first terminal UI and CLI for installing, checking, updating, backing up, and restoring WoW addons.</p>
 </div>
 
 ---
 
-[![Built with Bun](https://img.shields.io/badge/Built_with-Bun-fbf0df?logo=bun&labelColor=212121)](https://bun.sh)
 [![Test](https://github.com/archcorsair/lemonup/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/archcorsair/lemonup/actions/workflows/test.yml)
 
-**LemonUp** is a high-performance, terminal-first addon manager for World of
-Warcraft. Built with [Bun](https://bun.com) and
-[Ink](https://github.com/vadimdemedes/ink), it provides a modern and efficient
-way to handle your addons without leaving the terminal.
+LemonUp is now a single Rust workspace at the repo root. The legacy Bun/Ink app has been retired and archived in `docs/v1-archive.md`.
 
 ## Compatibility
 
-| Platform Support               | Content Sources          |
-| :-------------------------     | :----------------------- |
-| ✅ **Retail**                  | ✅ **GitHub**            |
-| 📋 **Classic / Era** (Planned) | ✅ **TukUI** (ElvUI)     |
-| 📋 **Cata** (Planned)          | ✅ **WoWInterface**      |
-|                                | ✅ **Wago.io**           |
+| Platform Support               | Content Sources      |
+| :----------------------------- | :------------------- |
+| ✅ **Retail**                  | ✅ **GitHub**        |
+| 📋 **Classic / Era** (Planned) | ✅ **TukUI**         |
+| 📋 **Cata** (Planned)          | ✅ **WoWInterface**  |
+|                                | ✅ **Wago.io**       |
 |                                | 📋 **WeakAuras** (Planned) |
 
 ### Supported Architectures
@@ -35,61 +30,47 @@ way to handle your addons without leaving the terminal.
 
 ## Features
 
-- **Interactive TUI:** A beautiful, terminal-native user interface with fluid
-  animations and responsive layout.
-- **Multi-Source Support:** Seamlessly install and update addons directly
-  from **GitHub**, **TukUI**, **WoWInterface**, and **Wago.io**.
-- **Smart Updates & Dependencies:** Git-based version tracking ensures
-  pinpoint accuracy, while robust library handling keeps your dependencies in
-  check.
-- **Intelligent Setup:** Intelligent WoW installation detection and a guided
-  first-run wizard to get you started in seconds.
-- **⌨️ Keyboard Driven:** Full **Vim-style** navigation (`h/j/k/l`) and
-  intuitive shortcuts for all actions.
-- **Wago.io Integration:** Bring your own API key to search and install addons
-  directly from Wago.io within the app.
-- **WeakAuras Management:** Coming soon.
+- Terminal-first overview table with inspect, sort, multi-select, bulk update, and bulk delete
+- Unified install/search overlay for Wago name search or direct Wago URL install
+- Provider-backed install/check/update flows for GitHub, TukUI, WoWInterface, and Wago
+- Import and export tracked addon lists using a portable JSON format
+- Background auto-check using the same freshness policy as manual checks
+- WTF backup and restore flows in both CLI and TUI
+- Seeded manual-smoke scripts for safe sandbox validation
 
-## 📦 Install
+## Workspace Layout
 
-### Binary Releases
+- `crates/lemonup-core`: domain model, config/state storage, transfer format
+- `crates/lemonup-app`: ratatui shell and CLI entrypoint
+- `docs/`: handoff, progress, acceptance, manual testing, archive notes
+- `scripts/`: PowerShell helpers for local runs and manual smoke
+- `testdata/`: manual-smoke fixtures
 
-Download the latest pre-built binaries from the
-[**Releases**](https://github.com/archcorsair/lemonup/releases) page.
+## Start Here
 
-### Package Managers
+1. `docs/windows-thread-handoff.md`
+2. `docs/progress.md`
+3. `docs/acceptance-matrix.md`
+4. `docs/manual-testing.md`
 
-#### Homebrew (macOS & Linux)
+## Common Commands
 
-```bash
-brew install archcorsair/lemonup/lemonup
+```powershell
+cargo fmt --all
+cargo clippy -p lemonup-app -- -D warnings
+cargo test --workspace
+cargo run -p lemonup-app --bin lemonup -- --profile dev tui
+cargo run -p lemonup-app --bin lemonup -- export-addons
+cargo run -p lemonup-app --bin lemonup -- import-addons --dry-run
+cargo run -p lemonup-app --bin lemonup -- restore-backup
+pwsh -File scripts/seed-sandbox.ps1 -SandboxRoot D:/Sandbox/WoWDev
+pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:/Sandbox/WoWDev
 ```
 
-#### Scoop (Windows)
+## Releases
 
-```bash
-scoop bucket add lemon-bucket https://github.com/archcorsair/lemon-bucket
-scoop install lemonup
-```
+GitHub releases are built from the Rust workspace only. Download the latest binaries from [Releases](https://github.com/archcorsair/lemonup/releases).
 
-## 📖 Documentation
-
-For detailed installation guides, configuration options, and usage instructions,
-please visit our official documentation website:
-
-[**lemonup.org**](https://lemonup.org)
-
-## 🤝 Contributing
-
-Contributions are welcome! Please see our
-[contribution guidelines](https://lemonup.org/contributing) on the docs site.
-
-```bash
-bun install
-bun run typecheck
-bun test
-```
-
-## 📄 License
+## License
 
 MIT © [ArchCorsair](https://github.com/archcorsair)
