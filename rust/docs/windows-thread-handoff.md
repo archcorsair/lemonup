@@ -312,6 +312,30 @@ Toolchain lookup rule:
   - `mise which cargo`
   - `mise which rustc`
   - `mise which node`
+- do **not** assume `cargo` is callable directly in a fresh shell
+- do **not** assume `rustup` has a default toolchain configured
+
+Fastest reliable Rust fallback in this repo:
+
+```powershell
+$cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
+$toolchain = Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE '.rustup\toolchains') -Directory |
+  Sort-Object Name -Descending |
+  Select-Object -First 1 -ExpandProperty Name
+& $cargo "+$toolchain" fmt --all
+& $cargo "+$toolchain" clippy -p lemonup-app -- -D warnings
+& $cargo "+$toolchain" test -p lemonup-app
+```
+
+Why:
+- some Codex Windows shells do not have `cargo` on PATH
+- some also have no rustup default set, so plain `cargo ...` fails even when the shim exists
+- the repo already uses this exact toolchain-discovery pattern in:
+  - `rust/scripts/Invoke-Lemonup.ps1`
+
+Use this fallback immediately if:
+- `cargo` is not recognized
+- or `cargo` says rustup could not choose a version because no default is configured
 
 Important note:
 - a prior Codex thread was rooted in WSL and produced stale cwd friction

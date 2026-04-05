@@ -2470,10 +2470,7 @@ impl App {
                 Some(vec![AppMessage::SearchSubmit])
             }
             KeyCode::Enter => Some(vec![AppMessage::SearchInstallSelected]),
-            KeyCode::Char('/') => Some(vec![AppMessage::OpenSearch(
-                SearchPresentationMode::ComposeFirst,
-            )]),
-            KeyCode::Char('e') => Some(vec![AppMessage::SearchBeginEditing]),
+            KeyCode::Char('/') => Some(vec![AppMessage::SearchBeginEditing]),
             _ => None,
         }
     }
@@ -3175,7 +3172,7 @@ impl App {
                 AppAction::SetDetailMode(DetailMode::Search),
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Search,
-                    "install from Wago | type a name, slug, or URL and press enter",
+                    "install from Wago | type a name or Wago URL and press enter",
                 )),
             ],
             AppMessage::SearchStopEditing => vec![
@@ -3209,7 +3206,7 @@ impl App {
                 } else if self.search_pane.query.trim().is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
-                        "enter an addon name, Wago slug, or addon URL before submitting",
+                        "enter an addon name or Wago URL before submitting",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -4878,10 +4875,17 @@ impl App {
 
         let mut spans = Vec::new();
         if self.search_pane.query.trim().is_empty() {
-            spans.push(Span::styled(
-                "Type an addon name, Wago slug, or Wago URL",
-                Style::default().fg(self.ui_theme.muted),
-            ));
+            if self.search_pane.is_editing {
+                spans.push(Span::styled(
+                    "▌",
+                    Style::default().fg(self.ui_theme.brand_gold),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "Type an addon name or paste a Wago URL",
+                    Style::default().fg(self.ui_theme.muted),
+                ));
+            }
         } else {
             spans.push(Span::styled(
                 self.search_pane.query.clone(),
@@ -4899,7 +4903,7 @@ impl App {
                 Color::Rgb(255, 244, 214),
                 ShimmerConfig::action(),
             ));
-        } else if self.search_pane.is_editing {
+        } else if self.search_pane.is_editing && !self.search_pane.query.trim().is_empty() {
             spans.push(Span::styled(
                 " ▌",
                 Style::default().fg(self.ui_theme.brand_gold),
@@ -5106,7 +5110,7 @@ impl App {
                     enabled: self.wago_api_key.is_some(),
                 },
                 SearchActionChip {
-                    key: "e",
+                    key: "/",
                     label: "edit input",
                     enabled: true,
                 },
@@ -5119,7 +5123,7 @@ impl App {
         } else {
             vec![
                 SearchActionChip {
-                    key: "j/k",
+                    key: "↑/↓",
                     label: "move",
                     enabled: true,
                 },
@@ -5129,7 +5133,7 @@ impl App {
                     enabled: true,
                 },
                 SearchActionChip {
-                    key: "e",
+                    key: "/",
                     label: "edit query",
                     enabled: true,
                 },
@@ -5339,7 +5343,7 @@ impl App {
         } else {
             vec![
                 Line::from(Span::styled(
-                    "Start with an addon name, slug, or URL",
+                    "Start with an addon name or Wago URL",
                     Style::default()
                         .fg(self.ui_theme.highlight)
                         .add_modifier(Modifier::BOLD),
@@ -5486,10 +5490,10 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(48),
-                Constraint::Percentage(22),
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
+                Constraint::Min(48),
+                Constraint::Length(18),
+                Constraint::Length(18),
+                Constraint::Length(8),
             ],
         )
         .header(header)
@@ -5630,7 +5634,7 @@ impl App {
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Run a search, then use j/k to choose a result.",
+                    "Run a search, then use ↑/↓ to choose a result.",
                     Style::default().fg(self.ui_theme.muted),
                 )),
             ]
