@@ -237,6 +237,8 @@ impl App {
                 self.render_inspect_overlay(frame, inner);
             } else if kind == OverlayKind::Install || kind == OverlayKind::Search {
                 self.render_search_overlay(frame, inner);
+            } else if kind == OverlayKind::Config {
+                self.render_config_overlay(frame, inner);
             } else {
                 let content = Paragraph::new(self.task_overlay_lines()).wrap(Wrap { trim: false });
                 frame.render_widget(content, inner);
@@ -980,27 +982,31 @@ impl App {
                         vec![
                             FooterCommandHint {
                                 id: FooterHintId::Fields,
-                                key: "j/k",
+                                key: "↑/↓",
                                 label: "fields",
                                 tier: primary,
                             },
                             FooterCommandHint {
                                 id: FooterHintId::Toggle,
                                 key: "enter",
-                                label: "toggle",
+                                label: if self.config_pane.selected_field().is_textual() {
+                                    "edit"
+                                } else {
+                                    "toggle"
+                                },
                                 tier: primary,
                             },
                             FooterCommandHint {
-                                id: FooterHintId::Edit,
-                                key: "e",
-                                label: "edit",
+                                id: FooterHintId::Change,
+                                key: "h/l",
+                                label: "change",
                                 tier: primary,
                             },
                             FooterCommandHint {
-                                id: FooterHintId::Save,
-                                key: "s",
-                                label: "save",
-                                tier: secondary,
+                                id: FooterHintId::Run,
+                                key: "r",
+                                label: "onboarding",
+                                tier: primary,
                             },
                             FooterCommandHint {
                                 id: FooterHintId::Install,
@@ -1012,12 +1018,6 @@ impl App {
                                 id: FooterHintId::Delete,
                                 key: "x",
                                 label: "export",
-                                tier: secondary,
-                            },
-                            FooterCommandHint {
-                                id: FooterHintId::Reset,
-                                key: "n",
-                                label: "reset",
                                 tier: secondary,
                             },
                             FooterCommandHint {

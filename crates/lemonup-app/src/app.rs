@@ -50,6 +50,7 @@ use crate::wago::{
 };
 use time::{Duration, OffsetDateTime};
 
+mod render_config;
 mod render_dashboard;
 mod render_inspect;
 mod render_install_search;
@@ -280,7 +281,6 @@ enum FooterHintId {
     Results,
     Change,
     Save,
-    Reset,
     Relations,
     Dependencies,
     Technical,
@@ -443,8 +443,8 @@ enum AppMessage {
     ConfigCommitEdit,
     ConfigCancelEdit,
     ConfigToggleSelected,
-    ConfigSave,
-    ConfigResetDraft,
+    ConfigAdjustSelected(i16),
+    ConfigRunOnboarding,
     ConfigExportAddons,
     ConfigImportAddons,
     BackupRunNow,
@@ -584,12 +584,10 @@ enum ConfigField {
     BackupRetention,
     Theme,
     ShowLibs,
-    DefaultScreen,
-    RunOnboardingAgain,
 }
 
 impl ConfigField {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 8] = [
         Self::WagoApiKey,
         Self::CheckInterval,
         Self::AutoCheckEnabled,
@@ -598,8 +596,6 @@ impl ConfigField {
         Self::BackupRetention,
         Self::Theme,
         Self::ShowLibs,
-        Self::DefaultScreen,
-        Self::RunOnboardingAgain,
     ];
 
     fn label(self) -> &'static str {
@@ -612,8 +608,6 @@ impl ConfigField {
             Self::BackupRetention => "Backup retention",
             Self::Theme => "Theme",
             Self::ShowLibs => "Show libs",
-            Self::DefaultScreen => "Default screen",
-            Self::RunOnboardingAgain => "Run onboarding again",
         }
     }
 
@@ -625,6 +619,10 @@ impl ConfigField {
                 | Self::AutoCheckInterval
                 | Self::BackupRetention
         )
+    }
+
+    fn supports_quick_adjust(self) -> bool {
+        !matches!(self, Self::WagoApiKey)
     }
 }
 
@@ -759,41 +757,42 @@ impl ConfigPaneState {
         Ok(next)
     }
 
-    fn toggle_selected(&self) -> Self {
+    fn adjust_selected(&self, delta: i16) -> Self {
         let mut next = self.clone();
         match next.selected_field() {
-            ConfigField::AutoCheckEnabled => {
-                next.draft.auto_check_enabled = !next.draft.auto_check_enabled
+            ConfigField::WagoApiKey => {}
+            ConfigField::CheckInterval => {
+                next.draft.check_interval_secs =
+                    adjust_u64(next.draft.check_interval_secs, delta, 60, 1);
             }
-            ConfigField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
+            ConfigField::AutoCheckEnabled => {
+                next.draft.auto_check_enabled = !next.draft.auto_check_enabled;
+            }
+            ConfigField::AutoCheckInterval => {
+                next.draft.auto_check_interval_secs =
+                    adjust_u64(next.draft.auto_check_interval_secs, delta, 300, 1);
+            }
+            ConfigField::BackupWtf => {
+                next.draft.backup_wtf = !next.draft.backup_wtf;
+            }
+            ConfigField::BackupRetention => {
+                next.draft.backup_retention = adjust_u16(next.draft.backup_retention, delta, 1, 1);
+            }
             ConfigField::Theme => {
                 next.draft.theme = match next.draft.theme {
                     ThemeMode::Dark => ThemeMode::Light,
                     ThemeMode::Light => ThemeMode::Dark,
                 };
             }
-            ConfigField::ShowLibs => next.draft.show_libs = !next.draft.show_libs,
-            ConfigField::DefaultScreen => {
-                next.draft.default_screen = match next.draft.default_screen {
-                    DefaultScreen::Manage => DefaultScreen::Install,
-                    DefaultScreen::Install => DefaultScreen::Config,
-                    DefaultScreen::Config => DefaultScreen::WagoSearch,
-                    DefaultScreen::WagoSearch => DefaultScreen::Manage,
-                };
+            ConfigField::ShowLibs => {
+                next.draft.show_libs = !next.draft.show_libs;
             }
-            ConfigField::RunOnboardingAgain => {}
-            _ => {}
         }
         next
     }
 
-    fn reset_draft(&self) -> Self {
-        Self {
-            persisted: self.persisted.clone(),
-            draft: self.persisted.clone(),
-            selected_field: self.selected_field,
-            edit: None,
-        }
+    fn toggle_selected(&self) -> Self {
+        self.adjust_selected(1)
     }
 
     fn mark_saved(&self, saved: AppConfig) -> Self {
@@ -2384,9 +2383,7 @@ impl App {
                             | KeyCode::Char('j')
                             | KeyCode::Char('k') => Some(FooterHintId::Fields),
                             KeyCode::Enter => Some(FooterHintId::Toggle),
-                            KeyCode::Char('e') => Some(FooterHintId::Edit),
-                            KeyCode::Char('s') => Some(FooterHintId::Save),
-                            KeyCode::Char('n') => Some(FooterHintId::Reset),
+                            KeyCode::Char('r') => Some(FooterHintId::Run),
                             KeyCode::Esc => Some(FooterHintId::Close),
                             _ => None,
                         }
@@ -2676,10 +2673,23 @@ impl App {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::ConfigSelectionNext]),
             KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::ConfigSelectionPrevious]),
+            KeyCode::Left | KeyCode::Char('h') => Some(
+                if self.config_pane.selected_field().supports_quick_adjust() {
+                    vec![AppMessage::ConfigAdjustSelected(-1)]
+                } else {
+                    vec![]
+                },
+            ),
+            KeyCode::Right | KeyCode::Char('l') => Some(
+                if self.config_pane.selected_field().supports_quick_adjust() {
+                    vec![AppMessage::ConfigAdjustSelected(1)]
+                } else {
+                    vec![]
+                },
+            ),
             KeyCode::Char('e') => Some(vec![AppMessage::ConfigBeginEditing]),
             KeyCode::Enter => Some(vec![AppMessage::ConfigToggleSelected]),
-            KeyCode::Char('s') => Some(vec![AppMessage::ConfigSave]),
-            KeyCode::Char('n') => Some(vec![AppMessage::ConfigResetDraft]),
+            KeyCode::Char('r') => Some(vec![AppMessage::ConfigRunOnboarding]),
             KeyCode::Char('x') => Some(vec![AppMessage::ConfigExportAddons]),
             KeyCode::Char('i') => Some(vec![AppMessage::ConfigImportAddons]),
             _ => None,
@@ -3583,33 +3593,20 @@ impl App {
                     self.dashboard_status_for(self.dashboard.detail_mode, "Wago install cancelled"),
                 ),
             ],
-            AppMessage::ConfigSelectionNext => vec![
-                AppAction::SetConfigPaneState(self.config_pane.select_next()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Config, "config field selection moved"),
-                ),
-            ],
-            AppMessage::ConfigSelectionPrevious => vec![
-                AppAction::SetConfigPaneState(self.config_pane.select_previous()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Config, "config field selection moved"),
-                ),
-            ],
+            AppMessage::ConfigSelectionNext => vec![AppAction::SetConfigPaneState(
+                self.config_pane.select_next(),
+            )],
+            AppMessage::ConfigSelectionPrevious => vec![AppAction::SetConfigPaneState(
+                self.config_pane.select_previous(),
+            )],
             AppMessage::ConfigBeginEditing => {
                 let field = self.config_pane.selected_field();
                 if field.is_textual() {
-                    vec![
-                        AppAction::SetConfigPaneState(self.config_pane.begin_editing()),
-                        AppAction::SetStatus(self.dashboard_status_for(
-                            DetailMode::Config,
-                            &format!("editing {} | enter apply | esc cancel", field.label()),
-                        )),
-                    ]
+                    vec![AppAction::SetConfigPaneState(
+                        self.config_pane.begin_editing(),
+                    )]
                 } else {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Config,
-                        &format!("press enter to change {}", field.label()),
-                    ))]
+                    vec![]
                 }
             }
             AppMessage::ConfigInputChar(character) => vec![AppAction::SetConfigPaneState(
@@ -3619,78 +3616,55 @@ impl App {
                 vec![AppAction::SetConfigPaneState(self.config_pane.backspace())]
             }
             AppMessage::ConfigCommitEdit => match self.config_pane.commit_edit() {
-                Ok(next) => vec![
-                    AppAction::SetConfigPaneState(next),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Config,
-                        "config field updated locally | s save | n reset",
-                    )),
-                ],
+                Ok(next) => match self.persist_config_pane(next, self.config_pane.selected_field())
+                {
+                    Ok(actions) => actions,
+                    Err(error) => vec![
+                        AppAction::SetConfigPaneState(self.config_pane.cancel_edit()),
+                        AppAction::SetStatus(self.dashboard_status_for(DetailMode::Config, &error)),
+                    ],
+                },
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Config,
                     &format!("config edit failed: {error}"),
                 ))],
             },
-            AppMessage::ConfigCancelEdit => vec![
-                AppAction::SetConfigPaneState(self.config_pane.cancel_edit()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Config, "config edit cancelled"),
-                ),
-            ],
-            AppMessage::ConfigToggleSelected => vec![
-                if self.config_pane.selected_field() == ConfigField::RunOnboardingAgain {
-                    AppAction::ReenterOnboarding
-                } else if self.config_pane.selected_field().is_textual() {
-                    AppAction::SetConfigPaneState(self.config_pane.begin_editing())
+            AppMessage::ConfigCancelEdit => {
+                vec![AppAction::SetConfigPaneState(
+                    self.config_pane.cancel_edit(),
+                )]
+            }
+            AppMessage::ConfigToggleSelected => {
+                let field = self.config_pane.selected_field();
+                if field.is_textual() {
+                    vec![AppAction::SetConfigPaneState(
+                        self.config_pane.begin_editing(),
+                    )]
                 } else {
-                    AppAction::SetConfigPaneState(self.config_pane.toggle_selected())
-                },
-                AppAction::SetStatus(self.dashboard_status_for(
-                    DetailMode::Config,
-                    if self.config_pane.selected_field() == ConfigField::RunOnboardingAgain {
-                        "re-entering onboarding"
-                    } else if self.config_pane.selected_field().is_textual() {
-                        "editing config field | enter apply | esc cancel"
-                    } else {
-                        "config field updated locally | s save | n reset"
-                    },
-                )),
-            ],
-            AppMessage::ConfigSave => {
-                if self.config_pane.edit.is_some() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Config,
-                        "finish or cancel the active config edit before saving",
-                    ))]
-                } else if !self.config_pane.is_dirty() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Config,
-                        "no config changes to save",
-                    ))]
-                } else {
-                    match self.config_store.write_config(&self.config_pane.draft) {
-                        Ok(()) => vec![
-                            AppAction::SetPersistedConfig(self.config_pane.draft.clone()),
-                            AppAction::SetConfigPaneState(
-                                self.config_pane.mark_saved(self.config_pane.draft.clone()),
-                            ),
-                            AppAction::SetStatus(
-                                self.dashboard_status_for(DetailMode::Config, "config saved"),
-                            ),
-                        ],
-                        Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
-                            DetailMode::Config,
-                            &format!("config save failed: {error}"),
-                        ))],
+                    let next = self.config_pane.toggle_selected();
+                    match self.persist_config_pane(next, field) {
+                        Ok(actions) => actions,
+                        Err(error) => vec![AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Config, &error),
+                        )],
                     }
                 }
             }
-            AppMessage::ConfigResetDraft => vec![
-                AppAction::SetConfigPaneState(self.config_pane.reset_draft()),
-                AppAction::SetStatus(self.dashboard_status_for(
-                    DetailMode::Config,
-                    "config draft reset to saved values",
-                )),
+            AppMessage::ConfigAdjustSelected(delta) => {
+                let field = self.config_pane.selected_field();
+                let next = self.config_pane.adjust_selected(delta);
+                match self.persist_config_pane(next, field) {
+                    Ok(actions) => actions,
+                    Err(error) => vec![AppAction::SetStatus(
+                        self.dashboard_status_for(DetailMode::Config, &error),
+                    )],
+                }
+            }
+            AppMessage::ConfigRunOnboarding => vec![
+                AppAction::ReenterOnboarding,
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Config, "re-entering onboarding"),
+                ),
             ],
             AppMessage::ConfigExportAddons => match default_transfer_path() {
                 Ok(output_path) => {
@@ -6090,33 +6064,44 @@ impl App {
                 .as_ref()
                 .map(|value| {
                     if value.is_empty() {
-                        "<empty>".to_string()
+                        "Configured".to_string()
                     } else {
-                        format!("set ({} chars)", value.len())
+                        format!("Configured ({} chars)", value.len())
                     }
                 })
-                .unwrap_or_else(|| "<unset>".to_string()),
+                .unwrap_or_else(|| "Unset".to_string()),
             ConfigField::CheckInterval => {
                 format!("{}s", self.config_pane.draft.check_interval_secs)
             }
-            ConfigField::AutoCheckEnabled => self.config_pane.draft.auto_check_enabled.to_string(),
+            ConfigField::AutoCheckEnabled => {
+                if self.config_pane.draft.auto_check_enabled {
+                    "Enabled".to_string()
+                } else {
+                    "Disabled".to_string()
+                }
+            }
             ConfigField::AutoCheckInterval => {
                 format!("{}s", self.config_pane.draft.auto_check_interval_secs)
             }
-            ConfigField::BackupWtf => self.config_pane.draft.backup_wtf.to_string(),
+            ConfigField::BackupWtf => {
+                if self.config_pane.draft.backup_wtf {
+                    "Enabled".to_string()
+                } else {
+                    "Disabled".to_string()
+                }
+            }
             ConfigField::BackupRetention => self.config_pane.draft.backup_retention.to_string(),
             ConfigField::Theme => match self.config_pane.draft.theme {
-                ThemeMode::Dark => "dark".to_string(),
-                ThemeMode::Light => "light".to_string(),
+                ThemeMode::Dark => "Dark".to_string(),
+                ThemeMode::Light => "Light".to_string(),
             },
-            ConfigField::ShowLibs => self.config_pane.draft.show_libs.to_string(),
-            ConfigField::DefaultScreen => match self.config_pane.draft.default_screen {
-                DefaultScreen::Manage => "manage".to_string(),
-                DefaultScreen::Install => "install".to_string(),
-                DefaultScreen::Config => "config".to_string(),
-                DefaultScreen::WagoSearch => "wago_search".to_string(),
-            },
-            ConfigField::RunOnboardingAgain => "press Enter".to_string(),
+            ConfigField::ShowLibs => {
+                if self.config_pane.draft.show_libs {
+                    "Enabled".to_string()
+                } else {
+                    "Disabled".to_string()
+                }
+            }
         }
     }
 
@@ -6223,6 +6208,100 @@ impl App {
                 summary.upserted_addons, summary.removed_addons
             ),
             ScanState::Failed(error) => format!("failed ({error})"),
+        }
+    }
+
+    fn config_field_saved_message(&self, field: ConfigField, config: &AppConfig) -> String {
+        match field {
+            ConfigField::WagoApiKey => {
+                if config.wago_api_key.is_some() {
+                    "Wago API key updated".to_string()
+                } else {
+                    "Wago API key cleared".to_string()
+                }
+            }
+            ConfigField::CheckInterval => {
+                format!("Check freshness set to {}s", config.check_interval_secs)
+            }
+            ConfigField::AutoCheckEnabled => {
+                if config.auto_check_enabled {
+                    "Background auto-check enabled".to_string()
+                } else {
+                    "Background auto-check disabled".to_string()
+                }
+            }
+            ConfigField::AutoCheckInterval => {
+                format!(
+                    "Auto-check interval set to {}s",
+                    config.auto_check_interval_secs
+                )
+            }
+            ConfigField::BackupWtf => {
+                if config.backup_wtf {
+                    "WTF backup enabled".to_string()
+                } else {
+                    "WTF backup disabled".to_string()
+                }
+            }
+            ConfigField::BackupRetention => {
+                format!("Backup retention set to {}", config.backup_retention)
+            }
+            ConfigField::Theme => match config.theme {
+                ThemeMode::Dark => "Theme set to Dark".to_string(),
+                ThemeMode::Light => "Theme set to Light".to_string(),
+            },
+            ConfigField::ShowLibs => {
+                if config.show_libs {
+                    "Show libs enabled".to_string()
+                } else {
+                    "Show libs disabled".to_string()
+                }
+            }
+        }
+    }
+
+    fn persist_config_pane(
+        &self,
+        next: ConfigPaneState,
+        field: ConfigField,
+    ) -> std::result::Result<Vec<AppAction>, String> {
+        match self.config_store.write_config(&next.draft) {
+            Ok(()) => Ok(vec![
+                AppAction::SetPersistedConfig(next.draft.clone()),
+                AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    DetailMode::Config,
+                    &self.config_field_saved_message(field, &next.draft),
+                )),
+            ]),
+            Err(error) => Err(format!("failed to save {}: {error}", field.label())),
+        }
+    }
+
+    fn config_field_help_text(&self, field: ConfigField) -> &'static str {
+        match field {
+            ConfigField::WagoApiKey => {
+                "Used only for Wago installs, search, and Wago update checks."
+            }
+            ConfigField::CheckInterval => {
+                "How long a checked addon stays fresh before LemonUp fetches it again."
+            }
+            ConfigField::AutoCheckEnabled => {
+                "Refresh tracked addon status in the background while the dashboard is open."
+            }
+            ConfigField::AutoCheckInterval => {
+                "How often LemonUp runs background update checks for tracked addons."
+            }
+            ConfigField::BackupWtf => {
+                "Include WTF data when creating backups before risky operations."
+            }
+            ConfigField::BackupRetention => {
+                "How many recent backup archives LemonUp keeps before pruning older ones."
+            }
+            ConfigField::Theme => "Pick the shell color treatment used across the TUI.",
+            ConfigField::ShowLibs => {
+                "Show embedded library folders in addon scans and relationship views."
+            }
         }
     }
 }
@@ -7055,6 +7134,30 @@ fn selection_count_after_toggle(dashboard: &DashboardState) -> usize {
     }
 }
 
+fn adjust_u64(current: u64, delta: i16, step: u64, minimum: u64) -> u64 {
+    if delta >= 0 {
+        current
+            .saturating_add(step.saturating_mul(delta as u64))
+            .max(minimum)
+    } else {
+        current
+            .saturating_sub(step.saturating_mul((-delta) as u64))
+            .max(minimum)
+    }
+}
+
+fn adjust_u16(current: u16, delta: i16, step: u16, minimum: u16) -> u16 {
+    if delta >= 0 {
+        current
+            .saturating_add(step.saturating_mul(delta as u16))
+            .max(minimum)
+    } else {
+        current
+            .saturating_sub(step.saturating_mul((-delta) as u16))
+            .max(minimum)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -7071,17 +7174,17 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState, ConfigField,
-        ConfigPaneState, DashboardChildConnector, DashboardDeleteOutcome, DashboardJobKind,
-        DashboardJobUiState, DashboardRow, DashboardSortColumn, DashboardState,
-        DashboardUpdateOutcome, DetailMode, FooterHintId, FooterKeyPulse, InspectOverlayState,
-        InspectResolvedTarget, InspectSection, InstallPaneState, MotionState, OverlayKind,
-        PendingWagoInstallRequest, ScanState, SearchInstallState, SearchPaneState,
-        SearchPresentationMode, ShellMode, ShellUiState, UiTheme, WagoInstallConfirmation,
-        WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
-        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
-        dashboard_item_version_line, format_download_count, summarize_owned_folders,
-        truncate_middle_text, visible_search_result_window,
+        AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState,
+        ConfigEditState, ConfigField, ConfigPaneState, DashboardChildConnector,
+        DashboardDeleteOutcome, DashboardJobKind, DashboardJobUiState, DashboardRow,
+        DashboardSortColumn, DashboardState, DashboardUpdateOutcome, DetailMode, FooterHintId,
+        FooterKeyPulse, InspectOverlayState, InspectResolvedTarget, InspectSection,
+        InstallPaneState, MotionState, OverlayKind, PendingWagoInstallRequest, ScanState,
+        SearchInstallState, SearchPaneState, SearchPresentationMode, ShellMode, ShellUiState,
+        UiTheme, WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource,
+        WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix, child_row_prefix,
+        dashboard_item_version_label, dashboard_item_version_line, format_download_count,
+        summarize_owned_folders, truncate_middle_text, visible_search_result_window,
     };
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome};
@@ -7953,6 +8056,10 @@ mod tests {
     fn config_mode_navigation_and_edit_keys_are_routed_to_config_pane() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| matches!(field, ConfigField::ShowLibs))
+            .expect("show libs field present");
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
@@ -7961,6 +8068,18 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('e'))),
             vec![AppMessage::ConfigBeginEditing]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('r'))),
+            vec![AppMessage::ConfigRunOnboarding]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('l'))),
+            vec![AppMessage::ConfigAdjustSelected(1)]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Left)),
+            vec![AppMessage::ConfigAdjustSelected(-1)]
         );
 
         app.config_pane.selected_field = 0;
@@ -8010,7 +8129,7 @@ mod tests {
     }
 
     #[test]
-    fn config_save_updates_runtime_wago_api_key_and_marks_config_present() {
+    fn config_commit_edit_updates_runtime_wago_api_key_and_marks_config_present() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("config.toml");
         let mut app = app_for_tests(ShellMode::Dashboard);
@@ -8018,9 +8137,12 @@ mod tests {
         app.wago_api_key = None;
         app.config_store = ConfigStore::new(config_path.clone());
         app.dashboard.detail_mode = DetailMode::Config;
-        app.config_pane.draft.wago_api_key = Some("new-wago-key".to_string());
+        app.config_pane.edit = Some(ConfigEditState {
+            field: ConfigField::WagoApiKey,
+            value: "new-wago-key".to_string(),
+        });
 
-        let actions = app.update(AppMessage::ConfigSave);
+        let actions = app.update(AppMessage::ConfigCommitEdit);
         assert!(matches!(actions[0], AppAction::SetPersistedConfig(_)));
         for action in actions {
             app.apply(action);
@@ -8039,19 +8161,15 @@ mod tests {
     }
 
     #[test]
-    fn config_onboarding_field_reenters_location_finder_with_current_path() {
+    fn config_run_onboarding_reenters_location_finder_with_current_path() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Config;
         app.shell_ui.overlay.active = Some(OverlayKind::Config);
         app.effective_addon_dir = Some(PathBuf::from(
             "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
         ));
-        app.config_pane.selected_field = ConfigField::ALL
-            .iter()
-            .position(|field| *field == ConfigField::RunOnboardingAgain)
-            .expect("onboarding field index");
 
-        let actions = app.update(AppMessage::ConfigToggleSelected);
+        let actions = app.update(AppMessage::ConfigRunOnboarding);
         assert!(matches!(actions[0], AppAction::ReenterOnboarding));
         assert!(matches!(actions[1], AppAction::SetStatus(_)));
 
@@ -8067,6 +8185,94 @@ mod tests {
             "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
         );
         assert!(matches!(app.onboarding.phase, OnboardingPhase::Ready));
+    }
+
+    #[test]
+    fn config_toggle_selected_persists_toggle_without_explicit_save() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(config_path.clone());
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::ShowLibs)
+            .expect("show libs field index");
+        app.config_pane.draft.show_libs = false;
+        app.config_pane.persisted.show_libs = false;
+
+        let actions = app.update(AppMessage::ConfigToggleSelected);
+        assert!(matches!(actions[0], AppAction::SetPersistedConfig(_)));
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert!(app.config_pane.persisted.show_libs);
+        let saved = app.config_store.load().expect("load config");
+        match saved {
+            ConfigLoad::Loaded(config) => assert!(config.show_libs),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+    }
+
+    #[test]
+    fn config_adjust_selected_persists_numeric_change_without_explicit_save() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(config_path.clone());
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::CheckInterval)
+            .expect("check interval field index");
+        app.config_pane.draft.check_interval_secs = 300;
+        app.config_pane.persisted.check_interval_secs = 300;
+
+        let actions = app.update(AppMessage::ConfigAdjustSelected(1));
+        assert!(matches!(actions[0], AppAction::SetPersistedConfig(_)));
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert_eq!(app.config_pane.persisted.check_interval_secs, 360);
+        let saved = app.config_store.load().expect("load config");
+        match saved {
+            ConfigLoad::Loaded(config) => assert_eq!(config.check_interval_secs, 360),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+    }
+
+    #[test]
+    fn config_commit_edit_reverts_to_persisted_value_on_write_failure() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config-dir");
+        std::fs::create_dir_all(&config_path).expect("create config dir");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(config_path);
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.persisted.wago_api_key = Some("old-key".to_string());
+        app.config_pane.draft.wago_api_key = Some("old-key".to_string());
+        app.config_pane.edit = Some(ConfigEditState {
+            field: ConfigField::WagoApiKey,
+            value: "new-key".to_string(),
+        });
+
+        let actions = app.update(AppMessage::ConfigCommitEdit);
+        for action in actions {
+            app.apply(action);
+        }
+
+        assert_eq!(app.config_pane.edit, None);
+        assert_eq!(
+            app.config_pane.draft.wago_api_key.as_deref(),
+            Some("old-key")
+        );
+        assert_eq!(
+            app.config_pane.persisted.wago_api_key.as_deref(),
+            Some("old-key")
+        );
     }
 
     #[test]
