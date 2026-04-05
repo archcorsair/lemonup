@@ -174,7 +174,7 @@ impl App {
             Span::styled("Version: ", Style::default().fg(self.ui_theme.muted)),
             Span::styled(
                 dashboard_item_version_label(item),
-                Style::default().fg(Color::Rgb(172, 182, 220)),
+                Style::default().fg(self.ui_theme.installed_text),
             ),
         ])
     }
@@ -211,14 +211,14 @@ impl App {
                 spans.push(Span::raw("   "));
             }
             let key_bg = if chip.key == "space" && is_selected {
-                Color::Rgb(28, 34, 48)
+                self.ui_theme.key_bg_selected
             } else if chip.enabled {
-                Color::Rgb(31, 37, 58)
+                self.ui_theme.key_bg
             } else {
-                Color::Rgb(27, 30, 45)
+                self.ui_theme.key_bg_disabled
             };
             let key_fg = if chip.key == "space" && is_selected {
-                Color::Rgb(172, 220, 255)
+                self.ui_theme.key_fg_selected
             } else if chip.enabled {
                 self.ui_theme.panel_title
             } else {
@@ -290,7 +290,7 @@ impl App {
             let remote = dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string());
             spans.extend([
                 Span::raw(" "),
-                Span::styled("→", Style::default().fg(Color::Yellow)),
+                Span::styled("→", Style::default().fg(self.ui_theme.warning)),
                 Span::raw(" "),
                 Span::styled(
                     remote,
@@ -299,7 +299,7 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
-                Span::styled("📦", Style::default().fg(Color::Rgb(212, 175, 55))),
+                Span::styled("📦", Style::default().fg(self.ui_theme.package_icon)),
             ]);
         }
         Line::from(spans)
@@ -313,8 +313,6 @@ impl App {
                 g.saturating_add(18),
                 b.saturating_add(8),
             ),
-            (Color::Yellow, 0..=2) => Color::Yellow,
-            (Color::Yellow, _) => Color::Rgb(255, 232, 168),
             (other, _) => other,
         }
     }

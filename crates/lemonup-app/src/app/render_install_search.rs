@@ -74,7 +74,7 @@ impl App {
             spans.extend(shimmer_text_spans(
                 "searching…",
                 self.ui_theme.warning,
-                Color::Rgb(255, 244, 214),
+                self.ui_theme.shimmer_glow,
                 ShimmerConfig::action(),
             ));
         } else if self.search_pane.is_editing && !self.search_pane.query.trim().is_empty() {
@@ -122,7 +122,7 @@ impl App {
             spans.extend(shimmer_text_spans(
                 "Searching Wago…",
                 self.ui_theme.warning,
-                Color::Rgb(255, 244, 214),
+                self.ui_theme.shimmer_glow,
                 ShimmerConfig::action(),
             ));
             Line::from(spans)
@@ -136,7 +136,7 @@ impl App {
                     spans.extend(shimmer_text_spans(
                         "Preparing install…",
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     ));
                     Line::from(spans)
@@ -149,7 +149,7 @@ impl App {
                     spans.extend(shimmer_text_spans(
                         "Installing from Wago…",
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     ));
                     Line::from(spans)
@@ -328,9 +328,9 @@ impl App {
                 spans.push(Span::raw("   "));
             }
             let key_bg = if chip.enabled {
-                Color::Rgb(31, 37, 58)
+                self.ui_theme.key_bg
             } else {
-                Color::Rgb(27, 30, 45)
+                self.ui_theme.key_bg_disabled
             };
             let key_fg = if chip.enabled {
                 self.ui_theme.panel_title
@@ -417,7 +417,7 @@ impl App {
                     Line::from(shimmer_text_spans(
                         &format!("Preparing {addon_name} for install…"),
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     )),
                     Line::from(""),
@@ -430,7 +430,7 @@ impl App {
                     Line::from(shimmer_text_spans(
                         &format!("Installing {addon_name} from Wago…"),
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     )),
                     Line::from(""),
@@ -636,7 +636,7 @@ impl App {
             let version = result.version.as_deref().unwrap_or("unknown");
             let row_style = if selected {
                 selected_row = Some(index);
-                Style::default().bg(Color::Rgb(36, 40, 56))
+                Style::default().bg(self.ui_theme.row_highlight_bg)
             } else {
                 Style::default()
             };
@@ -686,7 +686,7 @@ impl App {
         .column_spacing(2)
         .row_highlight_style(
             Style::default()
-                .bg(Color::Rgb(36, 40, 56))
+                .bg(self.ui_theme.row_highlight_bg)
                 .add_modifier(Modifier::BOLD),
         );
         let mut state = TableState::default().with_selected(selected_row);
@@ -731,7 +731,7 @@ impl App {
                     lines.push(Line::from(shimmer_text_spans(
                         "Checking tracked state and preparing install…",
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     )));
                 }
@@ -739,7 +739,7 @@ impl App {
                     lines.push(Line::from(shimmer_text_spans(
                         "Installing from Wago…",
                         self.ui_theme.warning,
-                        Color::Rgb(255, 244, 214),
+                        self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     )));
                 }
@@ -846,7 +846,7 @@ impl App {
             shimmer_text_spans(
                 &truncate_text(&result.display_name, 28),
                 self.ui_theme.info,
-                Color::Rgb(255, 244, 214),
+                self.ui_theme.shimmer_glow,
                 ShimmerConfig::action(),
             )
         } else {
@@ -869,13 +869,13 @@ impl App {
                 SearchInstallState::Checking { .. } => spans.extend(shimmer_text_spans(
                     "checking",
                     self.ui_theme.warning,
-                    Color::Rgb(255, 244, 214),
+                    self.ui_theme.shimmer_glow,
                     ShimmerConfig::action(),
                 )),
                 SearchInstallState::Installing { .. } => spans.extend(shimmer_text_spans(
                     "installing",
                     self.ui_theme.warning,
-                    Color::Rgb(255, 244, 214),
+                    self.ui_theme.shimmer_glow,
                     ShimmerConfig::action(),
                 )),
                 SearchInstallState::Success { .. } => spans.push(Span::styled(

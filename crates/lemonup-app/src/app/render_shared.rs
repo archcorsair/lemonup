@@ -138,6 +138,10 @@ impl App {
 
     pub(super) fn render_overlay_host(&self, frame: &mut Frame<'_>, area: Rect) {
         if let Some(kind) = self.shell_ui.overlay.active {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(self.ui_theme.scrim_bg)),
+                area,
+            );
             let title = match kind {
                 OverlayKind::Inspect => self
                     .inspect_resolved_target()
@@ -224,13 +228,44 @@ impl App {
                 }
             };
             frame.render_widget(Clear, overlay);
+            let title_style = match kind {
+                OverlayKind::Confirm if self.dashboard.pending_delete_folders().is_some() => {
+                    Style::default()
+                        .fg(self.ui_theme.error)
+                        .add_modifier(Modifier::BOLD)
+                }
+                OverlayKind::Confirm if self.pending_wago_install_confirmation.is_some() => {
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD)
+                }
+                _ => Style::default()
+                    .fg(self.ui_theme.modal_title_color())
+                    .add_modifier(Modifier::BOLD),
+            };
+            let close_title = Line::from(vec![
+                Span::styled(
+                    " esc ",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .bg(self.ui_theme.key_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " close ",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+            .right_aligned();
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(symbols::border::ROUNDED)
-                .title(Line::from(format!(" {title} ")).left_aligned())
-                .title(Line::from(" esc close ").right_aligned())
+                .title(Line::from(Span::styled(format!(" {title} "), title_style)).left_aligned())
+                .title(close_title)
                 .border_style(overlay_border_style)
-                .style(Style::default().bg(Color::Rgb(24, 24, 34)));
+                .style(Style::default().bg(self.ui_theme.overlay_bg));
             let inner = block.inner(overlay);
             frame.render_widget(block, overlay);
             if kind == OverlayKind::Inspect {
@@ -998,7 +1033,7 @@ impl App {
                             },
                             FooterCommandHint {
                                 id: FooterHintId::Change,
-                                key: "h/l",
+                                key: "←/→",
                                 label: "change",
                                 tier: primary,
                             },

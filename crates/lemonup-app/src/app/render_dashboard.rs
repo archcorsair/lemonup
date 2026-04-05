@@ -61,21 +61,21 @@ impl App {
         };
         let (icon_fg, text_fg, bg, prefix) = match kind {
             DashboardEventKind::Info => (
-                Color::Rgb(185, 231, 255),
+                self.ui_theme.toast_info_icon,
                 self.ui_theme.info,
-                Color::Rgb(24, 35, 48),
+                self.ui_theme.toast_info_bg,
                 "ℹ",
             ),
             DashboardEventKind::Success => (
-                Color::Rgb(196, 235, 144),
+                self.ui_theme.toast_success_icon,
                 self.ui_theme.success,
-                Color::Rgb(24, 42, 34),
+                self.ui_theme.toast_success_bg,
                 "✓",
             ),
             DashboardEventKind::Error => (
-                Color::Rgb(255, 182, 194),
+                self.ui_theme.toast_error_icon,
                 self.ui_theme.error,
-                Color::Rgb(50, 28, 33),
+                self.ui_theme.toast_error_bg,
                 "×",
             ),
         };
@@ -184,7 +184,7 @@ impl App {
         .column_spacing(1)
         .row_highlight_style(
             Style::default()
-                .bg(Color::Rgb(36, 40, 56))
+                .bg(self.ui_theme.row_highlight_bg)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -249,12 +249,12 @@ impl App {
             Style::default().fg(self.ui_theme.muted)
         } else if let Some(job) = active_job {
             let tint = match job.kind {
-                DashboardJobKind::Check => Color::Rgb(25, 41, 56),
-                DashboardJobKind::Update => Color::Rgb(48, 38, 28),
+                DashboardJobKind::Check => self.ui_theme.job_check_bg,
+                DashboardJobKind::Update => self.ui_theme.job_update_bg,
             };
             Style::default().bg(tint)
         } else if selected {
-            Style::default().bg(Color::Rgb(28, 34, 48))
+            Style::default().bg(self.ui_theme.key_bg_selected)
         } else {
             Style::default()
         };
@@ -347,7 +347,7 @@ pub(super) fn dashboard_item_version_line(
     ui_theme: UiTheme,
 ) -> Line<'static> {
     let installed = truncate_middle_text(&dashboard_item_version_label(item), 16);
-    let installed_style = Style::default().fg(Color::Rgb(172, 182, 220));
+    let installed_style = Style::default().fg(ui_theme.installed_text);
     let active_prefix = active_job.map(|job| {
         vec![
             Span::styled(
@@ -396,16 +396,16 @@ pub(super) fn dashboard_item_version_line(
             spans.extend([
                 Span::styled(installed, installed_style),
                 Span::raw(" "),
-                Span::styled("→", Style::default().fg(Color::Yellow)),
+                Span::styled("→", Style::default().fg(ui_theme.warning)),
                 Span::raw(" "),
                 Span::styled(
                     remote,
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(ui_theme.warning)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
-                Span::styled("📦", Style::default().fg(Color::Rgb(212, 175, 55))),
+                Span::styled("📦", Style::default().fg(ui_theme.package_icon)),
             ]);
             Line::from(spans)
         }

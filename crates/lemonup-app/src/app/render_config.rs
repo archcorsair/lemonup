@@ -216,7 +216,7 @@ impl App {
                     enabled: true,
                 },
                 SearchActionChip {
-                    key: "h/l",
+                    key: "←/→",
                     label: "change",
                     enabled: self.config_pane.selected_field().supports_quick_adjust(),
                 },
@@ -252,9 +252,9 @@ impl App {
                         self.ui_theme.muted
                     })
                     .bg(if chip.enabled {
-                        Color::Rgb(31, 37, 58)
+                        self.ui_theme.key_bg
                     } else {
-                        Color::Rgb(27, 30, 45)
+                        self.ui_theme.key_bg_disabled
                     })
                     .add_modifier(Modifier::BOLD),
             ));
