@@ -1,7 +1,6 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
 use lemonup_core::{
@@ -10,6 +9,7 @@ use lemonup_core::{
 };
 use reqwest::{Client, Url};
 use serde::Deserialize;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 use time::OffsetDateTime;
 use zip::ZipArchive;
 
@@ -447,10 +447,10 @@ fn install_downloaded_wago_addon(
     replace_existing: bool,
 ) -> Result<WagoInstallSummary, String> {
     let temp_root = create_temp_work_dir("wago-install")?;
-    let zip_path = temp_root.join("package.zip");
-    let extract_root = temp_root.join("extract");
-    let backup_root = temp_root.join("replace-backup");
-    let outcome = (|| {
+    let zip_path = temp_root.path().join("package.zip");
+    let extract_root = temp_root.path().join("extract");
+    let backup_root = temp_root.path().join("replace-backup");
+    (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -515,10 +515,7 @@ fn install_downloaded_wago_addon(
             version: release_version(addon, stability),
             dry_run: false,
         })
-    })();
-
-    let _ = fs::remove_dir_all(&temp_root);
-    outcome
+    })()
 }
 
 fn inspect_downloaded_wago_addon(
@@ -529,9 +526,9 @@ fn inspect_downloaded_wago_addon(
     stability: WagoStability,
 ) -> Result<WagoInstallInspection, String> {
     let temp_root = create_temp_work_dir("wago-inspect")?;
-    let zip_path = temp_root.join("package.zip");
-    let extract_root = temp_root.join("extract");
-    let outcome = (|| {
+    let zip_path = temp_root.path().join("package.zip");
+    let extract_root = temp_root.path().join("extract");
+    (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -567,10 +564,7 @@ fn inspect_downloaded_wago_addon(
             existing_folders,
             tracked_parent,
         })
-    })();
-
-    let _ = fs::remove_dir_all(&temp_root);
-    outcome
+    })()
 }
 
 fn update_downloaded_wago_addon(
@@ -583,12 +577,12 @@ fn update_downloaded_wago_addon(
     dry_run: bool,
 ) -> Result<WagoUpdateSummary, String> {
     let temp_root = create_temp_work_dir("wago-update")?;
-    let zip_path = temp_root.join("package.zip");
-    let extract_root = temp_root.join("extract");
-    let update_root = temp_root.join("backup");
+    let zip_path = temp_root.path().join("package.zip");
+    let extract_root = temp_root.path().join("extract");
+    let update_root = temp_root.path().join("backup");
     fs::create_dir_all(&update_root).map_err(|error| error.to_string())?;
     let previous_version = tracked.version.clone();
-    let outcome = (|| {
+    (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -673,10 +667,7 @@ fn update_downloaded_wago_addon(
             updated: true,
             dry_run: false,
         })
-    })();
-
-    let _ = fs::remove_dir_all(&temp_root);
-    outcome
+    })()
 }
 
 fn build_managed_wago_record(
@@ -1112,26 +1103,11 @@ fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis();
-    let root = std::env::temp_dir();
-
-    for attempt in 0..100u16 {
-        let candidate = if attempt == 0 {
-            root.join(format!("lemonup-{prefix}-{timestamp}"))
-        } else {
-            root.join(format!("lemonup-{prefix}-{timestamp}-{attempt}"))
-        };
-        if !candidate.exists() {
-            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
-            return Ok(candidate);
-        }
-    }
-
-    Err("failed to create a unique temporary Wago install directory".to_string())
+fn create_temp_work_dir(prefix: &str) -> Result<TempDir, String> {
+    TempDirBuilder::new()
+        .prefix(&format!("lemonup-{prefix}-"))
+        .tempdir()
+        .map_err(|error| error.to_string())
 }
 
 fn rollback_updated_folders(
