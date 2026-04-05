@@ -40,8 +40,8 @@ Before making changes:
 ## Current Branch / Status
 
 - active branch: `codex/rusty-lemon`
-- latest local milestone at handoff pass: Wago managed-state and version-normalization fixes implemented and user-verified
-- current worktree status at handoff pass: checkpoint-ready Wago managed-state/version-display slice pending commit
+- latest local milestone at handoff pass: inspect overlay redesign follow-through plus dashboard action-dock cleanup implemented and user-verified
+- current worktree status at handoff pass: checkpoint-ready inspect/footer polish slice pending commit
 
 ## Current State
 
@@ -175,6 +175,18 @@ Implemented, committed, and pushed:
   - state merges preserve provider-managed authority even with empty owned-folder lists
   - Wago immediate post-install false updates caused by leading # version labels are normalized away
   - overview version rendering now preserves suffixes so false same-version arrows are easier to avoid and diagnose
+- inspect overlay redesign follow-through is implemented and user-verified:
+  - inspect action chips now live at the bottom of the card and are centered
+  - duplicate title content was removed from the card body
+  - source/status/tracking summary lines are cleaner and more explicit
+  - update-available status now pulses gently and includes the target version
+  - details overflow now supports real scrolling with `j/k` or `↑/↓`
+  - overflow hints render below detail content instead of overwriting it
+- dashboard command-dock cleanup is implemented and user-verified:
+  - footer only shows core overview actions
+  - footer command dock is hidden while overlays are open
+  - dashboard status moved into a transient event rail above the table
+  - footer actions now render in a width-aware aligned grid instead of a loose chip flow
 
 ## Recent Important Commits
 
@@ -195,6 +207,8 @@ Most relevant recent milestones:
 - `d009a48` `feat(rust): add cli check command`
 - `3f56236` `feat(rust): add managed update refresh path`
 - `25ac841` `feat(rust): add managed ownership write path`
+- `c6acebe` `feat(rust): redesign inspect overlay`
+- `e332fb7` `feat(rust): polish inspect overlay layout`
 
 ## Product / UX Decisions Already Made
 

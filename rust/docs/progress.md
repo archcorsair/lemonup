@@ -82,12 +82,11 @@ These chunks are implemented, user-verified, committed, and pushed.
 
 Current checkpoint state:
 
-- one active unverified slice in the worktree:
-  - Wago managed-state and version-normalization fixes pending checkpoint
+- no active unverified Rust slice in the worktree
 - current focus:
-  - checkpoint the Wago managed-state/version-display fixes
-  - then continue search/install and overlay polish
-  - then return later for deeper onboarding and backup-restore work
+  - continue overlay-by-overlay production redesign passes
+  - keep converging footer/help/action language across dashboard and overlays
+  - return later for backup restore and deeper help/menu affordances
 ## Newly Completed
 
 These are implemented and manually verified in addition to the earlier chunks:
@@ -120,6 +119,19 @@ These are implemented and manually verified in addition to the earlier chunks:
 - provider-managed ownership no longer depends on owned child folders being present
 - long non-GitHub version labels now use middle truncation so differing suffixes remain visible
 - Wago version normalization now ignores leading punctuation like #, preventing false immediate updates after install
+- inspect overlay redesign is now checkpointed:
+  - command-palette card presentation replaces the old raw metadata dump
+  - child-row inspect resolves to the parent addon with child context
+  - in-card actions use split key/action chips and live at the bottom of the card
+  - `r`, `d`, and `t` reveal collapsible detail sections
+  - update-available status in inspect now pulses gently and carries the target version
+  - inspect details support scrolling with `j/k` or `↑/↓`
+  - overflow affordances now sit below the detail content instead of overwriting it
+- dashboard command dock cleanup is now checkpointed:
+  - the footer command dock now shows only core table actions
+  - dashboard footer actions disappear entirely while overlays are open
+  - transient dashboard status moved into a single-line event rail above the table
+  - core footer actions now render in a width-aware two-row grid instead of a loose flow
 - CLI-only `check` companion command now exists
 - `check` supports:
   - global check with no addon arguments

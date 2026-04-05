@@ -116,6 +116,7 @@ impl InspectSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InspectOverlayState {
     open_sections: HashSet<InspectSection>,
+    scroll_offset: u16,
 }
 
 impl InspectOverlayState {
@@ -128,6 +129,16 @@ impl InspectOverlayState {
 
     fn is_open(&self, section: InspectSection) -> bool {
         self.open_sections.contains(&section)
+    }
+
+    fn scroll_up(mut self) -> Self {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self
+    }
+
+    fn scroll_down(mut self) -> Self {
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        self
     }
 }
 
@@ -341,6 +352,8 @@ enum AppMessage {
     TerminalResized { width: u16, height: u16 },
     DashboardOpenInspect,
     DashboardCloseOverlay,
+    InspectScrollUp,
+    InspectScrollDown,
     InspectToggleSection(InspectSection),
     InspectToggleSelected,
     InspectRequestDelete,
@@ -2292,6 +2305,8 @@ impl App {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::InspectScrollDown],
+                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::InspectScrollUp],
                 KeyCode::Char('c') => vec![AppMessage::InspectRunCheck],
                 KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
@@ -2660,6 +2675,12 @@ impl App {
             }
             AppMessage::InspectToggleSection(section) => vec![AppAction::SetInspectOverlayState(
                 self.inspect_overlay.clone().toggle(section),
+            )],
+            AppMessage::InspectScrollUp => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay.clone().scroll_up(),
+            )],
+            AppMessage::InspectScrollDown => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay.clone().scroll_down(),
             )],
             AppMessage::InspectToggleSelected => match self.inspect_resolved_target() {
                 Some(target) => {
@@ -4459,11 +4480,20 @@ impl App {
         };
 
         let command_lines = self.footer_command_lines();
-        let status_lines = self.footer_status_lines();
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(padded);
+
+        if self.shell_mode == ShellMode::Dashboard {
+            if self.shell_ui.overlay.active.is_some() {
+                return;
+            }
+            self.render_dashboard_footer_grid(frame, &rows, &command_lines);
+            return;
+        }
+
+        let status_lines = self.footer_status_lines();
 
         let right_width = command_lines
             .iter()
@@ -4474,25 +4504,97 @@ impl App {
 
         for (index, hints) in command_lines.iter().enumerate() {
             let row = rows[index];
-            let [left, _, right] = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(if right_width > 0 { 3 } else { 0 }),
-                    Constraint::Length(right_width),
-                ])
-                .areas(row);
+            let status_line = status_lines[index].clone();
+            let status_is_empty = self.line_is_empty(&status_line);
 
-            let status = Paragraph::new(status_lines[index].clone())
-                .alignment(Alignment::Left)
-                .wrap(Wrap { trim: false });
-            frame.render_widget(status, left);
+            if status_is_empty {
+                if !hints.is_empty() {
+                    let commands = Paragraph::new(self.footer_hint_line(hints))
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(commands, row);
+                }
+            } else {
+                let [left, _, right] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Fill(1),
+                        Constraint::Length(if right_width > 0 { 3 } else { 0 }),
+                        Constraint::Length(right_width),
+                    ])
+                    .areas(row);
 
-            if !hints.is_empty() {
-                let commands = Paragraph::new(self.footer_hint_line(hints))
-                    .alignment(Alignment::Right)
+                let status = Paragraph::new(status_line)
+                    .alignment(Alignment::Left)
                     .wrap(Wrap { trim: false });
-                frame.render_widget(commands, right);
+                frame.render_widget(status, left);
+
+                if !hints.is_empty() {
+                    let commands = Paragraph::new(self.footer_hint_line(hints))
+                        .alignment(Alignment::Right)
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(commands, right);
+                }
+            }
+        }
+    }
+
+    fn line_is_empty(&self, line: &Line<'_>) -> bool {
+        line.spans.iter().all(|span| span.content.is_empty())
+    }
+
+    fn render_dashboard_footer_grid(
+        &self,
+        frame: &mut Frame<'_>,
+        rows: &[Rect],
+        command_lines: &[Vec<FooterCommandHint>],
+    ) {
+        let columns = command_lines.iter().map(Vec::len).max().unwrap_or(0);
+        if columns == 0 {
+            return;
+        }
+
+        let gap = 3u16;
+        let max_hint_width = command_lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|hint| self.footer_hint_line_width(std::slice::from_ref(hint)))
+            .max()
+            .unwrap_or(0) as u16;
+        let available_width = rows.iter().map(|row| row.width as usize).max().unwrap_or(0);
+        let grid_width = max_hint_width
+            .saturating_mul(columns as u16)
+            .saturating_add(gap.saturating_mul(columns.saturating_sub(1) as u16));
+
+        if available_width < grid_width as usize {
+            for (index, hints) in command_lines.iter().enumerate() {
+                if hints.is_empty() {
+                    continue;
+                }
+                let commands = Paragraph::new(self.footer_hint_line(hints))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(commands, rows[index]);
+            }
+            return;
+        }
+
+        let constraints = vec![Constraint::Fill(1); columns];
+
+        for (row_index, hints) in command_lines.iter().enumerate() {
+            if hints.is_empty() {
+                continue;
+            }
+            let row = rows[row_index];
+            let cells = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(constraints.clone())
+                .split(row);
+            for (column_index, hint) in hints.iter().enumerate() {
+                let cell = cells[column_index];
+                let command = Paragraph::new(self.footer_hint_line(std::slice::from_ref(hint)))
+                    .alignment(Alignment::Left);
+                frame.render_widget(command, cell);
             }
         }
     }
@@ -4512,6 +4614,22 @@ impl App {
                 OverlayKind::Confirm => "Confirm".to_string(),
             }
             .to_string();
+            let overlay_border_style = match kind {
+                OverlayKind::Inspect => Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+                OverlayKind::Confirm if self.dashboard.pending_delete_folders().is_some() => {
+                    Style::default()
+                        .fg(self.ui_theme.error)
+                        .add_modifier(Modifier::BOLD)
+                }
+                OverlayKind::Confirm if self.pending_wago_install_confirmation.is_some() => {
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD)
+                }
+                _ => Style::default().fg(self.ui_theme.border),
+            };
             let overlay = match kind {
                 OverlayKind::Inspect => {
                     let overlay = Layout::default()
@@ -4556,13 +4674,7 @@ impl App {
                 .border_set(symbols::border::ROUNDED)
                 .title(Line::from(format!(" {title} ")).left_aligned())
                 .title(Line::from(" esc close ").right_aligned())
-                .border_style(if kind == OverlayKind::Inspect {
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.ui_theme.border)
-                })
+                .border_style(overlay_border_style)
                 .style(Style::default().bg(Color::Rgb(24, 24, 34)));
             let inner = block.inner(overlay);
             frame.render_widget(block, overlay);
@@ -5258,7 +5370,9 @@ impl App {
                 ),
             ]),
         ];
-        if let Some(job_line) = self.dashboard_job_header_line() {
+        if self.shell_mode != ShellMode::Dashboard
+            && let Some(job_line) = self.dashboard_job_header_line()
+        {
             lines.push(job_line);
         }
         if mode == ShellLayoutMode::Compact {
@@ -5410,14 +5524,23 @@ impl App {
     }
 
     fn dashboard_footer_secondary_text(&self) -> String {
-        if self.shell_ui.overlay.active.is_none() {
-            let selected = self.dashboard.selected_parent_count();
-            if selected > 0 {
-                return format!("{selected} selected");
-            }
+        String::new()
+    }
+
+    fn dashboard_event_line(&self) -> Option<Line<'static>> {
+        if let Some(job_line) = self.dashboard_job_footer_line() {
+            return Some(job_line);
         }
 
-        String::new()
+        let summary = self.dashboard_footer_status_text();
+        if summary.is_empty() {
+            return None;
+        }
+
+        Some(Line::from(vec![Span::styled(
+            truncate_text(&summary, 160),
+            Style::default().fg(self.ui_theme.info),
+        )]))
     }
 
     fn onboarding_footer_status_text(&self) -> String {
@@ -5453,6 +5576,7 @@ impl App {
     fn humanized_footer_status(&self, summary: &str) -> Option<String> {
         if summary.is_empty()
             || summary.starts_with("terminal resized")
+            || summary.starts_with("selected ")
             || summary.contains("selection moved")
             || summary.contains("overlay closed")
             || summary.contains("inspect overlay open")
@@ -5948,8 +6072,8 @@ impl App {
         vec![
             FooterCommandHint {
                 id: FooterHintId::Nav,
-                key: "j/k",
-                label: "nav",
+                key: "↑/↓",
+                label: "move",
                 tier: primary,
             },
             FooterCommandHint {
@@ -5961,73 +6085,47 @@ impl App {
             FooterCommandHint {
                 id: FooterHintId::Select,
                 key: "space/a",
-                label: "select",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Sort,
-                key: "1-4",
-                label: "sort",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Clear,
-                key: "esc",
-                label: "clear",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Tree,
-                key: "l/h/[/]",
-                label: "tree",
+                label: if self.dashboard.selected_parent_count() > 0 {
+                    "clear"
+                } else {
+                    "select"
+                },
                 tier: primary,
             },
             FooterCommandHint {
                 id: FooterHintId::Check,
                 key: "c",
-                label: "check",
+                label: if self.dashboard.selected_parent_count() > 0 {
+                    "check sel"
+                } else {
+                    "check"
+                },
                 tier: primary,
             },
             FooterCommandHint {
                 id: FooterHintId::Update,
                 key: "u",
-                label: "update",
-                tier: primary,
+                label: if self.dashboard.selected_parent_count() > 0 {
+                    "update sel"
+                } else {
+                    "update"
+                },
+                tier: secondary,
             },
             FooterCommandHint {
                 id: FooterHintId::Delete,
                 key: "x",
-                label: "delete",
+                label: if self.dashboard.selected_parent_count() > 0 {
+                    "delete sel"
+                } else {
+                    "delete"
+                },
                 tier: secondary,
             },
             FooterCommandHint {
-                id: FooterHintId::Undo,
-                key: "z",
-                label: "undo",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Install,
-                key: "i",
-                label: "install",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Search,
-                key: "/",
-                label: "search",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Config,
-                key: ",",
-                label: "config",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Backup,
-                key: "b",
-                label: "backup",
+                id: FooterHintId::Sort,
+                key: "1-4",
+                label: "sort",
                 tier: secondary,
             },
         ]
@@ -6037,13 +6135,10 @@ impl App {
         let mut spans = Vec::new();
         for (index, hint) in hints.iter().enumerate() {
             if index > 0 {
-                spans.push(Span::styled(
-                    "  ·  ",
-                    Style::default().fg(self.ui_theme.muted),
-                ));
+                spans.push(Span::raw("   "));
             }
             let (key_style, label_style) = self.footer_hint_styles(hint.id);
-            spans.push(Span::styled(hint.key, key_style));
+            spans.push(Span::styled(format!(" {} ", hint.key), key_style));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(hint.label, label_style));
         }
@@ -6058,7 +6153,8 @@ impl App {
         {
             return (
                 Style::default()
-                    .fg(self.ui_theme.brand_gold)
+                    .fg(Color::Rgb(24, 24, 34))
+                    .bg(self.ui_theme.brand_gold)
                     .add_modifier(Modifier::BOLD),
                 Style::default()
                     .fg(self.ui_theme.highlight)
@@ -6068,7 +6164,8 @@ impl App {
 
         (
             Style::default()
-                .fg(self.ui_theme.info)
+                .fg(self.ui_theme.panel_title)
+                .bg(Color::Rgb(31, 37, 58))
                 .add_modifier(Modifier::BOLD),
             Style::default().fg(self.ui_theme.panel_title),
         )
@@ -6079,8 +6176,8 @@ impl App {
             .iter()
             .enumerate()
             .map(|(index, hint)| {
-                let base = hint.key.len() + 1 + hint.label.len();
-                if index == 0 { base } else { base + 5 }
+                let base = hint.key.len() + 2 + 1 + hint.label.len();
+                if index == 0 { base } else { base + 3 }
             })
             .sum()
     }
@@ -6602,7 +6699,33 @@ impl App {
     }
 
     fn render_dashboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        self.render_dashboard_list(frame, area);
+        if let Some(event_line) = self.dashboard_event_line() {
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            self.render_dashboard_event_rail(frame, sections[0], event_line);
+            self.render_dashboard_list(frame, sections[1]);
+        } else {
+            self.render_dashboard_list(frame, area);
+        }
+    }
+
+    fn render_dashboard_event_rail(&self, frame: &mut Frame<'_>, area: Rect, line: Line<'static>) {
+        frame.render_widget(Clear, area);
+        let padded = if area.width > 2 {
+            area.inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            })
+        } else {
+            area
+        };
+        let rail = Paragraph::new(line)
+            .style(Style::default().bg(Color::Rgb(28, 31, 46)))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(rail, padded);
     }
 
     fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -7256,24 +7379,32 @@ impl App {
             return;
         };
 
+        let hero_lines = self.inspect_hero_lines(target);
+        let summary_lines = self.inspect_summary_lines(target);
+        let detail_lines = self.inspect_detail_lines(target);
+        let hero_height = if hero_lines.is_empty() {
+            0
+        } else {
+            hero_lines.len() as u16
+        };
+        let summary_height = (summary_lines.len() as u16).saturating_add(1).max(4);
+
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if target.opened_from_child.is_some() {
-                    2
-                } else {
-                    1
-                }),
-                Constraint::Length(6),
+                Constraint::Length(hero_height),
+                Constraint::Length(summary_height),
                 Constraint::Length(1),
-                Constraint::Min(8),
+                Constraint::Min((detail_lines.len() as u16).clamp(4, 8)),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(content_area);
 
-        let hero = Paragraph::new(self.inspect_hero_lines(target)).wrap(Wrap { trim: false });
-        frame.render_widget(hero, sections[0]);
+        if hero_height > 0 {
+            let hero = Paragraph::new(hero_lines).wrap(Wrap { trim: false });
+            frame.render_widget(hero, sections[0]);
+        }
 
         let summary_block = Block::default()
             .borders(Borders::TOP)
@@ -7285,7 +7416,7 @@ impl App {
         let summary_inner = summary_block.inner(sections[1]);
         frame.render_widget(summary_block, sections[1]);
         frame.render_widget(
-            Paragraph::new(self.inspect_summary_lines(target)).wrap(Wrap { trim: false }),
+            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
             summary_inner,
         );
 
@@ -7300,12 +7431,39 @@ impl App {
             ));
         let details_inner = details_block.inner(sections[3]);
         frame.render_widget(details_block, sections[3]);
+        let max_scroll = detail_lines
+            .len()
+            .saturating_sub(details_inner.height as usize) as u16;
+        let scroll_offset = self.inspect_overlay.scroll_offset.min(max_scroll);
+        let can_scroll_up = scroll_offset > 0;
+        let can_scroll_down = scroll_offset < max_scroll;
         frame.render_widget(
-            Paragraph::new(self.inspect_detail_lines(target)).wrap(Wrap { trim: false }),
+            Paragraph::new(detail_lines)
+                .scroll((scroll_offset, 0))
+                .wrap(Wrap { trim: false }),
             details_inner,
         );
 
-        frame.render_widget(Paragraph::new(""), sections[4]);
+        let overflow_hint = match (can_scroll_up, can_scroll_down) {
+            (true, true) => Some("↑/↓ more"),
+            (true, false) => Some("↑ more"),
+            (false, true) => Some("↓ more"),
+            (false, false) => None,
+        };
+
+        if let Some(hint) = overflow_hint {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    hint,
+                    Style::default()
+                        .fg(self.ui_theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                sections[4],
+            );
+        } else {
+            frame.render_widget(Paragraph::new(""), sections[4]);
+        }
         frame.render_widget(
             Paragraph::new(self.inspect_action_line(target)).alignment(Alignment::Center),
             sections[5],
@@ -9260,11 +9418,26 @@ mod tests {
     }
 
     #[test]
-    fn footer_status_text_shows_selection_count_when_helpful() {
+    fn dashboard_event_line_stays_quiet_for_selection_only() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.apply(AppAction::ToggleDashboardSelection);
 
-        assert_eq!(app.footer_status_text(), "selected 1 addon");
+        assert!(app.dashboard_event_line().is_none());
+    }
+
+    #[test]
+    fn dashboard_event_line_uses_humanized_status_summary() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.status_line = "scan complete | 6 addons synced, 0 removed".to_string();
+
+        let line = app.dashboard_event_line().expect("event line");
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "scan complete · 6 addons synced, 0 removed");
     }
 
     #[test]
@@ -9277,9 +9450,9 @@ mod tests {
         assert_eq!(wide.len(), 2);
         assert_eq!(narrow.len(), 2);
         assert!(wide[0].iter().any(|hint| hint.id == FooterHintId::Check));
-        assert!(wide[1].iter().any(|hint| hint.id == FooterHintId::Config));
+        assert!(wide[1].iter().any(|hint| hint.id == FooterHintId::Sort));
         assert!(narrow[0].iter().any(|hint| hint.id == FooterHintId::Check));
-        assert!(narrow[1].iter().any(|hint| hint.id == FooterHintId::Config));
+        assert!(narrow[1].iter().any(|hint| hint.id == FooterHintId::Sort));
     }
 
     #[test]
@@ -9337,6 +9510,21 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('c'))),
             vec![AppMessage::InspectRunCheck]
+        );
+    }
+
+    #[test]
+    fn inspect_overlay_keys_route_jk_to_scroll() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
+            vec![AppMessage::InspectScrollDown]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('k'))),
+            vec![AppMessage::InspectScrollUp]
         );
     }
 
