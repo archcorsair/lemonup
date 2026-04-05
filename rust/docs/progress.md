@@ -516,6 +516,9 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 
 ## Latest Checkpoint
 
+- render-first `app.rs` cleanup landed
+- shared/dashboard/inspect/install-search rendering now lives under `rust/crates/lemonup-app/src/app/`
+- `app.rs` still owns state, message routing, update logic, and task orchestration
 - install and search are now one unified overlay opened by both `i` and `/`
 - the unified overlay uses the search-first compose layout as the canonical install UX
 - plain addon names now always search; only real Wago URLs trigger direct install

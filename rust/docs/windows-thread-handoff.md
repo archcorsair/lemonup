@@ -436,6 +436,11 @@ Next real phase:
 2. add backup restore workflows
 3. clean up any remaining source-parity or workflow gaps after those slices are proven
 
+Immediate maintainability follow-up:
+- render-first `app.rs` cleanup is now landed:
+  - dashboard/inspect/install-search/shared render helpers live under `rust/crates/lemonup-app/src/app/`
+  - `app.rs` still owns state, message routing, update logic, and task orchestration
+
 Why this is next:
 - Wago install/search/check/update is now proven
 - canonical TukUI install/check/update is now proven
@@ -472,6 +477,8 @@ mise exec rust@latest -- cargo run -q -p lemonup-app --bin lemonup -- --profile 
 
 ## Latest Checkpoint
 
+- render-first `app.rs` cleanup is now landed under `rust/crates/lemonup-app/src/app/`
+- `app.rs` keeps state/update/routing while render-heavy UI moved into focused submodules
 - install and search are now consolidated into one overlay opened by both `i` and `/`
 - the search-style compose-first layout is now the canonical install surface
 - plain addon names search Wago; only real Wago URLs are treated as direct-install targets
