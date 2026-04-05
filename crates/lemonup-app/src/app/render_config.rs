@@ -53,7 +53,7 @@ impl App {
 
     fn config_summary_lines(&self) -> Vec<Line<'static>> {
         let field = self.config_pane.selected_field();
-        vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
@@ -77,11 +77,18 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(vec![Span::styled(
-                self.config_field_help_text(field),
-                Style::default().fg(self.ui_theme.muted),
-            )]),
-        ]
+        ];
+        if let Some(status) = self.active_detail_status_message(DetailMode::Config) {
+            lines.push(Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(status, Style::default().fg(self.ui_theme.panel_title)),
+            ]));
+        }
+        lines.push(Line::from(vec![Span::styled(
+            self.config_field_help_text(field),
+            Style::default().fg(self.ui_theme.muted),
+        )]));
+        lines
     }
 
     fn render_config_group(

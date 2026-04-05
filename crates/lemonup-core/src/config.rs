@@ -12,22 +12,12 @@ pub enum ThemeMode {
     Light,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DefaultScreen {
-    Manage,
-    Install,
-    Config,
-    WagoSearch,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub schema_version: u32,
     pub addon_dir: Option<PathBuf>,
     pub user_agent: String,
-    pub default_screen: DefaultScreen,
     pub max_concurrent: u8,
     pub nerd_fonts: bool,
     pub check_interval_secs: u64,
@@ -50,7 +40,6 @@ impl AppConfig {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             addon_dir: None,
             user_agent: "LemonUp/2 (+https://github.com/archcorsair/lemonup)".to_string(),
-            default_screen: DefaultScreen::Manage,
             max_concurrent: 3,
             nerd_fonts: true,
             check_interval_secs: 300,

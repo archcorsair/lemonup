@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use lemonup_core::{AppConfig, DefaultScreen, ThemeMode, suggested_scan_roots};
+use lemonup_core::{AppConfig, ThemeMode, suggested_scan_roots};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
@@ -60,23 +60,16 @@ pub enum OnboardingSettingsField {
     BackupWtf,
     BackupRetention,
     ShowLibs,
-    DefaultScreen,
 }
 
 impl OnboardingSettingsField {
-    pub const ALL: [Self; 4] = [
-        Self::BackupWtf,
-        Self::BackupRetention,
-        Self::ShowLibs,
-        Self::DefaultScreen,
-    ];
+    pub const ALL: [Self; 3] = [Self::BackupWtf, Self::BackupRetention, Self::ShowLibs];
 
     pub fn index(self) -> usize {
         match self {
             Self::BackupWtf => 0,
             Self::BackupRetention => 1,
             Self::ShowLibs => 2,
-            Self::DefaultScreen => 3,
         }
     }
 
@@ -85,7 +78,6 @@ impl OnboardingSettingsField {
             Self::BackupWtf => "Back up WTF",
             Self::BackupRetention => "Backup retention",
             Self::ShowLibs => "Show libraries",
-            Self::DefaultScreen => "Default screen",
         }
     }
 
@@ -93,7 +85,7 @@ impl OnboardingSettingsField {
         Self::ALL
             .get(self.index() + 1)
             .copied()
-            .unwrap_or(Self::DefaultScreen)
+            .unwrap_or(Self::ShowLibs)
     }
 
     pub fn previous(self) -> Self {
@@ -446,9 +438,6 @@ impl OnboardingState {
                 next.draft.backup_retention = updated;
             }
             OnboardingSettingsField::ShowLibs => next.draft.show_libs = !next.draft.show_libs,
-            OnboardingSettingsField::DefaultScreen => {
-                next.draft.default_screen = rotate_default_screen(next.draft.default_screen, delta);
-            }
         }
         next
     }
@@ -458,26 +447,11 @@ impl OnboardingState {
     }
 }
 
-fn rotate_default_screen(current: DefaultScreen, delta: i16) -> DefaultScreen {
-    let order = [
-        DefaultScreen::Manage,
-        DefaultScreen::Install,
-        DefaultScreen::Config,
-        DefaultScreen::WagoSearch,
-    ];
-    let current_index = order
-        .iter()
-        .position(|screen| *screen == current)
-        .unwrap_or(0) as i16;
-    let next_index = (current_index + delta).rem_euclid(order.len() as i16) as usize;
-    order[next_index]
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use lemonup_core::{AppConfig, DefaultScreen, ThemeMode};
+    use lemonup_core::{AppConfig, ThemeMode};
 
     use super::{
         FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
@@ -520,18 +494,5 @@ mod tests {
     fn theme_toggle_updates_draft() {
         let state = OnboardingState::new();
         assert_eq!(state.toggle_theme().draft.theme, ThemeMode::Light);
-    }
-
-    #[test]
-    fn settings_rotation_wraps_default_screen() {
-        let state = OnboardingState::new()
-            .next_step()
-            .next_step()
-            .next_step()
-            .next_settings_field()
-            .next_settings_field()
-            .next_settings_field();
-        let next = state.adjust_settings_field(1);
-        assert_eq!(next.draft.default_screen, DefaultScreen::Install);
     }
 }

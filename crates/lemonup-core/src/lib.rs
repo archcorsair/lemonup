@@ -8,7 +8,7 @@ pub mod storage;
 pub mod transfer;
 pub mod wow;
 
-pub use config::{AppConfig, ConfigLoad, ConfigStore, DefaultScreen, ThemeMode};
+pub use config::{AppConfig, ConfigLoad, ConfigStore, ThemeMode};
 pub use domain::{
     AddonKind, AddonRecord, GameFlavor, InstallPlan, InstallSource, OwnedFolder, OwnershipSource,
     SourceKind, UpdateCheck, UpdateStatus,

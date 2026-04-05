@@ -17,8 +17,8 @@ use ratatui::{Frame, Terminal};
 
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
-    DefaultScreen, GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode,
-    UpdateStatus, analyze_import, default_transfer_path, detect_known_addons_path, export_addons,
+    GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
+    analyze_import, default_transfer_path, detect_known_addons_path, export_addons,
     parse_import_file, paths_match, scan_addons_dir, search_for_wow, validate_addons_path,
 };
 use tokio::sync::mpsc;
@@ -5454,10 +5454,6 @@ impl App {
                 "Show libraries: {}",
                 self.onboarding.draft.show_libs
             )),
-            Line::from(format!(
-                "Default screen: {}",
-                self.onboarding_setting_value(OnboardingSettingsField::DefaultScreen)
-            )),
             Line::from(""),
             Line::from(Span::styled(
                 "Enter saves the config and starts the first scan. Esc goes back.",
@@ -5991,6 +5987,24 @@ impl App {
         self.with_base_status(&format!("{} | {message}", detail_mode_label(detail_mode)))
     }
 
+    fn active_detail_status_message(&self, detail_mode: DetailMode) -> Option<String> {
+        if self.status_line.is_empty() {
+            return None;
+        }
+
+        let prefix = format!("{} | ", detail_mode_label(detail_mode));
+        let suffix = format!(" | {}", self.base_status_line());
+        let without_suffix = self
+            .status_line
+            .strip_suffix(&suffix)
+            .unwrap_or(&self.status_line);
+        without_suffix
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     fn location_finder_status(&self) -> String {
         self.with_base_status("location finder | enter validate | d deep scan | e edit path")
     }
@@ -6112,12 +6126,6 @@ impl App {
                 self.onboarding.draft.backup_retention.to_string()
             }
             OnboardingSettingsField::ShowLibs => self.onboarding.draft.show_libs.to_string(),
-            OnboardingSettingsField::DefaultScreen => match self.onboarding.draft.default_screen {
-                DefaultScreen::Manage => "manage".to_string(),
-                DefaultScreen::Install => "install".to_string(),
-                DefaultScreen::Config => "config".to_string(),
-                DefaultScreen::WagoSearch => "wago_search".to_string(),
-            },
         }
     }
 
@@ -9683,6 +9691,20 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('x'))),
             vec![AppMessage::ConfigExportAddons]
         );
+    }
+
+    #[test]
+    fn active_detail_status_message_extracts_config_message() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetStatus(
+            app.dashboard_status_for(DetailMode::Config, "exported 3 addons"),
+        ));
+
+        assert_eq!(
+            app.active_detail_status_message(DetailMode::Config),
+            Some("exported 3 addons".to_string())
+        );
+        assert_eq!(app.active_detail_status_message(DetailMode::Search), None);
     }
 
     #[test]
