@@ -516,6 +516,11 @@ mise exec rust@latest -- cargo run -p lemonup-app --bin lemonup -- --profile dev
 
 ## Latest Checkpoint
 
+- install and search are now one unified overlay opened by both `i` and `/`
+- the unified overlay uses the search-first compose layout as the canonical install UX
+- plain addon names now always search; only real Wago URLs trigger direct install
+- the install/search modal is larger and now lets the results pane flex to use available vertical space
+- search results now show above/below overflow hints when more matches exist offscreen
 - inspect overlay redesigned into a command-palette card
 - inspect now resolves child rows to the parent addon with child context
 - inspect default view now shows compact source/status/version/folder/author/tracking lines instead of internal scan state

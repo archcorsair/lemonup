@@ -38,8 +38,8 @@ use crate::update::{
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
-    inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
-    search_wago_addons,
+    inspect_wago_install_target, install_wago_addon_with_replace, parse_wago_target,
+    resolve_wago_api_key, search_wago_addons,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -150,6 +150,13 @@ struct InspectResolvedTarget<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InspectActionChip {
+    key: &'static str,
+    label: &'static str,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchActionChip {
     key: &'static str,
     label: &'static str,
     enabled: bool,
@@ -1664,6 +1671,16 @@ impl SearchPaneState {
         next
     }
 
+    fn start_direct_install_check(&self, addon_id: &str, addon_name: &str) -> Self {
+        let mut next = self.clone();
+        next.is_editing = false;
+        next.install_state = SearchInstallState::Checking {
+            addon_id: addon_id.to_string(),
+            addon_name: addon_name.to_string(),
+        };
+        next
+    }
+
     fn require_install_confirmation(&self, inspection: &WagoInstallInspection) -> Self {
         let mut next = self.clone();
         next.install_state = if let Some(tracked_parent) = &inspection.tracked_parent {
@@ -2398,8 +2415,7 @@ impl App {
             KeyCode::Char(']') => vec![AppMessage::DashboardExpandAllRelationships],
             KeyCode::Char('[') => vec![AppMessage::DashboardCollapseAllRelationships],
             KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
-            KeyCode::Char('i') => vec![AppMessage::SetDetailMode(DetailMode::Install)],
-            KeyCode::Char('s') | KeyCode::Char('/') => {
+            KeyCode::Char('i') | KeyCode::Char('/') => {
                 vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
             }
             KeyCode::Char('1') => vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Name)],
@@ -2444,8 +2460,15 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::SearchResultNext]),
-            KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::SearchResultPrevious]),
+            KeyCode::Down | KeyCode::Char('j') if !self.search_pane.results.is_empty() => {
+                Some(vec![AppMessage::SearchResultNext])
+            }
+            KeyCode::Up | KeyCode::Char('k') if !self.search_pane.results.is_empty() => {
+                Some(vec![AppMessage::SearchResultPrevious])
+            }
+            KeyCode::Enter if self.search_pane.results.is_empty() => {
+                Some(vec![AppMessage::SearchSubmit])
+            }
             KeyCode::Enter => Some(vec![AppMessage::SearchInstallSelected]),
             KeyCode::Char('/') => Some(vec![AppMessage::OpenSearch(
                 SearchPresentationMode::ComposeFirst,
@@ -2465,7 +2488,6 @@ impl App {
                 KeyCode::Enter => vec![AppMessage::InstallSubmit],
                 KeyCode::Esc => vec![AppMessage::InstallStopEditing],
                 KeyCode::Backspace => vec![AppMessage::InstallBackspace],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char(character) => vec![AppMessage::InstallInputChar(character)],
                 _ => vec![],
             });
@@ -3145,7 +3167,7 @@ impl App {
                 AppAction::SetSearchPaneState(self.search_pane.begin_editing()),
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Search,
-                    "editing Wago query | enter search | esc stop editing",
+                    "editing install input | enter search or install | esc stop editing",
                 )),
             ],
             AppMessage::OpenSearch(mode) => vec![
@@ -3153,12 +3175,14 @@ impl App {
                 AppAction::SetDetailMode(DetailMode::Search),
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Search,
-                    "search Wago | type a query and press enter",
+                    "install from Wago | type a name, slug, or URL and press enter",
                 )),
             ],
             AppMessage::SearchStopEditing => vec![
                 AppAction::SetSearchPaneState(self.search_pane.stop_editing()),
-                AppAction::SetStatus(self.dashboard_status_for(DetailMode::Search, "search ready")),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Search, "install/search ready"),
+                ),
             ],
             AppMessage::SearchInputChar(character) => vec![AppAction::SetSearchPaneState(
                 self.search_pane.insert_char(character),
@@ -3172,6 +3196,11 @@ impl App {
                         DetailMode::Search,
                         "Wago search already running",
                     ))]
+                } else if self.wago_install_in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago install already running",
+                    ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
@@ -3180,8 +3209,47 @@ impl App {
                 } else if self.search_pane.query.trim().is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
-                        "enter a search query before submitting",
+                        "enter an addon name, Wago slug, or addon URL before submitting",
                     ))]
+                } else if self.dashboard.pending_delete_folders().is_some() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "confirm or cancel the pending delete before installing addons",
+                    ))]
+                } else if let Some(target) = self.search_direct_install_target() {
+                    if self.effective_addon_dir.is_none() {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            "addon directory is not configured",
+                        ))]
+                    } else {
+                        let request = PendingWagoInstallRequest {
+                            target: target.clone(),
+                            source: WagoInstallSource::DirectInput,
+                        };
+                        vec![
+                            AppAction::SetSearchPaneState(
+                                self.search_pane.start_direct_install_check(
+                                    &target,
+                                    self.search_pane.query.trim(),
+                                ),
+                            ),
+                            AppAction::SetWagoInstallInProgress(true),
+                            AppAction::StartWagoInstall {
+                                addon_dir: self.effective_addon_dir.clone().expect("checked above"),
+                                api_key: self.wago_api_key.clone().expect("checked above"),
+                                request,
+                                allow_replace: false,
+                            },
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                DetailMode::Search,
+                                &format!(
+                                    "checking Wago addon '{}' for install",
+                                    self.search_pane.query.trim()
+                                ),
+                            )),
+                        ]
+                    }
                 } else {
                     let query = self.search_pane.query.trim().to_string();
                     vec![
@@ -4661,7 +4729,7 @@ impl App {
                     .map(|target| target.item.name.clone())
                     .unwrap_or_else(|| "Inspect".to_string()),
                 OverlayKind::Install => "Install".to_string(),
-                OverlayKind::Search => "Search".to_string(),
+                OverlayKind::Search => "Install".to_string(),
                 OverlayKind::Update => "Update".to_string(),
                 OverlayKind::Config => "Config".to_string(),
                 OverlayKind::Backup => "Backup".to_string(),
@@ -4703,6 +4771,24 @@ impl App {
                         ])
                         .split(overlay)[1]
                 }
+                OverlayKind::Install | OverlayKind::Search => {
+                    let overlay = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Percentage(8),
+                            Constraint::Percentage(84),
+                            Constraint::Percentage(8),
+                        ])
+                        .split(area)[1];
+                    Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Percentage(4),
+                            Constraint::Percentage(92),
+                            Constraint::Percentage(4),
+                        ])
+                        .split(overlay)[1]
+                }
                 _ => {
                     let overlay = Layout::default()
                         .direction(Direction::Vertical)
@@ -4734,7 +4820,7 @@ impl App {
             frame.render_widget(block, overlay);
             if kind == OverlayKind::Inspect {
                 self.render_inspect_overlay(frame, inner);
-            } else if kind == OverlayKind::Search {
+            } else if kind == OverlayKind::Install || kind == OverlayKind::Search {
                 self.render_search_overlay(frame, inner);
             } else {
                 let content = Paragraph::new(self.task_overlay_lines()).wrap(Wrap { trim: false });
@@ -4744,46 +4830,39 @@ impl App {
     }
 
     fn render_search_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
+        let content_area = area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let summary_lines = self.search_summary_lines();
+        let summary_height = summary_lines.len() as u16;
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(summary_height),
                 Constraint::Length(3),
                 Constraint::Length(1),
                 Constraint::Min(8),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
-            .split(area);
+            .split(content_area);
 
-        let badge = Line::from(vec![
-            Span::styled("Source ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                "Wago",
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .bg(Color::Rgb(31, 37, 58))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(badge), sections[0]);
+        frame.render_widget(
+            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
+            sections[0],
+        );
 
         self.render_search_input(frame, sections[1]);
 
-        let helper = Paragraph::new(self.search_helper_line()).wrap(Wrap { trim: false });
-        frame.render_widget(helper, sections[2]);
+        frame.render_widget(Paragraph::new(""), sections[2]);
 
-        let body = sections[3];
-        match self.search_pane.presentation_mode {
-            SearchPresentationMode::ComposeFirst => {
-                self.render_search_compose_first_body(frame, body);
-            }
-            SearchPresentationMode::TwoState => {
-                if self.search_pane.is_editing || self.search_pane.last_query.is_none() {
-                    self.render_search_empty_state(frame, body);
-                } else {
-                    self.render_search_workspace_body(frame, body);
-                }
-            }
-        }
+        self.render_search_compose_first_body(frame, sections[3]);
+        frame.render_widget(Paragraph::new(""), sections[4]);
+        frame.render_widget(
+            Paragraph::new(self.search_action_line()).alignment(Alignment::Center),
+            sections[5],
+        );
     }
 
     fn render_search_input(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -4795,12 +4874,12 @@ impl App {
             } else {
                 Style::default().fg(self.ui_theme.border)
             })
-            .title(" Query ");
+            .title(" Addon ");
 
         let mut spans = Vec::new();
         if self.search_pane.query.trim().is_empty() {
             spans.push(Span::styled(
-                "Type an addon name and press Enter",
+                "Type an addon name, Wago slug, or Wago URL",
                 Style::default().fg(self.ui_theme.muted),
             ));
         } else {
@@ -4833,6 +4912,266 @@ impl App {
         frame.render_widget(query, area);
     }
 
+    fn search_summary_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(
+                "Type an addon name to search",
+                Style::default().fg(self.ui_theme.panel_title),
+            ),
+            Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
+            Span::styled(
+                "Paste a Wago URL to install directly",
+                Style::default().fg(self.ui_theme.panel_title),
+            ),
+        ])];
+
+        let status_line = if self.wago_api_key.is_none() {
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    "API key required",
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else if self.search_pane.in_progress {
+            let mut spans = vec![Span::styled(
+                "Status: ",
+                Style::default().fg(self.ui_theme.muted),
+            )];
+            spans.extend(shimmer_text_spans(
+                "Searching Wago…",
+                self.ui_theme.warning,
+                Color::Rgb(255, 244, 214),
+                ShimmerConfig::action(),
+            ));
+            Line::from(spans)
+        } else if let Some(state) = self.active_search_install_state() {
+            match state {
+                SearchInstallState::Checking { .. } => {
+                    let mut spans = vec![Span::styled(
+                        "Status: ",
+                        Style::default().fg(self.ui_theme.muted),
+                    )];
+                    spans.extend(shimmer_text_spans(
+                        "Preparing install…",
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    ));
+                    Line::from(spans)
+                }
+                SearchInstallState::Installing { .. } => {
+                    let mut spans = vec![Span::styled(
+                        "Status: ",
+                        Style::default().fg(self.ui_theme.muted),
+                    )];
+                    spans.extend(shimmer_text_spans(
+                        "Installing from Wago…",
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    ));
+                    Line::from(spans)
+                }
+                SearchInstallState::Success { parent_folder, .. } => Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        format!("Installed into {parent_folder}"),
+                        Style::default()
+                            .fg(self.ui_theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                SearchInstallState::ConfirmReplace { tracked_parent, .. } => Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        format!("Already installed as {tracked_parent}"),
+                        Style::default()
+                            .fg(self.ui_theme.panel_title)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                SearchInstallState::Error { message, .. } => Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        message.clone(),
+                        Style::default()
+                            .fg(self.ui_theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                SearchInstallState::Idle => self.default_search_status_line(),
+            }
+        } else {
+            self.default_search_status_line()
+        };
+        lines.push(status_line);
+        lines
+    }
+
+    fn default_search_status_line(&self) -> Line<'static> {
+        if self.search_pane.results.is_empty() {
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    if self.search_pane.query.trim().is_empty() {
+                        "Enter an addon name or Wago URL"
+                    } else if self.search_direct_install_target().is_some() {
+                        "Press Enter to install directly"
+                    } else {
+                        "Press Enter to search Wago"
+                    },
+                    Style::default().fg(self.ui_theme.panel_title),
+                ),
+            ])
+        } else {
+            let count = self.search_pane.results.len();
+            let query = self.search_pane.last_query.as_deref().unwrap_or("query");
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    format!("{count} result{} for “{query}”", plural_suffix(count)),
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        }
+    }
+
+    fn selected_search_install_state(&self) -> Option<&SearchInstallState> {
+        let result = self.search_pane.selected_result()?;
+        self.search_install_state_for_result(result)
+    }
+
+    fn active_search_install_state(&self) -> Option<&SearchInstallState> {
+        self.selected_search_install_state().or({
+            if matches!(self.search_pane.install_state, SearchInstallState::Idle) {
+                None
+            } else {
+                Some(&self.search_pane.install_state)
+            }
+        })
+    }
+
+    fn search_direct_install_target(&self) -> Option<String> {
+        let trimmed = self.search_pane.query.trim();
+        let parsed = parse_wago_target(trimmed).ok()?;
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            return Some(parsed);
+        }
+        None
+    }
+
+    fn search_action_line(&self) -> Line<'static> {
+        let submit_label = if self.search_direct_install_target().is_some() {
+            "install"
+        } else {
+            "search"
+        };
+        let chips: Vec<SearchActionChip> = if self.pending_wago_install_confirmation.is_some() {
+            vec![
+                SearchActionChip {
+                    key: "y",
+                    label: "reinstall",
+                    enabled: true,
+                },
+                SearchActionChip {
+                    key: "n",
+                    label: "cancel",
+                    enabled: true,
+                },
+            ]
+        } else if self.search_pane.is_editing || self.search_pane.in_progress {
+            vec![
+                SearchActionChip {
+                    key: "enter",
+                    label: submit_label,
+                    enabled: !self.search_pane.in_progress,
+                },
+                SearchActionChip {
+                    key: "esc",
+                    label: "stop editing",
+                    enabled: self.search_pane.is_editing,
+                },
+            ]
+        } else if self.search_pane.results.is_empty() {
+            vec![
+                SearchActionChip {
+                    key: "enter",
+                    label: submit_label,
+                    enabled: self.wago_api_key.is_some(),
+                },
+                SearchActionChip {
+                    key: "e",
+                    label: "edit input",
+                    enabled: true,
+                },
+                SearchActionChip {
+                    key: ",",
+                    label: "config",
+                    enabled: self.wago_api_key.is_none(),
+                },
+            ]
+        } else {
+            vec![
+                SearchActionChip {
+                    key: "j/k",
+                    label: "move",
+                    enabled: true,
+                },
+                SearchActionChip {
+                    key: "enter",
+                    label: "install",
+                    enabled: true,
+                },
+                SearchActionChip {
+                    key: "e",
+                    label: "edit query",
+                    enabled: true,
+                },
+            ]
+        };
+
+        let mut spans = Vec::new();
+        for (index, chip) in chips.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            let key_bg = if chip.enabled {
+                Color::Rgb(31, 37, 58)
+            } else {
+                Color::Rgb(27, 30, 45)
+            };
+            let key_fg = if chip.enabled {
+                self.ui_theme.panel_title
+            } else {
+                self.ui_theme.muted
+            };
+            spans.push(Span::styled(
+                format!(" {} ", chip.key),
+                Style::default()
+                    .fg(key_fg)
+                    .bg(key_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                chip.label,
+                if chip.enabled {
+                    Style::default().fg(self.ui_theme.highlight)
+                } else {
+                    Style::default().fg(self.ui_theme.muted)
+                },
+            ));
+        }
+
+        Line::from(spans)
+    }
+
     fn render_search_compose_first_body(&self, frame: &mut Frame<'_>, area: Rect) {
         if self.search_pane.results.is_empty() {
             self.render_search_empty_state(frame, area);
@@ -4841,24 +5180,30 @@ impl App {
 
         let [results, preview] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Length(7)])
+            .constraints([Constraint::Min(8), Constraint::Length(5)])
             .areas(area);
-        self.render_search_results_list(frame, results);
-        self.render_search_selected_preview(frame, preview);
-    }
 
-    fn render_search_workspace_body(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.search_pane.results.is_empty() {
-            self.render_search_empty_state(frame, area);
-            return;
-        }
+        let results_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                " Results ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        let results_inner = results_block.inner(results);
+        frame.render_widget(results_block, results);
+        self.render_search_results_list(frame, results_inner);
 
-        let [results, preview] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .areas(area);
-        self.render_search_results_list(frame, results);
-        self.render_search_selected_preview(frame, preview);
+        let preview_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                " Selected ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        let preview_inner = preview_block.inner(preview);
+        frame.render_widget(preview_block, preview);
+        self.render_search_selected_preview(frame, preview_inner);
     }
 
     fn render_search_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -4872,10 +5217,97 @@ impl App {
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Add your key in Config, then come back here to search.",
+                    "Add your key in Config, then come back here to install addons.",
                     Style::default().fg(self.ui_theme.muted),
                 )),
             ]
+        } else if let Some(state) = self.active_search_install_state() {
+            match state {
+                SearchInstallState::Checking { addon_name, .. } => vec![
+                    Line::from(shimmer_text_spans(
+                        &format!("Preparing {addon_name} for install…"),
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "LemonUp is checking tracked state and preparing the package.",
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                ],
+                SearchInstallState::Installing { addon_name, .. } => vec![
+                    Line::from(shimmer_text_spans(
+                        &format!("Installing {addon_name} from Wago…"),
+                        self.ui_theme.warning,
+                        Color::Rgb(255, 244, 214),
+                        ShimmerConfig::action(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "The addon will appear in Manage when install and sync complete.",
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                ],
+                SearchInstallState::Success {
+                    addon_name,
+                    parent_folder,
+                    ..
+                } => vec![
+                    Line::from(vec![
+                        Span::styled(
+                            "✓ ",
+                            Style::default()
+                                .fg(self.ui_theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("Installed {addon_name}"),
+                            Style::default()
+                                .fg(self.ui_theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("Installed into {parent_folder}."),
+                        Style::default().fg(self.ui_theme.panel_title),
+                    )),
+                ],
+                SearchInstallState::ConfirmReplace {
+                    addon_name,
+                    tracked_parent,
+                    ..
+                } => vec![
+                    Line::from(Span::styled(
+                        format!("{addon_name} is already installed."),
+                        Style::default()
+                            .fg(self.ui_theme.panel_title)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!(
+                            "Press y to reinstall over tracked addon {tracked_parent}, or n to cancel."
+                        ),
+                        Style::default().fg(self.ui_theme.muted),
+                    )),
+                ],
+                SearchInstallState::Error { message, .. } => vec![
+                    Line::from(Span::styled(
+                        "Install failed",
+                        Style::default()
+                            .fg(self.ui_theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        message.clone(),
+                        Style::default().fg(self.ui_theme.error),
+                    )),
+                ],
+                SearchInstallState::Idle => unreachable!(),
+            }
         } else if self.search_pane.in_progress {
             vec![
                 Line::from(Span::styled(
@@ -4907,14 +5339,14 @@ impl App {
         } else {
             vec![
                 Line::from(Span::styled(
-                    "Search Wago addons",
+                    "Start with an addon name, slug, or URL",
                     Style::default()
                         .fg(self.ui_theme.highlight)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Type a query above, then press Enter.",
+                    "Press Enter to search Wago or install directly.",
                     Style::default().fg(self.ui_theme.muted),
                 )),
             ]
@@ -4927,19 +5359,58 @@ impl App {
     }
 
     fn render_search_results_list(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(" Results ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let result_count = self.search_pane.results.len();
+        let mut show_above = false;
+        let mut show_below = false;
+        let mut window_start = 0;
+        let mut window_end = 0;
 
-        let visible_rows = inner.height.saturating_sub(2).max(1) as usize;
-        let (window_start, window_end) = visible_search_result_window(
-            self.search_pane.results.len(),
-            self.search_pane.selected_result,
-            visible_rows,
-        );
+        for _ in 0..2 {
+            let reserved_rows = 1 + u16::from(show_above) + u16::from(show_below);
+            let visible_rows = area.height.saturating_sub(reserved_rows).max(1) as usize;
+            let (start, end) = visible_search_result_window(
+                result_count,
+                self.search_pane.selected_result,
+                visible_rows,
+            );
+            window_start = start;
+            window_end = end;
+            show_above = window_start > 0;
+            show_below = window_end < result_count;
+        }
+
+        let mut constraints = Vec::new();
+        if show_above {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(2));
+        if show_below {
+            constraints.push(Constraint::Length(1));
+        }
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        let mut area_index = 0;
+        if show_above {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("↑ ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        format!(
+                            "{} more result{} above",
+                            window_start,
+                            plural_suffix(window_start)
+                        ),
+                        Style::default().fg(self.ui_theme.muted),
+                    ),
+                ])),
+                areas[area_index],
+            );
+            area_index += 1;
+        }
+        let table_area = areas[area_index];
+        area_index += 1;
 
         let header = Row::new([
             Cell::from(Span::styled(
@@ -5029,17 +5500,28 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         );
         let mut state = TableState::default().with_selected(selected_row);
-        frame.render_stateful_widget(table, inner, &mut state);
+        frame.render_stateful_widget(table, table_area, &mut state);
+
+        if show_below {
+            let remaining_below = result_count.saturating_sub(window_end);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("↓ ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        format!(
+                            "{} more result{} below",
+                            remaining_below,
+                            plural_suffix(remaining_below)
+                        ),
+                        Style::default().fg(self.ui_theme.muted),
+                    ),
+                ])),
+                areas[area_index],
+            );
+        }
     }
 
     fn render_search_selected_preview(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(" Selected ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
         let lines = if let Some(result) = self.search_pane.selected_result() {
             let author = result
                 .owner
@@ -5155,7 +5637,7 @@ impl App {
         };
 
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, inner);
+        frame.render_widget(paragraph, area);
     }
 
     fn search_result_name_line(
@@ -5237,84 +5719,6 @@ impl App {
         }
 
         Line::from(spans)
-    }
-
-    fn search_helper_line(&self) -> Line<'static> {
-        if self.wago_api_key.is_none() {
-            return Line::from(Span::styled(
-                "Config needs a Wago API key before search can run.",
-                Style::default().fg(self.ui_theme.warning),
-            ));
-        }
-
-        if self.search_pane.is_editing {
-            return Line::from(vec![
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" search", Style::default().fg(self.ui_theme.muted)),
-                Span::raw("  ·  "),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" stop editing", Style::default().fg(self.ui_theme.muted)),
-            ]);
-        }
-
-        if matches!(
-            self.search_pane.install_state,
-            SearchInstallState::ConfirmReplace { .. }
-        ) {
-            return Line::from(vec![
-                Span::styled(
-                    "Y",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" reinstall", Style::default().fg(self.ui_theme.panel_title)),
-                Span::raw("  ·  "),
-                Span::styled(
-                    "N",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" cancel", Style::default().fg(self.ui_theme.panel_title)),
-            ]);
-        }
-
-        Line::from(vec![
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" install", Style::default().fg(self.ui_theme.muted)),
-            Span::raw("  ·  "),
-            Span::styled(
-                "j/k",
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" results", Style::default().fg(self.ui_theme.muted)),
-            Span::raw("  ·  "),
-            Span::styled(
-                "/",
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" edit query", Style::default().fg(self.ui_theme.muted)),
-        ])
     }
 
     fn tracked_wago_result_folder(&self, result: &WagoSearchResult) -> Option<String> {
@@ -6188,6 +6592,12 @@ impl App {
                 } else {
                     "update"
                 },
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Install,
+                key: "i",
+                label: "install",
                 tier: secondary,
             },
             FooterCommandHint {
@@ -9178,7 +9588,7 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
     match detail_mode {
         DetailMode::Overview => "Overview",
         DetailMode::Install => "Install",
-        DetailMode::Search => "Search",
+        DetailMode::Search => "Install",
         DetailMode::Update => "Update",
         DetailMode::Config => "Config",
         DetailMode::Backup => "Backup",
@@ -9493,7 +9903,7 @@ mod tests {
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
-            vec![AppMessage::SetDetailMode(DetailMode::Install)]
+            vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
@@ -9824,6 +10234,18 @@ mod tests {
     }
 
     #[test]
+    fn install_edit_mode_treats_quit_letter_as_input() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Install;
+        app.install_pane = app.install_pane.begin_editing();
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::InstallInputChar('q')]
+        );
+    }
+
+    #[test]
     fn search_mode_submit_starts_background_search() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
@@ -9847,11 +10269,76 @@ mod tests {
     }
 
     #[test]
+    fn search_mode_submit_direct_target_starts_install_flow() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.search_pane.query = "https://addons.wago.io/addons/VBNBxKx5".to_string();
+
+        let actions = app.update(AppMessage::SearchSubmit);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetSearchPaneState(app.search_pane.start_direct_install_check(
+                    "VBNBxKx5",
+                    "https://addons.wago.io/addons/VBNBxKx5",
+                )),
+                AppAction::SetWagoInstallInProgress(true),
+                AppAction::StartWagoInstall {
+                    addon_dir: PathBuf::from(
+                        "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+                    ),
+                    api_key: "test-wago-key".to_string(),
+                    request: PendingWagoInstallRequest {
+                        target: "VBNBxKx5".to_string(),
+                        source: WagoInstallSource::DirectInput,
+                    },
+                    allow_replace: false,
+                },
+                AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Search,
+                    "checking Wago addon 'https://addons.wago.io/addons/VBNBxKx5' for install",
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_mode_submit_plain_lowercase_name_stays_search() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.query = "details".to_string();
+
+        let actions = app.update(AppMessage::SearchSubmit);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetSearchPaneState(app.search_pane.start_search()),
+                AppAction::StartWagoSearch {
+                    query: "details".to_string(),
+                    api_key: "test-wago-key".to_string(),
+                },
+                AppAction::SetStatus(
+                    app.dashboard_status_for(DetailMode::Search, "searching Wago for 'details'")
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn dashboard_search_keys_open_expected_ab_variants() {
         let app = app_for_tests(ShellMode::Dashboard);
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
             vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
         );
         assert!(

@@ -111,8 +111,12 @@ pwsh -File scripts/smoke-provider-matrix.ps1 -SandboxRoot D:\Sandbox\WoWDev
   - `enter` opens inspect as a modal overlay
   - `Install`, `Search`, `Update`, `Config`, and `Backup` now open through the overlay host
   - `/` opens a compose-first Wago search overlay directly in typing mode
-  - search uses a dominant input-first layout and aligned table results
+  - `i` and `/` now open the same unified install/search overlay
+  - the unified overlay uses a dominant input-first layout and aligned table results
+  - plain addon names search Wago; only real Wago URLs install directly
   - Wago search results now sort by highest DL count first using compact DL labels (`K`/`M`/`B`)
+  - the install/search overlay is larger and its results pane flexes to use spare vertical space
+  - search results now show `↑/↓ ... more results` hints when rows exist offscreen
   - tracked Wago results show a `📦 installed` badge and inline reinstall/install progress states
   - `?` is no longer used for search and is reserved for a future help overlay
   - the header uses a smooth fruit-style gradient logo treatment inspired by v1
