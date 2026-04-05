@@ -7,6 +7,7 @@ mod event;
 mod github;
 mod onboarding;
 mod shimmer;
+mod theme;
 mod transfer;
 mod tui;
 mod tukui;
