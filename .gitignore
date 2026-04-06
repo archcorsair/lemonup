@@ -1,51 +1,22 @@
-# dependencies (bun install)
-node_modules
-
-# output
-out
-dist
-*.tgz
-*.bun-build
-lemonup
-lemonup.exe
+target/
+dist/
+out/
 test-output/
-debug_*
-debug.log
-
-# code coverage
-coverage
+coverage/
 *.lcov
-
-# logs
-logs
+logs/
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
-
-# dotenv environment variable files
 .env
 .env.development.local
 .env.test.local
 .env.production.local
 .env.local
-
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# IntelliJ based IDEs
 .idea
-
-# Finder (MacOS) folder config
 .DS_Store
 .cursor
-
-# AI Stuff
 CLAUDE.md
-AGENTS.md
 GEMINI.md
 .claude/
 conductor/
-
-# misc
-docs/
+node_modules/

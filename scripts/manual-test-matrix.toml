@@ -1,0 +1,39 @@
+[[targets]]
+provider = "tukui"
+install_command = "install-tukui ElvUI"
+selector = "ElvUI"
+expected_source = "TukUI"
+expected_parent = "ElvUI"
+requires_api_key = false
+
+[[targets]]
+provider = "github"
+install_command = "install-github https://github.com/WeakAuras/WeakAuras2"
+selector = "WeakAuras"
+expected_source = "GitHub"
+expected_parent = "WeakAuras"
+requires_api_key = false
+
+[[targets]]
+provider = "wowinterface"
+install_command = "install-wowinterface https://www.wowinterface.com/downloads/info7032-TomTom.html"
+selector = "TomTom"
+expected_source = "WoWInterface"
+expected_parent = "TomTom"
+requires_api_key = false
+
+[[targets]]
+provider = "wago"
+install_command = "install-wago bigwigs"
+selector = "BigWigs"
+expected_source = "Wago"
+expected_parent = "BigWigs"
+requires_api_key = true
+
+[[targets]]
+provider = "manual"
+install_command = "fixture:ManualSmokeAddon"
+selector = "ManualSmokeAddon"
+expected_source = "manual"
+expected_parent = "ManualSmokeAddon"
+requires_api_key = false

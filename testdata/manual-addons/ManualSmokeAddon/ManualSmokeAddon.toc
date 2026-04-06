@@ -1,0 +1,7 @@
+## Interface: 110200
+## Title: Manual Smoke Addon
+## Notes: Manual fixture for LemonUp Rust smoke coverage
+## Author: LemonUp
+## Version: 1.0.0
+
+ManualSmokeAddon.lua

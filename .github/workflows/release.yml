@@ -9,97 +9,71 @@ permissions:
   contents: write
 
 jobs:
-  verify-and-build:
-    name: Verify and Build
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
 
-      - name: Lint
-        run: bun run lint
+      - name: Format
+        run: cargo fmt --all --check
 
-      - name: Typecheck
-        run: bun run typecheck
+      - name: Clippy
+        run: cargo clippy -p lemonup-app -- -D warnings
 
-      - name: Run tests
-        run: bun test --only-failures
+      - name: Test workspace
+        run: cargo test --workspace
 
-      - name: Build Standalone Executables
+  build:
+    name: Build ${{ matrix.label }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+            asset_name: lemonup-linux-x64
+          - os: windows-latest
+            label: windows-x64
+            asset_name: lemonup-windows-x64.exe
+          - os: macos-13
+            label: macos-x64
+            asset_name: lemonup-macos-x64
+          - os: macos-14
+            label: macos-arm64
+            asset_name: lemonup-macos-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p lemonup-app --bin lemonup
+
+      - name: Prepare artifact
+        shell: pwsh
         run: |
-          mkdir -p dist
-          # Linux x64
-          bun build --compile --minify --sourcemap --target=bun-linux-x64 ./index.tsx --outfile dist/lemonup-linux-x64
-          # Windows x64
-          bun build --compile --minify --sourcemap --target=bun-windows-x64 ./index.tsx --outfile dist/lemonup-windows-x64.exe
-          # macOS ARM64
-          bun build --compile --minify --sourcemap --target=bun-darwin-arm64 ./index.tsx --outfile dist/lemonup-macos-arm64
-          # macOS x64
-          bun build --compile --minify --sourcemap --target=bun-darwin-x64 ./index.tsx --outfile dist/lemonup-macos-x64
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $binary = if ($env:RUNNER_OS -eq 'Windows') { 'target/release/lemonup.exe' } else { 'target/release/lemonup' }
+          Copy-Item -LiteralPath $binary -Destination (Join-Path 'dist' '${{ matrix.asset_name }}') -Force
 
-      - name: Debug - List Dist
-        run: ls -R dist
-
-      - name: Create Release
+      - name: Publish release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/lemonup-linux-x64
-            dist/lemonup-windows-x64.exe
-            dist/lemonup-macos-arm64
-            dist/lemonup-macos-x64
+          files: dist/${{ matrix.asset_name }}
           generate_release_notes: true
-          fail_on_unmatched_files: true
-
-  update-homebrew:
-    name: Update Homebrew Formula
-    if: false
-    needs: verify-and-build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Homebrew Repository
-        uses: actions/checkout@v4
-        with:
-          repository: archcorsair/homebrew-lemonup
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: homebrew-lemonup
-
-      - name: Calculate SHA256 Checksums
-        id: calculate-sha
-        run: |
-          echo "Calculating SHA256 hashes"
-          SHA_LINUX_X64=$(shasum -a 256 dist/lemonup-linux-x64 | cut -d' ' -f1)
-          SHA_MACOS_X64=$(shasum -a 256 dist/lemonup-macos-x64 | cut -d' ' -f1)
-          SHA_MACOS_ARM64=$(shasum -a 256 dist/lemonup-macos-arm64 | cut -d' ' -f1)
-          SHA_WINDOWS_X64=$(shasum -a 256 dist/lemonup-windows-x64.exe | cut -d' ' -f1)
-
-          echo "::set-output name=sha_linux_x64::${SHA_LINUX_X64}"
-          echo "::set-output name=sha_macos_x64::${SHA_MACOS_X64}"
-          echo "::set-output name=sha_macos_arm64::${SHA_MACOS_ARM64}"
-          echo "::set-output name=sha_windows_x64::${SHA_WINDOWS_X64}"
-
-      - name: Update Lemonup Formula
-        run: |
-          cd homebrew-lemonup
-          sed -i "s/version \".*\"/version \"$GITHUB_REF_NAME\"/" Formula/lemonup.rb
-          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_macos_arm64 }}\"/" Formula/lemonup.rb
-          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_macos_x64 }}\"/" Formula/lemonup.rb
-          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_linux_x64 }}\"/" Formula/lemonup.rb
-          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.calculate-sha.outputs.sha_windows_x64 }}\"/" Formula/lemonup.rb
-
-          git config user.email "archcorsair@gmail.com  "
-          git config user.name "Daniel Shneyder"
-          git add Formula/lemonup.rb
-          git commit -m "Update Homebrew formula for version $GITHUB_REF_NAME"
-          git push
-
-      - name: Verify Commit
-        run: git log -1

@@ -1,95 +1,87 @@
-# LemonUp 🍋
+# LemonUp
 
 <div align="center">
   <img src="./lemonup.png" alt="LemonUp Logo" width="150" />
   <h3>World of Warcraft Addon Manager</h3>
-  <p>A fast, lightweight, and beautiful TUI for managing your WoW addons.</p>
-  <img width="1514" height="746" alt="lemonup screenshot" src="https://github.com/user-attachments/assets/f8af4c10-a84a-4ace-b9a6-4806add3294a" />
+  <p>Fast, terminal-first addon management for WoW.</p>
 </div>
 
 ---
 
-[![Built with Bun](https://img.shields.io/badge/Built_with-Bun-fbf0df?logo=bun&labelColor=212121)](https://bun.sh)
 [![Test](https://github.com/archcorsair/lemonup/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/archcorsair/lemonup/actions/workflows/test.yml)
 
-**LemonUp** is a high-performance, terminal-first addon manager for World of
-Warcraft. Built with [Bun](https://bun.com) and
-[Ink](https://github.com/vadimdemedes/ink), it provides a modern and efficient
-way to handle your addons without leaving the terminal.
+**LemonUp** is a Rust TUI and CLI for installing, checking, updating, importing, exporting, backing up, and restoring World of Warcraft addons.
 
-## Compatibility
+## Current Scope
 
-| Platform Support               | Content Sources          |
-| :-------------------------     | :----------------------- |
-| ✅ **Retail**                  | ✅ **GitHub**            |
-| 📋 **Classic / Era** (Planned) | ✅ **TukUI** (ElvUI)     |
-| 📋 **Cata** (Planned)          | ✅ **WoWInterface**      |
-|                                | ✅ **Wago.io**           |
-|                                | 📋 **WeakAuras** (Planned) |
+- Retail support
+- GitHub, TukUI, WoWInterface, and Wago sources
+- TUI + CLI workflows
+- Background update checks
+- WTF backup and restore
 
-### Supported Architectures
+## Highlights
 
-- **Windows:** x64
-- **Linux:** x64
-- **macOS:** Apple Silicon (arm64), Intel (x64)
+- Terminal-native overview with inspect, sorting, multi-select, bulk update/delete, and undo
+- Unified install/search flow for addon discovery and direct installs
+- Guided setup with strict addon-path safety rails
+- Portable addon import/export format
+- Wago search and install support with your own API key
 
-## Features
+## Quick Start
 
-- **Interactive TUI:** A beautiful, terminal-native user interface with fluid
-  animations and responsive layout.
-- **Multi-Source Support:** Seamlessly install and update addons directly
-  from **GitHub**, **TukUI**, **WoWInterface**, and **Wago.io**.
-- **Smart Updates & Dependencies:** Git-based version tracking ensures
-  pinpoint accuracy, while robust library handling keeps your dependencies in
-  check.
-- **Intelligent Setup:** Intelligent WoW installation detection and a guided
-  first-run wizard to get you started in seconds.
-- **⌨️ Keyboard Driven:** Full **Vim-style** navigation (`h/j/k/l`) and
-  intuitive shortcuts for all actions.
-- **Wago.io Integration:** Bring your own API key to search and install addons
-  directly from Wago.io within the app.
-- **WeakAuras Management:** Coming soon.
+Launch the TUI:
 
-## 📦 Install
-
-### Binary Releases
-
-Download the latest pre-built binaries from the
-[**Releases**](https://github.com/archcorsair/lemonup/releases) page.
-
-### Package Managers
-
-#### Homebrew (macOS & Linux)
-
-```bash
-brew install archcorsair/lemonup/lemonup
+```powershell
+lemonup
 ```
 
-#### Scoop (Windows)
+Use a separate profile when you want isolated config/state, for example:
+- manual smoke testing
+- trying a different addon directory
+- keeping work and personal setups separate
 
-```bash
-scoop bucket add lemon-bucket https://github.com/archcorsair/lemon-bucket
-scoop install lemonup
+```powershell
+lemonup --profile manual-smoke tui
 ```
 
-## 📖 Documentation
+Check for updates:
 
-For detailed installation guides, configuration options, and usage instructions,
-please visit our official documentation website:
+```powershell
+lemonup check
+lemonup check WeakAuras
+```
+
+Update addons:
+
+```powershell
+lemonup update
+lemonup update WeakAuras
+lemonup update-all --dry-run
+```
+
+## Releases
+
+Download the latest binaries from [Releases](https://github.com/archcorsair/lemonup/releases).
+
+## Documentation
+
+For installation, configuration, usage guides, and detailed docs, visit:
 
 [**lemonup.org**](https://lemonup.org)
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please see our
-[contribution guidelines](https://lemonup.org/contributing) on the docs site.
+Contributions are welcome.
 
-```bash
-bun install
-bun run typecheck
-bun test
+Validation:
+
+```powershell
+cargo fmt --all
+cargo clippy -p lemonup-app -- -D warnings
+cargo test --workspace
 ```
 
-## 📄 License
+## License
 
 MIT © [ArchCorsair](https://github.com/archcorsair)

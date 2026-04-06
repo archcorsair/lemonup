@@ -1,11 +1,8 @@
 pre-commit:
   commands:
-    lint:
-      glob: "**/*.{ts,tsx,js,jsx,json}"
-      exclude: "**/*.test.ts"
-      run: bunx biome check --write {staged_files}
-      stage_fixed: true
-    typecheck:
-      run: bun run typecheck
+    fmt:
+      run: cargo fmt --all --check
+    clippy:
+      run: cargo clippy -p lemonup-app -- -D warnings
     test:
-      run: bun test --only-failures
+      run: cargo test -p lemonup-app
