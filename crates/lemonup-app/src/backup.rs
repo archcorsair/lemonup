@@ -316,7 +316,10 @@ mod tests {
 
     #[test]
     fn derive_wtf_dir_moves_from_addons_to_wtf() {
-        let root = PathBuf::from(r"D:\Sandbox\WoW\_retail_\Interface\AddOns");
+        let root = PathBuf::from("D:/Sandbox/WoW")
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
         let wtf = derive_wtf_dir(&root).expect_err("missing wtf should fail");
         let normalized = wtf.replace('\\', "/");
         assert!(normalized.contains("D:/Sandbox/WoW/WTF"));
