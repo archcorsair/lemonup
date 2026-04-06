@@ -318,13 +318,14 @@ mod tests {
     fn derive_wtf_dir_moves_from_addons_to_wtf() {
         let root = PathBuf::from(r"D:\Sandbox\WoW\_retail_\Interface\AddOns");
         let wtf = derive_wtf_dir(&root).expect_err("missing wtf should fail");
-        assert!(wtf.contains(r"D:\Sandbox\WoW\WTF"));
+        let normalized = wtf.replace('\\', "/");
+        assert!(normalized.contains("D:/Sandbox/WoW/WTF"));
     }
 
     #[test]
     fn backup_root_is_profile_scoped_under_data_dir() {
         let path = backup_root(Path::new(r"C:\Users\archc\AppData\Roaming\lemonup\data"));
-        assert!(path.ends_with(r"backups\wtf"));
+        assert!(path.ends_with(Path::new("backups").join("wtf")));
     }
 
     #[test]

@@ -543,7 +543,6 @@ pub(super) fn child_row_prefix(row: &DashboardRow) -> &'static str {
 }
 
 #[cfg(test)]
-
 pub(super) fn child_row_detail_prefix(row: &DashboardRow) -> &'static str {
     match row.child_connector {
         Some(DashboardChildConnector::Mid) => "  │  ",
