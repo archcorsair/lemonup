@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Current progress ledger for the Rust LemonUp workspace on `codex/rusty-lemon`.
+Current progress ledger for the Rust LemonUp workspace.
 
 ## Current State
 
-- Branch: `codex/rusty-lemon`
+- Default branch: `main`
 - Workspace root: repo root
 - Default seeded manual-smoke profile: `--profile manual-smoke`
 - Production AddOns path: do not use for manual testing
@@ -39,20 +39,14 @@ Current progress ledger for the Rust LemonUp workspace on `codex/rusty-lemon`.
 
 ## Completed Foundation
 
-- Rust workspace split into:
+- root Rust workspace:
   - `crates/lemonup-core`
   - `crates/lemonup-app`
-- typed core domain/config/state setup
-- SQLite-backed state storage
-- OS-native path discovery
-- panic-safe terminal restore
-- typed event/action flow
-- onboarding stepper wizard with strict addon-dir safety checks
-- single-surface shell with overview, inspect, install/search, config, and backup overlays
-- provider-backed install/check/update flows for GitHub, TukUI, WoWInterface, and Wago
-- unified install/search overlay opened by both `i` and `/`
-- overview sort, multi-select, bulk update/delete, soft-delete undo, and inspect action chips
-- floating timed dashboard toast with semantic `ℹ` / `✓` / `×` feedback
+- typed core domain/config/state + SQLite storage
+- safe onboarding, path discovery, and terminal restore
+- TUI shell with overview, inspect, install/search, config, and backup overlays
+- provider-backed install/check/update for GitHub, TukUI, WoWInterface, and Wago
+- overview sort, multi-select, bulk update/delete, undo, and toast/status feedback
 - render-first `app.rs` cleanup into `crates/lemonup-app/src/app/` submodules
 
 ## Validation Ladder
@@ -77,5 +71,4 @@ Default validation remains:
 - `docs/acceptance-matrix.md`
 - `docs/manual-testing.md`
 - `docs/v1-archive.md`
-- `docs/single-surface-shell-plan.md`
-- `docs/production-tui-design-plan.md`
+- git history if historical design-planning context is needed

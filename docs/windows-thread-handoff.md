@@ -23,9 +23,9 @@ Read in this order:
 - `scripts`
 - `testdata`
 
-## Current Branch / Status
+## Current Status
 
-- active branch: `codex/rusty-lemon`
+- default branch: `main`
 - latest verified milestone: Rust-only cutover complete, v1 retired, blocker slice closed
 
 ## Current Product State
@@ -84,3 +84,8 @@ mise which cargo
 - product polish and help/action discovery
 - future source/provider work only if product scope expands
 - keep docs current when checkpointing
+
+## Historical Design Context
+
+- the old in-repo design-plan docs were removed after implementation landed
+- use git history if you explicitly need the earlier planning artifacts
