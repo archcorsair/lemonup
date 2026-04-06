@@ -59,36 +59,36 @@ impl App {
         } else {
             area
         };
-        let (icon_fg, text_fg, bg, prefix) = match kind {
+        let (icon_fg, badge_bg, text_fg, bg, prefix) = match kind {
             DashboardEventKind::Info => (
                 self.ui_theme.toast_info_icon,
+                self.ui_theme.toast_info_badge_bg,
                 self.ui_theme.info,
                 self.ui_theme.toast_info_bg,
                 "ℹ",
             ),
             DashboardEventKind::Success => (
                 self.ui_theme.toast_success_icon,
+                self.ui_theme.toast_success_badge_bg,
                 self.ui_theme.success,
                 self.ui_theme.toast_success_bg,
                 "✓",
             ),
             DashboardEventKind::Error => (
                 self.ui_theme.toast_error_icon,
+                self.ui_theme.toast_error_badge_bg,
                 self.ui_theme.error,
                 self.ui_theme.toast_error_bg,
                 "×",
             ),
         };
         let toast_y = padded.y.saturating_add(padded.height.saturating_sub(1));
-        let pill_width = (text.chars().count() + 5).min(padded.width as usize) as u16;
-        let pill_area = Rect::new(padded.x, toast_y, pill_width, 1);
-        frame.render_widget(Clear, pill_area);
-        let pill = Paragraph::new(Line::from(vec![
+        let line = Line::from(vec![
             Span::styled(
-                format!(" {prefix}"),
+                format!(" {prefix} "),
                 Style::default()
                     .fg(icon_fg)
-                    .bg(bg)
+                    .bg(badge_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -98,9 +98,13 @@ impl App {
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false });
+        ]);
+        let pill_width = line.width().min(padded.width as usize) as u16;
+        let pill_area = Rect::new(padded.x, toast_y, pill_width, 1);
+        frame.render_widget(Clear, pill_area);
+        let pill = Paragraph::new(line)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
         frame.render_widget(pill, pill_area);
     }
 
