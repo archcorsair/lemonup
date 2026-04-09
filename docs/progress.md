@@ -14,6 +14,10 @@ Current progress ledger for the Rust LemonUp workspace.
 
 ## Newly Completed
 
+- backup overlay now matches the current modal language:
+  - compact summary, recent backups list, selected archive card, centered actions
+  - restore and delete both use in-context confirmation
+  - backup creation is throttled briefly to avoid accidental spam
 - contextual `?` help overlay is implemented:
   - opens from dashboard and active overlays
   - content is grouped by current context: overview, inspect, install/search, config, backup

@@ -34,6 +34,12 @@ pub struct BackupRestoreOutcome {
     pub backup: BackupEntry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupDeleteOutcome {
+    pub deleted: BackupEntry,
+    pub backups: Vec<BackupEntry>,
+}
+
 pub fn backup_root(data_dir: &Path) -> PathBuf {
     data_dir.join("backups").join("wtf")
 }
@@ -142,6 +148,19 @@ pub fn restore_wtf_backup(
 
     fs::remove_dir_all(&rollback_dir).map_err(|error| error.to_string())?;
     Ok(BackupRestoreOutcome { backup })
+}
+
+pub fn delete_backup(
+    backup_root: &Path,
+    archive_path: &Path,
+) -> Result<BackupDeleteOutcome, String> {
+    let backup = backup_entry_from_path(archive_path)?;
+    fs::remove_file(&backup.path).map_err(|error| error.to_string())?;
+    let backups = list_backups(backup_root)?;
+    Ok(BackupDeleteOutcome {
+        deleted: backup,
+        backups,
+    })
 }
 
 fn backup_entry_from_path(path: &Path) -> Result<BackupEntry, String> {
@@ -312,7 +331,10 @@ mod tests {
     use tempfile::tempdir;
     use zip::ZipArchive;
 
-    use super::{backup_root, create_wtf_backup, derive_wtf_dir, list_backups, restore_wtf_backup};
+    use super::{
+        backup_root, create_wtf_backup, delete_backup, derive_wtf_dir, list_backups,
+        restore_wtf_backup,
+    };
 
     #[test]
     fn derive_wtf_dir_moves_from_addons_to_wtf() {
@@ -403,5 +425,32 @@ mod tests {
         let config = fs::read_to_string(wtf_dir.join("Config.wtf")).expect("restored config");
         assert!(config.contains("SET current \"1\""));
         assert!(!wtf_dir.join("Layout-local.txt").exists());
+    }
+
+    #[test]
+    fn delete_backup_removes_archive_and_refreshes_listing() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("WoW")
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let wtf_dir = temp.path().join("WoW").join("WTF");
+        let backup_dir = temp.path().join("data").join("backups").join("wtf");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::create_dir_all(&wtf_dir).expect("create wtf dir");
+        fs::write(wtf_dir.join("Config.wtf"), "SET test \"1\"\n").expect("write config");
+
+        let first = create_wtf_backup(&addon_dir, &backup_dir, 5).expect("first backup");
+        fs::write(wtf_dir.join("Config.wtf"), "SET test \"2\"\n").expect("update config");
+        let second = create_wtf_backup(&addon_dir, &backup_dir, 5).expect("second backup");
+
+        let outcome = delete_backup(&backup_dir, &first.backup.path).expect("delete backup");
+
+        assert_eq!(outcome.deleted.file_name, first.backup.file_name);
+        assert_eq!(outcome.backups.len(), 1);
+        assert_eq!(outcome.backups[0].file_name, second.backup.file_name);
+        assert!(!first.backup.path.exists());
     }
 }

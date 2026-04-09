@@ -82,6 +82,10 @@ pub enum AppAction {
         addon_dir: PathBuf,
         backup_path: PathBuf,
     },
+    StartBackupDelete {
+        backup_root: PathBuf,
+        backup_path: PathBuf,
+    },
     StartTransferImport {
         addon_dir: PathBuf,
         input_path: PathBuf,

@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 
 use crate::action::AppAction;
 use crate::backup::{
-    BackupEntry, BackupRestoreOutcome, BackupRunOutcome, backup_root, create_wtf_backup,
-    list_backups, restore_wtf_backup,
+    BackupDeleteOutcome, BackupEntry, BackupRestoreOutcome, BackupRunOutcome, backup_root,
+    create_wtf_backup, delete_backup, list_backups, restore_wtf_backup,
 };
 use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
@@ -51,6 +51,7 @@ use crate::wago::{
 };
 use time::{Duration, OffsetDateTime};
 
+mod render_backup;
 mod render_config;
 mod render_dashboard;
 mod render_help;
@@ -80,6 +81,7 @@ const LOGO_COMPACT: &str = "LEMONUP";
 const MOTION_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
+const BACKUP_SPAM_GUARD_WINDOW: Duration = Duration::seconds(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellLayoutMode {
@@ -434,7 +436,9 @@ enum AppMessage {
     BackupSelectionNext,
     BackupSelectionPrevious,
     BackupRequestRestore,
+    BackupRequestDelete,
     BackupConfirmRestore,
+    BackupConfirmDelete,
     BackupCancelRestore,
     OnboardingNextStep,
     OnboardingPreviousStep,
@@ -469,6 +473,7 @@ enum AppTaskEvent {
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
     BackupFinished(std::result::Result<BackupRunOutcome, String>),
     BackupRestoreFinished(std::result::Result<BackupRestoreOutcome, String>),
+    BackupDeleteFinished(std::result::Result<BackupDeleteOutcome, String>),
     TransferImportFinished(std::result::Result<TransferImportOutcome, String>),
     WagoSearchFinished(std::result::Result<WagoSearchOutcome, String>),
     WagoInstallFinished(std::result::Result<WagoInstallTaskOutcome, String>),
@@ -798,6 +803,8 @@ pub struct BackupPaneState {
     in_progress: bool,
     selected_backup: usize,
     pending_restore: Option<BackupEntry>,
+    pending_delete: Option<BackupEntry>,
+    last_completed_backup_at: Option<OffsetDateTime>,
 }
 
 impl BackupPaneState {
@@ -836,12 +843,27 @@ impl BackupPaneState {
             next.selected_backup = next.selected_backup.min(next.backups.len() - 1);
         }
         next.pending_restore = None;
+        next.pending_delete = None;
+        next
+    }
+
+    fn with_last_completed_backup_at(&self, timestamp: Option<OffsetDateTime>) -> Self {
+        let mut next = self.clone();
+        next.last_completed_backup_at = timestamp;
         next
     }
 
     fn request_restore(&self) -> Self {
         let mut next = self.clone();
         next.pending_restore = self.selected_backup().cloned();
+        next.pending_delete = None;
+        next
+    }
+
+    fn request_delete(&self) -> Self {
+        let mut next = self.clone();
+        next.pending_delete = self.selected_backup().cloned();
+        next.pending_restore = None;
         next
     }
 
@@ -851,11 +873,18 @@ impl BackupPaneState {
         next
     }
 
+    fn cancel_delete(&self) -> Self {
+        let mut next = self.clone();
+        next.pending_delete = None;
+        next
+    }
+
     fn set_in_progress(&self, in_progress: bool) -> Self {
         let mut next = self.clone();
         next.in_progress = in_progress;
         if in_progress {
             next.pending_restore = None;
+            next.pending_delete = None;
         }
         next
     }
@@ -2035,6 +2064,8 @@ impl App {
                 in_progress: false,
                 selected_backup: 0,
                 pending_restore: None,
+                pending_delete: None,
+                last_completed_backup_at: None,
             },
             wago_api_key,
             config_store,
@@ -2710,12 +2741,20 @@ impl App {
                 _ => vec![],
             });
         }
+        if self.backup_pane.pending_delete.is_some() {
+            return Some(match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => vec![AppMessage::BackupConfirmDelete],
+                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::BackupCancelRestore],
+                _ => vec![],
+            });
+        }
 
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::BackupSelectionNext]),
             KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::BackupSelectionPrevious]),
             KeyCode::Char('n') => Some(vec![AppMessage::BackupRunNow]),
             KeyCode::Char('r') | KeyCode::Enter => Some(vec![AppMessage::BackupRequestRestore]),
+            KeyCode::Char('x') => Some(vec![AppMessage::BackupRequestDelete]),
             _ => None,
         }
     }
@@ -3738,6 +3777,39 @@ impl App {
                         DetailMode::Backup,
                         "WTF backup already running",
                     ))]
+                } else if let Some(last_completed) = self.backup_pane.last_completed_backup_at {
+                    let elapsed = OffsetDateTime::now_utc() - last_completed;
+                    if elapsed < BACKUP_SPAM_GUARD_WINDOW {
+                        let remaining = (BACKUP_SPAM_GUARD_WINDOW - elapsed).whole_seconds().max(1);
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Backup,
+                            &format!(
+                                "backup created recently; wait {} more second{}",
+                                remaining,
+                                plural_suffix(remaining as usize)
+                            ),
+                        ))]
+                    } else if self.effective_addon_dir.is_none() {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Backup,
+                            "addon directory is not configured",
+                        ))]
+                    } else {
+                        vec![
+                            AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(true)),
+                            AppAction::StartBackupNow {
+                                addon_dir: self.effective_addon_dir.clone().expect("checked above"),
+                                backup_dir: self.backup_dir.clone(),
+                                retention: self.config_pane.draft.backup_retention,
+                            },
+                            AppAction::SetStatus(
+                                self.dashboard_status_for(
+                                    DetailMode::Backup,
+                                    "creating WTF backup",
+                                ),
+                            ),
+                        ]
+                    }
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Backup,
@@ -3784,6 +3856,27 @@ impl App {
                     ]
                 }
             }
+            AppMessage::BackupRequestDelete => {
+                if self.backup_pane.in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        "backup work already running",
+                    ))]
+                } else if self.backup_pane.selected_backup().is_none() {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        "select a backup before deleting",
+                    ))]
+                } else {
+                    vec![
+                        AppAction::SetBackupPaneState(self.backup_pane.request_delete()),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Backup,
+                            "delete selected backup? | y confirm | n cancel",
+                        )),
+                    ]
+                }
+            }
             AppMessage::BackupConfirmRestore => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -3815,10 +3908,31 @@ impl App {
                     vec![]
                 }
             }
+            AppMessage::BackupConfirmDelete => {
+                if self.backup_pane.in_progress {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        "backup work already running",
+                    ))]
+                } else if let Some(backup) = self.backup_pane.pending_delete.clone() {
+                    vec![
+                        AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(true)),
+                        AppAction::StartBackupDelete {
+                            backup_root: self.backup_dir.clone(),
+                            backup_path: backup.path,
+                        },
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Backup, "deleting backup"),
+                        ),
+                    ]
+                } else {
+                    vec![]
+                }
+            }
             AppMessage::BackupCancelRestore => vec![
-                AppAction::SetBackupPaneState(self.backup_pane.cancel_restore()),
+                AppAction::SetBackupPaneState(self.backup_pane.cancel_restore().cancel_delete()),
                 AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Backup, "backup restore cancelled"),
+                    self.dashboard_status_for(DetailMode::Backup, "backup action cancelled"),
                 ),
             ],
             AppMessage::OnboardingNextStep => match self.onboarding.step {
@@ -4205,6 +4319,7 @@ impl App {
                         AppAction::SetBackupPaneState(
                             self.backup_pane
                                 .with_backups(outcome.backups)
+                                .with_last_completed_backup_at(Some(OffsetDateTime::now_utc()))
                                 .set_in_progress(false),
                         ),
                         AppAction::SetStatus(
@@ -4231,6 +4346,24 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Backup,
                         &format!("WTF restore failed: {error}"),
+                    )),
+                ],
+                AppTaskEvent::BackupDeleteFinished(Ok(outcome)) => vec![
+                    AppAction::SetBackupPaneState(
+                        self.backup_pane
+                            .with_backups(outcome.backups)
+                            .set_in_progress(false),
+                    ),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        &format!("deleted backup {}", outcome.deleted.label),
+                    )),
+                ],
+                AppTaskEvent::BackupDeleteFinished(Err(error)) => vec![
+                    AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(false)),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Backup,
+                        &format!("backup delete failed: {error}"),
                     )),
                 ],
                 AppTaskEvent::TransferImportFinished(Ok(outcome)) => {
@@ -4805,6 +4938,21 @@ impl App {
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
                     let _ = sender.send(AppTaskEvent::BackupRestoreFinished(result));
+                });
+            }
+            AppAction::StartBackupDelete {
+                backup_root,
+                backup_path,
+            } => {
+                let sender = self.task_events_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        delete_backup(&backup_root, &backup_path)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+
+                    let _ = sender.send(AppTaskEvent::BackupDeleteFinished(result));
                 });
             }
             AppAction::StartTransferImport {
@@ -7219,6 +7367,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::widgets::TableState;
     use tempfile::tempdir;
+    use time::{Duration, OffsetDateTime};
     use tokio::sync::mpsc;
 
     use super::{
@@ -8367,6 +8516,28 @@ mod tests {
         assert!(matches!(actions[0], AppAction::SetBackupPaneState(_)));
         assert!(matches!(actions[1], AppAction::StartBackupNow { .. }));
         assert!(matches!(actions[2], AppAction::SetStatus(_)));
+    }
+
+    #[test]
+    fn backup_run_now_is_throttled_when_recent_backup_completed() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Backup;
+        app.effective_addon_dir = Some(PathBuf::from(
+            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        app.backup_pane.last_completed_backup_at =
+            Some(OffsetDateTime::now_utc() - Duration::seconds(2));
+
+        let actions = app.update(AppMessage::BackupRunNow);
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            AppAction::SetStatus(status) => {
+                assert!(status.contains("backup created recently"));
+                assert!(status.contains("wait"));
+            }
+            other => panic!("expected throttled backup status, got {other:?}"),
+        }
     }
 
     #[test]
@@ -9791,6 +9962,27 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
             vec![AppMessage::BackupConfirmRestore]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+            vec![AppMessage::BackupCancelRestore]
+        );
+    }
+
+    #[test]
+    fn backup_mode_routes_delete_confirmation_keys() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Backup;
+        app.backup_pane.pending_delete = Some(BackupEntry {
+            file_name: "WTF-20260405T120000.000Z.zip".to_string(),
+            path: PathBuf::from("C:\\Temp\\WTF-20260405T120000.000Z.zip"),
+            label: "2026-04-05 12:00:00.000Z".to_string(),
+            size_bytes: 128,
+        });
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+            vec![AppMessage::BackupConfirmDelete]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),

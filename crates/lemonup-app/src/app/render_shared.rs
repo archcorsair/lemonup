@@ -277,6 +277,8 @@ impl App {
                 self.render_search_overlay(frame, inner);
             } else if kind == OverlayKind::Config {
                 self.render_config_overlay(frame, inner);
+            } else if kind == OverlayKind::Backup {
+                self.render_backup_overlay(frame, inner);
             } else {
                 let content = Paragraph::new(self.task_overlay_lines()).wrap(Wrap { trim: false });
                 frame.render_widget(content, inner);
@@ -1100,6 +1102,21 @@ impl App {
                                 tier: secondary,
                             },
                         ]
+                    } else if self.backup_pane.pending_delete.is_some() {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Confirm,
+                                key: "y",
+                                label: "delete",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Cancel,
+                                key: "n",
+                                label: "cancel",
+                                tier: secondary,
+                            },
+                        ]
                     } else {
                         vec![
                             FooterCommandHint {
@@ -1118,6 +1135,12 @@ impl App {
                                 id: FooterHintId::Run,
                                 key: "n",
                                 label: "backup",
+                                tier: secondary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Delete,
+                                key: "x",
+                                label: "delete",
                                 tier: secondary,
                             },
                             FooterCommandHint {

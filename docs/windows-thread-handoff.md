@@ -36,6 +36,7 @@ Implemented and validated:
 - unified install/search overlay for name search and direct Wago URL install
 - overview sort, inspect, multi-select, bulk update/delete, soft-delete undo
 - contextual `?` help overlay for dashboard, inspect, install/search, config, and backup
+- redesigned backup overlay with create/restore/delete flows and short backup spam guard
 - import/export addon list
 - background auto-check / dashboard status
 - WTF backup and restore
