@@ -4,7 +4,7 @@ use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
-    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, FooterKeyPulse,
+    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, FooterKeyPulse, HelpContext,
     InspectOverlayState, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
     WagoInstallConfirmation,
 };
@@ -18,6 +18,8 @@ pub enum AppAction {
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),
     SetInspectOverlayState(InspectOverlayState),
+    SetHelpOverlay(bool),
+    SetHelpContext(HelpContext),
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
     ToggleDashboardSort(DashboardSortColumn),

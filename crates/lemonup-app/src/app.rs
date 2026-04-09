@@ -53,6 +53,7 @@ use time::{Duration, OffsetDateTime};
 
 mod render_config;
 mod render_dashboard;
+mod render_help;
 mod render_inspect;
 mod render_install_search;
 mod render_shared;
@@ -103,6 +104,7 @@ enum LogoStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
     Inspect,
+    Help,
     Install,
     Search,
     Update,
@@ -114,6 +116,16 @@ enum OverlayKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct OverlayState {
     active: Option<OverlayKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HelpContext {
+    #[default]
+    Overview,
+    Inspect,
+    InstallSearch,
+    Config,
+    Backup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -229,6 +241,7 @@ struct ShellUiState {
     motion: MotionState,
     footer_pulse: Option<FooterKeyPulse>,
     dashboard_toast: Option<DashboardToast>,
+    help_context: HelpContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +265,7 @@ enum FooterHintTier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FooterHintId {
+    Help,
     Nav,
     Inspect,
     Select,
@@ -360,6 +374,7 @@ enum AppMessage {
     QuitRequested,
     TerminalResized { width: u16, height: u16 },
     DashboardOpenInspect,
+    DashboardOpenHelp,
     DashboardCloseOverlay,
     InspectScrollUp,
     InspectScrollDown,
@@ -2291,6 +2306,13 @@ impl App {
             };
         }
 
+        if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
+            return match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => Some(FooterHintId::Close),
+                _ => None,
+            };
+        }
+
         if self.shell_ui.overlay.active.is_some() {
             return match self.dashboard.detail_mode {
                 DetailMode::Install => {
@@ -2374,6 +2396,7 @@ impl App {
                 Some(FooterHintId::Nav)
             }
             KeyCode::Enter => Some(FooterHintId::Inspect),
+            KeyCode::Char('?') => Some(FooterHintId::Help),
             KeyCode::Char(' ') | KeyCode::Char('a') => Some(FooterHintId::Select),
             KeyCode::Esc => Some(FooterHintId::Clear),
             KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4') => {
@@ -2455,6 +2478,7 @@ impl App {
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
+                KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::InspectScrollDown],
                 KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::InspectScrollUp],
@@ -2480,6 +2504,14 @@ impl App {
             };
         }
 
+        if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
+            return match key.code {
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                KeyCode::Char('?') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                _ => vec![],
+            };
+        }
+
         if let Some(messages) = self.search_messages_for_key(key) {
             return messages;
         }
@@ -2495,6 +2527,7 @@ impl App {
 
         if self.shell_ui.overlay.active.is_some() {
             return match key.code {
+                KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
                     vec![AppMessage::DashboardRunUpdateSelected]
@@ -2509,6 +2542,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+            KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
             KeyCode::Char('x') => vec![AppMessage::DashboardRequestDelete],
@@ -2868,11 +2902,21 @@ impl App {
                     ]
                 }
             }
+            AppMessage::DashboardOpenHelp => vec![
+                AppAction::SetHelpContext(self.current_help_context()),
+                AppAction::SetHelpOverlay(true),
+                AppAction::SetStatus(String::new()),
+            ],
             AppMessage::DashboardCloseOverlay => {
                 if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
                     vec![
                         AppAction::SetInspectOverlay(false),
                         AppAction::SetInspectOverlayState(InspectOverlayState::default()),
+                        AppAction::SetStatus(String::new()),
+                    ]
+                } else if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
+                    vec![
+                        AppAction::SetHelpOverlay(false),
                         AppAction::SetStatus(String::new()),
                     ]
                 } else {
@@ -4332,6 +4376,23 @@ impl App {
             AppAction::SetInspectOverlayState(state) => {
                 self.inspect_overlay = state;
             }
+            AppAction::SetHelpOverlay(active) => {
+                if active {
+                    self.shell_ui.overlay.active = Some(OverlayKind::Help);
+                } else if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
+                    self.shell_ui.overlay.active = match self.dashboard.detail_mode {
+                        DetailMode::Overview => None,
+                        DetailMode::Install => Some(OverlayKind::Install),
+                        DetailMode::Search => Some(OverlayKind::Search),
+                        DetailMode::Update => Some(OverlayKind::Update),
+                        DetailMode::Config => Some(OverlayKind::Config),
+                        DetailMode::Backup => Some(OverlayKind::Backup),
+                    };
+                }
+            }
+            AppAction::SetHelpContext(context) => {
+                self.shell_ui.help_context = context;
+            }
             AppAction::SetStatus(status) => {
                 if let Some(toast) = self.dashboard_toast_from_status(&status) {
                     self.shell_ui.dashboard_toast = Some(toast);
@@ -4470,6 +4531,7 @@ impl App {
                     self.search_pane = self.search_pane.stop_editing();
                 }
                 self.config_pane.edit = None;
+                self.shell_ui.help_context = self.current_help_context_for_mode(detail_mode);
                 self.shell_ui.overlay.active = match detail_mode {
                     DetailMode::Overview => None,
                     DetailMode::Install => Some(OverlayKind::Install),
@@ -7164,7 +7226,7 @@ mod tests {
         ConfigEditState, ConfigField, ConfigPaneState, DashboardChildConnector,
         DashboardDeleteOutcome, DashboardJobKind, DashboardJobUiState, DashboardRow,
         DashboardSortColumn, DashboardState, DashboardUpdateOutcome, DetailMode, FooterHintId,
-        FooterKeyPulse, InspectOverlayState, InspectResolvedTarget, InspectSection,
+        FooterKeyPulse, HelpContext, InspectOverlayState, InspectResolvedTarget, InspectSection,
         InstallPaneState, MotionState, OverlayKind, PendingWagoInstallRequest, ScanState,
         SearchInstallState, SearchPaneState, SearchPresentationMode, ShellMode, ShellUiState,
         UiTheme, WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource,
@@ -7871,9 +7933,27 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
             vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
         );
-        assert!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('?')))
-                .is_empty()
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('?'))),
+            vec![AppMessage::DashboardOpenHelp]
+        );
+    }
+
+    #[test]
+    fn help_overlay_opens_and_closes_with_question_mark() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        let actions = app.update(AppMessage::DashboardOpenHelp);
+        assert_eq!(actions[0], AppAction::SetHelpContext(HelpContext::Overview));
+        assert_eq!(actions[1], AppAction::SetHelpOverlay(true));
+
+        app.apply(AppAction::SetHelpContext(HelpContext::Overview));
+        app.apply(AppAction::SetHelpOverlay(true));
+        assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('?'))),
+            vec![AppMessage::DashboardCloseOverlay]
         );
     }
 

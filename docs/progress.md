@@ -14,6 +14,10 @@ Current progress ledger for the Rust LemonUp workspace.
 
 ## Newly Completed
 
+- contextual `?` help overlay is implemented:
+  - opens from dashboard and active overlays
+  - content is grouped by current context: overview, inspect, install/search, config, backup
+  - uses the shared modal design language and contextual footer hints
 - import/export addon list is implemented in Rust:
   - portable JSON transfer format in `crates/lemonup-core/src/transfer.rs`
   - CLI commands: `export-addons`, `import-addons`
@@ -61,7 +65,7 @@ Default validation remains:
 ## Next Up
 
 1. continue product polish and post-parity UX work
-2. add the future `?` help overlay / action discovery work
+2. keep tightening modal/overlay polish and action discoverability
 3. keep expanding provider and workflow parity only when product scope demands it
 
 ## Related Docs

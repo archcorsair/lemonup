@@ -147,6 +147,7 @@ impl App {
                     .inspect_resolved_target()
                     .map(|target| target.item.name.clone())
                     .unwrap_or_else(|| "Inspect".to_string()),
+                OverlayKind::Help => "Help".to_string(),
                 OverlayKind::Install => "Install".to_string(),
                 OverlayKind::Search => "Install".to_string(),
                 OverlayKind::Update => "Update".to_string(),
@@ -270,6 +271,8 @@ impl App {
             frame.render_widget(block, overlay);
             if kind == OverlayKind::Inspect {
                 self.render_inspect_overlay(frame, inner);
+            } else if kind == OverlayKind::Help {
+                self.render_help_overlay(frame, inner);
             } else if kind == OverlayKind::Install || kind == OverlayKind::Search {
                 self.render_search_overlay(frame, inner);
             } else if kind == OverlayKind::Config {
@@ -873,6 +876,23 @@ impl App {
             ];
         }
 
+        if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
+            return vec![
+                FooterCommandHint {
+                    id: FooterHintId::Help,
+                    key: "?",
+                    label: "close",
+                    tier: FooterHintTier::Primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Close,
+                    key: "esc",
+                    label: "close",
+                    tier: FooterHintTier::Secondary,
+                },
+            ];
+        }
+
         if self.shell_ui.overlay.active.is_some() {
             return match self.dashboard.detail_mode {
                 DetailMode::Install => {
@@ -946,7 +966,7 @@ impl App {
                         vec![
                             FooterCommandHint {
                                 id: FooterHintId::Edit,
-                                key: "/ ?",
+                                key: "/",
                                 label: "query",
                                 tier: primary,
                             },
@@ -1161,6 +1181,12 @@ impl App {
                 id: FooterHintId::Install,
                 key: "i",
                 label: "install",
+                tier: secondary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Help,
+                key: "?",
+                label: "help",
                 tier: secondary,
             },
             FooterCommandHint {

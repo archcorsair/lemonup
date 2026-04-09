@@ -35,6 +35,7 @@ Implemented and validated:
 - provider-backed install/check/update for GitHub, TukUI, WoWInterface, and Wago
 - unified install/search overlay for name search and direct Wago URL install
 - overview sort, inspect, multi-select, bulk update/delete, soft-delete undo
+- contextual `?` help overlay for dashboard, inspect, install/search, config, and backup
 - import/export addon list
 - background auto-check / dashboard status
 - WTF backup and restore
@@ -81,7 +82,7 @@ mise which cargo
 
 ## Recommended Next Work
 
-- product polish and help/action discovery
+- product polish and overlay/layout tightening
 - future source/provider work only if product scope expands
 - keep docs current when checkpointing
 
