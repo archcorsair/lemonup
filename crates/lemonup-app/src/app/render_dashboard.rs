@@ -333,15 +333,29 @@ pub(super) fn dashboard_item_remote_label(item: &DashboardItem) -> Option<String
     }
 }
 
-pub(super) fn dashboard_item_sort_version_key(item: &DashboardItem) -> String {
-    let installed = dashboard_item_version_label(item);
-    let remote = dashboard_item_remote_label(item).unwrap_or_default();
-    match dashboard_item_update_status(item) {
-        UpdateStatus::UpdateAvailable => format!("0:{installed}:{remote}"),
-        UpdateStatus::UpToDate => format!("1:{installed}"),
-        UpdateStatus::Unknown => format!("2:{installed}:{remote}"),
-        UpdateStatus::Error => format!("3:{installed}:{remote}"),
-    }
+pub(super) fn dashboard_item_sort_version_key(
+    item: &DashboardItem,
+) -> (
+    u8,
+    std::cmp::Reverse<OffsetDateTime>,
+    std::cmp::Reverse<OffsetDateTime>,
+    String,
+    String,
+) {
+    let priority = match dashboard_item_update_status(item) {
+        UpdateStatus::UpdateAvailable => 0,
+        UpdateStatus::UpToDate => 1,
+        UpdateStatus::Unknown => 2,
+        UpdateStatus::Error => 3,
+    };
+
+    (
+        priority,
+        std::cmp::Reverse(item.updated_at),
+        std::cmp::Reverse(item.installed_at),
+        dashboard_item_version_label(item),
+        dashboard_item_remote_label(item).unwrap_or_default(),
+    )
 }
 
 pub(super) fn dashboard_item_version_line(

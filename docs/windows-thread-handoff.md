@@ -33,6 +33,7 @@ Read in this order:
 Implemented and validated:
 - onboarding and addon-dir safety rails
 - provider-backed install/check/update for GitHub, TukUI, WoWInterface, and Wago
+- dashboard default sort now starts on Version and prioritizes update-available rows, then recent update/install activity
 - unified install/search overlay for name search and direct Wago URL install
 - overview sort, inspect, multi-select, bulk update/delete, soft-delete undo
 - contextual `?` help overlay for dashboard, inspect, install/search, config, and backup

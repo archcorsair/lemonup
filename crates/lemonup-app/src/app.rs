@@ -978,6 +978,8 @@ struct DashboardItem {
     interface: Option<String>,
     git_commit: Option<String>,
     remote_version: Option<String>,
+    installed_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
     last_checked_at: Option<OffsetDateTime>,
     required_deps: Vec<String>,
     optional_deps: Vec<String>,
@@ -1077,7 +1079,7 @@ struct DashboardSortConfig {
 impl Default for DashboardSortConfig {
     fn default() -> Self {
         Self {
-            column: DashboardSortColumn::Name,
+            column: DashboardSortColumn::Version,
             direction: DashboardSortDirection::Asc,
         }
     }
@@ -1137,6 +1139,8 @@ impl DashboardState {
                     interface: addon.interface,
                     git_commit: addon.git_commit,
                     remote_version: addon.remote_version,
+                    installed_at: addon.installed_at,
+                    updated_at: addon.updated_at,
                     last_checked_at: addon.last_checked_at,
                     required_deps: addon.required_deps,
                     optional_deps: addon.optional_deps,
@@ -1543,11 +1547,9 @@ impl DashboardState {
             let result = match sort.column {
                 DashboardSortColumn::Name => compare_text(&left.name, &right.name)
                     .then_with(|| compare_text(&left.folder, &right.folder)),
-                DashboardSortColumn::Version => compare_text(
-                    &dashboard_item_sort_version_key(left),
-                    &dashboard_item_sort_version_key(right),
-                )
-                .then_with(|| compare_text(&left.name, &right.name)),
+                DashboardSortColumn::Version => dashboard_item_sort_version_key(left)
+                    .cmp(&dashboard_item_sort_version_key(right))
+                    .then_with(|| compare_text(&left.name, &right.name)),
                 DashboardSortColumn::Author => compare_text(
                     &dashboard_item_author_sort_key(left),
                     &dashboard_item_author_sort_key(right),
@@ -7400,25 +7402,35 @@ mod tests {
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         let config = AppConfig::new_unconfigured();
+        let base = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("base timestamp");
         let mut first = AddonRecord::new("First", "First", SourceKind::Manual);
         first.kind = AddonKind::Addon;
         first.version = Some("1.0.0".to_string());
+        first.installed_at = base;
+        first.updated_at = base;
 
         let mut second = AddonRecord::new("Second", "Second", SourceKind::GitHub);
         second.kind = AddonKind::Addon;
         second.version = Some("2.0.0".to_string());
+        second.remote_version = Some("2.1.0".to_string());
         second.author = Some("Author".to_string());
         second.git_commit = Some("abcdef".to_string());
         second.required_deps = vec!["Ace3".to_string()];
         second.embedded_libs = vec!["LibStub".to_string()];
+        second.installed_at = base + Duration::days(1);
+        second.updated_at = base + Duration::days(1);
         second.set_managed_owned_folders(vec![lemonup_core::OwnedFolder {
             name: "Second_Config".to_string(),
         }]);
 
         let mut third = AddonRecord::new("Third", "Third", SourceKind::Wago);
         third.kind = AddonKind::Library;
+        third.version = Some("3.0.0".to_string());
+        third.remote_version = Some("3.0.0".to_string());
         third.interface = Some("110005".to_string());
         third.optional_deps = vec!["Optional".to_string()];
+        third.installed_at = base + Duration::days(2);
+        third.updated_at = base + Duration::days(2);
 
         App {
             shell_mode,
@@ -7497,21 +7509,15 @@ mod tests {
     #[test]
     fn dashboard_sort_toggle_reverses_and_preserves_selection() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.list_state.select(Some(1));
+        let third_index = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| row.folder == "Third")
+            .expect("third row");
+        app.dashboard.list_state.select(Some(third_index));
         assert_eq!(
             app.dashboard.selected_row().map(|row| row.folder.as_str()),
-            Some("Second")
-        );
-
-        for action in app.update(AppMessage::DashboardToggleSort(DashboardSortColumn::Name)) {
-            app.apply(action);
-        }
-        assert_eq!(
-            app.dashboard.selected_row().map(|row| row.folder.as_str()),
-            Some("Second")
-        );
-        assert_eq!(
-            app.dashboard.rows.first().map(|row| row.folder.as_str()),
             Some("Third")
         );
 
@@ -7520,11 +7526,41 @@ mod tests {
         }
         assert_eq!(
             app.dashboard.selected_row().map(|row| row.folder.as_str()),
-            Some("Second")
+            Some("Third")
         );
         assert_eq!(
             app.dashboard.rows.first().map(|row| row.folder.as_str()),
             Some("First")
+        );
+
+        for action in app.update(AppMessage::DashboardToggleSort(DashboardSortColumn::Name)) {
+            app.apply(action);
+        }
+        assert_eq!(
+            app.dashboard.selected_row().map(|row| row.folder.as_str()),
+            Some("Third")
+        );
+        assert_eq!(
+            app.dashboard.rows.first().map(|row| row.folder.as_str()),
+            Some("Third")
+        );
+    }
+
+    #[test]
+    fn dashboard_defaults_to_version_sort_with_update_available_first() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        assert_eq!(
+            app.dashboard.sort_config().column,
+            DashboardSortColumn::Version
+        );
+        assert_eq!(
+            app.dashboard.rows.first().map(|row| row.folder.as_str()),
+            Some("Third")
+        );
+        assert_eq!(
+            app.dashboard.rows.get(1).map(|row| row.folder.as_str()),
+            Some("Second")
         );
     }
 
@@ -7871,7 +7907,12 @@ mod tests {
     fn inspect_summary_hides_empty_author_placeholder_and_internal_noise() {
         let app = app_for_tests(ShellMode::Dashboard);
         let target = InspectResolvedTarget {
-            item: &app.dashboard.items[2],
+            item: app
+                .dashboard
+                .items
+                .iter()
+                .find(|item| item.folder == "First")
+                .expect("first item"),
             opened_from_child: None,
         };
 
@@ -7882,8 +7923,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(summary.contains("Version: unknown"));
-        assert!(summary.contains("Folder: Third"));
+        assert!(summary.contains("Version: 1.0.0"));
+        assert!(summary.contains("Folder: First"));
         assert!(!summary.contains("Author:"));
         assert!(!summary.contains("selection"));
         assert!(!summary.contains("scan"));
@@ -8888,7 +8929,13 @@ mod tests {
     #[test]
     fn expand_all_preserves_logical_selection_when_rows_are_inserted_above() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.list_state.select(Some(2));
+        let third_index = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| row.folder == "Third")
+            .expect("third row");
+        app.dashboard.list_state.select(Some(third_index));
 
         app.apply(AppAction::ExpandAllDashboardRelationships);
 
@@ -8898,7 +8945,7 @@ mod tests {
                 .map(|item| item.folder.as_str()),
             Some("Third")
         );
-        assert_eq!(app.dashboard.list_state.selected(), Some(3));
+        assert_eq!(app.dashboard.list_state.selected(), Some(0));
     }
 
     #[test]
@@ -9514,7 +9561,15 @@ mod tests {
     #[test]
     fn replacing_addons_preserves_selected_row_and_scroll_offset() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.list_state = TableState::default().with_offset(2).with_selected(Some(2));
+        let third_index = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| row.folder == "Third")
+            .expect("third row");
+        app.dashboard.list_state = TableState::default()
+            .with_offset(third_index)
+            .with_selected(Some(third_index));
 
         let updated = vec![
             AddonRecord::new("First", "First", SourceKind::Manual),
@@ -9524,8 +9579,8 @@ mod tests {
 
         app.apply(AppAction::ReplaceDashboardAddons(updated));
 
-        assert_eq!(app.dashboard.list_state.selected(), Some(2));
-        assert_eq!(app.dashboard.list_state.offset(), 2);
+        assert_eq!(app.dashboard.list_state.selected(), Some(0));
+        assert_eq!(app.dashboard.list_state.offset(), 0);
         assert_eq!(
             app.dashboard
                 .selected_item()

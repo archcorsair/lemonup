@@ -14,6 +14,10 @@ Current progress ledger for the Rust LemonUp workspace.
 
 ## Newly Completed
 
+- dashboard default sort now starts on Version:
+  - update-available addons rank first
+  - then rows sort by most recently updated / installed activity
+  - version sort toggle still works for reverse ordering
 - backup overlay now matches the current modal language:
   - compact summary, recent backups list, selected archive card, centered actions
   - restore and delete both use in-context confirmation
