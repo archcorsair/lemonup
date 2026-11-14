@@ -12,6 +12,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use zip::ZipArchive;
 
+use crate::archive::safe_entry_relative_path;
+
 const API_URL: &str = "https://api.tukui.org/v1/addons";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -52,6 +54,78 @@ struct TukuiAddon {
     version: String,
     web_url: String,
     directories: Vec<String>,
+    /// Game patches the package lists as supported (for example `12.0.5`, `1.60.1`).
+    #[serde(default, deserialize_with = "deserialize_patch_list")]
+    patch: Vec<String>,
+}
+
+/// Lenient view of the feed's `patch` field. Anything that is not a string or a list of
+/// strings is ignored so a malformed value can never break parsing of the whole feed.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TukuiPatchField {
+    One(String),
+    Many(Vec<TukuiPatchEntry>),
+    Other(serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TukuiPatchEntry {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
+fn deserialize_patch_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        match Option::<TukuiPatchField>::deserialize(deserializer)? {
+            Some(TukuiPatchField::One(value)) => vec![value],
+            Some(TukuiPatchField::Many(entries)) => entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    TukuiPatchEntry::Text(value) => Some(value),
+                    TukuiPatchEntry::Other(_) => None,
+                })
+                .collect(),
+            Some(TukuiPatchField::Other(_)) | None => Vec::new(),
+        },
+    )
+}
+
+/// Parses the `major.minor` prefix of a patch string such as `1.60.1`; the patch component and
+/// anything unparsable is ignored.
+fn parse_patch_major_minor(patch: &str) -> Option<(u32, u32)> {
+    let mut parts = patch.trim().split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    Some((major, minor))
+}
+
+/// WoW Forever runs client patch 1.60 or newer within major 1; refuse TukUI packages that do
+/// not list such a patch.
+fn ensure_tukui_supports_flavor(
+    addon: &TukuiAddon,
+    flavor: GameFlavor,
+    operation: &str,
+) -> Result<(), String> {
+    if flavor != GameFlavor::Forever {
+        return Ok(());
+    }
+    if addon
+        .patch
+        .iter()
+        .filter_map(|patch| parse_patch_major_minor(patch))
+        .any(|(major, minor)| major == 1 && minor >= 60)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "TukUI addon '{}' does not list WoW Forever support (no 1.60 or newer 1.x patch); refusing to {operation} it into a WoW Forever AddOns folder",
+        addon.name
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +186,7 @@ pub(crate) async fn install_tukui_addon(
     let slug = parse_tukui_target(target)?;
     let client = build_tukui_client()?;
     let addon = resolve_tukui_addon(&client, &slug, false).await?;
+    ensure_tukui_supports_flavor(&addon, GameFlavor::for_addons_dir(addon_dir), "install")?;
     let bytes = download_tukui_release_bytes(&client, &addon).await?;
     install_downloaded_tukui_addon(state_database, addon_dir, &addon, &bytes, dry_run)
 }
@@ -145,10 +220,39 @@ pub(crate) async fn update_tukui_addon(
     let slug = resolve_tracked_tukui_target(tracked)?;
     let client = build_tukui_client()?;
     let addon = resolve_tukui_addon(&client, &slug, false).await?;
+    let plan = plan_tukui_update(
+        tracked,
+        &addon,
+        GameFlavor::for_addons_dir(addon_dir),
+        force,
+        dry_run,
+    )?;
+    if let TukuiUpdatePlan::UpToDate(summary) = plan {
+        return Ok(summary);
+    }
+
+    let bytes = download_tukui_release_bytes(&client, &addon).await?;
+    update_downloaded_tukui_addon(state_database, addon_dir, tracked, &addon, &bytes, dry_run)
+}
+
+enum TukuiUpdatePlan {
+    UpToDate(TukuiUpdateSummary),
+    Download,
+}
+
+/// Decides whether an update needs a download. The up-to-date comparison runs first so an
+/// already current addon reports up to date; the flavor support check then gates any download.
+fn plan_tukui_update(
+    tracked: &AddonRecord,
+    addon: &TukuiAddon,
+    flavor: GameFlavor,
+    force: bool,
+    dry_run: bool,
+) -> Result<TukuiUpdatePlan, String> {
     let remote_version = Some(addon.version.clone());
 
     if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
-        return Ok(TukuiUpdateSummary {
+        return Ok(TukuiUpdatePlan::UpToDate(TukuiUpdateSummary {
             addon_slug: addon.slug.clone(),
             addon_name: addon.name.clone(),
             parent_folder: canonical_parent_folder(&addon.slug).to_string(),
@@ -157,11 +261,11 @@ pub(crate) async fn update_tukui_addon(
             remote_version,
             updated: false,
             dry_run,
-        });
+        }));
     }
 
-    let bytes = download_tukui_release_bytes(&client, &addon).await?;
-    update_downloaded_tukui_addon(state_database, addon_dir, tracked, &addon, &bytes, dry_run)
+    ensure_tukui_supports_flavor(addon, flavor, "update")?;
+    Ok(TukuiUpdatePlan::Download)
 }
 
 fn build_tukui_client() -> Result<Client, String> {
@@ -261,7 +365,7 @@ fn install_downloaded_tukui_addon(
         extract_zip_archive(&zip_path, &extract_root)?;
 
         let layout = inspect_tukui_package_layout(&extract_root, addon)?;
-        let scanned = scan_addons_dir(&layout.source_root, GameFlavor::Retail)
+        let scanned = scan_addons_dir(&layout.source_root, GameFlavor::for_addons_dir(addon_dir))
             .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
@@ -335,7 +439,7 @@ fn update_downloaded_tukui_addon(
             ));
         }
 
-        let scanned = scan_addons_dir(&layout.source_root, GameFlavor::Retail)
+        let scanned = scan_addons_dir(&layout.source_root, GameFlavor::for_addons_dir(addon_dir))
             .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
@@ -623,7 +727,7 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+        let Some(relative_path) = safe_entry_relative_path(entry.name()) else {
             continue;
         };
         let output_path = destination.join(relative_path);
@@ -710,8 +814,9 @@ fn rollback_updated_folders(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_managed_tukui_record, canonical_install_folders, inspect_tukui_package_layout,
-        parse_tukui_target, update_downloaded_tukui_addon, versions_match,
+        TukuiAddon, TukuiUpdatePlan, build_managed_tukui_record, canonical_install_folders,
+        ensure_tukui_supports_flavor, inspect_tukui_package_layout, parse_tukui_target,
+        plan_tukui_update, update_downloaded_tukui_addon, versions_match,
     };
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -729,6 +834,163 @@ mod tests {
             zip.finish().expect("finish zip");
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn forever_requires_a_1_60_patch_entry() {
+        let mut addon: TukuiAddon = serde_json::from_str(
+            r#"{
+                "slug": "elvui",
+                "author": "Elv",
+                "name": "ElvUI",
+                "url": "https://api.tukui.org/v1/download/elvui/token",
+                "version": "15.08",
+                "web_url": "https://tukui.org/elvui",
+                "directories": ["ElvUI", "ElvUI_Libraries", "ElvUI_Options"],
+                "patch": ["12.0.5", "1.60.1", "5.5.4", "1.15.9"]
+            }"#,
+        )
+        .expect("parse feed entry");
+        assert!(
+            ensure_tukui_supports_flavor(&addon, lemonup_core::GameFlavor::Forever, "install")
+                .is_ok()
+        );
+
+        addon.patch = vec!["12.0.5".to_string(), "5.5.4".to_string()];
+        let error =
+            ensure_tukui_supports_flavor(&addon, lemonup_core::GameFlavor::Forever, "install")
+                .expect_err("missing 1.60 patch");
+        assert!(error.contains("ElvUI"));
+        assert!(error.contains("does not list WoW Forever support"));
+        assert!(
+            ensure_tukui_supports_flavor(&addon, lemonup_core::GameFlavor::Retail, "install")
+                .is_ok()
+        );
+    }
+
+    fn forever_addon_with_patch(patch: &[&str]) -> TukuiAddon {
+        let mut addon: TukuiAddon = serde_json::from_str(
+            r#"{"slug": "elvui", "author": "Elv", "name": "ElvUI", "url": "u",
+                "version": "15.08", "web_url": "w", "directories": ["ElvUI"]}"#,
+        )
+        .expect("parse feed entry");
+        addon.patch = patch.iter().map(|value| value.to_string()).collect();
+        addon
+    }
+
+    #[test]
+    fn forever_accepts_1_60_or_newer_1x_patches() {
+        let forever = lemonup_core::GameFlavor::Forever;
+        for patch in [
+            &["1.61.0"][..],
+            &["1.60"][..],
+            &["12.0.5", "1.75.2"][..],
+            &["not-a-patch", " 1.60.1 "][..],
+        ] {
+            assert!(
+                ensure_tukui_supports_flavor(&forever_addon_with_patch(patch), forever, "install")
+                    .is_ok(),
+                "{patch:?} should be accepted"
+            );
+        }
+
+        for patch in [
+            &["1.15.9"][..],
+            &["2.60.0", "12.0.5"][..],
+            &["1", "garbage", ""][..],
+            &[][..],
+        ] {
+            assert!(
+                ensure_tukui_supports_flavor(&forever_addon_with_patch(patch), forever, "install")
+                    .is_err(),
+                "{patch:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn tukui_patch_ignores_non_string_entries_and_values() {
+        let feed: Vec<TukuiAddon> = serde_json::from_str(
+            r#"[
+                {"slug": "tukui", "author": "Tukz", "name": "Tukui", "url": "u", "version": "1",
+                 "web_url": "w", "directories": ["Tukui"],
+                 "patch": ["12.0.5", 7, null, {"a": 1}, ["1.60.1"], "1.60.2", 1.5]},
+                {"slug": "elvui", "author": "Elv", "name": "ElvUI", "url": "u", "version": "2",
+                 "web_url": "w", "directories": ["ElvUI"], "patch": null},
+                {"slug": "weird", "author": "W", "name": "Weird", "url": "u", "version": "3",
+                 "web_url": "w", "directories": ["Weird"], "patch": {"unexpected": true}},
+                {"slug": "number", "author": "N", "name": "Number", "url": "u", "version": "4",
+                 "web_url": "w", "directories": ["Number"], "patch": 12}
+            ]"#,
+        )
+        .expect("a weird patch field must not break the feed");
+
+        assert_eq!(feed.len(), 4);
+        assert_eq!(
+            feed[0].patch,
+            vec!["12.0.5".to_string(), "1.60.2".to_string()]
+        );
+        assert!(feed[1].patch.is_empty());
+        assert!(feed[2].patch.is_empty());
+        assert!(feed[3].patch.is_empty());
+
+        let retail = lemonup_core::GameFlavor::Retail;
+        for addon in &feed {
+            assert!(ensure_tukui_supports_flavor(addon, retail, "install").is_ok());
+        }
+    }
+
+    #[test]
+    fn tukui_update_reports_up_to_date_before_forever_support_check() {
+        let forever = lemonup_core::GameFlavor::Forever;
+        let unsupported = forever_addon_with_patch(&["12.0.5"]);
+        let mut tracked = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        tracked.version = Some("v15.08".to_string());
+
+        match plan_tukui_update(&tracked, &unsupported, forever, false, false)
+            .expect("up to date must not error")
+        {
+            TukuiUpdatePlan::UpToDate(summary) => {
+                assert!(!summary.updated);
+                assert_eq!(summary.remote_version.as_deref(), Some("15.08"));
+            }
+            TukuiUpdatePlan::Download => panic!("expected up to date"),
+        }
+
+        // An outdated record still refuses before any download.
+        tracked.version = Some("15.01".to_string());
+        let error = plan_tukui_update(&tracked, &unsupported, forever, false, false)
+            .err()
+            .expect("unsupported addon must refuse");
+        assert!(error.contains("does not list WoW Forever support"));
+
+        // Force skips the up-to-date shortcut and must still be refused.
+        tracked.version = Some("15.08".to_string());
+        assert!(plan_tukui_update(&tracked, &unsupported, forever, true, false).is_err());
+
+        let supported = forever_addon_with_patch(&["1.61.0"]);
+        tracked.version = Some("15.01".to_string());
+        assert!(matches!(
+            plan_tukui_update(&tracked, &supported, forever, false, false),
+            Ok(TukuiUpdatePlan::Download)
+        ));
+    }
+
+    #[test]
+    fn tukui_patch_accepts_string_or_missing_field() {
+        let single: TukuiAddon = serde_json::from_str(
+            r#"{"slug": "tukui", "author": "Tukz", "name": "Tukui", "url": "u", "version": "1",
+                "web_url": "w", "directories": ["Tukui"], "patch": "1.60.1"}"#,
+        )
+        .expect("parse single patch");
+        assert_eq!(single.patch, vec!["1.60.1".to_string()]);
+
+        let missing: TukuiAddon = serde_json::from_str(
+            r#"{"slug": "tukui", "author": "Tukz", "name": "Tukui", "url": "u", "version": "1",
+                "web_url": "w", "directories": ["Tukui"]}"#,
+        )
+        .expect("parse missing patch");
+        assert!(missing.patch.is_empty());
     }
 
     #[test]
@@ -762,6 +1024,7 @@ mod tests {
             version: "1.0.0".to_string(),
             web_url: "https://tukui.org/elvui".to_string(),
             directories: canonical_install_folders("elvui"),
+            patch: Vec::new(),
         };
 
         let layout = inspect_tukui_package_layout(&root, &addon).expect("layout");
@@ -801,6 +1064,7 @@ mod tests {
             version: "15.09".to_string(),
             web_url: "https://tukui.org/elvui".to_string(),
             directories: canonical_install_folders("elvui"),
+            patch: Vec::new(),
         };
 
         let record =
@@ -847,6 +1111,7 @@ mod tests {
             version: "20.463".to_string(),
             web_url: "https://tukui.org/tukui".to_string(),
             directories: canonical_install_folders("tukui"),
+            patch: Vec::new(),
         };
 
         let bytes = build_zip(&[(

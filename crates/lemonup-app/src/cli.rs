@@ -8,8 +8,16 @@ use clap::{Parser, Subcommand};
 use lemonup_core::DEFAULT_PROFILE;
 
 #[derive(Debug, Parser)]
-#[command(name = "lemonup", about = "World of Warcraft addon manager")]
+#[command(
+    name = "lemonup",
+    about = "World of Warcraft addon manager",
+    version,
+    disable_version_flag = true
+)]
 pub struct Cli {
+    /// Print version
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
     #[arg(long, default_value = DEFAULT_PROFILE)]
     pub profile: String,
     #[arg(long)]
@@ -157,6 +165,14 @@ mod tests {
         Cli, Commands, parse_addon_selector, parse_github_install_target,
         parse_tukui_install_target, parse_wago_install_target, parse_wowinterface_install_target,
     };
+
+    #[test]
+    fn version_flags_display_version() {
+        for flag in ["--version", "-v"] {
+            let err = Cli::try_parse_from(["lemonup", flag]).expect_err("version flag exits");
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        }
+    }
 
     #[test]
     fn addon_selector_accepts_expected_characters() {

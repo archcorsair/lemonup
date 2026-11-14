@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -19,6 +19,34 @@ pub enum GameFlavor {
     Retail,
     Classic,
     Cata,
+    Forever,
+}
+
+impl GameFlavor {
+    /// Detects the client flavor from an AddOns path. The client folder is the AddOns
+    /// directory's grandparent (`<client>/Interface/AddOns`); only that component is considered
+    /// (`_retail_` or `_forever_`, case-insensitive), never other parts of the path.
+    pub fn detect_from_path(path: &Path) -> Option<Self> {
+        let rendered = path.to_string_lossy();
+        let client = rendered
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .rev()
+            .nth(2)?;
+        if client.eq_ignore_ascii_case("_retail_") {
+            Some(Self::Retail)
+        } else if client.eq_ignore_ascii_case("_forever_") {
+            Some(Self::Forever)
+        } else {
+            None
+        }
+    }
+
+    /// Flavor for a configured AddOns directory; paths without a known client folder
+    /// (for example test fixtures) are treated as retail.
+    pub fn for_addons_dir(path: &Path) -> Self {
+        Self::detect_from_path(path).unwrap_or(Self::Retail)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +160,68 @@ impl AddonRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddonRecord, OwnershipSource, SourceKind};
+    use std::path::Path;
+
+    use super::{AddonRecord, GameFlavor, OwnershipSource, SourceKind};
+
+    #[test]
+    fn detects_flavor_from_client_folder() {
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new(
+                "/Applications/World of Warcraft/_retail_/Interface/AddOns"
+            )),
+            Some(GameFlavor::Retail)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new(
+                "/Applications/World of Warcraft/_forever_/Interface/AddOns"
+            )),
+            Some(GameFlavor::Forever)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new(
+                r"D:\World of Warcraft\_FOREVER_\Interface\AddOns"
+            )),
+            Some(GameFlavor::Forever)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new(
+                r"D:\World of Warcraft\_Retail_\Interface\AddOns"
+            )),
+            Some(GameFlavor::Retail)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new(
+                "/Applications/World of Warcraft/_forever_/Interface/AddOns/"
+            )),
+            Some(GameFlavor::Forever)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new("/x/_retail_link/_forever_/Interface/AddOns")),
+            Some(GameFlavor::Forever)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new("/x/_retail_/stuff/_forever_/Interface/AddOns")),
+            Some(GameFlavor::Forever)
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new("/x/_forever_/stuff/Interface/AddOns")),
+            None
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new("/x/_retail_/Interface/AddOns/Sub")),
+            None
+        );
+        assert_eq!(
+            GameFlavor::detect_from_path(Path::new("/tmp/sandbox/Interface/AddOns")),
+            None
+        );
+        assert_eq!(GameFlavor::detect_from_path(Path::new("AddOns")), None);
+        assert_eq!(
+            GameFlavor::for_addons_dir(Path::new("/tmp/sandbox/Interface/AddOns")),
+            GameFlavor::Retail
+        );
+    }
 
     #[test]
     fn managed_empty_owned_folders_remain_authoritative() {

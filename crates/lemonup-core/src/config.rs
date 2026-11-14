@@ -18,17 +18,13 @@ pub struct AppConfig {
     pub schema_version: u32,
     pub addon_dir: Option<PathBuf>,
     pub user_agent: String,
-    pub max_concurrent: u8,
-    pub nerd_fonts: bool,
     pub check_interval_secs: u64,
     pub auto_check_enabled: bool,
     pub auto_check_interval_secs: u64,
     pub backup_wtf: bool,
     pub backup_retention: u16,
-    pub debug: bool,
     pub show_libs: bool,
     pub theme: ThemeMode,
-    pub terminal_progress: bool,
     pub wago_api_key: Option<String>,
 }
 
@@ -40,17 +36,13 @@ impl AppConfig {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             addon_dir: None,
             user_agent: "LemonUp/2 (+https://github.com/archcorsair/lemonup)".to_string(),
-            max_concurrent: 3,
-            nerd_fonts: true,
             check_interval_secs: 300,
             auto_check_enabled: true,
             auto_check_interval_secs: 3600,
             backup_wtf: true,
             backup_retention: 5,
-            debug: false,
             show_libs: false,
             theme: ThemeMode::Dark,
-            terminal_progress: true,
             wago_api_key: None,
         }
     }
@@ -121,7 +113,7 @@ mod tests {
 
         let mut config = AppConfig::new_unconfigured();
         config.theme = ThemeMode::Light;
-        config.debug = true;
+        config.show_libs = true;
         store.write_new_config(&config).expect("write config");
 
         let loaded = store.load().expect("load config");
@@ -144,6 +136,36 @@ mod tests {
                 assert_eq!(config, expected);
             }
             ConfigLoad::Missing(_) => panic!("partial config should load"),
+        }
+    }
+
+    #[test]
+    fn loads_config_with_removed_legacy_keys() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::new(path.clone());
+
+        std::fs::write(
+            &path,
+            "schema_version = 1\n\
+             user_agent = \"Custom/1\"\n\
+             max_concurrent = 5\n\
+             nerd_fonts = false\n\
+             terminal_progress = false\n\
+             debug = true\n\
+             backup_retention = 9\n\
+             theme = \"light\"\n",
+        )
+        .expect("write legacy config");
+
+        match store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => {
+                assert_eq!(config.user_agent, "Custom/1");
+                assert_eq!(config.backup_retention, 9);
+                assert_eq!(config.theme, ThemeMode::Light);
+                assert_eq!(config.schema_version, 1);
+            }
+            ConfigLoad::Missing(_) => panic!("legacy config should load"),
         }
     }
 }

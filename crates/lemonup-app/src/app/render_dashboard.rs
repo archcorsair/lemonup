@@ -110,7 +110,7 @@ impl App {
 
     pub(super) fn render_dashboard_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
         self.last_dashboard_list_area = Some(area);
-        if self.dashboard.rows.is_empty() {
+        if self.dashboard.items.is_empty() {
             let body = Paragraph::new(vec![
                 Line::from("No scanned addons yet."),
                 Line::from(format!("Scan state: {}", self.scan_status_label())),
@@ -161,6 +161,15 @@ impl App {
             })
             .collect::<Vec<_>>();
 
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.border))
+            .title(Span::styled(
+                self.dashboard_list_title(),
+                Style::default()
+                    .fg(self.ui_theme.panel_title)
+                    .add_modifier(Modifier::BOLD),
+            ));
         let table = Table::new(
             rows,
             [
@@ -171,20 +180,6 @@ impl App {
             ],
         )
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.ui_theme.border))
-                .title(Span::styled(
-                    format!(
-                        "Addons ({} selected)",
-                        self.dashboard.selected_parent_count()
-                    ),
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
         .column_spacing(1)
         .row_highlight_style(
             Style::default()
@@ -192,7 +187,80 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         );
 
-        frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
+        if !self.dashboard.filter_bar_visible() {
+            frame.render_stateful_widget(table.block(block), area, &mut self.dashboard.list_state);
+            return;
+        }
+
+        // Filter bar takes the first inner line; `dashboard_selection_for_pointer`
+        // accounts for this extra line when mapping clicks to rows.
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [filter_area, table_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Fill(1)])
+            .areas(inner);
+        frame.render_widget(Paragraph::new(self.dashboard_filter_line()), filter_area);
+
+        if self.dashboard.rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        "No addons match '{}'",
+                        truncate_text(self.dashboard.filter_query(), 40)
+                    ),
+                    Style::default().fg(self.ui_theme.muted),
+                ))),
+                table_area,
+            );
+            return;
+        }
+
+        frame.render_stateful_widget(table, table_area, &mut self.dashboard.list_state);
+    }
+
+    pub(super) fn dashboard_list_title(&self) -> String {
+        let selected = self.dashboard.selected_parent_count();
+        if self.dashboard.has_filter() {
+            format!(
+                "Addons ({} of {} shown, {} selected)",
+                self.dashboard.visible_parent_count(),
+                self.dashboard.items.len(),
+                selected
+            )
+        } else {
+            format!("Addons ({selected} selected)")
+        }
+    }
+
+    pub(super) fn dashboard_filter_line(&self) -> Line<'static> {
+        let query = self.dashboard.filter_query().to_string();
+        let mut spans = vec![Span::styled(
+            "Filter: ",
+            Style::default().fg(self.ui_theme.muted),
+        )];
+        if self.dashboard.filter_editing() {
+            spans.push(Span::styled(
+                query,
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                "▌",
+                Style::default().fg(self.ui_theme.brand_gold),
+            ));
+        } else {
+            spans.push(Span::styled(
+                query,
+                Style::default().fg(self.ui_theme.muted),
+            ));
+            spans.push(Span::styled(
+                "  / edit · esc clear",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+        }
+        Line::from(spans)
     }
 
     pub(super) fn dashboard_sort_header(&self, column: DashboardSortColumn) -> Line<'static> {

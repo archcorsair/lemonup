@@ -9,7 +9,7 @@ This is the current product contract for the Rust workspace now that v1 is retir
 | Install from TukUI / ElvUI | Done | Canonical TukUI coverage |
 | Install from WoWInterface | Done | CLI + tracked update/check |
 | Search + install from Wago | Done | Unified install/search overlay plus CLI |
-| Scan installed addons | Done | Retail scan plus reconcile |
+| Scan installed addons | Done | Retail and WoW Forever scan plus reconcile |
 | Update one / selected / all addons | Done | CLI + TUI overview actions |
 | Remove addon | Done | Soft-delete plus undo |
 | Owned-folder / subfolder tracking | Done | Managed ownership persisted in state |
@@ -19,6 +19,7 @@ This is the current product contract for the Rust workspace now that v1 is retir
 | Restore WTF backup | Done | CLI + TUI restore with rollback |
 | Auto-check / background status | Done | Background freshness-aware dashboard refresh |
 | CLI updater | Done | `check`, `update`, `update-all`, import/export, restore |
+| WoW Forever | Done | `_forever_` AddOns folders: flavor detected from the path, Forever/Camelot then Mainline TOC selection, Wago `game_version=forever`, TukUI requires a 1.60.x patch, WoWInterface installs warn; one folder per profile. Not yet verified against a live Forever install |
 | WeakAuras | Out of scope | Separate product work |
 | CurseForge | Out of scope | Not supported |
 

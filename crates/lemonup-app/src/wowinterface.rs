@@ -11,6 +11,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use zip::ZipArchive;
 
+use crate::archive::safe_entry_relative_path;
+
 const API_BASE: &str = "https://api.mmoui.com/v3/game/WOW/filedetails";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,7 @@ pub(crate) struct WowinterfaceInstallSummary {
     pub(crate) installed_folders: Vec<String>,
     pub(crate) version: Option<String>,
     pub(crate) dry_run: bool,
+    pub(crate) warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,12 +36,23 @@ pub(crate) struct WowinterfaceUpdateSummary {
     pub(crate) remote_version: Option<String>,
     pub(crate) updated: bool,
     pub(crate) dry_run: bool,
+    pub(crate) warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WowinterfaceRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
+}
+
+/// WoWInterface has no WoW Forever category, so its files are not tagged for that client.
+/// Installs into a Forever AddOns folder are allowed but carry this warning.
+pub(crate) fn forever_install_warning(addon_dir: &Path, addon_name: &str) -> Option<String> {
+    (GameFlavor::for_addons_dir(addon_dir) == GameFlavor::Forever).then(|| {
+        format!(
+            "WoWInterface does not tag WoW Forever builds; the files for '{addon_name}' may target another game version"
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -152,6 +166,7 @@ pub(crate) async fn update_wowinterface_addon(
             remote_version,
             updated: false,
             dry_run,
+            warning: None,
         });
     }
 
@@ -247,8 +262,11 @@ fn install_downloaded_wowinterface_addon(
         let target_name = addon.ui_file_name.trim_end_matches(".zip");
         let parent_folder =
             determine_parent_folder(&extracted.folders, target_name, Some(&addon.ui_name))?;
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == parent_folder)
@@ -267,6 +285,7 @@ fn install_downloaded_wowinterface_addon(
                 installed_folders: extracted.folders,
                 version: Some(addon.ui_version.clone()),
                 dry_run: true,
+                warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
 
@@ -292,6 +311,7 @@ fn install_downloaded_wowinterface_addon(
             installed_folders: extracted.folders,
             version: Some(addon.ui_version.clone()),
             dry_run: false,
+            warning: forever_install_warning(addon_dir, &addon.ui_name),
         })
     })();
 
@@ -328,8 +348,11 @@ fn update_downloaded_wowinterface_addon(
             ));
         }
 
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == tracked.folder)
@@ -356,6 +379,7 @@ fn update_downloaded_wowinterface_addon(
                 remote_version: Some(addon.ui_version.clone()),
                 updated: true,
                 dry_run: true,
+                warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
 
@@ -392,6 +416,7 @@ fn update_downloaded_wowinterface_addon(
             remote_version: Some(addon.ui_version.clone()),
             updated: true,
             dry_run: false,
+            warning: forever_install_warning(addon_dir, &addon.ui_name),
         })
     })();
 
@@ -712,7 +737,7 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+        let Some(relative_path) = safe_entry_relative_path(entry.name()) else {
             continue;
         };
         let output_path = destination.join(relative_path);
@@ -800,8 +825,8 @@ fn rollback_updated_folders(
 mod tests {
     use super::{
         WowinterfaceResponse, build_managed_wowinterface_record, determine_parent_folder,
-        parse_wowinterface_id_from_url, parse_wowinterface_target,
-        update_downloaded_wowinterface_addon, versions_match,
+        install_downloaded_wowinterface_addon, parse_wowinterface_id_from_url,
+        parse_wowinterface_target, update_downloaded_wowinterface_addon, versions_match,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -966,12 +991,52 @@ mod tests {
         .expect("update");
 
         assert!(summary.updated);
+        assert_eq!(summary.warning, None);
         let stored = database
             .get_addon_by_folder("ElvUI_WindTools")
             .expect("get addon")
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("4.16"));
         assert_eq!(stored.source, SourceKind::WowInterface);
+    }
+
+    #[test]
+    fn forever_install_warns_that_wowinterface_does_not_tag_forever_builds() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let addon = super::WowinterfaceAddon {
+            uid: "25687".to_string(),
+            ui_name: "ElvUI_WindTools".to_string(),
+            ui_version: "4.16".to_string(),
+            ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=25687".to_string(),
+            ui_author_name: "fang2hou".to_string(),
+            ui_file_name: "ElvUI_WindTools-4.16.zip".to_string(),
+        };
+        let bytes = build_zip(&[(
+            "ElvUI_WindTools/ElvUI_WindTools.toc",
+            "## Title: ElvUI WindTools\n## Version: 4.16\n## Interface: 120105, 16001\n",
+        )]);
+
+        let summary =
+            install_downloaded_wowinterface_addon(&mut database, &addon_dir, &addon, &bytes, false)
+                .expect("install is allowed on Forever");
+
+        assert!(addon_dir.join("ElvUI_WindTools").exists());
+        let warning = summary.warning.expect("forever warning");
+        assert!(warning.contains("WoWInterface does not tag WoW Forever builds"));
+        assert!(warning.contains("ElvUI_WindTools"));
+        let stored = database
+            .get_addon_by_folder("ElvUI_WindTools")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.flavor, lemonup_core::GameFlavor::Forever);
     }
 
     #[test]

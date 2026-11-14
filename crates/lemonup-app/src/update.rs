@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use lemonup_core::{AddonRecord, LemonupError, SourceKind, StateDatabase, UpdateStatus};
+use lemonup_core::{
+    AddonRecord, GameFlavor, LemonupError, SourceKind, StateDatabase, UpdateStatus,
+};
 #[cfg(test)]
-use lemonup_core::{GameFlavor, ScannedAddon, scan_addons_dir};
+use lemonup_core::{ScannedAddon, scan_addons_dir};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,10 +87,17 @@ pub(crate) async fn refresh_live_update_checks(
     database: &mut StateDatabase,
     selectors: &[String],
     wago_api_key: Option<&str>,
+    addon_dir: Option<&Path>,
 ) -> Result<Vec<CheckResult>, LemonupError> {
-    refresh_live_update_checks_with(database, selectors, wago_api_key, |addon, api_key| async move {
-        crate::wago::fetch_wago_remote_version(&addon, &api_key).await
-    })
+    refresh_live_update_checks_with(
+        database,
+        selectors,
+        wago_api_key,
+        addon_dir,
+        |addon, api_key| async move {
+            crate::wago::fetch_wago_remote_version(&addon, &api_key).await
+        },
+    )
     .await
 }
 
@@ -96,6 +105,7 @@ async fn refresh_live_update_checks_with<F, Fut>(
     database: &mut StateDatabase,
     selectors: &[String],
     wago_api_key: Option<&str>,
+    addon_dir: Option<&Path>,
     fetch_wago_remote_version: F,
 ) -> Result<Vec<CheckResult>, LemonupError>
 where
@@ -131,7 +141,14 @@ where
                     continue;
                 };
 
-                match fetch_wago_remote_version(addon.clone(), api_key.to_string()).await {
+                // Updates query Wago with the AddOns folder's flavor, so checks must too; the
+                // stored record flavor is only a fallback when no AddOns dir is known.
+                let mut query_addon = addon.clone();
+                if let Some(addon_dir) = addon_dir {
+                    query_addon.flavor = GameFlavor::for_addons_dir(addon_dir);
+                }
+
+                match fetch_wago_remote_version(query_addon, api_key.to_string()).await {
                     Ok(remote) => {
                         let mut refreshed = addon.clone();
                         refreshed.remote_version = remote.version;
@@ -407,7 +424,7 @@ pub(crate) async fn apply_live_updates(
                             status: LiveUpdateStatus::Updated,
                             previous_version: result.previous_version,
                             remote_version: result.remote_version,
-                            message: None,
+                            message: result.warning,
                         });
                     }
                     Ok(result) => {
@@ -599,7 +616,7 @@ pub(crate) fn refresh_managed_update_state_for_selectors(
     selectors: &[String],
     dry_run: bool,
 ) -> lemonup_core::Result<UpdateRefreshSummary> {
-    let scanned = scan_addons_dir(addon_dir, GameFlavor::Retail)?;
+    let scanned = scan_addons_dir(addon_dir, GameFlavor::for_addons_dir(addon_dir))?;
     let scanned_by_folder = scanned
         .iter()
         .map(|addon| (addon.folder.as_str(), addon))
@@ -766,6 +783,7 @@ mod tests {
             &mut database,
             &[],
             Some("fake-key"),
+            None,
             |tracked, api_key| {
                 let tracked = tracked.clone();
                 async move {
@@ -794,6 +812,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_checks_query_wago_with_the_addon_dir_flavor() {
+        use lemonup_core::GameFlavor;
+
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let forever_dir = temp
+            .path()
+            .join("World of Warcraft")
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.flavor = GameFlavor::Retail;
+        addon.version = Some("5.20.0".to_string());
+        addon.source_url = Some("https://addons.wago.io/addons/VBNBxKx5".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        let fetch = |tracked: AddonRecord, _api_key: String| async move {
+            let url = crate::wago::addon_details_url("VBNBxKx5", tracked.flavor);
+            Ok(crate::wago::WagoRemoteVersion {
+                source_url: Some(url),
+                version: Some("5.21.1".to_string()),
+            })
+        };
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            Some(&forever_dir),
+            fetch,
+        )
+        .await
+        .expect("refresh checks");
+        assert_eq!(checks.len(), 1);
+        let refreshed = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(
+            refreshed
+                .source_url
+                .as_deref()
+                .is_some_and(|url| url.ends_with("game_version=forever")),
+            "checks under a _forever_ dir must query game_version=forever: {:?}",
+            refreshed.source_url
+        );
+        // The stored record flavor is not rewritten by the check.
+        assert_eq!(refreshed.flavor, GameFlavor::Retail);
+
+        // Without an AddOns dir the stored record flavor is used.
+        refresh_live_update_checks_with(&mut database, &[], Some("fake-key"), None, fetch)
+            .await
+            .expect("refresh checks");
+        let refreshed = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(
+            refreshed
+                .source_url
+                .as_deref()
+                .is_some_and(|url| url.ends_with("game_version=retail"))
+        );
+    }
+
+    #[tokio::test]
     async fn live_checks_report_missing_wago_api_key_without_fetching() {
         let temp = tempdir().expect("tempdir");
         let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
@@ -806,6 +892,7 @@ mod tests {
         let checks = refresh_live_update_checks_with(
             &mut database,
             &[],
+            None,
             None,
             |_tracked, _api_key| async move {
                 panic!("fetcher should not run without an API key");
@@ -841,6 +928,7 @@ mod tests {
             &mut database,
             &[],
             Some("unused"),
+            None,
             |_tracked, _api_key| async move {
                 panic!("Wago fetcher should not run for non-Wago sources");
                 #[allow(unreachable_code)]

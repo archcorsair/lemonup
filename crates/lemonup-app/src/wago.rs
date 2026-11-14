@@ -13,6 +13,8 @@ use tempfile::{Builder as TempDirBuilder, TempDir};
 use time::OffsetDateTime;
 use zip::ZipArchive;
 
+use crate::archive::safe_entry_relative_path;
+
 const API_BASE: &str = "https://addons.wago.io";
 const EXTERNAL_PATH: &str = "/api/external";
 
@@ -292,8 +294,15 @@ pub(crate) async fn install_wago_addon_with_replace(
 ) -> Result<WagoInstallSummary, String> {
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
-    let resolved =
-        resolve_wago_release(&client, &addon_id, api_key, Some(preferred_stability)).await?;
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+    let resolved = resolve_wago_release(
+        &client,
+        &addon_id,
+        api_key,
+        flavor,
+        Some(preferred_stability),
+    )
+    .await?;
     let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
 
     install_downloaded_wago_addon(
@@ -310,6 +319,7 @@ pub(crate) async fn install_wago_addon_with_replace(
 pub(crate) async fn search_wago_addons(
     query: &str,
     api_key: &str,
+    flavor: GameFlavor,
 ) -> Result<Vec<WagoSearchResult>, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -317,7 +327,7 @@ pub(crate) async fn search_wago_addons(
     }
 
     let client = build_wago_client()?;
-    let results = fetch_addon_search_results(&client, trimmed, api_key).await?;
+    let results = fetch_addon_search_results(&client, trimmed, api_key, flavor).await?;
     Ok(results.into_iter().map(Into::into).collect())
 }
 
@@ -330,8 +340,15 @@ pub(crate) async fn inspect_wago_install_target(
 ) -> Result<WagoInstallInspection, String> {
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
-    let resolved =
-        resolve_wago_release(&client, &addon_id, api_key, Some(preferred_stability)).await?;
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+    let resolved = resolve_wago_release(
+        &client,
+        &addon_id,
+        api_key,
+        flavor,
+        Some(preferred_stability),
+    )
+    .await?;
     let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
 
     inspect_downloaded_wago_addon(
@@ -359,7 +376,7 @@ pub(crate) async fn fetch_wago_remote_version(
         })?;
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
-    let resolved = resolve_wago_release(&client, &addon_id, api_key, None).await?;
+    let resolved = resolve_wago_release(&client, &addon_id, api_key, addon.flavor, None).await?;
 
     Ok(WagoRemoteVersion {
         source_url: Some(
@@ -403,7 +420,8 @@ pub(crate) async fn update_wago_addon(
         })?;
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
-    let resolved = resolve_wago_release(&client, &addon_id, api_key, None).await?;
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+    let resolved = resolve_wago_release(&client, &addon_id, api_key, flavor, None).await?;
     let remote_version = resolved.version.clone();
 
     if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
@@ -456,8 +474,11 @@ fn install_downloaded_wago_addon(
 
         let extracted = discover_extracted_folders(&extract_root)?;
         let parent_folder = determine_parent_folder(&extracted.folders, &addon.display_name)?;
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == parent_folder)
@@ -598,8 +619,11 @@ fn update_downloaded_wago_addon(
             ));
         }
 
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == tracked.folder)
@@ -747,9 +771,10 @@ async fn resolve_wago_release(
     client: &Client,
     addon_id: &str,
     api_key: &str,
+    flavor: GameFlavor,
     preferred_stability: Option<WagoStability>,
 ) -> Result<WagoResolvedRelease, String> {
-    let addon = fetch_addon_details(client, addon_id, api_key).await?;
+    let addon = fetch_addon_details(client, addon_id, api_key, flavor).await?;
     let effective_stability = addon.best_available_stability().ok_or_else(|| {
         format!(
             "no stable, beta, or alpha release is available for Wago addon '{}'",
@@ -801,12 +826,42 @@ async fn download_wago_release_bytes(
         .map_err(|error| error.to_string())
 }
 
+/// Wago `game_version` key for a client flavor (`forever` for WoW Forever installs).
+fn wago_game_version(flavor: GameFlavor) -> &'static str {
+    match flavor {
+        GameFlavor::Retail => "retail",
+        GameFlavor::Forever => "forever",
+        GameFlavor::Classic => "classic",
+        GameFlavor::Cata => "cata",
+    }
+}
+
+pub(crate) fn addon_details_url(addon_id: &str, flavor: GameFlavor) -> String {
+    format!(
+        "{API_BASE}{EXTERNAL_PATH}/addons/{addon_id}?game_version={}",
+        wago_game_version(flavor)
+    )
+}
+
+fn addon_search_url(query: &str, flavor: GameFlavor) -> Result<Url, String> {
+    Url::parse_with_params(
+        &format!("{API_BASE}{EXTERNAL_PATH}/addons/_search"),
+        [
+            ("query", query),
+            ("game_version", wago_game_version(flavor)),
+            ("stability", "stable"),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
 async fn fetch_addon_details(
     client: &Client,
     addon_id: &str,
     api_key: &str,
+    flavor: GameFlavor,
 ) -> Result<WagoAddonSummary, String> {
-    let url = format!("{API_BASE}{EXTERNAL_PATH}/addons/{addon_id}?game_version=retail");
+    let url = addon_details_url(addon_id, flavor);
     let response = client
         .get(url)
         .bearer_auth(api_key)
@@ -828,16 +883,9 @@ async fn fetch_addon_search_results(
     client: &Client,
     query: &str,
     api_key: &str,
+    flavor: GameFlavor,
 ) -> Result<Vec<WagoAddonSummary>, String> {
-    let url = Url::parse_with_params(
-        &format!("{API_BASE}{EXTERNAL_PATH}/addons/_search"),
-        [
-            ("query", query),
-            ("game_version", "retail"),
-            ("stability", "stable"),
-        ],
-    )
-    .map_err(|error| error.to_string())?;
+    let url = addon_search_url(query, flavor)?;
     let response = client
         .get(url)
         .bearer_auth(api_key)
@@ -1061,7 +1109,7 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+        let Some(relative_path) = safe_entry_relative_path(entry.name()) else {
             continue;
         };
         let output_path = destination.join(relative_path);
@@ -1190,9 +1238,10 @@ mod tests {
 
     use super::{
         WagoAddonDetailsResponse, WagoAddonSummary, WagoAddonSummaryRaw, WagoRelease, WagoReleases,
-        WagoSearchResult, WagoStability, determine_parent_folder, discover_extracted_folders,
-        extract_zip_archive, inspect_downloaded_wago_addon, install_downloaded_wago_addon,
-        parse_wago_target, release_version, update_downloaded_wago_addon, versions_match,
+        WagoSearchResult, WagoStability, addon_details_url, addon_search_url,
+        determine_parent_folder, discover_extracted_folders, extract_zip_archive,
+        inspect_downloaded_wago_addon, install_downloaded_wago_addon, parse_wago_target,
+        release_version, update_downloaded_wago_addon, versions_match,
     };
     use lemonup_core::{GameFlavor, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -1233,6 +1282,27 @@ mod tests {
         }
 
         writer.finish().expect("finish zip").into_inner()
+    }
+
+    #[test]
+    fn wago_urls_carry_game_version_for_flavor() {
+        assert!(
+            addon_details_url("details", GameFlavor::Forever).ends_with("?game_version=forever")
+        );
+        assert!(addon_details_url("details", GameFlavor::Retail).ends_with("?game_version=retail"));
+
+        let forever = addon_search_url("details", GameFlavor::Forever).expect("search url");
+        assert!(
+            forever
+                .query_pairs()
+                .any(|(key, value)| key == "game_version" && value == "forever")
+        );
+        let retail = addon_search_url("details", GameFlavor::Retail).expect("search url");
+        assert!(
+            retail
+                .query_pairs()
+                .any(|(key, value)| key == "game_version" && value == "retail")
+        );
     }
 
     #[test]

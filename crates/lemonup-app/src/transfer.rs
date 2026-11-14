@@ -13,6 +13,7 @@ use crate::wowinterface::install_wowinterface_addon;
 pub(crate) struct TransferInstallSummary {
     pub installed: usize,
     pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 pub(crate) fn collect_existing_import_folders(
@@ -55,11 +56,15 @@ pub(crate) async fn install_transfer_addons(
     let mut summary = TransferInstallSummary {
         installed: 0,
         errors: Vec::new(),
+        warnings: Vec::new(),
     };
 
     for addon in &analysis.to_install {
         match install_transfer_addon(database, addon_dir, addon, wago_api_key).await {
-            Ok(()) => summary.installed += 1,
+            Ok(warning) => {
+                summary.installed += 1;
+                summary.warnings.extend(warning);
+            }
             Err(error) => summary.errors.push(format!("{}: {error}", addon.name)),
         }
     }
@@ -72,7 +77,7 @@ async fn install_transfer_addon(
     addon_dir: &Path,
     addon: &TransferAddon,
     wago_api_key: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let Some(url) = addon.url.as_deref() else {
         return Err("missing install URL".to_string());
     };
@@ -80,14 +85,14 @@ async fn install_transfer_addon(
     match addon.source {
         TransferSourceKind::GitHub => install_github_addon(database, addon_dir, url, false)
             .await
-            .map(|_| ()),
+            .map(|_| None),
         TransferSourceKind::Tukui => install_tukui_addon(database, addon_dir, url, false)
             .await
-            .map(|_| ()),
+            .map(|_| None),
         TransferSourceKind::Wowinterface => {
             install_wowinterface_addon(database, addon_dir, url, false)
                 .await
-                .map(|_| ())
+                .map(|summary| summary.warning)
         }
         TransferSourceKind::Wago => {
             let Some(api_key) = wago_api_key else {
@@ -102,7 +107,7 @@ async fn install_transfer_addon(
                 false,
             )
             .await
-            .map(|_| ())
+            .map(|_| None)
         }
         TransferSourceKind::Manual => Err("manual addon exports are not reinstallable".to_string()),
     }

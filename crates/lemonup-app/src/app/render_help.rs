@@ -114,6 +114,8 @@ impl App {
                     vec![
                         self.help_entry("↑/↓", "Move through addons"),
                         self.help_entry("enter", "Open inspect"),
+                        self.help_entry("/", "Filter installed addons (enter keeps it)"),
+                        self.help_entry("esc", "Clear the filter, then the selection"),
                     ],
                 ),
                 (

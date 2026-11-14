@@ -14,7 +14,7 @@
 
 ## Current Scope
 
-- Retail support
+- Retail and WoW Forever (`_forever_`) support, one AddOns folder per profile (use `--profile` to manage both)
 - GitHub, TukUI, WoWInterface, and Wago sources
 - TUI + CLI workflows
 - Background update checks

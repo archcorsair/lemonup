@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 
 use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, OwnershipSource, SourceKind};
 use crate::error::Result;
-use crate::scan::{ScanSummary, ScannedAddon};
+use crate::scan::{GroupingGuard, ScanSummary, ScannedAddon};
 
 pub struct StateDatabase {
     connection: Connection,
@@ -140,6 +140,24 @@ impl StateDatabase {
             .filter(|addon| active_authoritative_parents.contains(&addon.folder))
             .flat_map(|addon| addon.owned_folders.iter().map(|child| child.name.clone()))
             .collect::<HashSet<_>>();
+        // Folders the scan saw on disk, whether as top-level entries or grouped children.
+        let on_disk_folders = scanned_addons
+            .iter()
+            .flat_map(|addon| {
+                std::iter::once(addon.folder.clone())
+                    .chain(addon.owned_folders.iter().map(|owned| owned.name.clone()))
+            })
+            .collect::<HashSet<_>>();
+        // A tracked non-manual row whose folder is still on disk is never deleted here: at worst
+        // it is kept as its own top-level row.
+        let protected_rows = existing_addons
+            .iter()
+            .filter(|addon| {
+                addon.source != SourceKind::Manual && on_disk_folders.contains(&addon.folder)
+            })
+            .map(|addon| addon.folder.clone())
+            .collect::<HashSet<_>>();
+        let grouping_guard = GroupingGuard::from_tracked(&existing_addons);
         let mut visible_parent_folders = HashSet::new();
         let mut represented_child_folders = HashSet::new();
 
@@ -148,10 +166,21 @@ impl StateDatabase {
                 continue;
             }
 
+            let preserve_owned_folders =
+                active_authoritative_parents.contains(&scanned_addon.folder);
+            // Defense in depth for scans grouped without tracked-row knowledge: drop inferred
+            // children that the tracked rows say must stay standalone.
+            let mut guarded_addon = scanned_addon.clone();
+            if !preserve_owned_folders {
+                guarded_addon
+                    .owned_folders
+                    .retain(|owned| grouping_guard.may_group(&scanned_addon.folder, &owned.name));
+            }
+
             let merged = merge_scanned_addon(
-                scanned_addon,
+                &guarded_addon,
                 existing_by_folder.get(&scanned_addon.folder),
-                active_authoritative_parents.contains(&scanned_addon.folder),
+                preserve_owned_folders,
             );
             visible_parent_folders.insert(merged.folder.clone());
             represented_child_folders.extend(
@@ -180,6 +209,7 @@ impl StateDatabase {
             .iter()
             .cloned()
             .chain(represented_child_rows.iter().cloned())
+            .filter(|folder| !protected_rows.contains(folder))
             .collect::<HashSet<_>>();
         let removed_existing_rows = removed_folders
             .iter()
@@ -623,6 +653,7 @@ fn parse_flavor(value: &str) -> rusqlite::Result<GameFlavor> {
         "retail" => Ok(GameFlavor::Retail),
         "classic" => Ok(GameFlavor::Classic),
         "cata" => Ok(GameFlavor::Cata),
+        "forever" => Ok(GameFlavor::Forever),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -658,6 +689,7 @@ fn serialize_flavor(value: GameFlavor) -> &'static str {
         GameFlavor::Retail => "retail",
         GameFlavor::Classic => "classic",
         GameFlavor::Cata => "cata",
+        GameFlavor::Forever => "forever",
     }
 }
 
@@ -702,6 +734,20 @@ mod tests {
         assert_eq!(stored[0].owned_folders.len(), 2);
         assert!(stored[0].has_authoritative_owned_folders());
         assert_eq!(stored[0].required_deps, vec!["LibStub".to_string()]);
+    }
+
+    #[test]
+    fn round_trips_forever_flavor() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut addon = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        addon.flavor = GameFlavor::Forever;
+        database.upsert_addon(&addon).expect("upsert");
+
+        let stored = database.list_addons().expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].flavor, GameFlavor::Forever);
     }
 
     #[test]
@@ -1310,5 +1356,253 @@ mod tests {
             .expect("addon exists");
         assert!(stored.has_authoritative_owned_folders());
         assert!(stored.owned_folders.is_empty());
+    }
+
+    fn write_addon_folders(addons: &std::path::Path, folders: &[&str]) {
+        for folder in folders {
+            let folder_path = addons.join(folder);
+            std::fs::create_dir_all(&folder_path).expect("create addon dir");
+            std::fs::write(
+                folder_path.join(format!("{folder}.toc")),
+                format!("## Title: {folder}\n## Version: 1.0"),
+            )
+            .expect("write toc");
+        }
+    }
+
+    fn seed_elvui_with_plugins(database: &StateDatabase) {
+        let mut elvui = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        elvui.source_url = Some("https://tukui.org/elvui".to_string());
+        elvui.set_managed_owned_folders(vec![
+            OwnedFolder {
+                name: "ElvUI_Libraries".to_string(),
+            },
+            OwnedFolder {
+                name: "ElvUI_Options".to_string(),
+            },
+        ]);
+        database.upsert_addon(&elvui).expect("seed elvui");
+
+        let mut fct = AddonRecord::new("ElvUI FCT", "ElvUI_FCT", SourceKind::GitHub);
+        fct.source_url = Some("https://github.com/example/ElvUI_FCT".to_string());
+        fct.version = Some("2.0.0".to_string());
+        database.upsert_addon(&fct).expect("seed fct");
+
+        let mut windtools = AddonRecord::new(
+            "ElvUI WindTools",
+            "ElvUI_WindTools",
+            SourceKind::WowInterface,
+        );
+        windtools.source_url = Some("https://www.wowinterface.com/downloads/info1".to_string());
+        windtools.version = Some("3.0.0".to_string());
+        database.upsert_addon(&windtools).expect("seed windtools");
+    }
+
+    fn assert_elvui_plugins_survive(database: &StateDatabase) {
+        let fct = database
+            .get_addon_by_folder("ElvUI_FCT")
+            .expect("get fct")
+            .expect("fct row survives");
+        assert_eq!(fct.source, SourceKind::GitHub);
+        assert_eq!(
+            fct.source_url.as_deref(),
+            Some("https://github.com/example/ElvUI_FCT")
+        );
+
+        let windtools = database
+            .get_addon_by_folder("ElvUI_WindTools")
+            .expect("get windtools")
+            .expect("windtools row survives");
+        assert_eq!(windtools.source, SourceKind::WowInterface);
+        assert_eq!(
+            windtools.source_url.as_deref(),
+            Some("https://www.wowinterface.com/downloads/info1")
+        );
+
+        let elvui = database
+            .get_addon_by_folder("ElvUI")
+            .expect("get elvui")
+            .expect("elvui exists");
+        assert!(elvui.has_authoritative_owned_folders());
+        assert_eq!(
+            elvui
+                .owned_folders
+                .iter()
+                .map(|owned| owned.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ElvUI_Libraries", "ElvUI_Options"]
+        );
+        assert!(
+            database
+                .get_addon_by_folder("ElvUI_Libraries")
+                .expect("get libraries")
+                .is_none()
+        );
+        assert!(
+            database
+                .get_addon_by_folder("ElvUI_Options")
+                .expect("get options")
+                .is_none()
+        );
+    }
+
+    const ELVUI_TREE: [&str; 5] = [
+        "ElvUI",
+        "ElvUI_Libraries",
+        "ElvUI_Options",
+        "ElvUI_FCT",
+        "ElvUI_WindTools",
+    ];
+
+    #[test]
+    fn reconcile_keeps_separately_tracked_elvui_plugins() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        write_addon_folders(&addons, &ELVUI_TREE);
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        seed_elvui_with_plugins(&database);
+
+        let tracked = database.list_addons().expect("list tracked");
+        let scanned =
+            crate::scan::scan_addons_dir_with_tracked(&addons, GameFlavor::Retail, &tracked)
+                .expect("scan addons");
+        let summary = database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile");
+
+        assert_eq!(summary.removed_addons, 0);
+        assert_elvui_plugins_survive(&database);
+        let fct = database
+            .get_addon_by_folder("ElvUI_FCT")
+            .expect("get fct")
+            .expect("fct exists");
+        assert_eq!(fct.version.as_deref(), Some("1.0"));
+        assert!(fct.owned_folders.is_empty());
+        assert_eq!(database.list_addons().expect("list").len(), 3);
+    }
+
+    #[test]
+    fn reconcile_never_deletes_tracked_rows_from_an_unguarded_scan() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        write_addon_folders(&addons, &ELVUI_TREE);
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        seed_elvui_with_plugins(&database);
+
+        // The unguarded heuristic folds every ElvUI_* sibling under ElvUI.
+        let scanned =
+            crate::scan::scan_addons_dir(&addons, GameFlavor::Retail).expect("scan addons");
+        assert_eq!(scanned.len(), 1);
+        let summary = database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile");
+
+        assert_eq!(summary.removed_addons, 0);
+        assert_elvui_plugins_survive(&database);
+    }
+
+    #[test]
+    fn reconcile_drops_tracked_children_from_unguarded_inferred_groups() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        write_addon_folders(&addons, &["Foo", "Foo_Plugin", "Foo_Options"]);
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut plugin = AddonRecord::new("Foo Plugin", "Foo_Plugin", SourceKind::GitHub);
+        plugin.source_url = Some("https://github.com/example/Foo_Plugin".to_string());
+        database.upsert_addon(&plugin).expect("seed plugin");
+
+        let scanned =
+            crate::scan::scan_addons_dir(&addons, GameFlavor::Retail).expect("scan addons");
+        database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile");
+
+        let foo = database
+            .get_addon_by_folder("Foo")
+            .expect("get foo")
+            .expect("foo exists");
+        assert_eq!(
+            foo.owned_folders
+                .iter()
+                .map(|owned| owned.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Foo_Options"]
+        );
+        let plugin = database
+            .get_addon_by_folder("Foo_Plugin")
+            .expect("get plugin")
+            .expect("plugin survives");
+        assert_eq!(plugin.source, SourceKind::GitHub);
+        assert_eq!(
+            plugin.source_url.as_deref(),
+            Some("https://github.com/example/Foo_Plugin")
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_untracked_sibling_of_authoritative_parent_as_manual_row() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        write_addon_folders(&addons, &["Parent", "Parent_Options", "Parent_Extra"]);
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut parent = AddonRecord::new("Parent", "Parent", SourceKind::Wago);
+        parent.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Parent_Options".to_string(),
+        }]);
+        database.upsert_addon(&parent).expect("seed parent");
+
+        let tracked = database.list_addons().expect("list tracked");
+        let scanned =
+            crate::scan::scan_addons_dir_with_tracked(&addons, GameFlavor::Retail, &tracked)
+                .expect("scan addons");
+        database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile");
+
+        let extra = database
+            .get_addon_by_folder("Parent_Extra")
+            .expect("get extra")
+            .expect("extra is its own row");
+        assert_eq!(extra.source, SourceKind::Manual);
+        assert_eq!(extra.name, "Parent_Extra");
+        assert_eq!(extra.version.as_deref(), Some("1.0"));
+        let parent = database
+            .get_addon_by_folder("Parent")
+            .expect("get parent")
+            .expect("parent exists");
+        assert_eq!(parent.owned_folders.len(), 1);
+        assert_eq!(parent.owned_folders[0].name, "Parent_Options");
+    }
+
+    #[test]
+    fn reconcile_still_groups_manual_siblings_without_authoritative_parent() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        write_addon_folders(&addons, &["Foo", "Foo_Options"]);
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&AddonRecord::new("Foo", "Foo", SourceKind::Manual))
+            .expect("seed foo");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "Foo_Options",
+                "Foo_Options",
+                SourceKind::Manual,
+            ))
+            .expect("seed foo options");
+
+        let tracked = database.list_addons().expect("list tracked");
+        let scanned =
+            crate::scan::scan_addons_dir_with_tracked(&addons, GameFlavor::Retail, &tracked)
+                .expect("scan addons");
+        database
+            .reconcile_scanned_addons(&scanned)
+            .expect("reconcile");
+
+        let stored = database.list_addons().expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].folder, "Foo");
+        assert_eq!(stored[0].owned_folders.len(), 1);
+        assert_eq!(stored[0].owned_folders[0].name, "Foo_Options");
     }
 }

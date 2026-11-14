@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
+use crate::domain::GameFlavor;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanProgressUpdate {
     pub dirs_scanned: usize,
@@ -46,51 +48,53 @@ pub fn suggested_scan_roots() -> Vec<PathBuf> {
     dedupe_paths(suggestions)
 }
 
+/// Client folders LemonUp manages: retail and WoW Forever.
+const CLIENT_FOLDERS: [&str; 2] = ["_retail_", "_forever_"];
+
 pub fn detect_known_addons_path() -> Option<PathBuf> {
-    if cfg!(windows) {
+    detect_known_addons_paths().into_iter().next()
+}
+
+/// Every valid AddOns folder found at the well-known install locations, retail before
+/// WoW Forever for each install.
+pub fn detect_known_addons_paths() -> Vec<PathBuf> {
+    let candidates = if cfg!(windows) {
+        let mut candidates = Vec::new();
         for root in suggested_scan_roots() {
             let root_str = root.display().to_string();
             if root_str.len() == 3 && root_str.ends_with(":\\") {
                 let drive = &root_str[0..1];
                 for template in windows_relative_candidates() {
-                    let candidate = PathBuf::from(format!(r"{drive}:\{template}"));
-                    if validate_addons_path(&candidate).is_ok() {
-                        return Some(candidate);
-                    }
+                    candidates.push(PathBuf::from(format!(r"{drive}:\{template}")));
                 }
             }
         }
-        return None;
-    }
-
-    let candidates = if cfg!(target_os = "macos") {
-        vec![PathBuf::from(
-            "/Applications/World of Warcraft/_retail_/Interface/AddOns",
-        )]
+        candidates
+    } else if cfg!(target_os = "macos") {
+        addons_candidates(&[PathBuf::from("/Applications/World of Warcraft")])
     } else {
-        let home = env::var_os("HOME").map(PathBuf::from)?;
-        vec![
+        let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+            return Vec::new();
+        };
+        addons_candidates(&[
+            home.join("Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft"),
+            home.join(".wine/drive_c/Program Files (x86)/World of Warcraft"),
             home.join(
-                "Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+                ".var/app/com.usebottles.bottles/data/bottles/bottles/World-of-Warcraft/drive_c/Program Files (x86)/World of Warcraft",
             ),
+            home.join(".local/share/Steam/steamapps/common/World of Warcraft"),
             home.join(
-                ".wine/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+                ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/World of Warcraft",
             ),
-            home.join(
-                ".var/app/com.usebottles.bottles/data/bottles/bottles/World-of-Warcraft/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-            home.join(
-                ".local/share/Steam/steamapps/common/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-            home.join(
-                ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-        ]
+        ])
     };
 
-    candidates
-        .into_iter()
-        .find(|candidate| validate_addons_path(candidate).is_ok())
+    dedupe_paths(
+        candidates
+            .into_iter()
+            .filter(|candidate| validate_addons_path(candidate).is_ok())
+            .collect(),
+    )
 }
 
 pub fn quick_check_common_paths(root: &Path) -> Option<PathBuf> {
@@ -117,11 +121,9 @@ pub fn validate_addons_path(path: &Path) -> std::result::Result<(), String> {
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect::<Vec<_>>();
 
-    if !parts
-        .iter()
-        .any(|part| part.eq_ignore_ascii_case("_retail_"))
-    {
-        return Err("path must point to a retail WoW AddOns folder".to_string());
+    // Same rule as flavor detection: the client folder is the AddOns dir's grandparent.
+    if GameFlavor::detect_from_path(path).is_none() {
+        return Err("path must point to a retail or WoW Forever AddOns folder".to_string());
     }
     if !parts
         .iter()
@@ -173,15 +175,30 @@ pub fn validate_addons_path(path: &Path) -> std::result::Result<(), String> {
 
 pub fn search_for_wow<F, C>(
     root: &Path,
-    mut should_cancel: C,
-    mut on_progress: F,
+    should_cancel: C,
+    on_progress: F,
 ) -> std::result::Result<Option<PathBuf>, String>
 where
     F: FnMut(ScanProgressUpdate),
     C: FnMut() -> bool,
 {
+    search_for_wow_installs(root, should_cancel, on_progress).map(|found| found.into_iter().next())
+}
+
+/// Deep scan that returns every AddOns folder of the first WoW install it reaches: the
+/// retail folder and the WoW Forever folder when both exist. Empty when nothing was found
+/// or the scan was cancelled.
+pub fn search_for_wow_installs<F, C>(
+    root: &Path,
+    mut should_cancel: C,
+    mut on_progress: F,
+) -> std::result::Result<Vec<PathBuf>, String>
+where
+    F: FnMut(ScanProgressUpdate),
+    C: FnMut() -> bool,
+{
     if validate_addons_path(root).is_ok() {
-        return Ok(Some(root.to_path_buf()));
+        return Ok(vec![root.to_path_buf()]);
     }
 
     if !root.exists() {
@@ -199,7 +216,7 @@ where
 
     while let Some(current_dir) = queue.pop_front() {
         if should_cancel() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         dirs_scanned += 1;
@@ -211,7 +228,7 @@ where
         if dirs_scanned.is_multiple_of(50) {
             thread::yield_now();
             if should_cancel() {
-                return Ok(None);
+                return Ok(Vec::new());
             }
         }
 
@@ -251,14 +268,18 @@ where
             child_dirs.push((file_name, full_path));
         }
 
-        if let Some((_, retail_dir)) = child_dirs
+        let found = CLIENT_FOLDERS
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("_retail_"))
-        {
-            let addons_path = retail_dir.join("Interface").join("AddOns");
-            if validate_addons_path(&addons_path).is_ok() {
-                return Ok(Some(addons_path));
-            }
+            .filter_map(|client| {
+                child_dirs
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(client))
+            })
+            .map(|(_, client_dir)| client_dir.join("Interface").join("AddOns"))
+            .filter(|addons_path| validate_addons_path(addons_path).is_ok())
+            .collect::<Vec<_>>();
+        if !found.is_empty() {
+            return Ok(found);
         }
 
         for (_, child_dir) in child_dirs {
@@ -266,7 +287,7 @@ where
         }
     }
 
-    Ok(None)
+    Ok(Vec::new())
 }
 
 fn common_relative_candidates() -> Vec<PathBuf> {
@@ -276,31 +297,42 @@ fn common_relative_candidates() -> Vec<PathBuf> {
             .map(PathBuf::from)
             .collect()
     } else if cfg!(target_os = "macos") {
-        vec![PathBuf::from(
-            "Applications/World of Warcraft/_retail_/Interface/AddOns",
-        )]
+        addons_candidates(&[PathBuf::from("Applications/World of Warcraft")])
     } else {
-        vec![
-            PathBuf::from(
-                "Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-            PathBuf::from(
-                ".wine/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-            PathBuf::from(
-                ".local/share/Steam/steamapps/common/World of Warcraft/_retail_/Interface/AddOns",
-            ),
-        ]
+        addons_candidates(&[
+            PathBuf::from("Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft"),
+            PathBuf::from(".wine/drive_c/Program Files (x86)/World of Warcraft"),
+            PathBuf::from(".local/share/Steam/steamapps/common/World of Warcraft"),
+        ])
     }
 }
 
-fn windows_relative_candidates() -> Vec<&'static str> {
-    vec![
-        r"Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
-        r"Program Files\World of Warcraft\_retail_\Interface\AddOns",
-        r"Games\World of Warcraft\_retail_\Interface\AddOns",
-        r"World of Warcraft\_retail_\Interface\AddOns",
+/// Expands WoW install roots into `<root>/<client>/Interface/AddOns` for every client folder.
+fn addons_candidates(wow_roots: &[PathBuf]) -> Vec<PathBuf> {
+    wow_roots
+        .iter()
+        .flat_map(|wow_root| {
+            CLIENT_FOLDERS
+                .iter()
+                .map(move |client| wow_root.join(client).join("Interface").join("AddOns"))
+        })
+        .collect()
+}
+
+fn windows_relative_candidates() -> Vec<String> {
+    [
+        r"Program Files (x86)\World of Warcraft",
+        r"Program Files\World of Warcraft",
+        r"Games\World of Warcraft",
+        r"World of Warcraft",
     ]
+    .into_iter()
+    .flat_map(|wow_root| {
+        CLIENT_FOLDERS
+            .iter()
+            .map(move |client| format!(r"{wow_root}\{client}\Interface\AddOns"))
+    })
+    .collect()
 }
 
 fn ignored_dirs() -> HashSet<&'static str> {
@@ -354,18 +386,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        quick_check_common_paths, search_for_wow, suggested_scan_roots, validate_addons_path,
+        quick_check_common_paths, search_for_wow, search_for_wow_installs, suggested_scan_roots,
+        validate_addons_path,
     };
 
     fn create_wow_install(root: &Path) -> PathBuf {
+        create_wow_client(root, "_retail_")
+    }
+
+    fn create_wow_client(root: &Path, client: &str) -> PathBuf {
         let wow_root = root.join("World of Warcraft");
-        let retail = wow_root.join("_retail_");
-        let addons = retail.join("Interface").join("AddOns");
+        let client_dir = wow_root.join(client);
+        let addons = client_dir.join("Interface").join("AddOns");
 
         fs::create_dir_all(wow_root.join("Data")).expect("create Data");
         fs::write(wow_root.join(".build.info"), "build").expect("write .build.info");
         fs::create_dir_all(&addons).expect("create addons dir");
-        fs::write(retail.join("Wow.exe"), "wow").expect("write Wow.exe");
+        fs::write(client_dir.join("Wow.exe"), "wow").expect("write Wow.exe");
 
         addons
     }
@@ -376,6 +413,58 @@ mod tests {
         let addons = create_wow_install(temp.path());
 
         assert!(validate_addons_path(&addons).is_ok());
+    }
+
+    #[test]
+    fn validates_a_forever_addons_path() {
+        let temp = tempdir().expect("tempdir");
+        let addons = create_wow_client(temp.path(), "_forever_");
+
+        assert!(validate_addons_path(&addons).is_ok());
+    }
+
+    #[test]
+    fn rejects_paths_whose_grandparent_is_not_a_client_folder() {
+        let temp = tempdir().expect("tempdir");
+        let addons = create_wow_install(temp.path());
+
+        // A client folder elsewhere in the path is not enough.
+        let nested = addons.join("Sub");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let error = validate_addons_path(&nested).expect_err("grandparent is Interface");
+        assert!(error.contains("retail or WoW Forever"));
+
+        let stuffed = temp
+            .path()
+            .join("World of Warcraft")
+            .join("_retail_")
+            .join("stuff")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&stuffed).expect("create stuffed dir");
+        let error = validate_addons_path(&stuffed).expect_err("grandparent is stuff");
+        assert!(error.contains("retail or WoW Forever"));
+    }
+
+    #[test]
+    fn rejects_unknown_client_folder() {
+        let temp = tempdir().expect("tempdir");
+        let addons = create_wow_client(temp.path(), "_classic_");
+
+        let error = validate_addons_path(&addons).expect_err("classic is not supported");
+        assert!(error.contains("retail or WoW Forever"));
+    }
+
+    #[test]
+    fn deep_scan_lists_retail_and_forever_installs() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("search-root");
+        let retail = create_wow_client(&root, "_retail_");
+        let forever = create_wow_client(&root, "_forever_");
+
+        let result = search_for_wow_installs(&root, || false, |_| {}).expect("search");
+
+        assert_eq!(result, vec![retail, forever]);
     }
 
     #[test]

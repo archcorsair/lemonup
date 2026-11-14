@@ -7,7 +7,9 @@ use std::sync::{
 };
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
@@ -18,8 +20,9 @@ use ratatui::{Frame, Terminal};
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
-    analyze_import, default_transfer_path, detect_known_addons_path, export_addons,
-    parse_import_file, paths_match, scan_addons_dir, search_for_wow, validate_addons_path,
+    analyze_import, default_transfer_path, detect_known_addons_paths, export_addons,
+    parse_import_file, paths_match, scan_addons_dir_with_tracked, search_for_wow_installs,
+    validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -280,6 +283,7 @@ enum FooterHintId {
     Undo,
     Install,
     Search,
+    Filter,
     Config,
     Backup,
     Confirm,
@@ -403,6 +407,11 @@ enum AppMessage {
     DashboardExpandAllRelationships,
     DashboardCollapseAllRelationships,
     DashboardCollapseExpanded,
+    DashboardFilterBegin,
+    DashboardFilterInputChar(char),
+    DashboardFilterBackspace,
+    DashboardFilterApply,
+    DashboardFilterClear,
     SetDetailMode(DetailMode),
     OpenSearch(SearchPresentationMode),
     InstallBeginEditing,
@@ -509,6 +518,7 @@ struct DashboardCheckOutcome {
 struct DashboardUpdateOutcome {
     summary: LiveUpdateSummary,
     updated_addon_name: Option<String>,
+    warnings: Vec<String>,
     sync: AddonScanOutcome,
 }
 
@@ -1114,6 +1124,10 @@ struct DashboardState {
     update_in_progress: bool,
     job_ui: Option<DashboardJobUiState>,
     last_update_summary: Option<DashboardUpdateRunSummary>,
+    /// Live filter text applied to the visible rows; empty means no filter.
+    filter_query: String,
+    /// True while `/` filter input is capturing keystrokes.
+    filter_editing: bool,
 }
 
 impl DashboardState {
@@ -1164,6 +1178,8 @@ impl DashboardState {
             update_in_progress: false,
             job_ui: None,
             last_update_summary: None,
+            filter_query: String::new(),
+            filter_editing: false,
         };
         state.sort_items();
         state.rebuild_rows();
@@ -1210,6 +1226,7 @@ impl DashboardState {
             }
         });
         self.update_in_progress = false;
+        // `next` starts unfiltered; the filter lives on `self` and survives rescans.
         self.sort_items();
         self.rebuild_rows();
 
@@ -1403,14 +1420,72 @@ impl DashboardState {
         true
     }
 
+    /// Selects every parent row currently visible (all addons when unfiltered).
+    /// Selections hidden by an active filter are kept.
     fn select_all_parents(&mut self) -> bool {
         let before = self.selected_parents.len();
-        self.selected_parents = self
-            .items
+        let visible = self
+            .rows
             .iter()
-            .map(|item| item.folder.clone())
-            .collect::<HashSet<_>>();
+            .filter(|row| matches!(row.kind, DashboardRowKind::Parent))
+            .map(|row| row.folder.clone())
+            .collect::<Vec<_>>();
+        self.selected_parents.extend(visible);
         self.selected_parents.len() != before
+    }
+
+    fn visible_parent_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| matches!(row.kind, DashboardRowKind::Parent))
+            .count()
+    }
+
+    fn filter_query(&self) -> &str {
+        &self.filter_query
+    }
+
+    fn filter_editing(&self) -> bool {
+        self.filter_editing
+    }
+
+    fn has_filter(&self) -> bool {
+        !self.filter_query.is_empty()
+    }
+
+    /// The filter bar is shown while editing or while a filter is applied.
+    fn filter_bar_visible(&self) -> bool {
+        self.filter_editing || self.has_filter()
+    }
+
+    /// Updates the filter and rebuilds the visible rows, keeping the cursor on
+    /// the same addon when it is still visible and clamping it otherwise.
+    fn set_filter(&mut self, query: String, editing: bool) {
+        self.filter_editing = editing;
+        if self.filter_query == query {
+            return;
+        }
+
+        let selected_key = self.selected_row().map(|row| row.key.clone());
+        let selected_parent = self.selected_parent_folder().map(str::to_string);
+        let previous_index = self.list_state.selected();
+        self.filter_query = query;
+        self.rebuild_rows();
+
+        let selection = selected_key
+            .and_then(|key| self.rows.iter().position(|row| row.key == key))
+            .or_else(|| {
+                selected_parent.and_then(|folder| {
+                    self.rows
+                        .iter()
+                        .position(|row| row.key == DashboardRowKey::Parent(folder.clone()))
+                })
+            })
+            .or_else(|| {
+                (!self.rows.is_empty())
+                    .then(|| previous_index.unwrap_or(0).min(self.rows.len() - 1))
+            });
+        self.list_state = TableState::default().with_selected(selection);
     }
 
     fn clear_selected_parents(&mut self) -> bool {
@@ -1571,9 +1646,17 @@ impl DashboardState {
 
     fn rebuild_rows(&mut self) {
         let mut rows = Vec::new();
+        let terms = dashboard_filter_terms(&self.filter_query);
 
         for item in &self.items {
-            let expanded = self.expanded_folders.contains(&item.folder);
+            // A parent that only matches through its owned folders is shown expanded
+            // so the matching child row is visible.
+            let expanded_by_filter = match dashboard_item_filter_match(item, &terms) {
+                DashboardFilterMatch::Hidden => continue,
+                DashboardFilterMatch::Direct => false,
+                DashboardFilterMatch::ViaOwnedFolders => true,
+            };
+            let expanded = expanded_by_filter || self.expanded_folders.contains(&item.folder);
             let expandable = !item.owned_folders.is_empty();
             rows.push(DashboardRow {
                 key: DashboardRowKey::Parent(item.folder.clone()),
@@ -1620,6 +1703,56 @@ impl DashboardState {
             .position(|row| row.key == *key)
             .or(if self.rows.is_empty() { None } else { Some(0) });
         self.list_state.select(selection);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardFilterMatch {
+    Hidden,
+    /// Every term matches the addon's own name, folder, or author.
+    Direct,
+    /// Some term only matches one of the addon's owned folders.
+    ViaOwnedFolders,
+}
+
+fn dashboard_filter_terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Case-insensitive AND match: every term must be a substring of the title,
+/// folder, author, or any owned folder name.
+fn dashboard_item_filter_match(item: &DashboardItem, terms: &[String]) -> DashboardFilterMatch {
+    if terms.is_empty() {
+        return DashboardFilterMatch::Direct;
+    }
+
+    let own_fields = [
+        Some(item.name.as_str()),
+        Some(item.folder.as_str()),
+        item.author.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_lowercase)
+    .collect::<Vec<_>>();
+    let owned_folders = item
+        .owned_folders
+        .iter()
+        .map(|folder| folder.to_lowercase())
+        .collect::<Vec<_>>();
+    let in_own = |term: &String| own_fields.iter().any(|field| field.contains(term.as_str()));
+    let in_owned = |term: &String| {
+        owned_folders
+            .iter()
+            .any(|folder| folder.contains(term.as_str()))
+    };
+
+    if terms.iter().all(in_own) {
+        DashboardFilterMatch::Direct
+    } else if terms.iter().all(|term| in_own(term) || in_owned(term)) {
+        DashboardFilterMatch::ViaOwnedFolders
+    } else {
+        DashboardFilterMatch::Hidden
     }
 }
 
@@ -1983,6 +2116,8 @@ pub struct App {
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
     task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
     active_onboarding_cancel: Option<Arc<AtomicBool>>,
+    /// One-line startup notice (v1 migration result) and whether it is an error.
+    startup_notice: Option<(String, bool)>,
 }
 
 impl App {
@@ -2008,7 +2143,7 @@ impl App {
             Some(path) => {
                 if runtime.is_guarded_path(path) {
                     return Err(lemonup_core::LemonupError::InvalidArgument(format!(
-                        "invalid --addon-dir for profile '{}': {} | reason: this matches the default profile AddOns directory | hint: omit --addon-dir to use the Location Finder, or pass a valid sandbox _retail_\\Interface\\AddOns path",
+                        "invalid --addon-dir for profile '{}': {} | reason: this matches the default profile AddOns directory | hint: omit --addon-dir to use the Location Finder, or pass a valid sandbox _retail_ or _forever_ \\Interface\\AddOns path",
                         runtime.profile_name,
                         path.display()
                     )));
@@ -2016,7 +2151,7 @@ impl App {
 
                 validate_addons_path(path).map_err(|error| {
                     lemonup_core::LemonupError::InvalidArgument(format!(
-                        "invalid --addon-dir for profile '{}': {} | reason: {} | hint: omit --addon-dir to use the Location Finder, or pass a valid _retail_\\Interface\\AddOns path",
+                        "invalid --addon-dir for profile '{}': {} | reason: {} | hint: omit --addon-dir to use the Location Finder, or pass a valid _retail_ or _forever_ \\Interface\\AddOns path",
                         runtime.profile_name,
                         path.display(),
                         error
@@ -2092,9 +2227,28 @@ impl App {
             task_events_tx,
             task_events_rx,
             active_onboarding_cancel: None,
+            startup_notice: None,
         };
         app.status_line = app.initial_status_line();
         Ok(app)
+    }
+
+    /// Shows a startup notice: a dashboard toast, or a line on the onboarding
+    /// screen (onboarding replaces the status line on its first tick).
+    pub fn show_startup_notice(&mut self, text: &str, is_error: bool) {
+        self.status_line = self.with_base_status(text);
+        if self.shell_mode == ShellMode::Dashboard {
+            self.shell_ui.dashboard_toast = Some(DashboardToast {
+                text: truncate_text(&text.replace(" | ", " · "), 160),
+                kind: if is_error {
+                    DashboardEventKind::Error
+                } else {
+                    DashboardEventKind::Success
+                },
+                expires_at: Instant::now() + StdDuration::from_secs(8),
+            });
+        }
+        self.startup_notice = Some((text.to_string(), is_error));
     }
 
     pub async fn run(
@@ -2196,7 +2350,8 @@ impl App {
             return None;
         }
 
-        let table_body_top = inner_top.saturating_add(1);
+        let filter_bar_lines = u16::from(self.dashboard.filter_bar_visible());
+        let table_body_top = inner_top.saturating_add(1).saturating_add(filter_bar_lines);
         if row < table_body_top || row > inner_bottom {
             return None;
         }
@@ -2424,6 +2579,16 @@ impl App {
             };
         }
 
+        if self.dashboard.filter_editing() {
+            return match key.code {
+                KeyCode::Down | KeyCode::Up => Some(FooterHintId::Nav),
+                KeyCode::Enter => Some(FooterHintId::Save),
+                KeyCode::Esc => Some(FooterHintId::Clear),
+                KeyCode::Backspace => Some(FooterHintId::Back),
+                _ => None,
+            };
+        }
+
         match key.code {
             KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
                 Some(FooterHintId::Nav)
@@ -2446,7 +2611,8 @@ impl App {
             KeyCode::Char('x') => Some(FooterHintId::Delete),
             KeyCode::Char('z') => Some(FooterHintId::Undo),
             KeyCode::Char('i') => Some(FooterHintId::Install),
-            KeyCode::Char('s') | KeyCode::Char('/') => Some(FooterHintId::Search),
+            KeyCode::Char('s') => Some(FooterHintId::Search),
+            KeyCode::Char('/') => Some(FooterHintId::Filter),
             KeyCode::Char(',') => Some(FooterHintId::Config),
             KeyCode::Char('b') => Some(FooterHintId::Backup),
             _ => None,
@@ -2573,6 +2739,24 @@ impl App {
             };
         }
 
+        if self.dashboard.filter_editing() {
+            return match key.code {
+                KeyCode::Enter => vec![AppMessage::DashboardFilterApply],
+                KeyCode::Esc => vec![AppMessage::DashboardFilterClear],
+                KeyCode::Backspace => vec![AppMessage::DashboardFilterBackspace],
+                KeyCode::Down => vec![AppMessage::DashboardSelectionNext],
+                KeyCode::Up => vec![AppMessage::DashboardSelectionPrevious],
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    vec![AppMessage::DashboardFilterInputChar(character)]
+                }
+                _ => vec![],
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') => vec![AppMessage::QuitRequested],
             KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
@@ -2588,7 +2772,9 @@ impl App {
                     vec![AppMessage::DashboardSelectAll]
                 }
             }
+            KeyCode::Esc if self.dashboard.has_filter() => vec![AppMessage::DashboardFilterClear],
             KeyCode::Esc => vec![AppMessage::DashboardClearSelection],
+            KeyCode::Char('/') => vec![AppMessage::DashboardFilterBegin],
             KeyCode::Enter if self.dashboard.detail_mode == DetailMode::Overview => {
                 vec![AppMessage::DashboardOpenInspect]
             }
@@ -2599,7 +2785,7 @@ impl App {
             KeyCode::Char(']') => vec![AppMessage::DashboardExpandAllRelationships],
             KeyCode::Char('[') => vec![AppMessage::DashboardCollapseAllRelationships],
             KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
-            KeyCode::Char('i') | KeyCode::Char('/') => {
+            KeyCode::Char('i') => {
                 vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
             }
             KeyCode::Char('1') => vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Name)],
@@ -3300,11 +3486,39 @@ impl App {
                     self.dashboard.detail_mode,
                     &format!(
                         "selected all {} addon{}",
-                        self.dashboard.items.len(),
-                        plural_suffix(self.dashboard.items.len())
+                        self.dashboard.visible_parent_count(),
+                        plural_suffix(self.dashboard.visible_parent_count())
                     ),
                 )),
             ],
+            AppMessage::DashboardFilterBegin => vec![AppAction::SetDashboardFilter {
+                query: self.dashboard.filter_query().to_string(),
+                editing: true,
+            }],
+            AppMessage::DashboardFilterInputChar(character) => {
+                let mut query = self.dashboard.filter_query().to_string();
+                query.push(character);
+                vec![AppAction::SetDashboardFilter {
+                    query,
+                    editing: true,
+                }]
+            }
+            AppMessage::DashboardFilterBackspace => {
+                let mut query = self.dashboard.filter_query().to_string();
+                query.pop();
+                vec![AppAction::SetDashboardFilter {
+                    query,
+                    editing: true,
+                }]
+            }
+            AppMessage::DashboardFilterApply => vec![AppAction::SetDashboardFilter {
+                query: self.dashboard.filter_query().to_string(),
+                editing: false,
+            }],
+            AppMessage::DashboardFilterClear => vec![AppAction::SetDashboardFilter {
+                query: String::new(),
+                editing: false,
+            }],
             AppMessage::DashboardClearSelection => vec![
                 AppAction::ClearDashboardSelection,
                 AppAction::SetStatus(
@@ -4045,7 +4259,7 @@ impl App {
 
                 match validate_addons_path(&current_path) {
                     Ok(()) => {
-                        let next_state = self.onboarding_found_state(current_path.clone());
+                        let next_state = self.onboarding_found_state(vec![current_path.clone()]);
                         vec![
                             AppAction::SetOnboardingState(next_state),
                             AppAction::SetStatus(self.found_status_for_path(&current_path)),
@@ -4115,13 +4329,17 @@ impl App {
                 ],
             },
             AppMessage::BackgroundTask(event) => match event {
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(Some(path))) => {
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(paths))
+                    if !paths.is_empty() =>
+                {
+                    let state = self.onboarding_found_state(paths);
+                    let status = self.found_status_for_path(Path::new(state.input.trim()));
                     vec![
-                        AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
-                        AppAction::SetStatus(self.found_status_for_path(&path)),
+                        AppAction::SetOnboardingState(state),
+                        AppAction::SetStatus(status),
                     ]
                 }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(None)) => vec![
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(_)) => vec![
                     AppAction::SetOnboardingState(self.onboarding.ready()),
                     AppAction::SetStatus(self.with_base_status(
                         "no install found yet | enter validate | d deep scan | e edit path",
@@ -4132,13 +4350,17 @@ impl App {
                         self.onboarding.set_scan_progress(progress),
                     )]
                 }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(Some(path)))) => {
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(paths)))
+                    if !paths.is_empty() =>
+                {
+                    let state = self.onboarding_found_state(paths);
+                    let status = self.found_status_for_path(Path::new(state.input.trim()));
                     vec![
-                        AppAction::SetOnboardingState(self.onboarding_found_state(path.clone())),
-                        AppAction::SetStatus(self.found_status_for_path(&path)),
+                        AppAction::SetOnboardingState(state),
+                        AppAction::SetStatus(status),
                     ]
                 }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(None))) => vec![
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(_))) => vec![
                     AppAction::SetOnboardingState(
                         self.onboarding
                             .error("no WoW installation found from this root".to_string()),
@@ -4538,6 +4760,9 @@ impl App {
                 self.dashboard.list_state.select(selection)
             }
             AppAction::ToggleDashboardSort(column) => self.dashboard.toggle_sort(column),
+            AppAction::SetDashboardFilter { query, editing } => {
+                self.dashboard.set_filter(query, editing);
+            }
             AppAction::SetPendingDelete(folders) => {
                 self.dashboard.set_pending_delete_folders(folders);
             }
@@ -4700,10 +4925,9 @@ impl App {
             AppAction::StartOnboardingQuickCheck => {
                 let sender = self.task_events_tx.clone();
                 tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(detect_known_addons_path)
+                    let result = tokio::task::spawn_blocking(detect_known_addons_paths)
                         .await
-                        .ok()
-                        .flatten();
+                        .unwrap_or_default();
                     let _ = sender.send(AppTaskEvent::Onboarding(
                         OnboardingTaskEvent::QuickCheckFinished(result),
                     ));
@@ -4716,7 +4940,7 @@ impl App {
                 tokio::spawn(async move {
                     let progress_sender = sender.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        search_for_wow(
+                        search_for_wow_installs(
                             &root,
                             || cancel.load(Ordering::SeqCst),
                             |progress| {
@@ -4886,9 +5110,11 @@ impl App {
             } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
+                let addon_dir = self.effective_addon_dir.clone();
                 tokio::spawn(async move {
                     let result = run_dashboard_check_task(
                         &state_db_file,
+                        addon_dir.as_deref(),
                         &folders,
                         wago_api_key,
                         check_interval_secs,
@@ -4985,8 +5211,12 @@ impl App {
             }
             AppAction::StartWagoSearch { query, api_key } => {
                 let sender = self.task_events_tx.clone();
+                let flavor = self
+                    .effective_addon_dir
+                    .as_deref()
+                    .map_or(GameFlavor::Retail, GameFlavor::for_addons_dir);
                 tokio::spawn(async move {
-                    let result = search_wago_addons(&query, &api_key)
+                    let result = search_wago_addons(&query, &api_key, flavor)
                         .await
                         .map(|results| WagoSearchOutcome { query, results });
                     let _ = sender.send(AppTaskEvent::WagoSearchFinished(result));
@@ -5403,6 +5633,18 @@ impl App {
             )),
             Line::from(""),
         ];
+        if let Some((notice, is_error)) = self.startup_notice.as_ref() {
+            let color = if *is_error {
+                self.ui_theme.warning
+            } else {
+                self.ui_theme.success
+            };
+            lines.push(Line::from(Span::styled(
+                notice.replace(" | ", " · "),
+                Style::default().fg(color),
+            )));
+            lines.push(Line::from(""));
+        }
 
         match &self.onboarding.phase {
             OnboardingPhase::Bootstrapping => {
@@ -5460,12 +5702,35 @@ impl App {
                 )));
             }
             OnboardingPhase::Found(found) => {
-                lines.push(Line::from(vec![
-                    Span::styled("✓ Detected: ", Style::default().fg(self.ui_theme.success)),
-                    Span::styled(found.path.clone(), Style::default().fg(self.ui_theme.info)),
-                ]));
+                let labels = if let [path] = found.paths.as_slice() {
+                    lines.push(Line::from(vec![
+                        Span::styled("✓ Detected: ", Style::default().fg(self.ui_theme.success)),
+                        Span::styled(path.clone(), Style::default().fg(self.ui_theme.info)),
+                    ]));
+                    vec!["Use this path".to_string()]
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("✓ Detected {} installs:", found.paths.len()),
+                        Style::default().fg(self.ui_theme.success),
+                    )));
+                    found
+                        .paths
+                        .iter()
+                        .map(|path| {
+                            let client = match GameFlavor::detect_from_path(Path::new(path)) {
+                                Some(GameFlavor::Forever) => "WoW Forever",
+                                _ => "Retail",
+                            };
+                            format!("Use {client}: {path}")
+                        })
+                        .collect()
+                };
                 lines.push(Line::from(""));
-                for (index, label) in ["Use this path", "Enter different path"].iter().enumerate() {
+                let labels = labels
+                    .into_iter()
+                    .chain(std::iter::once("Enter different path".to_string()))
+                    .collect::<Vec<_>>();
+                for (index, label) in labels.iter().enumerate() {
                     let selected = found.selected_action == index;
                     lines.push(Line::from(vec![
                         Span::styled(
@@ -5473,7 +5738,7 @@ impl App {
                             Style::default().fg(self.ui_theme.highlight),
                         ),
                         Span::styled(
-                            (*label).to_string(),
+                            label.clone(),
                             if selected {
                                 Style::default()
                                     .fg(self.ui_theme.highlight)
@@ -5483,6 +5748,13 @@ impl App {
                             },
                         ),
                     ]));
+                }
+                if found.paths.len() > 1 {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Each profile manages one AddOns folder. Use --profile <name> for the other install.",
+                        Style::default().fg(self.ui_theme.muted),
+                    )));
                 }
             }
             OnboardingPhase::Error(message) => {
@@ -6341,13 +6613,16 @@ impl App {
         })
     }
 
-    fn onboarding_found_state(&self, path: PathBuf) -> OnboardingState {
-        let state = self.onboarding.found(path.clone());
-        if self.is_guarded_path(&path) {
-            state.next_found_action()
-        } else {
-            state
+    /// Found state for the discovered paths, moving the selection past any path this profile
+    /// must not target (ending on "Enter different path" when every path is guarded).
+    fn onboarding_found_state(&self, paths: Vec<PathBuf>) -> OnboardingState {
+        let mut state = self.onboarding.found_many(paths);
+        while state.selected_found_action() == FoundAction::UseThisPath
+            && self.is_guarded_path(Path::new(state.input.trim()))
+        {
+            state = state.next_found_action();
         }
+        state
     }
 
     fn found_status_for_input(&self) -> String {
@@ -6762,6 +7037,7 @@ async fn run_dashboard_update_task(
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     preflight_stale_update_checks(
         &mut database,
+        Some(addon_dir),
         folders,
         wago_api_key.as_deref(),
         check_interval_secs,
@@ -6789,12 +7065,21 @@ async fn run_dashboard_update_task(
     } else {
         None
     };
+    let warnings = run
+        .results
+        .iter()
+        .filter(|result| {
+            result.status == LiveUpdateStatus::Updated && result.source == SourceKind::WowInterface
+        })
+        .filter_map(|result| result.message.clone())
+        .collect();
     let summary = run.summary;
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
     Ok(DashboardUpdateOutcome {
         summary,
         updated_addon_name,
+        warnings,
         sync,
     })
 }
@@ -6837,11 +7122,13 @@ fn transfer_import_status_message(
     if !install_summary.errors.is_empty() {
         segments.push(format!("{} errors", install_summary.errors.len()));
     }
+    segments.extend(install_summary.warnings.iter().cloned());
     segments.join(" · ")
 }
 
 async fn run_dashboard_check_task(
     state_db_file: &Path,
+    addon_dir: Option<&Path>,
     folders: &[String],
     wago_api_key: Option<String>,
     check_interval_secs: u64,
@@ -6862,6 +7149,7 @@ async fn run_dashboard_check_task(
             &mut database,
             std::slice::from_ref(folder),
             wago_api_key.as_deref(),
+            addon_dir,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -6886,6 +7174,7 @@ async fn run_dashboard_check_task(
 
 async fn preflight_stale_update_checks(
     database: &mut StateDatabase,
+    addon_dir: Option<&Path>,
     folders: &[String],
     wago_api_key: Option<&str>,
     check_interval_secs: u64,
@@ -6901,9 +7190,14 @@ async fn preflight_stale_update_checks(
             stale.len(),
             folder.clone(),
         );
-        refresh_live_update_checks(database, std::slice::from_ref(folder), wago_api_key)
-            .await
-            .map_err(|error| error.to_string())?;
+        refresh_live_update_checks(
+            database,
+            std::slice::from_ref(folder),
+            wago_api_key,
+            addon_dir,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     }
 
     Ok(())
@@ -6944,10 +7238,11 @@ fn sync_dashboard_state(
     state_db_file: &Path,
     addon_dir: &Path,
 ) -> std::result::Result<AddonScanOutcome, String> {
-    let scanned =
-        scan_addons_dir(addon_dir, GameFlavor::Retail).map_err(|error| error.to_string())?;
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     let tracked = database.list_addons().map_err(|error| error.to_string())?;
+    let scanned =
+        scan_addons_dir_with_tracked(addon_dir, GameFlavor::for_addons_dir(addon_dir), &tracked)
+            .map_err(|error| error.to_string())?;
     let drift_report = compute_drift_report(&tracked, &scanned);
     let summary = database
         .reconcile_scanned_addons(&scanned)
@@ -7103,6 +7398,7 @@ fn dashboard_update_status_message(outcome: &DashboardUpdateOutcome) -> String {
             if summary.errors == 1 { "" } else { "s" }
         ));
     }
+    details.extend(outcome.warnings.iter().cloned());
 
     if details.is_empty() {
         headline
@@ -7467,6 +7763,7 @@ mod tests {
             task_events_tx,
             task_events_rx,
             active_onboarding_cancel: None,
+            startup_notice: None,
             inspect_overlay: InspectOverlayState::default(),
         }
     }
@@ -8117,7 +8414,7 @@ mod tests {
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
-            vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
+            vec![AppMessage::DashboardFilterBegin]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
@@ -9409,6 +9706,7 @@ mod tests {
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
                 summary: refresh,
                 updated_addon_name: Some("Second".to_string()),
+                warnings: Vec::new(),
                 sync: sync.clone(),
             })),
         ));
@@ -9470,6 +9768,7 @@ mod tests {
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
                 summary: refresh,
                 updated_addon_name: None,
+                warnings: Vec::new(),
                 sync,
             })),
         ));
@@ -9495,6 +9794,7 @@ mod tests {
                 errors: 0,
             },
             updated_addon_name: Some("WeakAuras".to_string()),
+            warnings: Vec::new(),
             sync: AddonScanOutcome {
                 path: PathBuf::from("D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"),
                 summary: ScanSummary {
@@ -9737,7 +10037,7 @@ mod tests {
             "C:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns".to_string();
         app.onboarding.step = OnboardingStep::Directory;
         app.onboarding.phase = OnboardingPhase::Found(FoundState {
-            path: app.onboarding.input.clone(),
+            paths: vec![app.onboarding.input.clone()],
             selected_action: 0,
         });
 
@@ -9830,18 +10130,19 @@ mod tests {
 
         let path = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
         let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
-            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Some(path.clone())),
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(vec![path.clone()]),
         )));
 
         assert_eq!(
             actions,
             vec![
-                AppAction::SetOnboardingState(app.onboarding_found_state(path.clone())),
+                AppAction::SetOnboardingState(app.onboarding_found_state(vec![path.clone()])),
                 AppAction::SetStatus(app.found_status_for_path(&path)),
             ]
         );
         assert_eq!(
-            app.onboarding_found_state(path).selected_found_action(),
+            app.onboarding_found_state(vec![path])
+                .selected_found_action(),
             FoundAction::EnterDifferentPath
         );
     }
@@ -10176,5 +10477,376 @@ mod tests {
 
         assert_eq!(app.ui_theme.panel_title, Color::Rgb(46, 125, 233));
         assert_eq!(app.ui_theme.overlay_bg, Color::Rgb(232, 233, 238));
+    }
+
+    fn press_key(app: &mut App, code: KeyCode) {
+        for message in app.messages_for_key(KeyEvent::from(code)) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            press_key(app, KeyCode::Char(character));
+        }
+    }
+
+    fn visible_folders(app: &App) -> Vec<String> {
+        app.dashboard
+            .rows
+            .iter()
+            .map(|row| row.folder.clone())
+            .collect()
+    }
+
+    #[test]
+    fn dashboard_slash_starts_filter_and_does_not_open_search() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            vec![AppMessage::DashboardFilterBegin]
+        );
+        press_key(&mut app, KeyCode::Char('/'));
+
+        assert!(app.dashboard.filter_editing());
+        assert!(app.dashboard.filter_bar_visible());
+        assert_eq!(app.dashboard.detail_mode, DetailMode::Overview);
+        assert!(app.shell_ui.overlay.active.is_none());
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn dashboard_i_still_opens_search_and_search_slash_still_edits_query() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
+            vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
+        );
+
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.shell_ui.overlay.active = Some(OverlayKind::Search);
+        app.search_pane.is_editing = false;
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            vec![AppMessage::SearchBeginEditing]
+        );
+    }
+
+    #[test]
+    fn footer_hint_for_slash_is_filter_on_dashboard_and_edit_in_search() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        assert_eq!(
+            app.footer_hint_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            Some(FooterHintId::Filter)
+        );
+        assert!(
+            app.footer_command_hints()
+                .iter()
+                .any(|hint| hint.id == FooterHintId::Filter && hint.key == "/")
+        );
+
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.shell_ui.overlay.active = Some(OverlayKind::Search);
+        app.search_pane.is_editing = false;
+        assert_eq!(
+            app.footer_hint_for_key(KeyEvent::from(KeyCode::Char('/'))),
+            Some(FooterHintId::Edit)
+        );
+    }
+
+    #[test]
+    fn dashboard_filter_matches_name_folder_and_author_case_insensitively() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.items[0].name = "Deadly Boss Mods".to_string();
+        app.dashboard.rebuild_rows();
+        let dbm_folder = app.dashboard.items[0].folder.clone();
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "BOSS");
+        assert_eq!(visible_folders(&app), vec![dbm_folder.clone()]);
+
+        app.dashboard.set_filter(String::new(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "thi");
+        assert_eq!(visible_folders(&app), vec!["Third".to_string()]);
+
+        app.dashboard.set_filter(String::new(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "author");
+        assert_eq!(visible_folders(&app), vec!["Second".to_string()]);
+    }
+
+    #[test]
+    fn dashboard_filter_child_folder_match_shows_parent_expanded() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        assert!(!app.dashboard.expanded_folders.contains("Second"));
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "config");
+
+        assert_eq!(
+            visible_folders(&app),
+            vec!["Second".to_string(), "Second_Config".to_string()]
+        );
+        assert!(app.dashboard.rows[0].expanded);
+        // The forced expansion is a view of the filter, not a persisted tree change.
+        assert!(!app.dashboard.expanded_folders.contains("Second"));
+
+        press_key(&mut app, KeyCode::Esc);
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn dashboard_filter_requires_every_term_to_match() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+
+        type_text(&mut app, "second config");
+        assert_eq!(
+            visible_folders(&app),
+            vec!["Second".to_string(), "Second_Config".to_string()]
+        );
+
+        type_text(&mut app, " third");
+        assert!(app.dashboard.rows.is_empty());
+        assert_eq!(app.dashboard.list_state.selected(), None);
+    }
+
+    #[test]
+    fn dashboard_filter_backspace_widens_the_list() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "thirdx");
+        assert!(app.dashboard.rows.is_empty());
+
+        press_key(&mut app, KeyCode::Backspace);
+        assert_eq!(app.dashboard.filter_query(), "third");
+        assert_eq!(visible_folders(&app), vec!["Third".to_string()]);
+        assert_eq!(app.dashboard.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn dashboard_filter_enter_keeps_filter_and_stops_editing() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "third");
+        press_key(&mut app, KeyCode::Enter);
+
+        assert!(!app.dashboard.filter_editing());
+        assert_eq!(app.dashboard.filter_query(), "third");
+        assert_eq!(visible_folders(&app), vec!["Third".to_string()]);
+        assert!(app.dashboard.filter_bar_visible());
+
+        // Dashboard keys work again on the filtered rows.
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('u'))),
+            vec![AppMessage::DashboardRunUpdateSelected]
+        );
+        assert_eq!(
+            app.dashboard.actionable_parent_targets(),
+            Ok(vec!["Third".to_string()])
+        );
+
+        // `/` re-enters editing with the current text.
+        press_key(&mut app, KeyCode::Char('/'));
+        assert!(app.dashboard.filter_editing());
+        assert_eq!(app.dashboard.filter_query(), "third");
+    }
+
+    #[test]
+    fn dashboard_filter_escape_while_editing_clears_and_closes() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "third");
+
+        press_key(&mut app, KeyCode::Esc);
+
+        assert!(!app.dashboard.filter_editing());
+        assert!(!app.dashboard.has_filter());
+        assert!(!app.dashboard.filter_bar_visible());
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn dashboard_escape_clears_applied_filter_before_selection() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.selected_parents.insert("Third".to_string());
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "third");
+        press_key(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardFilterClear]
+        );
+        press_key(&mut app, KeyCode::Esc);
+        assert!(!app.dashboard.has_filter());
+        assert_eq!(app.dashboard.selected_parent_count(), 1);
+
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::DashboardClearSelection]
+        );
+    }
+
+    #[test]
+    fn dashboard_filter_editing_captures_action_letters_as_text() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+
+        for character in ['u', 'x', 'c', 'a', 'q', 'i', 'j', 'k', '1', ' ', '/', '?'] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char(character))),
+                vec![AppMessage::DashboardFilterInputChar(character)]
+            );
+        }
+        type_text(&mut app, "uxca");
+        assert_eq!(app.dashboard.filter_query(), "uxca");
+        assert!(app.dashboard.pending_delete_folders().is_none());
+        assert_eq!(app.dashboard.selected_parent_count(), 0);
+        assert!(app.shell_ui.overlay.active.is_none());
+        assert_eq!(
+            app.footer_hint_for_key(KeyEvent::from(KeyCode::Char('u'))),
+            None
+        );
+    }
+
+    #[test]
+    fn dashboard_select_all_with_filter_selects_only_visible_rows() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "second");
+        press_key(&mut app, KeyCode::Enter);
+
+        press_key(&mut app, KeyCode::Char('a'));
+
+        assert_eq!(
+            app.dashboard.selected_parent_folders(),
+            vec!["Second".to_string()]
+        );
+        assert_eq!(
+            app.dashboard_list_title(),
+            "Addons (1 of 3 shown, 1 selected)"
+        );
+    }
+
+    #[test]
+    fn dashboard_selections_survive_filter_changes() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.selected_parents.insert("First".to_string());
+        app.dashboard.selected_parents.insert("Third".to_string());
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "second");
+        assert_eq!(app.dashboard.selected_parent_count(), 2);
+        assert_eq!(
+            app.dashboard_list_title(),
+            "Addons (1 of 3 shown, 2 selected)"
+        );
+        press_key(&mut app, KeyCode::Enter);
+
+        // Bulk actions keep targeting the full selection, including hidden rows.
+        assert_eq!(
+            app.dashboard.actionable_parent_targets(),
+            Ok(vec!["First".to_string(), "Third".to_string()])
+        );
+
+        press_key(&mut app, KeyCode::Esc);
+        assert_eq!(app.dashboard.selected_parent_count(), 2);
+        assert_eq!(app.dashboard_list_title(), "Addons (2 selected)");
+    }
+
+    #[test]
+    fn dashboard_filter_keeps_cursor_on_same_addon_or_clamps() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let third_index = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| row.folder == "Third")
+            .expect("third row");
+        app.dashboard.list_state.select(Some(third_index));
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "t");
+        assert_eq!(
+            app.dashboard.selected_row().map(|row| row.folder.as_str()),
+            Some("Third")
+        );
+
+        // Cursor row filtered out: clamp into the remaining rows.
+        app.dashboard.set_filter("second".to_string(), true);
+        assert_eq!(app.dashboard.rows.len(), 1);
+        assert_eq!(app.dashboard.list_state.selected(), Some(0));
+
+        // No rows: no cursor; growing again restores a valid one.
+        app.dashboard.set_filter("nomatch".to_string(), true);
+        assert_eq!(app.dashboard.list_state.selected(), None);
+        assert!(app.dashboard.selected_row().is_none());
+        app.dashboard.set_filter(String::new(), true);
+        assert_eq!(app.dashboard.list_state.selected(), Some(0));
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn dashboard_filter_keeps_current_sort_order() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "ir");
+        let before = visible_folders(&app);
+        assert_eq!(before.len(), 2);
+
+        app.apply(AppAction::ToggleDashboardSort(DashboardSortColumn::Name));
+        let ascending = visible_folders(&app);
+        app.apply(AppAction::ToggleDashboardSort(DashboardSortColumn::Name));
+        let descending = visible_folders(&app);
+
+        assert_eq!(ascending, vec!["First".to_string(), "Third".to_string()]);
+        assert_eq!(descending, vec!["Third".to_string(), "First".to_string()]);
+    }
+
+    #[test]
+    fn dashboard_filter_zero_match_renders_empty_state() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "zzz");
+        assert_eq!(
+            app.dashboard_list_title(),
+            "Addons (0 of 3 shown, 0 selected)"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("No addons match 'zzz'"));
+        assert!(text.contains("Filter: zzz"));
+        assert!(!text.contains("No scanned addons yet"));
+    }
+
+    #[test]
+    fn dashboard_pointer_selection_accounts_for_filter_bar() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 40, 10));
+        // Without a filter bar: border at 0, header at 1, first body row at 2.
+        assert_eq!(app.dashboard_selection_for_pointer(2, 2), Some(0));
+
+        // With a filter bar: border at 0, filter at 1, header at 2, body from 3.
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "ir");
+        assert_eq!(app.dashboard_selection_for_pointer(2, 2), None);
+        assert_eq!(app.dashboard_selection_for_pointer(2, 3), Some(0));
+        assert_eq!(app.dashboard_selection_for_pointer(2, 4), Some(1));
+        assert_eq!(app.dashboard_selection_for_pointer(2, 5), None);
     }
 }

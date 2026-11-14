@@ -6,10 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
 };
-use reqwest::{Client, StatusCode, Url};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
 use time::OffsetDateTime;
 use zip::ZipArchive;
+
+use crate::archive::safe_entry_relative_path;
 
 const API_BASE: &str = "https://api.github.com";
 
@@ -172,10 +175,118 @@ pub(crate) async fn update_github_addon(
     )
 }
 
+const GITHUB_TOKEN_ENV_VARS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
+
+/// Resolves an optional GitHub API token. Checks `GITHUB_TOKEN`, then `GH_TOKEN`;
+/// values are trimmed and empty/whitespace-only values are skipped.
+fn resolve_github_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    GITHUB_TOKEN_ENV_VARS.iter().find_map(|name| {
+        let value = lookup(name)?;
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn github_token_from_env() -> Option<String> {
+    resolve_github_token(|name| std::env::var(name).ok())
+}
+
 fn build_github_client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
-        .build()
+    build_github_client_with_token(github_token_from_env().as_deref())
+}
+
+fn build_github_client_with_token(token: Option<&str>) -> Result<Client, String> {
+    let mut builder =
+        Client::builder().user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)");
+
+    if let Some(token) = token {
+        // Never include the token in the error: it is not a valid header value.
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            "GitHub token contains characters not allowed in HTTP headers".to_string()
+        })?;
+        // Marks the value as sensitive so it is redacted from `Debug` output and
+        // is not kept in HTTP/2 header compression tables.
+        value.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+    }
+
+    builder.build().map_err(|error| error.to_string())
+}
+
+fn unix_now() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// Returns a descriptive error when a response is a GitHub API rate-limit
+/// rejection (403/429 with `x-ratelimit-remaining: 0`, or 429 with `retry-after`).
+fn classify_rate_limit(status: StatusCode, headers: &HeaderMap, now_unix: i64) -> Option<String> {
+    if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+
+    let header_str = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let header_i64 =
+        |name: &str| header_str(name).and_then(|value| value.trim().parse::<i64>().ok());
+
+    let remaining_zero =
+        header_str("x-ratelimit-remaining").is_some_and(|value| value.trim() == "0");
+    let retry_after = header_i64("retry-after");
+    let throttled = status == StatusCode::TOO_MANY_REQUESTS && retry_after.is_some();
+    if !(remaining_zero || throttled) {
+        return None;
+    }
+
+    let reset_unix = header_i64("x-ratelimit-reset")
+        .or_else(|| retry_after.map(|seconds| now_unix.saturating_add(seconds.max(0))));
+    let reset_note = reset_unix
+        .map(|reset| format!(" and {}", describe_reset(reset, now_unix)))
+        .unwrap_or_default();
+
+    Some(format!(
+        "GitHub API rate limit reached (HTTP {}){reset_note}; set the GITHUB_TOKEN environment variable to a GitHub token to raise the limit",
+        status.as_u16()
+    ))
+}
+
+fn describe_reset(reset_unix: i64, now_unix: i64) -> String {
+    let remaining_secs = reset_unix.saturating_sub(now_unix);
+    if remaining_secs <= 0 {
+        return "resets momentarily".to_string();
+    }
+    let minutes = (remaining_secs + 59) / 60;
+    let unit = if minutes == 1 { "minute" } else { "minutes" };
+    match OffsetDateTime::from_unix_timestamp(reset_unix) {
+        Ok(at) => format!(
+            "resets in {minutes} {unit} (at {:02}:{:02} UTC)",
+            at.hour(),
+            at.minute()
+        ),
+        Err(_) => format!("resets in {minutes} {unit}"),
+    }
+}
+
+/// A 401 while a token was sent means GitHub rejected that token. Never includes the token value.
+fn classify_rejected_token(status: StatusCode, token_sent: bool) -> Option<String> {
+    (status == StatusCode::UNAUTHORIZED && token_sent).then(|| {
+        "GitHub rejected the token from GITHUB_TOKEN/GH_TOKEN (HTTP 401); unset it or replace it with a valid token"
+            .to_string()
+    })
+}
+
+/// Maps a non-success response to an error, with a dedicated message for rate limits.
+fn ensure_github_success(response: Response) -> Result<Response, String> {
+    if let Some(message) =
+        classify_rejected_token(response.status(), github_token_from_env().is_some())
+    {
+        return Err(message);
+    }
+    if let Some(message) = classify_rate_limit(response.status(), response.headers(), unix_now()) {
+        return Err(message);
+    }
+    response
+        .error_for_status()
         .map_err(|error| error.to_string())
 }
 
@@ -207,9 +318,7 @@ async fn fetch_github_repo_metadata(
         ));
     }
 
-    let response = response
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
+    let response = ensure_github_success(response)?;
     let parsed = response
         .json::<GithubRepoResponse>()
         .await
@@ -246,9 +355,7 @@ async fn fetch_github_head_commit(
         ));
     }
 
-    let response = response
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
+    let response = ensure_github_success(response)?;
     let parsed = response
         .json::<GithubCommitResponse>()
         .await
@@ -264,13 +371,12 @@ async fn download_github_zipball_bytes(
         "{API_BASE}/repos/{}/{}/zipball/{}",
         resolved.metadata.owner, resolved.metadata.repo, resolved.head_sha
     );
-    client
+    let response = client
         .get(url)
         .send()
         .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    ensure_github_success(response)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
@@ -293,8 +399,11 @@ fn install_downloaded_github_addon(
 
         let extracted = discover_extracted_folders(&extract_root)?;
         let parent_folder = determine_parent_folder(&extracted.folders, &resolved.metadata.repo)?;
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == parent_folder)
@@ -375,8 +484,11 @@ fn update_downloaded_github_addon(
             ));
         }
 
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == tracked.folder)
@@ -756,7 +868,7 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+        let Some(relative_path) = safe_entry_relative_path(entry.name()) else {
             continue;
         };
         let output_path = destination.join(relative_path);
@@ -843,13 +955,148 @@ fn rollback_updated_folders(
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubRepoResponse, build_managed_github_record, commits_match, determine_parent_folder,
-        parse_github_repo_url, parse_github_target, update_downloaded_github_addon,
+        GithubRepoResponse, build_github_client_with_token, build_managed_github_record,
+        classify_rate_limit, classify_rejected_token, commits_match, determine_parent_folder,
+        extract_zip_archive, parse_github_repo_url, parse_github_target, resolve_github_token,
+        update_downloaded_github_addon,
     };
     use lemonup_core::{
         AddonKind, AddonRecord, GameFlavor, ScannedAddon, SourceKind, StateDatabase,
     };
+    use reqwest::StatusCode;
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use tempfile::tempdir;
+
+    fn env_lookup(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs = pairs.to_vec();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn token_resolution_prefers_github_token_over_gh_token() {
+        let lookup = env_lookup(&[("GITHUB_TOKEN", "primary"), ("GH_TOKEN", "secondary")]);
+        assert_eq!(resolve_github_token(lookup).as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn token_resolution_falls_back_to_gh_token() {
+        let lookup = env_lookup(&[("GH_TOKEN", "secondary")]);
+        assert_eq!(resolve_github_token(lookup).as_deref(), Some("secondary"));
+    }
+
+    #[test]
+    fn token_resolution_trims_and_skips_empty_values() {
+        let lookup = env_lookup(&[("GITHUB_TOKEN", "   "), ("GH_TOKEN", "  padded \n")]);
+        assert_eq!(resolve_github_token(lookup).as_deref(), Some("padded"));
+
+        let lookup = env_lookup(&[("GITHUB_TOKEN", ""), ("GH_TOKEN", "\t")]);
+        assert_eq!(resolve_github_token(lookup), None);
+        assert_eq!(resolve_github_token(env_lookup(&[])), None);
+    }
+
+    #[test]
+    fn client_builds_with_and_without_token_and_rejects_invalid_token_without_echoing_it() {
+        assert!(build_github_client_with_token(None).is_ok());
+        assert!(build_github_client_with_token(Some("ghp_valid")).is_ok());
+        let error = build_github_client_with_token(Some("bad\ntoken-secret")).unwrap_err();
+        assert!(!error.contains("token-secret"));
+    }
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn unauthorized_with_token_reports_rejected_token() {
+        let message =
+            classify_rejected_token(StatusCode::UNAUTHORIZED, true).expect("rejected token");
+        assert!(message.contains("GITHUB_TOKEN/GH_TOKEN"), "{message}");
+        assert!(message.contains("HTTP 401"), "{message}");
+    }
+
+    #[test]
+    fn unauthorized_without_token_keeps_generic_error() {
+        assert!(classify_rejected_token(StatusCode::UNAUTHORIZED, false).is_none());
+        assert!(classify_rejected_token(StatusCode::FORBIDDEN, true).is_none());
+    }
+
+    #[test]
+    fn rate_limit_403_with_zero_remaining_is_classified() {
+        let message = classify_rate_limit(
+            StatusCode::FORBIDDEN,
+            &headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1700000600"),
+            ]),
+            1_700_000_000,
+        )
+        .expect("rate limit error");
+        assert!(message.contains("rate limit"), "{message}");
+        assert!(message.contains("resets in 10 minutes"), "{message}");
+        assert!(message.contains("22:23 UTC"), "{message}");
+        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+    }
+
+    #[test]
+    fn rate_limit_403_without_reset_header_still_classified() {
+        let message = classify_rate_limit(
+            StatusCode::FORBIDDEN,
+            &headers(&[("x-ratelimit-remaining", "0")]),
+            1_700_000_000,
+        )
+        .expect("rate limit error");
+        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+        assert!(!message.contains("resets"), "{message}");
+    }
+
+    #[test]
+    fn rate_limit_429_with_retry_after_is_classified() {
+        let message = classify_rate_limit(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers(&[("retry-after", "120")]),
+            1_700_000_000,
+        )
+        .expect("rate limit error");
+        assert!(message.contains("resets in 2 minutes"), "{message}");
+        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+    }
+
+    #[test]
+    fn non_rate_limit_responses_are_not_classified() {
+        // Plain 403 (e.g. forbidden repo) with quota remaining.
+        assert!(
+            classify_rate_limit(
+                StatusCode::FORBIDDEN,
+                &headers(&[("x-ratelimit-remaining", "42")]),
+                1_700_000_000
+            )
+            .is_none()
+        );
+        assert!(classify_rate_limit(StatusCode::FORBIDDEN, &HeaderMap::new(), 0).is_none());
+        // Other statuses are never rate-limit errors, even with a zero counter.
+        assert!(
+            classify_rate_limit(
+                StatusCode::NOT_FOUND,
+                &headers(&[("x-ratelimit-remaining", "0")]),
+                0
+            )
+            .is_none()
+        );
+        // 429 without any rate-limit hint stays a normal error.
+        assert!(classify_rate_limit(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new(), 0).is_none());
+    }
 
     fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
         let mut cursor = std::io::Cursor::new(Vec::new());
@@ -864,6 +1111,49 @@ mod tests {
             zip.finish().expect("finish zip");
         }
         cursor.into_inner()
+    }
+
+    fn collect_file_names(root: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(root).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            out.push(entry.file_name().to_string_lossy().into_owned());
+            if entry.file_type().expect("file type").is_dir() {
+                collect_file_names(&entry.path(), out);
+            }
+        }
+    }
+
+    #[test]
+    fn extract_zip_archive_nests_windows_style_backslash_entries() {
+        let workspace = tempdir().expect("tempdir");
+        let zip_path = workspace.path().join("addon.zip");
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("Foo\\Foo.toc", options).expect("start toc");
+            zip.write_all(b"## Title: Foo").expect("write toc");
+            zip.add_directory("Foo\\Sub\\", options).expect("add dir");
+            zip.start_file("Foo\\Sub\\a.lua", options)
+                .expect("start lua");
+            zip.write_all(b"print('a')").expect("write lua");
+            zip.finish().expect("finish zip");
+        }
+        std::fs::write(&zip_path, cursor.into_inner()).expect("write zip");
+
+        let destination = workspace.path().join("out");
+        extract_zip_archive(&zip_path, &destination).expect("extract");
+
+        assert!(destination.join("Foo").join("Foo.toc").is_file());
+        assert!(destination.join("Foo").join("Sub").is_dir());
+        assert!(destination.join("Foo").join("Sub").join("a.lua").is_file());
+        let mut names = Vec::new();
+        collect_file_names(&destination, &mut names);
+        assert!(
+            names.iter().all(|name| !name.contains('\\')),
+            "no extracted name may contain a backslash: {names:?}"
+        );
     }
 
     #[test]

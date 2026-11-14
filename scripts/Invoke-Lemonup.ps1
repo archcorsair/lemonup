@@ -149,7 +149,7 @@ function Get-WowSandboxLayout {
         RetailDir    = Join-Path $resolved '_retail_'
         AddonsDir    = Join-Path $resolved '_retail_\Interface\AddOns'
         RootDataDir  = Join-Path $resolved 'Data'
-        WtfDir       = Join-Path $resolved 'WTF'
+        WtfDir       = Join-Path $resolved '_retail_\WTF'
         BuildInfo    = Join-Path $resolved '.build.info'
         RetailExe    = Join-Path $resolved '_retail_\Wow.exe'
     }

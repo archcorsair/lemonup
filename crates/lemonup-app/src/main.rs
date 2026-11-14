@@ -1,5 +1,6 @@
 mod action;
 mod app;
+mod archive;
 mod backup;
 mod cli;
 mod drift;
@@ -21,8 +22,9 @@ use std::time::Duration;
 use clap::Parser;
 use lemonup_core::{
     AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    StateDatabase, UpdateStatus, analyze_import, default_transfer_path, export_addons,
-    parse_import_file, scan_addons_dir, validate_addons_path,
+    StateDatabase, UpdateStatus, V1Location, V1MigrationOutcome, analyze_import,
+    default_transfer_path, export_addons, migrate_v1_if_needed, parse_import_file,
+    scan_addons_dir_with_tracked, validate_addons_path,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -56,10 +58,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     configure_tracing();
 
-    match cli.command.unwrap_or(Commands::Tui) {
-        Commands::Tui => run_tui(paths, runtime).await?,
+    let command = cli.command.unwrap_or(Commands::Tui);
+    let startup_notice = run_v1_migration(&paths, V1Location::discover());
+    if let Some(notice) = startup_notice.as_ref()
+        && !matches!(command, Commands::Tui)
+    {
+        notice.print();
+    }
+
+    match command {
+        Commands::Tui => run_tui(paths, runtime, startup_notice).await?,
         Commands::Sync => run_sync(paths, runtime)?,
-        Commands::Check { addons } => run_check(paths, addons).await?,
+        Commands::Check { addons } => run_check(paths, runtime, addons).await?,
         Commands::Update {
             addons,
             force,
@@ -104,8 +114,94 @@ fn configure_tracing() {
         .init();
 }
 
-async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::error::Error>> {
+/// Result of the one-time v1 migration, shown once at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupNotice {
+    text: String,
+    is_error: bool,
+    /// Extra lines printed by CLI commands only (for example skipped addons).
+    details: Vec<String>,
+}
+
+impl StartupNotice {
+    /// CLI output goes to stderr so it never mixes with `key=value` result lines.
+    fn print(&self) {
+        eprintln!("{}", self.text);
+        for line in &self.details {
+            eprintln!("  {line}");
+        }
+    }
+}
+
+/// Runs the v1 migration for the default profile when no v2 config exists.
+/// Never fails startup: errors become a one-line notice and onboarding runs.
+fn run_v1_migration(paths: &AppPaths, v1: Option<V1Location>) -> Option<StartupNotice> {
+    let v1 = v1?;
+    match migrate_v1_if_needed(paths, &v1) {
+        Ok(V1MigrationOutcome::NotApplicable) => None,
+        Ok(V1MigrationOutcome::Migrated(report)) => {
+            tracing::info!(
+                v1_dir = %report.v1_dir.display(),
+                addon_dir = ?report.addon_dir,
+                addon_dir_rejected = ?report.addon_dir_rejected,
+                database_found = report.database_found,
+                migrated = ?report.migrated_addons,
+                skipped = ?report.skipped_addons,
+                already_tracked = ?report.already_tracked,
+                owned_by_parent = ?report.owned_by_parent,
+                addons_not_imported = ?report.addons_not_imported,
+                "migrated LemonUp v1 config"
+            );
+            let mut details = Vec::new();
+            if let Some(reason) = report.addon_dir_rejected.as_ref() {
+                details.push(format!("v1 AddOns path not migrated: {reason}"));
+            }
+            if !report.skipped_addons.is_empty() {
+                details.push(format!(
+                    "v1 addons skipped (folder not found or not a plain folder name): {}",
+                    report.skipped_addons.join(", ")
+                ));
+            }
+            if !report.already_tracked.is_empty() {
+                details.push(format!(
+                    "v1 addons already tracked in v2 (kept v2 data): {}",
+                    report.already_tracked.join(", ")
+                ));
+            }
+            if report.addons_not_imported.is_some() {
+                details.push(
+                    "to bring addons over: export in v1, then run `lemonup import-addons`"
+                        .to_string(),
+                );
+            }
+            Some(StartupNotice {
+                text: report.summary_line(),
+                is_error: report.addons_not_imported.is_some(),
+                details,
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, v1_dir = %v1.dir.display(), "LemonUp v1 migration failed");
+            Some(StartupNotice {
+                text: format!(
+                    "LemonUp v1 migration failed: {error} | continuing with setup, v1 files untouched"
+                ),
+                is_error: true,
+                details: Vec::new(),
+            })
+        }
+    }
+}
+
+async fn run_tui(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    startup_notice: Option<StartupNotice>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::bootstrap(paths, runtime)?;
+    if let Some(notice) = startup_notice {
+        app.show_startup_notice(&notice.text, notice.is_error);
+    }
     let mut tui = Tui::enter()?;
     let events = EventHandler::new(Duration::from_millis(100));
     let result = app.run(tui.terminal_mut(), events).await;
@@ -114,15 +210,29 @@ async fn run_tui(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std
     Ok(())
 }
 
-async fn run_check(paths: AppPaths, addons: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_check(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addons: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let mut database = StateDatabase::open(paths.state_db_file)?;
     let show_details = !addons.is_empty();
     let api_key = resolve_wago_api_key(&config_state);
-    let checks = refresh_live_update_checks(&mut database, &addons, api_key.as_deref())
-        .await
-        .map_err(Box::<dyn std::error::Error>::from)?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let effective_addon_dir = runtime.addon_dir_override.clone().or(configured_addon_dir);
+    let checks = refresh_live_update_checks(
+        &mut database,
+        &addons,
+        api_key.as_deref(),
+        effective_addon_dir.as_deref(),
+    )
+    .await
+    .map_err(Box::<dyn std::error::Error>::from)?;
 
     let up_to_date = checks
         .iter()
@@ -302,8 +412,13 @@ fn run_sync(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::err
                 Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
             })?;
 
-            let scanned = scan_addons_dir(&addon_dir, GameFlavor::Retail)?;
             let mut database = StateDatabase::open(paths.state_db_file)?;
+            let tracked = database.list_addons()?;
+            let scanned = scan_addons_dir_with_tracked(
+                &addon_dir,
+                GameFlavor::for_addons_dir(&addon_dir),
+                &tracked,
+            )?;
             let summary = database.reconcile_scanned_addons(&scanned)?;
 
             println!(
@@ -418,6 +533,9 @@ async fn run_import_addons(
     for error in summary.errors {
         println!("import error: {error}");
     }
+    for warning in summary.warnings {
+        println!("import warning: {warning}");
+    }
     Ok(())
 }
 
@@ -508,9 +626,15 @@ fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) ->
         .iter()
         .filter(|result| result.status == LiveUpdateStatus::SkippedUnsupported)
         .count();
-    let error_lines = results
+    // Errors, plus updates that succeeded but carry a warning (for example the WoWInterface
+    // Forever notice), stay visible in the aggregated view. Up-to-date results carry a
+    // boilerplate message and are intentionally not listed.
+    let attention_lines = results
         .iter()
-        .filter(|result| result.status == LiveUpdateStatus::Error)
+        .filter(|result| {
+            result.status == LiveUpdateStatus::Error
+                || (result.status == LiveUpdateStatus::Updated && result.message.is_some())
+        })
         .map(format_update_result_line)
         .collect::<Vec<_>>();
 
@@ -522,14 +646,14 @@ fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) ->
         ));
     }
 
-    if lines.is_empty() && error_lines.is_empty() {
+    if lines.is_empty() && attention_lines.is_empty() {
         lines.push(
             "update detail: all processed targets were updated or already up to date".to_string(),
         );
         return lines;
     }
 
-    lines.extend(error_lines);
+    lines.extend(attention_lines);
     lines
 }
 
@@ -733,6 +857,9 @@ async fn run_install_wowinterface(
         summary.version.as_deref().unwrap_or("<unknown>"),
         summary.dry_run
     );
+    if let Some(warning) = &summary.warning {
+        println!("wowinterface warning: {warning}");
+    }
 
     Ok(())
 }
@@ -1079,6 +1206,26 @@ mod tests {
     }
 
     #[test]
+    fn update_all_detail_lines_show_warnings_on_updated_results() {
+        let mut warned = update_result(
+            "Details",
+            LiveUpdateStatus::Updated,
+            SourceKind::WowInterface,
+        );
+        warned.message = Some("WoWInterface may not support WoW Forever".to_string());
+        let mut quiet = update_result("Pawn", LiveUpdateStatus::Updated, SourceKind::WowInterface);
+        quiet.message = None;
+        let up_to_date = update_result("Bagnon", LiveUpdateStatus::UpToDate, SourceKind::Wago);
+
+        let lines = build_update_detail_lines(&[], &[warned, quiet, up_to_date]);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("update result: addon=Details"));
+        assert!(lines[0].contains("status=updated"));
+        assert!(lines[0].contains("message=WoWInterface may not support WoW Forever"));
+    }
+
+    #[test]
     fn targeted_update_detail_lines_keep_per_addon_rows() {
         let lines = build_update_detail_lines(
             &["WeakAuras".to_string()],
@@ -1092,5 +1239,80 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("update result: addon=WeakAuras"));
         assert!(lines[0].contains("status=skipped_manual"));
+    }
+}
+
+#[cfg(test)]
+mod v1_migration_tests {
+    use tempfile::tempdir;
+
+    use super::run_v1_migration;
+    use crate::app::{App, AppRuntime};
+    use lemonup_core::{AppPaths, DEFAULT_PROFILE, V1Location};
+
+    fn default_paths(root: &std::path::Path) -> AppPaths {
+        AppPaths {
+            profile: DEFAULT_PROFILE.to_string(),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            log_dir: root.join("data").join("logs"),
+            config_file: root.join("config").join("config.toml"),
+            state_db_file: root.join("data").join("state.sqlite"),
+        }
+    }
+
+    #[test]
+    fn corrupt_v1_config_yields_notice_and_startup_continues() {
+        let temp = tempdir().expect("tempdir");
+        let v1_dir = temp.path().join("v1");
+        std::fs::create_dir_all(&v1_dir).expect("v1 dir");
+        std::fs::write(v1_dir.join("config.json"), "{ broken").expect("corrupt config");
+        let paths = default_paths(&temp.path().join("v2"));
+
+        let notice =
+            run_v1_migration(&paths, Some(V1Location::from_dir(&v1_dir))).expect("failure notice");
+        assert!(notice.is_error);
+        assert!(notice.text.contains("v1 migration failed"));
+        assert!(!paths.config_file.exists());
+
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
+        )
+        .expect("bootstrap continues to onboarding");
+        app.show_startup_notice(&notice.text, notice.is_error);
+    }
+
+    #[test]
+    fn missing_v1_location_is_silent() {
+        let temp = tempdir().expect("tempdir");
+        let paths = default_paths(temp.path());
+        assert!(run_v1_migration(&paths, None).is_none());
+        assert!(
+            run_v1_migration(&paths, Some(V1Location::from_dir(temp.path().join("none"))))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn config_only_migration_prints_summary() {
+        let temp = tempdir().expect("tempdir");
+        let v1_dir = temp.path().join("v1");
+        std::fs::create_dir_all(&v1_dir).expect("v1 dir");
+        std::fs::write(
+            v1_dir.join("config.json"),
+            r#"{"destDir":"NOT_CONFIGURED","theme":"light","wagoApiKey":"key"}"#,
+        )
+        .expect("v1 config");
+        let paths = default_paths(&temp.path().join("v2"));
+
+        let notice =
+            run_v1_migration(&paths, Some(V1Location::from_dir(&v1_dir))).expect("success notice");
+        assert!(!notice.is_error);
+        assert!(notice.text.starts_with("Migrated LemonUp v1 settings"));
+        assert!(notice.text.contains("v1 files left untouched"));
+        assert!(paths.config_file.exists());
+        assert!(run_v1_migration(&paths, Some(V1Location::from_dir(&v1_dir))).is_none());
     }
 }

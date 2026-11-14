@@ -1161,6 +1161,29 @@ impl App {
             };
         }
 
+        if self.dashboard.filter_editing() {
+            return vec![
+                FooterCommandHint {
+                    id: FooterHintId::Nav,
+                    key: "↑/↓",
+                    label: "move",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Save,
+                    key: "enter",
+                    label: "keep filter",
+                    tier: primary,
+                },
+                FooterCommandHint {
+                    id: FooterHintId::Clear,
+                    key: "esc",
+                    label: "clear filter",
+                    tier: primary,
+                },
+            ];
+        }
+
         vec![
             FooterCommandHint {
                 id: FooterHintId::Nav,
@@ -1188,6 +1211,12 @@ impl App {
                 id: FooterHintId::Check,
                 key: "c",
                 label: "check",
+                tier: primary,
+            },
+            FooterCommandHint {
+                id: FooterHintId::Filter,
+                key: "/",
+                label: "filter",
                 tier: primary,
             },
             FooterCommandHint {

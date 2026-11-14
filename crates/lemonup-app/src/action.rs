@@ -23,6 +23,10 @@ pub enum AppAction {
     SetStatus(String),
     SetDashboardSelection(Option<usize>),
     ToggleDashboardSort(DashboardSortColumn),
+    SetDashboardFilter {
+        query: String,
+        editing: bool,
+    },
     SetPendingDelete(Option<Vec<String>>),
     SetDashboardUndoDelete(Option<DashboardUndoDeleteState>),
     SetDashboardDriftReport(Option<DriftReport>),

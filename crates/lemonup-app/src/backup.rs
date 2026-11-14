@@ -1,5 +1,5 @@
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
@@ -9,8 +9,11 @@ use time::macros::format_description;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
+use crate::archive::safe_entry_relative_path;
+
 const BACKUP_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
     format_description!("[year][month][day]T[hour][minute][second][subsecond digits:3]Z");
+const MAX_ARCHIVE_NAME_ATTEMPTS: usize = 50;
 const BACKUP_DISPLAY_FORMAT: &[FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]Z");
 
@@ -45,16 +48,12 @@ pub fn backup_root(data_dir: &Path) -> PathBuf {
 }
 
 pub fn derive_wtf_dir(addon_dir: &Path) -> Result<PathBuf, String> {
-    let interface_dir = addon_dir
+    // AddOns -> Interface -> client folder (`_retail_`, `_forever_`, ...), which owns WTF.
+    let client_dir = addon_dir
         .parent()
+        .and_then(Path::parent)
         .ok_or_else(|| format!("invalid addon directory: {}", addon_dir.display()))?;
-    let flavor_dir = interface_dir
-        .parent()
-        .ok_or_else(|| format!("invalid addon directory: {}", addon_dir.display()))?;
-    let wow_root = flavor_dir
-        .parent()
-        .ok_or_else(|| format!("invalid addon directory: {}", addon_dir.display()))?;
-    let wtf_dir = wow_root.join("WTF");
+    let wtf_dir = client_dir.join("WTF");
     if !wtf_dir.is_dir() {
         return Err(format!("WTF folder missing at {}", wtf_dir.display()));
     }
@@ -87,12 +86,7 @@ pub fn create_wtf_backup(
     let wtf_dir = derive_wtf_dir(addon_dir)?;
     fs::create_dir_all(backup_dir).map_err(|error| error.to_string())?;
 
-    let timestamp = OffsetDateTime::now_utc()
-        .format(BACKUP_TIMESTAMP_FORMAT)
-        .map_err(|error| error.to_string())?;
-    let file_name = format!("WTF-{timestamp}.zip");
-    let archive_path = backup_dir.join(&file_name);
-    write_wtf_archive(&wtf_dir, &archive_path)?;
+    let (file_name, archive_path) = write_wtf_archive(&wtf_dir, backup_dir)?;
 
     let pruned_files = prune_backups(backup_dir, usize::from(retention))?;
     let backups = list_backups(backup_dir)?;
@@ -216,8 +210,32 @@ fn prune_backups(root: &Path, retention: usize) -> Result<Vec<String>, String> {
     Ok(deleted)
 }
 
-fn write_wtf_archive(wtf_dir: &Path, archive_path: &Path) -> Result<(), String> {
-    let file = File::create(archive_path).map_err(|error| error.to_string())?;
+fn create_unique_archive_file(backup_dir: &Path) -> Result<(String, PathBuf, File), String> {
+    for _ in 0..MAX_ARCHIVE_NAME_ATTEMPTS {
+        let timestamp = OffsetDateTime::now_utc()
+            .format(BACKUP_TIMESTAMP_FORMAT)
+            .map_err(|error| error.to_string())?;
+        let file_name = format!("WTF-{timestamp}.zip");
+        let archive_path = backup_dir.join(&file_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive_path)
+        {
+            Ok(file) => return Ok((file_name, archive_path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(format!(
+        "could not allocate a unique backup name after {MAX_ARCHIVE_NAME_ATTEMPTS} attempts"
+    ))
+}
+
+fn write_wtf_archive(wtf_dir: &Path, backup_dir: &Path) -> Result<(String, PathBuf), String> {
+    let (file_name, archive_path, file) = create_unique_archive_file(backup_dir)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -225,7 +243,7 @@ fn write_wtf_archive(wtf_dir: &Path, archive_path: &Path) -> Result<(), String> 
 
     add_directory_to_zip(&mut zip, wtf_dir, "WTF", options)?;
     zip.finish().map_err(|error| error.to_string())?;
-    Ok(())
+    Ok((file_name, archive_path))
 }
 
 fn extract_wtf_archive(archive_path: &Path, destination_root: &Path) -> Result<(), String> {
@@ -254,8 +272,7 @@ fn archive_output_path(
     entry: &zip::read::ZipFile<'_>,
     destination_root: &Path,
 ) -> Result<PathBuf, String> {
-    let enclosed = entry
-        .enclosed_name()
+    let enclosed = safe_entry_relative_path(entry.name())
         .ok_or_else(|| format!("backup archive contains unsafe path: {}", entry.name()))?;
     let output_path = destination_root.join(enclosed);
     Ok(output_path)
@@ -332,8 +349,8 @@ mod tests {
     use zip::ZipArchive;
 
     use super::{
-        backup_root, create_wtf_backup, delete_backup, derive_wtf_dir, list_backups,
-        restore_wtf_backup,
+        backup_root, create_unique_archive_file, create_wtf_backup, delete_backup, derive_wtf_dir,
+        list_backups, restore_wtf_backup,
     };
 
     #[test]
@@ -344,13 +361,70 @@ mod tests {
             .join("AddOns");
         let wtf = derive_wtf_dir(&root).expect_err("missing wtf should fail");
         let normalized = wtf.replace('\\', "/");
-        assert!(normalized.contains("D:/Sandbox/WoW/WTF"));
+        assert!(normalized.contains("D:/Sandbox/WoW/_retail_/WTF"));
+    }
+
+    #[test]
+    fn derive_wtf_dir_uses_forever_client_folder() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("WoW")
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        let wtf_dir = temp.path().join("WoW").join("_forever_").join("WTF");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::create_dir_all(&wtf_dir).expect("create wtf dir");
+        assert_eq!(derive_wtf_dir(&addon_dir).expect("wtf dir"), wtf_dir);
     }
 
     #[test]
     fn backup_root_is_profile_scoped_under_data_dir() {
         let path = backup_root(Path::new(r"C:\Users\archc\AppData\Roaming\lemonup\data"));
         assert!(path.ends_with(Path::new("backups").join("wtf")));
+    }
+
+    #[test]
+    fn rapid_backups_never_overwrite_existing_archives() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("WoW")
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let wtf_dir = temp.path().join("WoW").join("_retail_").join("WTF");
+        let backup_dir = temp.path().join("data").join("backups").join("wtf");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::create_dir_all(&wtf_dir).expect("create wtf dir");
+        fs::write(wtf_dir.join("Config.wtf"), "SET test \"1\"\n").expect("write config");
+
+        let mut names = Vec::new();
+        for _ in 0..8 {
+            let outcome = create_wtf_backup(&addon_dir, &backup_dir, 100).expect("backup");
+            names.push(outcome.backup.file_name);
+        }
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len());
+        assert_eq!(list_backups(&backup_dir).expect("list").len(), 8);
+
+        let pruned = create_wtf_backup(&addon_dir, &backup_dir, 3).expect("pruning backup");
+        assert_eq!(pruned.backups.len(), 3);
+        assert_eq!(pruned.pruned_files.len(), 6);
+    }
+
+    #[test]
+    fn create_unique_archive_file_skips_existing_names() {
+        let temp = tempdir().expect("tempdir");
+        let (first_name, first_path, _file) =
+            create_unique_archive_file(temp.path()).expect("first");
+        fs::write(&first_path, "sentinel").expect("write sentinel");
+        let (second_name, _, _file2) = create_unique_archive_file(temp.path()).expect("second");
+        assert_ne!(first_name, second_name);
+        assert_eq!(fs::read_to_string(&first_path).expect("read"), "sentinel");
     }
 
     #[test]
@@ -362,7 +436,7 @@ mod tests {
             .join("_retail_")
             .join("Interface")
             .join("AddOns");
-        let wtf_dir = temp.path().join("WoW").join("WTF");
+        let wtf_dir = temp.path().join("WoW").join("_retail_").join("WTF");
         let backup_dir = temp.path().join("data").join("backups").join("wtf");
         fs::create_dir_all(&addon_dir).expect("create addon dir");
         fs::create_dir_all(wtf_dir.join("Account")).expect("create wtf subdir");
@@ -410,7 +484,7 @@ mod tests {
             .join("_retail_")
             .join("Interface")
             .join("AddOns");
-        let wtf_dir = temp.path().join("WoW").join("WTF");
+        let wtf_dir = temp.path().join("WoW").join("_retail_").join("WTF");
         let backup_dir = temp.path().join("data").join("backups").join("wtf");
         fs::create_dir_all(&addon_dir).expect("create addon dir");
         fs::create_dir_all(wtf_dir.join("Account")).expect("create wtf dir");
@@ -436,7 +510,7 @@ mod tests {
             .join("_retail_")
             .join("Interface")
             .join("AddOns");
-        let wtf_dir = temp.path().join("WoW").join("WTF");
+        let wtf_dir = temp.path().join("WoW").join("_retail_").join("WTF");
         let backup_dir = temp.path().join("data").join("backups").join("wtf");
         fs::create_dir_all(&addon_dir).expect("create addon dir");
         fs::create_dir_all(&wtf_dir).expect("create wtf dir");
@@ -452,5 +526,45 @@ mod tests {
         assert_eq!(outcome.backups.len(), 1);
         assert_eq!(outcome.backups[0].file_name, second.backup.file_name);
         assert!(!first.backup.path.exists());
+    }
+
+    #[test]
+    fn extract_wtf_archive_nests_backslash_entries_and_rejects_traversal() {
+        use std::io::Write;
+
+        let workspace = tempdir().expect("tempdir");
+        let archive_path = workspace.path().join("backup.zip");
+        {
+            let file = File::create(&archive_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.add_directory("WTF\\Account\\", options)
+                .expect("add dir");
+            zip.start_file("WTF\\Account\\config.wtf", options)
+                .expect("start file");
+            zip.write_all(b"SET x 1").expect("write file");
+            zip.finish().expect("finish zip");
+        }
+
+        let destination = workspace.path().join("out");
+        super::extract_wtf_archive(&archive_path, &destination).expect("extract");
+        assert!(
+            destination
+                .join("WTF")
+                .join("Account")
+                .join("config.wtf")
+                .is_file()
+        );
+
+        let evil_path = workspace.path().join("evil.zip");
+        {
+            let file = File::create(&evil_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("..\\..\\evil", options).expect("start file");
+            zip.write_all(b"x").expect("write file");
+            zip.finish().expect("finish zip");
+        }
+        assert!(super::extract_wtf_archive(&evil_path, &workspace.path().join("out2")).is_err());
     }
 }

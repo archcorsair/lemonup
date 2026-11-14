@@ -102,10 +102,22 @@ pub struct ScanProgressState {
     pub current_path: String,
 }
 
+/// Discovered AddOns folders (retail and/or WoW Forever) plus the selected choice. Choices
+/// are one "use" entry per path followed by "Enter different path".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundState {
-    pub path: String,
+    pub paths: Vec<String>,
     pub selected_action: usize,
+}
+
+impl FoundState {
+    pub fn action_count(&self) -> usize {
+        self.paths.len() + 1
+    }
+
+    pub fn selected_path(&self) -> Option<&str> {
+        self.paths.get(self.selected_action).map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,9 +139,9 @@ pub enum FoundAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingTaskEvent {
-    QuickCheckFinished(Option<PathBuf>),
+    QuickCheckFinished(Vec<PathBuf>),
     DeepScanProgress(ScanProgressState),
-    DeepScanFinished(std::result::Result<Option<PathBuf>, String>),
+    DeepScanFinished(std::result::Result<Vec<PathBuf>, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,12 +237,23 @@ impl OnboardingState {
         next
     }
 
+    #[cfg(test)]
     pub fn found(&self, path: PathBuf) -> Self {
+        self.found_many(vec![path])
+    }
+
+    /// Enters the Found phase with every discovered AddOns folder; the first is preselected.
+    pub fn found_many(&self, paths: Vec<PathBuf>) -> Self {
         let mut next = self.clone();
-        let rendered = path.display().to_string();
-        next.input = rendered.clone();
+        let rendered = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        if let Some(first) = rendered.first() {
+            next.input = first.clone();
+        }
         next.phase = OnboardingPhase::Found(FoundState {
-            path: rendered,
+            paths: rendered,
             selected_action: 0,
         });
         next.is_editing = false;
@@ -387,7 +410,10 @@ impl OnboardingState {
     pub fn next_found_action(&self) -> Self {
         let mut next = self.clone();
         if let OnboardingPhase::Found(found) = &mut next.phase {
-            found.selected_action = (found.selected_action + 1) % 2;
+            found.selected_action = (found.selected_action + 1) % found.action_count();
+            if let Some(path) = found.selected_path() {
+                next.input = path.to_string();
+            }
         }
         next
     }
@@ -395,17 +421,22 @@ impl OnboardingState {
     pub fn previous_found_action(&self) -> Self {
         let mut next = self.clone();
         if let OnboardingPhase::Found(found) = &mut next.phase {
-            found.selected_action = if found.selected_action == 0 { 1 } else { 0 };
+            found.selected_action = found
+                .selected_action
+                .checked_sub(1)
+                .unwrap_or(found.action_count() - 1);
+            if let Some(path) = found.selected_path() {
+                next.input = path.to_string();
+            }
         }
         next
     }
 
     pub fn selected_found_action(&self) -> FoundAction {
         match &self.phase {
-            OnboardingPhase::Found(found) => match found.selected_action {
-                0 => FoundAction::UseThisPath,
-                _ => FoundAction::EnterDifferentPath,
-            },
+            OnboardingPhase::Found(found) if found.selected_path().is_none() => {
+                FoundAction::EnterDifferentPath
+            }
             _ => FoundAction::UseThisPath,
         }
     }
@@ -488,6 +519,46 @@ mod tests {
         let state = OnboardingState::new().found(PathBuf::from("C:\\Games\\WoW"));
         let rotated = state.next_found_action().next_found_action();
         assert_eq!(rotated.selected_found_action(), FoundAction::UseThisPath);
+    }
+
+    #[test]
+    fn found_many_lists_retail_and_forever_and_selects_each() {
+        let retail = "D:\\World of Warcraft\\_retail_\\Interface\\AddOns";
+        let forever = "D:\\World of Warcraft\\_forever_\\Interface\\AddOns";
+        let state =
+            OnboardingState::new().found_many(vec![PathBuf::from(retail), PathBuf::from(forever)]);
+        let OnboardingPhase::Found(found) = &state.phase else {
+            panic!("expected found phase");
+        };
+        assert_eq!(found.paths, vec![retail.to_string(), forever.to_string()]);
+        assert_eq!(state.input, retail);
+        assert_eq!(state.selected_found_action(), FoundAction::UseThisPath);
+
+        let second = state.next_found_action();
+        assert_eq!(second.input, forever);
+        assert_eq!(second.selected_found_action(), FoundAction::UseThisPath);
+        assert_eq!(
+            second.apply_directory_to_draft().draft.addon_dir,
+            Some(PathBuf::from(forever))
+        );
+
+        let other = second.next_found_action();
+        assert_eq!(
+            other.selected_found_action(),
+            FoundAction::EnterDifferentPath
+        );
+        assert_eq!(
+            other.next_found_action().selected_found_action(),
+            FoundAction::UseThisPath
+        );
+        assert_eq!(
+            state.previous_found_action().selected_found_action(),
+            FoundAction::EnterDifferentPath
+        );
+        assert_eq!(
+            state.previous_found_action().previous_found_action().input,
+            forever
+        );
     }
 
     #[test]
