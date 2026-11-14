@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use lemonup_core::DEFAULT_PROFILE;
 
 #[derive(Debug, Parser)]
-#[command(name = "lemonup", about = "Rust rewrite of the LemonUp addon manager")]
+#[command(name = "lemonup", about = "World of Warcraft addon manager")]
 pub struct Cli {
     #[arg(long, default_value = DEFAULT_PROFILE)]
     pub profile: String,

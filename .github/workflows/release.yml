@@ -45,10 +45,10 @@ jobs:
           - os: windows-latest
             label: windows-x64
             asset_name: lemonup-windows-x64.exe
-          - os: macos-13
+          - os: macos-15-intel
             label: macos-x64
             asset_name: lemonup-macos-x64
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64
             asset_name: lemonup-macos-arm64
 

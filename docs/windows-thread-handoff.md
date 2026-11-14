@@ -13,7 +13,8 @@ Read in this order:
 
 ## Repo Root
 
-- `C:/Users/archc/ghq/github.com/archcorsair/lemonup`
+- Windows (primary): `C:/Users/archc/ghq/github.com/archcorsair/lemonup`
+- Other machines: `~/ghq/github.com/archcorsair/lemonup` (ghq layout)
 
 ## Workspace Layout
 
@@ -26,7 +27,8 @@ Read in this order:
 ## Current Status
 
 - default branch: `main`
-- latest verified milestone: Rust-only cutover complete, v1 retired, blocker slice closed
+- latest verified milestone: Rust-only cutover complete and v1 retired (2026-04-05), followed by the help overlay, backup overlay polish, and Version default sort (through 2026-04-09)
+- no Rust release published yet; see Releases in `docs/progress.md`
 
 ## Current Product State
 

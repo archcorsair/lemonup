@@ -1,4 +1,4 @@
-This file provides guidance to Codex when working in this repository.
+This file provides guidance to coding agents (Codex, Claude Code) when working in this repository.
 
 ## Repo Truth
 
@@ -23,24 +23,17 @@ Use the docs as the source of truth for:
 - safety rules
 - manual verification status
 
-## Product Context
-
-If product context is needed, read only:
-- `conductor/product.md`
-- `conductor/product-guidelines.md`
-
-Ignore everything else under `conductor/` unless explicitly asked.
-
 ## Runtime / Tooling
 
-- use native Windows/PowerShell for LemonUp work
-- if toolchain binaries are missing, prefer `mise which <tool>`
+- the primary dev machine is Windows; docs and `scripts/*.ps1` assume native PowerShell (`pwsh`)
+- cargo commands work the same on Linux/macOS (CI runs on Ubuntu); the smoke scripts need `pwsh` there
+- the Rust toolchain is pinned in `mise.toml`; if toolchain binaries are missing, prefer `mise which <tool>`
 - if `cargo` still is not usable, follow the fallback in `docs/windows-thread-handoff.md`
 
 ## Safety / Workflow
 
 - keep changes minimal and surgical
-- commit only after user verification when working in the Rust rewrite flow
+- commit only after user verification
 - when the user says `checkpoint`, update relevant docs under `docs/` before commit
 
 ## Legacy v1

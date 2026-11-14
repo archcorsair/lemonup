@@ -1,4 +1,4 @@
-# Rewrite Progress
+# Progress
 
 ## Purpose
 
@@ -11,8 +11,12 @@ Current progress ledger for the Rust LemonUp workspace.
 - Default seeded manual-smoke profile: `--profile manual-smoke`
 - Production AddOns path: do not use for manual testing
 - Legacy v1 app: retired and removed from the runnable tree
+- Activity: last product work landed 2026-04-09; the project was on hold until 2026-11
+- Releases: no Rust release has been published yet. The latest GitHub release (`v0.1.16`,
+  2026-01-10) and the Scoop/Homebrew manifests still ship the retired v1 Bun binary, and the
+  workspace version in `Cargo.toml` is `0.1.0`, below that tag
 
-## Newly Completed
+## Completed Through 2026-04-09
 
 - dashboard default sort now starts on Version:
   - update-available addons rank first

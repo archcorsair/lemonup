@@ -15,7 +15,7 @@ This is the current product contract for the Rust workspace now that v1 is retir
 | Owned-folder / subfolder tracking | Done | Managed ownership persisted in state |
 | Dependency metadata | Done | Inspect overlay and core record support |
 | Import / export addon list | Done | Portable JSON format, CLI + TUI entry path |
-| Backup WTF | Done | Create + retention in CLI/TUI |
+| Backup WTF | Done | Create + retention in the TUI backup overlay (no CLI create command) |
 | Restore WTF backup | Done | CLI + TUI restore with rollback |
 | Auto-check / background status | Done | Background freshness-aware dashboard refresh |
 | CLI updater | Done | `check`, `update`, `update-all`, import/export, restore |
