@@ -12615,6 +12615,15 @@ mod tests {
             .collect()
     }
 
+    /// The three rows of the filter box at `width`, as text.
+    fn filter_box_text(app: &App, width: u16) -> String {
+        app.dashboard_filter_box_lines(width)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn press_key(app: &mut App, code: KeyCode) {
         for message in app.messages_for_key(KeyEvent::from(code)) {
             for action in app.update(message) {
@@ -13000,7 +13009,7 @@ mod tests {
             app.dashboard.selected_parent_folders(),
             vec!["Second".to_string()]
         );
-        assert!(line_text(&app.dashboard_filter_line(120)).contains("1 of 3 shown"));
+        assert!(filter_box_text(&app, 120).contains("1 of 3 shown"));
     }
 
     #[test]
@@ -13012,7 +13021,7 @@ mod tests {
         press_key(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "second");
         assert_eq!(app.dashboard.selected_parent_count(), 2);
-        assert!(line_text(&app.dashboard_filter_line(120)).contains("1 of 3 shown"));
+        assert!(filter_box_text(&app, 120).contains("1 of 3 shown"));
         press_key(&mut app, KeyCode::Enter);
 
         // Bulk actions keep targeting the full selection, including hidden rows.
@@ -13080,7 +13089,7 @@ mod tests {
         let mut app = app_for_tests(ShellMode::Dashboard);
         press_key(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "zzz");
-        assert!(line_text(&app.dashboard_filter_line(120)).contains("0 of 3 shown"));
+        assert!(filter_box_text(&app, 120).contains("0 of 3 shown"));
 
         let rows = render_rows(&mut app, 100, 30);
         let text = rows.join("\n");
@@ -13088,13 +13097,246 @@ mod tests {
             text.contains("Nothing you have installed matches \"zzz\"."),
             "{text}"
         );
-        // The filter uses row 3, right under the header, so the table stays put.
-        assert!(rows[2].starts_with(" / zzz▌"), "{text}");
+        // The filter box covers rows 1 to 3, so the table stays put.
+        assert!(rows[1].starts_with("│  / zzz▌"), "{text}");
+        assert!(rows[0].ends_with(" 0 of 3 shown ─╮"), "{text}");
         assert!(rows[3].contains("Addon"), "{text}");
         assert!(
             !text.contains("Looking through your AddOns folder"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn dashboard_filter_box_keeps_the_list_rows_in_place() {
+        for (width, height) in [(120u16, 30u16), (80, 24), (60, 20)] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let before = render_rows(&mut app, width, height);
+            press_key(&mut app, KeyCode::Char('/'));
+            let empty = render_rows(&mut app, width, height);
+            type_text(&mut app, "ir");
+            let typing = render_rows(&mut app, width, height);
+            press_key(&mut app, KeyCode::Enter);
+            let applied = render_rows(&mut app, width, height);
+            press_key(&mut app, KeyCode::Esc);
+            let cleared = render_rows(&mut app, width, height);
+
+            let bottom_rule = usize::from(height) - 3;
+            // The row of the first addon in the list.
+            let first_row = |rows: &[String]| {
+                rows.iter().position(|row| {
+                    ["First", "Second", "Third"]
+                        .iter()
+                        .any(|name| row.contains(name))
+                })
+            };
+            for (label, rows) in [
+                ("empty", &empty),
+                ("typing", &typing),
+                ("applied", &applied),
+            ] {
+                let text = rows.join("\n");
+                assert!(rows[0].starts_with("╭─ Filter "), "{label} {width}\n{text}");
+                assert!(rows[0].ends_with("─╮"), "{label} {width}\n{text}");
+                assert!(rows[1].starts_with("│  / "), "{label} {width}\n{text}");
+                assert!(rows[1].ends_with('│'), "{label} {width}\n{text}");
+                assert_eq!(rows[2], format!("╰{}╯", "─".repeat(usize::from(width) - 2)));
+                // The column header, both rules and the first list row stay put.
+                assert_eq!(rows[3], before[3], "{label} {width}\n{text}");
+                assert_eq!(rows[4], before[4], "{label} {width}\n{text}");
+                assert_eq!(rows[bottom_rule], before[bottom_rule], "{label} {width}");
+                assert_eq!(
+                    first_row(rows),
+                    first_row(&before),
+                    "{label} {width}\n{text}"
+                );
+            }
+            assert_eq!(first_row(&before), Some(5));
+            // esc brings the header and the blank row back.
+            assert!(!cleared[0].starts_with('╭'), "{}", cleared.join("\n"));
+            assert!(cleared[2].trim().is_empty(), "{}", cleared.join("\n"));
+            assert_eq!(cleared[3], before[3]);
+        }
+    }
+
+    #[test]
+    fn dashboard_filter_query_lines_up_with_the_addon_names() {
+        let column = |row: &str, needle: &str| {
+            row.find(needle)
+                .map(|byte| row[..byte].chars().count())
+                .expect("needle")
+        };
+        for (width, docked) in [(120u16, false), (80, false), (120, true)] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            if docked {
+                app.apply(AppAction::SetDashboardFilter {
+                    query: "First".to_string(),
+                    editing: false,
+                });
+                app.apply(AppAction::SetInspectOverlay(true));
+            } else {
+                press_key(&mut app, KeyCode::Char('/'));
+                type_text(&mut app, "First");
+            }
+            let rows = render_rows(&mut app, width, 30);
+            let text = rows.join("\n");
+            let list_row = rows[5..]
+                .iter()
+                .find(|row| row.contains("First"))
+                .expect("list row");
+            assert_eq!(
+                column(&rows[1], "First"),
+                column(list_row, "First"),
+                "{text}"
+            );
+            assert_eq!(column(&rows[1], "First"), 5, "{text}");
+            if docked {
+                // The box spans the window over docked Details, and esc
+                // closes Details first, so the box does not offer it.
+                assert!(app.details_docked());
+                assert_eq!(rows[1].chars().count(), usize::from(width));
+                assert!(rows[1].ends_with("/ edit  │"), "{text}");
+                assert!(!rows[1].contains("esc"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_filter_box_shows_the_count_and_the_keys_for_its_state() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        let empty = filter_box_text(&app, 120);
+        assert!(
+            empty.contains("│  / ▌part of a name, folder or author "),
+            "{empty}"
+        );
+        assert!(empty.contains(" 3 of 3 shown ─╮"), "{empty}");
+        assert!(empty.contains("enter keep · esc clear  │"), "{empty}");
+
+        type_text(&mut app, "ir");
+        let typing = app.dashboard_filter_box_lines(120);
+        let rows: Vec<String> = typing.iter().map(line_text).collect();
+        for row in &rows {
+            assert_eq!(row.chars().count(), 120, "{row}");
+        }
+        assert!(rows[0].starts_with("╭─ Filter ──"), "{}", rows[0]);
+        assert!(rows[0].ends_with("── 2 of 3 shown ─╮"), "{}", rows[0]);
+        assert!(rows[1].starts_with("│  / ir▌ "), "{}", rows[1]);
+        assert!(
+            rows[1].ends_with("enter keep · esc clear  │"),
+            "{}",
+            rows[1]
+        );
+        // Typing: the border is the accent and the query is strong.
+        let roles = app.ui_theme.roles;
+        assert_eq!(typing[0].spans[0].style.fg, Some(roles.lemon));
+        let query = typing[1]
+            .spans
+            .iter()
+            .find(|span| span.content == "ir")
+            .expect("query span");
+        assert!(
+            query
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+
+        press_key(&mut app, KeyCode::Enter);
+        let applied = app.dashboard_filter_box_lines(120);
+        let rows: Vec<String> = applied.iter().map(line_text).collect();
+        assert!(rows[1].starts_with("│  / ir "), "{}", rows[1]);
+        assert!(!rows[1].contains('▌'), "{}", rows[1]);
+        assert!(rows[1].ends_with("/ edit · esc clear  │"), "{}", rows[1]);
+        assert!(rows[0].ends_with(" 2 of 3 shown ─╮"), "{}", rows[0]);
+        // Applied: the border steps back and the query is plain text.
+        assert_eq!(applied[0].spans[0].style.fg, Some(roles.border));
+        let query = applied[1]
+            .spans
+            .iter()
+            .find(|span| span.content == "ir")
+            .expect("query span");
+        assert!(
+            !query
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        // The old filter line's "esc clears the filter" is gone.
+        assert!(!filter_box_text(&app, 120).contains("clears the filter"));
+    }
+
+    #[test]
+    fn dashboard_filter_box_gives_way_on_narrow_windows() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        let rows = |app: &App, width: u16| -> Vec<String> {
+            let rows: Vec<String> = app
+                .dashboard_filter_box_lines(width)
+                .iter()
+                .map(line_text)
+                .collect();
+            for row in &rows {
+                assert_eq!(row.chars().count(), usize::from(width), "{row}");
+            }
+            rows
+        };
+        // An empty query: the shorter placeholder keeps the hint at 60.
+        assert!(rows(&app, 80)[1].contains("▌part of a name, folder or author"));
+        let at_60 = rows(&app, 60);
+        assert!(
+            at_60[1].contains("▌name, folder or author "),
+            "{}",
+            at_60[1]
+        );
+        assert!(
+            at_60[1].ends_with("enter keep · esc clear  │"),
+            "{}",
+            at_60[1]
+        );
+
+        // A short query fits with its hint and the full count at 80 and 60.
+        type_text(&mut app, "weak");
+        for width in [80, 60] {
+            let rows = rows(&app, width);
+            assert!(rows[0].ends_with(" 0 of 3 shown ─╮"), "{}", rows[0]);
+            assert!(rows[1].starts_with("│  / weak▌ "), "{}", rows[1]);
+            assert!(
+                rows[1].ends_with("enter keep · esc clear  │"),
+                "{}",
+                rows[1]
+            );
+        }
+
+        // A longer query drops the hint first.
+        let long = "abcdefghij".repeat(4);
+        app.dashboard.set_filter(long.clone(), true);
+        let at_60 = rows(&app, 60);
+        assert!(
+            at_60[1].starts_with(&format!("│  / {long}▌")),
+            "{}",
+            at_60[1]
+        );
+        assert!(!at_60[1].contains("enter"), "{}", at_60[1]);
+        assert!(at_60[0].ends_with(" 0 of 3 shown ─╮"), "{}", at_60[0]);
+
+        // Then, on a very narrow window, the count loses "shown".
+        let at_26 = rows(&app, 26);
+        assert!(at_26[0].ends_with("─ 0 of 3 ─╮"), "{}", at_26[0]);
+
+        // A query wider than the box is cut from the left: the end stays.
+        let longer = format!("{}END", "0123456789".repeat(7));
+        app.dashboard.set_filter(longer.clone(), true);
+        for width in [80u16, 60] {
+            let rows = rows(&app, width);
+            assert!(rows[1].starts_with("│  / …"), "{}", rows[1]);
+            assert!(rows[1].ends_with("END▌ │"), "{}", rows[1]);
+        }
+        // Applied, the same: no cursor, the end still shows.
+        app.dashboard.set_filter(longer, false);
+        let at_60 = rows(&app, 60);
+        assert!(at_60[1].starts_with("│  / …"), "{}", at_60[1]);
+        assert!(at_60[1].ends_with("END │"), "{}", at_60[1]);
     }
 
     #[test]

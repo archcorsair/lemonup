@@ -16,7 +16,8 @@ const JOB_BAR_WIDTH: usize = 28;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DashboardFrameLayout {
     pub(super) header: Rect,
-    /// Blank, or the `/` filter line.
+    /// Blank under the header. While the filter is open or applied, the
+    /// filter box covers the header and this row (see `filter_box`).
     pub(super) filter: Rect,
     pub(super) column_header: Rect,
     pub(super) top_rule: Rect,
@@ -60,6 +61,17 @@ impl DashboardFrameLayout {
             status,
             keys,
         }
+    }
+
+    /// The filter box: the header rows and the filter row together, so the
+    /// column header and the list stay where they are when it opens.
+    pub(super) fn filter_box(&self) -> Rect {
+        Rect::new(
+            self.header.x,
+            self.header.y,
+            self.header.width,
+            self.filter.bottom().saturating_sub(self.header.y),
+        )
     }
 
     /// Where sheets draw: everything above the status line and the key line.
@@ -473,9 +485,9 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
 }
 
 impl App {
-    /// The dashboard frame: two header rows, the filter row, the column
-    /// header and a rule, the list, then a rule, the status line and the
-    /// key line.
+    /// The dashboard frame: two header rows and a blank row (or the filter
+    /// box over all three), the column header and a rule, the list, then a
+    /// rule, the status line and the key line.
     pub(super) fn draw_dashboard_frame(&mut self, frame: &mut Frame<'_>) {
         let roles = self.ui_theme.roles;
         let area = frame.area();
@@ -486,14 +498,22 @@ impl App {
         );
         let layout = DashboardFrameLayout::new(area);
         let now = OffsetDateTime::now_utc();
-        frame.render_widget(
-            Paragraph::new(self.dashboard_header_lines(area.width, now)),
-            layout.header,
-        );
-        frame.render_widget(
-            Paragraph::new(self.dashboard_filter_line(area.width)),
-            layout.filter,
-        );
+        // While the filter is open or applied its box takes the header rows
+        // and the blank row under them; the rows below never move.
+        let filter_box = self.dashboard.filter_bar_visible();
+        let top_rows = if filter_box {
+            frame.render_widget(
+                Paragraph::new(self.dashboard_filter_box_lines(area.width)),
+                layout.filter_box(),
+            );
+            layout.filter_box().height
+        } else {
+            frame.render_widget(
+                Paragraph::new(self.dashboard_header_lines(area.width, now)),
+                layout.header,
+            );
+            layout.header.height
+        };
         // Docked Details takes the right of the list rows; everything else
         // spans the window as usual.
         let docked = self.details_docked();
@@ -552,7 +572,7 @@ impl App {
             let panel = |row: Rect| Rect::new(divider_x + 1, row.y, panel_width, row.height);
             self.render_docked_details(frame, panel(layout.column_header), panel(layout.list));
         } else {
-            self.render_overlay_host(frame, layout.sheet_region(), layout.header.height);
+            self.render_overlay_host(frame, layout.sheet_region(), top_rows);
         }
         // A question sits on top of everything, sheets and docked Details too.
         self.render_question(frame, layout.sheet_region());
@@ -738,82 +758,177 @@ impl App {
         spans
     }
 
-    /// Row 3: blank, or the `/` filter with its match count.
-    pub(super) fn dashboard_filter_line(&self, width: u16) -> Line<'static> {
+    /// Rows 1 to 3 while the filter is open or applied: a box with the
+    /// query, the match count and the keys that act on it.
+    ///
+    /// ```text
+    /// ╭─ Filter ─────────────────────────────────── 3 of 33 shown ─╮
+    /// │  / weak▌                            enter keep · esc clear  │
+    /// ╰─────────────────────────────────────────────────────────────╯
+    /// ```
+    ///
+    /// The query starts in the column of the addon names below. When room
+    /// runs out the hint goes first, then the count loses "shown", then the
+    /// query is cut from the left so its end (and the cursor) stays visible.
+    pub(super) fn dashboard_filter_box_lines(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        if !self.dashboard.filter_bar_visible() {
-            return Line::default();
+        let width = usize::from(width);
+        if width < 2 {
+            return vec![Line::default(); 3];
         }
-        let query = self.dashboard.filter_query().to_string();
-        let count = format!(
-            "{} of {} shown",
-            self.dashboard.visible_parent_count(),
-            self.dashboard.items.len()
-        );
-        let (mut left, right, right_margin) = if self.dashboard.filter_editing() {
-            (
-                vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        "/",
-                        Style::default()
-                            .fg(roles.lemon)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(query, Style::default().fg(roles.text)),
-                    Span::styled("▌", Style::default().fg(roles.lemon)),
-                ],
-                vec![Span::styled(count, Style::default().fg(roles.muted))],
-                16,
-            )
+        let editing = self.dashboard.filter_editing();
+        let border = Style::default().fg(if editing { roles.lemon } else { roles.border });
+        let muted = Style::default().fg(roles.muted);
+        let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
+        // Between the corners.
+        let inner = width - 2;
+
+        // ╭─ Filter ───── 3 of 33 shown ─╮
+        let title = "─ Filter ";
+        let title_style = if editing {
+            Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
+        } else {
+            muted
+        };
+        let shown = self.dashboard.visible_parent_count();
+        let total = self.dashboard.items.len();
+        let count = [
+            format!(" {shown} of {total} shown "),
+            format!(" {shown} of {total} "),
+        ]
+        .into_iter()
+        // A dash on each side of the count.
+        .find(|count| title.chars().count() + 1 + count.chars().count() < inner);
+        let mut top = vec![Span::styled("╭", border)];
+        if title.chars().count() + 1 > inner {
+            top.push(Span::styled("─".repeat(inner), border));
+        } else {
+            top.push(Span::styled("─ ", border));
+            top.push(Span::styled("Filter", title_style));
+            top.push(Span::styled(" ", border));
+            let count_width = count.as_ref().map_or(0, |count| count.chars().count() + 1);
+            top.push(Span::styled(
+                "─".repeat(inner - title.chars().count() - count_width),
+                border,
+            ));
+            if let Some(count) = count {
+                top.push(Span::styled(count, muted));
+                top.push(Span::styled("─", border));
+            }
+        }
+        top.push(Span::styled("╮", border));
+
+        // │  / query▌                 enter keep · esc clear  │
+        let gutter = usize::from(GUTTER_WIDTH);
+        let mut row = vec![
+            Span::styled("│", border),
+            Span::raw(" ".repeat(gutter.saturating_sub(3))),
+            Span::styled(
+                "/",
+                if editing {
+                    Style::default()
+                        .fg(roles.lemon)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    muted
+                },
+            ),
+            Span::raw(" "),
+        ];
+        let hint = |keys: &[(&'static str, &'static str)]| {
+            let mut spans = Vec::new();
+            for (index, (name, label)) in keys.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(roles.dim)));
+                }
+                spans.push(Span::styled(*name, key));
+                spans.push(Span::styled(*label, muted));
+            }
+            spans
+        };
+        let hint = if editing {
+            hint(&[("enter", " keep"), ("esc", " clear")])
         } else if self.details_docked() {
             // esc closes docked Details first, so it does not offer to clear.
+            hint(&[("/", " edit")])
+        } else {
+            hint(&[("/", " edit"), ("esc", " clear")])
+        };
+        // The field runs from the query column to one space before the
+        // right border; the hint needs a gap before it and ends two columns
+        // in, under the count's last character.
+        let field_room = inner.saturating_sub(gutter.saturating_sub(1) + 1);
+        let hint_room = spans_width(&hint) + 3;
+        let query: Vec<char> = self.dashboard.filter_query().chars().collect();
+        let cursor = || Span::styled("▌", Style::default().fg(roles.lemon));
+        let (field, show_hint) = if editing && query.is_empty() {
+            // Says what the filter looks at; see `dashboard_item_filter_match`.
+            let (placeholder, show_hint) = [
+                ("part of a name, folder or author", true),
+                ("name, folder or author", true),
+                ("part of a name, folder or author", false),
+                ("name, folder or author", false),
+            ]
+            .into_iter()
+            .find(|(text, with_hint)| {
+                let room = if *with_hint {
+                    field_room.saturating_sub(hint_room)
+                } else {
+                    field_room
+                };
+                // The cursor sits before the placeholder.
+                text.chars().count() < room
+            })
+            .unwrap_or(("name, folder or author", false));
+            let room = field_room.saturating_sub(1);
             (
                 vec![
-                    Span::raw(" "),
-                    Span::styled("/", Style::default().fg(roles.muted)),
-                    Span::raw(" "),
-                    Span::styled(query, Style::default().fg(roles.text)),
+                    cursor(),
+                    Span::styled(truncate_text(placeholder, room), muted),
                 ],
-                vec![Span::styled(count, Style::default().fg(roles.muted))],
-                1,
+                show_hint,
             )
         } else {
-            (
-                vec![
-                    Span::raw(" "),
-                    Span::styled("/", Style::default().fg(roles.muted)),
-                    Span::raw(" "),
-                    Span::styled(query, Style::default().fg(roles.text)),
-                ],
-                vec![
-                    Span::styled(format!("{count} ·"), Style::default().fg(roles.muted)),
-                    Span::raw(" "),
-                    Span::styled(
-                        "esc",
-                        Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" clears the filter", Style::default().fg(roles.muted)),
-                ],
-                1,
-            )
+            let cursor_width = usize::from(editing);
+            let needed = query.len() + cursor_width;
+            let show_hint = needed + hint_room <= field_room;
+            let text: String = if needed <= field_room {
+                query.iter().collect()
+            } else {
+                // Cut from the left: the end of the query is what was typed last.
+                let keep = field_room.saturating_sub(cursor_width + 1);
+                let tail: String = query[query.len() - keep.min(query.len())..]
+                    .iter()
+                    .collect();
+                format!("…{tail}")
+            };
+            let style = if editing {
+                Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(roles.text)
+            };
+            let mut field = vec![Span::styled(text, style)];
+            if editing {
+                field.push(cursor());
+            }
+            (field, show_hint)
         };
-        let width = usize::from(width);
-        let left_width = spans_width(&left);
-        let right_width = spans_width(&right);
-        let margin = if left_width + right_width + right_margin < width {
-            right_margin
-        } else {
-            1
-        };
-        if left_width + right_width + margin < width {
-            left.push(Span::raw(
-                " ".repeat(width - left_width - right_width - margin),
-            ));
-            left.extend(right);
+        row.extend(field);
+        let used = spans_width(&row);
+        let hint = if show_hint { hint } else { Vec::new() };
+        let tail = if hint.is_empty() { 1 } else { 2 };
+        let end = width.saturating_sub(1 + tail + spans_width(&hint));
+        if end > used {
+            row.push(Span::raw(" ".repeat(end - used)));
         }
-        Line::from(fit_spans(left, width))
+        row.extend(hint);
+        let mut row = fit_spans(row, width.saturating_sub(1 + tail));
+        let used = spans_width(&row);
+        row.push(Span::raw(" ".repeat(width.saturating_sub(1 + used))));
+        row.push(Span::styled("│", border));
+
+        let bottom = vec![Span::styled(format!("╰{}╯", "─".repeat(inner)), border)];
+        vec![Line::from(top), Line::from(row), Line::from(bottom)]
     }
 
     pub(super) fn dashboard_column_header_line(&self, columns: ListColumns) -> Line<'static> {
