@@ -1,284 +1,543 @@
-use super::render_dashboard::{dashboard_item_remote_label, dashboard_item_update_status};
-use super::sheet::SheetBody;
-use super::*;
-impl App {
-    /// Details of one addon: the summary first, then the sections that
-    /// `r` `d` `t` open. The whole body scrolls, so nothing is dropped.
-    pub(super) fn inspect_sheet_body(&self, _width: u16) -> SheetBody<'static> {
-        let mut body = SheetBody::new();
-        let Some(target) = self.inspect_resolved_target() else {
-            body.text(vec![
-                Line::from(Span::styled(
-                    "No addon selected",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Select a row, then press Enter to inspect.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ]);
-            return body;
-        };
+//! Details of one addon: the status first, a sentence when the status needs
+//! explaining, then one list of facts. Below 120 columns it is a sheet over
+//! the list; at 120 columns and wider it docks on the right of the list.
 
-        let hero_lines = self.inspect_hero_lines(target);
-        if !hero_lines.is_empty() {
-            body.text(hero_lines);
+use super::render_dashboard::{
+    RowStatus, dashboard_item_installed_version, dashboard_item_remote_label, dashboard_source_name,
+};
+use super::sheet::{SheetBody, wrap_lines};
+use super::*;
+
+/// At this width and wider, Details docks beside the list.
+pub(super) const DETAILS_DOCK_MIN_WIDTH: u16 = 120;
+/// The docked panel at 120 columns; it grows with the window up to the max.
+const PANEL_MIN_WIDTH: u16 = 41;
+const PANEL_MAX_WIDTH: u16 = 52;
+/// Label column of the sheet ("Last checked    ") and of the docked panel.
+const SHEET_LABEL_WIDTH: usize = 16;
+const PANEL_LABEL_WIDTH: usize = 14;
+/// The status word column of the sheet's first row.
+const SHEET_STATUS_WIDTH: usize = 20;
+
+/// The list and panel widths for a docked window `width` columns wide. The
+/// divider takes the one column between them. At 120 columns: 78 and 41.
+/// Wider windows share the extra columns until the panel reaches 52.
+pub(super) fn docked_widths(width: u16) -> (u16, u16) {
+    let panel = (PANEL_MIN_WIDTH + width.saturating_sub(DETAILS_DOCK_MIN_WIDTH) / 2)
+        .min(PANEL_MAX_WIDTH)
+        .min(width.saturating_sub(1));
+    (width.saturating_sub(panel + 1), panel)
+}
+
+/// "WoW 12.0.5" for interface 120005: major n/10000, minor (n/100)%100,
+/// patch n%100. Several interfaces are joined in the TOC's order, as
+/// "WoW 11.2.7, 1.15.7"; `None` when none parses.
+pub(super) fn wow_versions_for_interface(interface: &str) -> Option<String> {
+    let mut versions: Vec<String> = Vec::new();
+    for part in interface.split(',') {
+        let Ok(number) = part.trim().parse::<u32>() else {
+            continue;
+        };
+        if number == 0 {
+            continue;
         }
-        body.heading(" Summary ")
-            .text(self.inspect_summary_lines(target))
-            .gap(1)
-            .heading(" Details ")
-            .text(self.inspect_detail_lines(target));
+        let version = format!(
+            "{}.{}.{}",
+            number / 10000,
+            (number / 100) % 100,
+            number % 100
+        );
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
+    (!versions.is_empty()).then(|| format!("WoW {}", versions.join(", ")))
+}
+
+/// "5 minutes ago", for Last checked.
+pub(super) fn time_ago(now: OffsetDateTime, at: OffsetDateTime) -> String {
+    let seconds = (now - at).whole_seconds().max(0);
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    let unit =
+        |count: i64, word: &str| format!("{count} {word}{} ago", if count == 1 { "" } else { "s" });
+    if minutes < 1 {
+        "just now".to_string()
+    } else if hours < 1 {
+        unit(minutes, "minute")
+    } else if days < 1 {
+        unit(hours, "hour")
+    } else {
+        unit(days, "day")
+    }
+}
+
+/// A link without its scheme or `www.`: `addons.wago.io/addons/dbm`.
+fn web_page_label(url: &str) -> String {
+    let url = url.trim();
+    let url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    url.strip_prefix("www.")
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Rows of at most `width` characters, broken after a `/` where possible.
+fn wrap_link(link: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut rest: Vec<char> = link.chars().collect();
+    while rest.len() > width {
+        let cut = rest[..width]
+            .iter()
+            .rposition(|character| *character == '/')
+            .map_or(width, |index| index + 1);
+        rows.push(rest[..cut].iter().collect());
+        rest.drain(..cut);
+    }
+    if !rest.is_empty() || rows.is_empty() {
+        rows.push(rest.into_iter().collect());
+    }
+    rows
+}
+
+/// One fact in Details.
+enum DetailValue {
+    Text(String),
+    /// One name per row when docked, a comma list in the sheet.
+    Folders(Vec<String>),
+    Link(String),
+}
+
+/// What Details says about one addon, before it is laid out.
+struct DetailsContent {
+    /// Symbol and status word.
+    status: Vec<Span<'static>>,
+    /// `12.0.8 → 12.0.10`, or the installed version alone.
+    versions: Vec<Span<'static>>,
+    /// Empty unless the status needs explaining.
+    sentence: Vec<Span<'static>>,
+    rows: Vec<(&'static str, DetailValue)>,
+}
+
+impl App {
+    /// True while Details is open in a window wide enough to dock it.
+    pub(super) fn details_docked(&self) -> bool {
+        self.shell_ui.overlay.active == Some(OverlayKind::Inspect)
+            && self
+                .last_frame_width
+                .is_some_and(|width| width >= DETAILS_DOCK_MIN_WIDTH)
+    }
+
+    /// Details as a sheet: the status row, the sentence, then the facts with
+    /// their labels in one column. The body scrolls, so nothing is dropped.
+    pub(super) fn inspect_sheet_body(&self, width: u16) -> SheetBody<'static> {
+        let mut body = SheetBody::new();
+        match self.details_content() {
+            Some(content) => body.text(self.details_sheet_lines(&content, width)),
+            None => body.text(self.details_empty_lines()),
+        };
         body
     }
 
-    pub(super) fn inspect_hero_lines(
-        &self,
-        target: InspectResolvedTarget<'_>,
-    ) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        if let Some(child_folder) = target.opened_from_child {
-            lines.push(Line::from(Span::styled(
-                format!("Opened from child: {child_folder}"),
-                Style::default().fg(self.ui_theme.muted),
-            )));
-        }
-        lines
+    fn details_empty_lines(&self) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        vec![Line::from(Span::styled(
+            "No addon selected",
+            Style::default().fg(roles.muted),
+        ))]
     }
 
-    pub(super) fn inspect_summary_lines(
-        &self,
-        target: InspectResolvedTarget<'_>,
-    ) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            self.inspect_source_line(target.item),
-            self.inspect_status_line(target.item),
-            self.inspect_version_line(target.item),
-            self.overlay_kv_line("Folder", target.item.folder.clone()),
-        ];
+    fn details_content(&self) -> Option<DetailsContent> {
+        let target = self.inspect_resolved_target()?;
+        let item = target.item;
+        let roles = self.ui_theme.roles;
+        let text = Style::default().fg(roles.text);
+        let muted = Style::default().fg(roles.muted);
+        let status = self.dashboard_row_status(item);
+        let spinner = self.shell_ui.motion.spinner_frame();
+        let status_spans = match status {
+            RowStatus::UpToDate | RowStatus::NewerThanSource => vec![
+                Span::styled(status.symbol(spinner), Style::default().fg(roles.green)),
+                Span::styled(
+                    format!(" {}", status.word()),
+                    text.add_modifier(Modifier::BOLD),
+                ),
+            ],
+            other => other.spans(spinner, roles),
+        };
 
-        if let Some(author) = target.item.author.as_deref().map(str::trim)
+        let installed = dashboard_item_installed_version(item);
+        let remote = dashboard_item_remote_label(item);
+        let linked = item.source != SourceKind::Manual;
+        let source_name = dashboard_source_name(item.source, true);
+        let versions = if status == RowStatus::UpdateReady {
+            vec![
+                Span::styled(format!("{installed} →"), muted),
+                Span::raw(" "),
+                Span::styled(
+                    remote.clone().unwrap_or_else(|| "newer".to_string()),
+                    Style::default()
+                        .fg(roles.amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        } else {
+            vec![Span::styled(installed.clone(), muted)]
+        };
+
+        let key = |label: &'static str| {
+            Span::styled(
+                label,
+                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+            )
+        };
+        let sentence = match status {
+            RowStatus::NewerThanSource => vec![Span::styled(
+                format!(
+                    "You have {installed}. {source_name} lists {}, which is older, so LemonUp leaves yours alone.",
+                    remote.as_deref().unwrap_or("an older version")
+                ),
+                text,
+            )],
+            RowStatus::NotLinked => vec![Span::styled(
+                "LemonUp found this addon in your AddOns folder but doesn't know where it came from, so it can't check it for updates.",
+                text,
+            )],
+            RowStatus::CheckFailed => vec![
+                Span::styled(
+                    format!("LemonUp couldn't check {source_name} for a newer version. Press "),
+                    text,
+                ),
+                key("c"),
+                Span::styled(" to try again.", text),
+            ],
+            _ => Vec::new(),
+        };
+
+        let mut rows = Vec::new();
+        if linked {
+            rows.push(("From", DetailValue::Text(source_name.to_string())));
+        }
+        if let Some(author) = item.author.as_deref().map(str::trim)
             && !author.is_empty()
             && !author.eq_ignore_ascii_case("unknown")
         {
-            lines.push(self.overlay_kv_line("Author", author.to_string()));
+            rows.push(("Author", DetailValue::Text(author.to_string())));
+        }
+        if linked {
+            rows.push(("Installed", DetailValue::Text(installed.clone())));
+            if let Some(checked_at) = item.last_checked_at {
+                rows.push((
+                    "Last checked",
+                    DetailValue::Text(time_ago(OffsetDateTime::now_utc(), checked_at)),
+                ));
+            }
+        }
+        if let Some(made_for) = item
+            .interface
+            .as_deref()
+            .and_then(wow_versions_for_interface)
+        {
+            rows.push(("Made for", DetailValue::Text(made_for)));
+        }
+        let missing = self.dashboard_parent_missing_owned_children(&item.folder);
+        let mut folders = vec![item.folder.clone()];
+        for folder in &item.owned_folders {
+            if !folders.contains(folder) {
+                folders.push(folder.clone());
+            }
+        }
+        let folders = folders
+            .into_iter()
+            .map(|folder| {
+                if missing.contains(&folder) {
+                    format!("{folder} (missing)")
+                } else {
+                    folder
+                }
+            })
+            .collect();
+        rows.push(("Folders", DetailValue::Folders(folders)));
+        let mut needs: Vec<String> = Vec::new();
+        for dependency in &item.required_deps {
+            if !needs.contains(dependency) {
+                needs.push(dependency.clone());
+            }
+        }
+        rows.push((
+            "Needs",
+            DetailValue::Text(if needs.is_empty() {
+                "nothing else".to_string()
+            } else {
+                needs.join(", ")
+            }),
+        ));
+        if let Some(url) = item.source_url.as_deref().map(str::trim)
+            && !url.is_empty()
+        {
+            rows.push(("Web page", DetailValue::Link(web_page_label(url))));
         }
 
-        if target.item.has_authoritative_owned_folders && target.item.source != SourceKind::Manual {
-            lines.push(self.overlay_kv_line("Tracking", "Managed by LemonUp"));
+        Some(DetailsContent {
+            status: status_spans,
+            versions,
+            sentence,
+            rows,
+        })
+    }
+
+    fn details_sheet_lines(&self, content: &DetailsContent, width: u16) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let width = usize::from(width);
+        let mut first = content.status.clone();
+        let status_width = spans_text_width(&content.status);
+        first.push(Span::raw(
+            " ".repeat(SHEET_STATUS_WIDTH.saturating_sub(status_width).max(2)),
+        ));
+        first.extend(content.versions.clone());
+        let mut lines = vec![Line::from(first), Line::default()];
+        if !content.sentence.is_empty() {
+            lines.push(Line::from(content.sentence.clone()));
+            lines.push(Line::default());
         }
-
-        lines
-    }
-
-    pub(super) fn inspect_source_line(&self, item: &DashboardItem) -> Line<'static> {
-        Line::from(vec![
-            Span::styled("Source: ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                source_label(item.source).to_string(),
-                Style::default()
-                    .fg(source_badge_color(item.source))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
-    }
-
-    pub(super) fn inspect_version_line(&self, item: &DashboardItem) -> Line<'static> {
-        Line::from(vec![
-            Span::styled("Version: ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                dashboard_item_version_label(item),
-                Style::default().fg(self.ui_theme.installed_text),
-            ),
-        ])
-    }
-
-    pub(super) fn inspect_detail_lines(
-        &self,
-        target: InspectResolvedTarget<'_>,
-    ) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for section in [
-            InspectSection::IncludedAddons,
-            InspectSection::Dependencies,
-            InspectSection::AddonInfo,
-        ] {
-            let is_open = self.inspect_overlay.is_open(section);
-            lines.push(self.inspect_section_header(section, is_open));
-            if is_open {
-                lines.extend(self.inspect_section_body(section, target));
+        let value_width = width.saturating_sub(SHEET_LABEL_WIDTH).max(8);
+        for (label, value) in &content.rows {
+            let rows = match value {
+                DetailValue::Text(text) => self.detail_value_rows(text, value_width),
+                DetailValue::Folders(folders) => {
+                    self.detail_value_rows(&folders.join(", "), value_width)
+                }
+                DetailValue::Link(link) => wrap_link(link, value_width)
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, Style::default().fg(roles.blue))))
+                    .collect(),
+            };
+            for (index, row) in rows.into_iter().enumerate() {
+                let prefix = if index == 0 {
+                    Span::styled(
+                        format!("{label:<SHEET_LABEL_WIDTH$}"),
+                        Style::default().fg(roles.muted),
+                    )
+                } else {
+                    Span::raw(" ".repeat(SHEET_LABEL_WIDTH))
+                };
+                let mut spans = vec![prefix];
+                spans.extend(row.spans);
+                lines.push(Line::from(spans));
             }
         }
         lines
     }
 
-    pub(super) fn inspect_status_line(&self, item: &DashboardItem) -> Line<'static> {
-        let (status_label, status_color) = self.inspect_status_chip(item);
-        let mut spans = vec![Span::styled(
-            "Status: ",
-            Style::default().fg(self.ui_theme.muted),
-        )];
-        let item_status = dashboard_item_update_status(item);
-        let is_update_available =
-            item_status == UpdateStatus::UpdateAvailable && item.source != SourceKind::Manual;
-        let display_color = if is_update_available {
-            self.inspect_pulse_color(status_color)
-        } else {
-            status_color
+    /// A value word wrapped at `width`.
+    fn detail_value_rows(&self, value: &str, width: usize) -> Vec<Line<'static>> {
+        let style = Style::default().fg(self.ui_theme.roles.text);
+        wrap_lines(
+            &[Line::from(Span::styled(value.to_string(), style))],
+            u16::try_from(width).unwrap_or(u16::MAX),
+        )
+    }
+
+    /// Details laid out for the docked panel, `width` columns of text after
+    /// the one column of padding: versions under the status, and folders
+    /// and the web page on their own indented rows.
+    fn details_docked_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let pad = || Span::raw(" ");
+        let Some(content) = self.details_content() else {
+            let mut lines = vec![Line::default()];
+            for line in self.details_empty_lines() {
+                let mut spans = vec![pad()];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+            return lines;
         };
-        spans.push(Span::styled(
-            status_label.to_string(),
-            Style::default()
-                .fg(display_color)
-                .add_modifier(Modifier::BOLD),
-        ));
-        if is_update_available {
-            let remote = dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string());
-            spans.extend([
-                Span::raw(" "),
-                Span::styled("→", Style::default().fg(self.ui_theme.warning)),
+        let width = usize::from(width);
+        let with_pad = |spans: Vec<Span<'static>>| {
+            let mut row = vec![pad()];
+            row.extend(spans);
+            Line::from(row)
+        };
+        let mut lines = vec![Line::default(), with_pad(content.status.clone())];
+        lines.push(with_pad(content.versions.clone()));
+        lines.push(Line::default());
+        if !content.sentence.is_empty() {
+            let sentence = wrap_lines(
+                &[Line::from(content.sentence.clone())],
+                u16::try_from(width).unwrap_or(u16::MAX),
+            );
+            lines.extend(sentence.into_iter().map(|line| with_pad(line.spans)));
+            lines.push(Line::default());
+        }
+        let blank_before = |lines: &mut Vec<Line<'static>>| {
+            if lines.last().is_some_and(|line| line.width() > 0) {
+                lines.push(Line::default());
+            }
+        };
+        let label = |text: &'static str| Span::styled(text, Style::default().fg(roles.muted));
+        let indent = 3usize;
+        let item_width = width.saturating_sub(indent - 1);
+        let mut after_block = false;
+        for (name, value) in &content.rows {
+            match value {
+                DetailValue::Text(text) => {
+                    if after_block {
+                        blank_before(&mut lines);
+                        after_block = false;
+                    }
+                    let value_width = width.saturating_sub(PANEL_LABEL_WIDTH).max(8);
+                    for (index, row) in self
+                        .detail_value_rows(text, value_width)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let prefix = if index == 0 {
+                            label(name)
+                        } else {
+                            Span::raw("")
+                        };
+                        let used = prefix.width();
+                        let mut spans = vec![
+                            pad(),
+                            prefix,
+                            Span::raw(" ".repeat(PANEL_LABEL_WIDTH.saturating_sub(used))),
+                        ];
+                        spans.extend(row.spans);
+                        lines.push(Line::from(spans));
+                    }
+                }
+                DetailValue::Folders(folders) => {
+                    blank_before(&mut lines);
+                    lines.push(with_pad(vec![label(name)]));
+                    for folder in folders {
+                        lines.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(
+                                truncate_text(folder, item_width),
+                                Style::default().fg(roles.text),
+                            ),
+                        ]));
+                    }
+                    after_block = true;
+                }
+                DetailValue::Link(link) => {
+                    blank_before(&mut lines);
+                    lines.push(with_pad(vec![label(name)]));
+                    for row in wrap_link(link, item_width) {
+                        lines.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(row, Style::default().fg(roles.blue)),
+                        ]));
+                    }
+                    after_block = true;
+                }
+            }
+        }
+        while lines.last().is_some_and(|line| line.width() == 0) {
+            lines.pop();
+        }
+        lines
+    }
+
+    /// The docked panel: the addon name on the column header row, then the
+    /// details. What does not fit ends in "↓ N more".
+    pub(super) fn render_docked_details(&self, frame: &mut Frame<'_>, title: Rect, body: Rect) {
+        let roles = self.ui_theme.roles;
+        let text_width = body.width.saturating_sub(2);
+        let name = self
+            .inspect_resolved_target()
+            .map_or_else(|| "Details".to_string(), |target| target.item.name.clone());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
-                    remote,
-                    Style::default()
-                        .fg(display_color)
-                        .add_modifier(Modifier::BOLD),
+                    truncate_text(&name, usize::from(text_width)),
+                    Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" "),
-                Span::styled("📦", Style::default().fg(self.ui_theme.package_icon)),
-            ]);
-        } else if item_status == UpdateStatus::RemoteOlder && item.source != SourceKind::Manual {
-            let remote = dashboard_item_remote_label(item).unwrap_or_else(|| "?".to_string());
-            spans.push(Span::styled(
-                format!(" (remote {remote}; not offered as an update)"),
-                Style::default().fg(self.ui_theme.muted),
-            ));
+            ])),
+            title,
+        );
+        let mut lines = self.details_docked_lines(text_width);
+        let height = usize::from(body.height);
+        if height > 0 && lines.len() > height {
+            let shown = height - 1;
+            let hidden = lines.len() - shown;
+            lines.truncate(shown);
+            lines.push(Line::from(Span::styled(
+                format!(" ↓ {hidden} more"),
+                Style::default().fg(roles.muted),
+            )));
         }
-        Line::from(spans)
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+}
+
+fn spans_text_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_numbers_read_as_wow_versions() {
+        assert_eq!(
+            wow_versions_for_interface("120005").as_deref(),
+            Some("WoW 12.0.5")
+        );
+        assert_eq!(
+            wow_versions_for_interface("11507").as_deref(),
+            Some("WoW 1.15.7")
+        );
+        assert_eq!(
+            wow_versions_for_interface("110207, 11507").as_deref(),
+            Some("WoW 11.2.7, 1.15.7")
+        );
+        assert_eq!(
+            wow_versions_for_interface("120005,120005").as_deref(),
+            Some("WoW 12.0.5")
+        );
+        assert_eq!(wow_versions_for_interface("").as_deref(), None);
+        assert_eq!(wow_versions_for_interface("abc").as_deref(), None);
     }
 
-    pub(super) fn inspect_pulse_color(&self, base: Color) -> Color {
-        match (base, self.shell_ui.motion.tick_count % 6) {
-            (Color::Rgb(r, g, b), 0..=2) => Color::Rgb(r, g, b),
-            (Color::Rgb(r, g, b), _) => Color::Rgb(
-                r.saturating_add(22),
-                g.saturating_add(18),
-                b.saturating_add(8),
-            ),
-            (other, _) => other,
-        }
+    #[test]
+    fn docked_panel_is_41_at_120_and_stops_near_52() {
+        assert_eq!(docked_widths(120), (78, 41));
+        assert_eq!(docked_widths(130), (83, 46));
+        assert_eq!(docked_widths(142), (89, 52));
+        assert_eq!(docked_widths(160), (107, 52));
+        assert_eq!(docked_widths(250), (197, 52));
     }
 
-    pub(super) fn inspect_status_chip(&self, item: &DashboardItem) -> (&'static str, Color) {
-        if item.source == SourceKind::Manual {
-            return ("Manual", Color::Magenta);
-        }
-        match dashboard_item_update_status(item) {
-            UpdateStatus::UpToDate => ("Up to date", self.ui_theme.success),
-            UpdateStatus::UpdateAvailable => ("Update available", self.ui_theme.warning),
-            UpdateStatus::RemoteOlder => ("Remote older", self.ui_theme.muted),
-            UpdateStatus::Unknown => ("Unknown", Color::Magenta),
-            UpdateStatus::Error => ("Error", self.ui_theme.error),
-        }
+    #[test]
+    fn links_break_after_a_slash() {
+        assert_eq!(
+            wrap_link("addons.wago.io/addons/deadly-boss-mods", 36),
+            vec!["addons.wago.io/addons/", "deadly-boss-mods"]
+        );
+        assert_eq!(wrap_link("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        assert_eq!(
+            web_page_label("https://www.wowinterface.com/downloads/info5633/"),
+            "wowinterface.com/downloads/info5633"
+        );
     }
 
-    pub(super) fn inspect_section_header(
-        &self,
-        section: InspectSection,
-        is_open: bool,
-    ) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                if is_open { "▾ " } else { "▸ " },
-                Style::default().fg(self.ui_theme.muted),
-            ),
-            Span::styled(
-                format!("{} ", section.key()),
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                section.label(),
-                Style::default().fg(self.ui_theme.panel_title),
-            ),
-        ])
-    }
-
-    pub(super) fn inspect_section_body(
-        &self,
-        section: InspectSection,
-        target: InspectResolvedTarget<'_>,
-    ) -> Vec<Line<'static>> {
-        let indent = "  ";
-        match section {
-            InspectSection::IncludedAddons => {
-                let mut lines = Vec::new();
-                if let Some(child_folder) = target.opened_from_child {
-                    lines.push(Line::from(format!(
-                        "{indent}Opened from child: {child_folder}"
-                    )));
-                }
-                if !target.item.owned_folders.is_empty() {
-                    lines.push(Line::from(format!(
-                        "{indent}Children: {}",
-                        summarize_owned_folders(&target.item.owned_folders)
-                    )));
-                }
-                let missing = self.dashboard_parent_missing_owned_children(&target.item.folder);
-                if !missing.is_empty() {
-                    lines.push(Line::from(format!(
-                        "{indent}Missing: {}",
-                        summarize_owned_folders(missing)
-                    )));
-                }
-                if lines.is_empty() {
-                    lines.push(Line::from(format!("{indent}No relationship details")));
-                }
-                lines
-            }
-            InspectSection::Dependencies => {
-                let mut lines = Vec::new();
-                if !target.item.required_deps.is_empty() {
-                    lines.push(Line::from(format!(
-                        "{indent}Required: {}",
-                        summarize_owned_folders(&target.item.required_deps)
-                    )));
-                }
-                if !target.item.optional_deps.is_empty() {
-                    lines.push(Line::from(format!(
-                        "{indent}Optional: {}",
-                        summarize_owned_folders(&target.item.optional_deps)
-                    )));
-                }
-                if lines.is_empty() {
-                    lines.push(Line::from(format!("{indent}No dependency metadata")));
-                }
-                lines
-            }
-            InspectSection::AddonInfo => {
-                let mut lines = Vec::new();
-                if let Some(interface) = target.item.interface.as_deref().map(str::trim)
-                    && !interface.is_empty()
-                {
-                    lines.push(Line::from(format!("{indent}Interface: {interface}")));
-                }
-                if let Some(source_url) = target.item.source_url.as_deref().map(str::trim)
-                    && !source_url.is_empty()
-                {
-                    lines.push(Line::from(format!(
-                        "{indent}Source URL: {}",
-                        truncate_text(source_url, 64)
-                    )));
-                }
-                if lines.is_empty() {
-                    lines.push(Line::from(format!("{indent}No technical details")));
-                }
-                lines
-            }
-        }
+    #[test]
+    fn time_ago_uses_whole_words() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("now");
+        let ago = |seconds: i64| time_ago(now, now - time::Duration::seconds(seconds));
+        assert_eq!(ago(20), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(300), "5 minutes ago");
+        assert_eq!(ago(7200), "2 hours ago");
+        assert_eq!(ago(3 * 86_400), "3 days ago");
     }
 }

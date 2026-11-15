@@ -1,4 +1,6 @@
 use super::keymap::fit_key_line;
+use super::render_inspect::docked_widths;
+use super::sheet::SheetScroll;
 use super::*;
 use crate::theme::ColorRoles;
 
@@ -134,6 +136,34 @@ impl ListColumns {
         columns
     }
 
+    /// The list beside docked Details: Addon, Status and Version only. At
+    /// 78 columns (a 120 column window): Addon 30, Status 21, Version 22.
+    /// Extra width grows Addon to 40, then Version to 26.
+    pub(super) fn for_docked(width: u16) -> Self {
+        let mut columns = Self {
+            name: 30,
+            status: 21,
+            version: 22,
+            author: 0,
+            source: 0,
+            wide: true,
+        };
+        let base = columns.total();
+        if width < base {
+            columns.name = columns.name.saturating_sub(base - width).max(8);
+            return columns;
+        }
+        let mut extra = width - base;
+        let mut grow = |column: &mut u16, cap: u16| {
+            let step = cap.saturating_sub(*column).min(extra);
+            *column += step;
+            extra -= step;
+        };
+        grow(&mut columns.name, 40);
+        grow(&mut columns.version, 26);
+        columns
+    }
+
     /// Columns used, gutter included.
     pub(super) fn total(self) -> u16 {
         GUTTER_WIDTH + self.name + self.status + self.version + self.author + self.source
@@ -149,7 +179,9 @@ impl ListColumns {
         if self.author > 0 {
             constraints.push(Constraint::Length(self.author));
         }
-        constraints.push(Constraint::Length(self.source));
+        if self.source > 0 {
+            constraints.push(Constraint::Length(self.source));
+        }
         // Empty space at the right edge, so the cursor row still spans it.
         constraints.push(Constraint::Fill(1));
         constraints
@@ -210,7 +242,7 @@ impl RowStatus {
         format!("{} {}", self.symbol(spinner), self.word())
     }
 
-    fn spans(self, spinner: &'static str, roles: ColorRoles) -> Vec<Span<'static>> {
+    pub(super) fn spans(self, spinner: &'static str, roles: ColorRoles) -> Vec<Span<'static>> {
         let symbol = self.symbol(spinner);
         let word = self.word();
         let bold = Modifier::BOLD;
@@ -447,6 +479,7 @@ impl App {
     pub(super) fn draw_dashboard_frame(&mut self, frame: &mut Frame<'_>) {
         let roles = self.ui_theme.roles;
         let area = frame.area();
+        self.last_frame_width = Some(area.width);
         frame.render_widget(
             Block::default().style(Style::default().bg(roles.background).fg(roles.text)),
             area,
@@ -461,19 +494,66 @@ impl App {
             Paragraph::new(self.dashboard_filter_line(area.width)),
             layout.filter,
         );
-        let columns = ListColumns::for_width(area.width);
+        // Docked Details takes the right of the list rows; everything else
+        // spans the window as usual.
+        let docked = self.details_docked();
+        let (list_width, panel_width) = if docked {
+            docked_widths(area.width)
+        } else {
+            (area.width, 0)
+        };
+        let columns = if docked {
+            ListColumns::for_docked(list_width)
+        } else {
+            ListColumns::for_width(area.width)
+        };
+        let narrow = |row: Rect| Rect {
+            width: list_width,
+            ..row
+        };
         frame.render_widget(
             Paragraph::new(self.dashboard_column_header_line(columns)),
-            layout.column_header,
+            narrow(layout.column_header),
         );
+        let dim = Style::default().fg(roles.dim);
         let rule = Paragraph::new(Line::from(Span::styled(
             "─".repeat(usize::from(area.width)),
-            Style::default().fg(roles.dim),
+            dim,
         )));
-        frame.render_widget(rule.clone(), layout.top_rule);
-        self.render_dashboard_list(frame, layout.list, columns);
+        if docked {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        "{}┼{}",
+                        "─".repeat(usize::from(list_width)),
+                        "─".repeat(usize::from(panel_width))
+                    ),
+                    dim,
+                ))),
+                layout.top_rule,
+            );
+        } else {
+            frame.render_widget(rule.clone(), layout.top_rule);
+        }
+        self.render_dashboard_list(frame, narrow(layout.list), columns);
         frame.render_widget(rule, layout.bottom_rule);
-        self.render_overlay_host(frame, layout.sheet_region(), layout.header.height);
+        if docked {
+            // No sheet is open, so the next one starts at the top.
+            self.sheet_scroll.set(SheetScroll::default());
+            let divider_x = area.x + list_width;
+            for row in [layout.column_header, layout.list] {
+                for y in row.top()..row.bottom() {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("│", dim)),
+                        Rect::new(divider_x, y, 1, 1),
+                    );
+                }
+            }
+            let panel = |row: Rect| Rect::new(divider_x + 1, row.y, panel_width, row.height);
+            self.render_docked_details(frame, panel(layout.column_header), panel(layout.list));
+        } else {
+            self.render_overlay_host(frame, layout.sheet_region(), layout.header.height);
+        }
         frame.render_widget(
             Paragraph::new(self.dashboard_status_line(area.width)),
             layout.status,
@@ -685,6 +765,18 @@ impl App {
                 vec![Span::styled(count, Style::default().fg(roles.muted))],
                 16,
             )
+        } else if self.details_docked() {
+            // esc closes docked Details first, so it does not offer to clear.
+            (
+                vec![
+                    Span::raw(" "),
+                    Span::styled("/", Style::default().fg(roles.muted)),
+                    Span::raw(" "),
+                    Span::styled(query, Style::default().fg(roles.text)),
+                ],
+                vec![Span::styled(count, Style::default().fg(roles.muted))],
+                1,
+            )
         } else {
             (
                 vec![
@@ -766,7 +858,9 @@ impl App {
                 columns.author,
             ));
         }
-        spans.extend(cell("Source", Some(DashboardSortColumn::Source), 0));
+        if columns.source > 0 {
+            spans.extend(cell("Source", Some(DashboardSortColumn::Source), 0));
+        }
         Line::from(spans)
     }
 
@@ -952,10 +1046,12 @@ impl App {
                     Style::default().fg(roles.muted),
                 )));
             }
-            cells.push(Cell::from(Span::styled(
-                dashboard_source_name(item.source, columns.wide),
-                Style::default().fg(roles.muted),
-            )));
+            if columns.source > 0 {
+                cells.push(Cell::from(Span::styled(
+                    dashboard_source_name(item.source, columns.wide),
+                    Style::default().fg(roles.muted),
+                )));
+            }
         }
         let style = if selected {
             Style::default().bg(roles.selected_row)
@@ -986,8 +1082,11 @@ impl App {
             .dashboard_job_status_spans(width)
             .or_else(|| self.status_flash_spans())
             .unwrap_or_default();
-        let show_position = self.shell_ui.overlay.active.is_none()
-            && !self.dashboard.filter_editing()
+        // Details moves through the addons too, so it keeps the position.
+        let show_position = matches!(
+            self.shell_ui.overlay.active,
+            None | Some(OverlayKind::Inspect)
+        ) && !self.dashboard.filter_editing()
             && self.dashboard.job_ui().is_none();
         let right = show_position
             .then(|| self.dashboard_position_label())

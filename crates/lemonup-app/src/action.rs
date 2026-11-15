@@ -5,8 +5,8 @@ use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
-    FooterKeyPulse, HelpContext, InspectOverlayState, InstallPaneState, PendingWagoInstallRequest,
-    SearchPaneState, StatusMessage, WagoInstallConfirmation,
+    FooterKeyPulse, HelpContext, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
+    StatusMessage, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -17,7 +17,6 @@ pub enum AppAction {
     AdvanceMotionTick,
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),
-    SetInspectOverlayState(InspectOverlayState),
     /// Scrolls the open sheet to this body row.
     SetSheetOffset(u16),
     SetHelpOverlay(bool),

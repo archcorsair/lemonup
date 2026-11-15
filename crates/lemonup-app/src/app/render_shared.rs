@@ -87,7 +87,7 @@ impl App {
             OverlayKind::Inspect => self
                 .inspect_resolved_target()
                 .map(|target| target.item.name.clone())
-                .unwrap_or_else(|| "Inspect".to_string()),
+                .unwrap_or_else(|| "Details".to_string()),
             OverlayKind::Help => "Help".to_string(),
             OverlayKind::Install | OverlayKind::Search => "Install".to_string(),
             OverlayKind::Update => "Update".to_string(),

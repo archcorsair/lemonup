@@ -5,7 +5,7 @@
 //! (`footer_hint_for_key`) and Help (`help_sections`), so they cannot drift
 //! apart.
 
-use super::render_dashboard::WIDE_FRAME_MIN_WIDTH;
+use super::render_dashboard::{RowStatus, WIDE_FRAME_MIN_WIDTH};
 use super::*;
 
 /// Key presses one entry answers to.
@@ -45,6 +45,8 @@ const ENTER: KeyCodes = &[KeyCode::Enter];
 const ESC: KeyCodes = &[KeyCode::Esc];
 const BACKSPACE: KeyCodes = &[KeyCode::Backspace];
 const CLOSE: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q')];
+/// Details closes on enter too, the key that opens it.
+const CLOSE_DETAILS: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q'), KeyCode::Enter];
 const NO: KeyCodes = &[KeyCode::Char('n'), KeyCode::Esc, KeyCode::Char('q')];
 const HELP: KeyCodes = &[KeyCode::Char('?')];
 const SELECT: KeyCodes = &[KeyCode::Char(' '), KeyCode::Char('a')];
@@ -136,7 +138,7 @@ impl KeyHint {
     fn rank(&self) -> u8 {
         if self.kept || self.main || self.primary || self.key.is_empty() {
             0
-        } else if self.key.starts_with("esc") || self.key == "n/esc" {
+        } else if self.key.contains("esc") {
             1
         } else if self.key == "?" {
             2
@@ -177,7 +179,7 @@ pub(super) fn help_sections(context: HelpContext) -> &'static [HelpSection] {
                 title: " Movement ",
                 rows: &[
                     ("↑/↓", "Move through addons"),
-                    ("enter", "Open inspect"),
+                    ("enter", "Open details"),
                     ("/", "Filter installed addons (enter keeps it)"),
                     ("esc", "Clear the filter, then the selection"),
                 ],
@@ -198,16 +200,20 @@ pub(super) fn help_sections(context: HelpContext) -> &'static [HelpSection] {
             HelpSection {
                 title: " Actions ",
                 rows: &[
+                    ("u / c / x", "Update, check, or delete"),
                     ("space", "Select or deselect this addon"),
-                    ("c / u / x", "Check, update, or delete"),
                 ],
             },
             HelpSection {
-                title: " Sections ",
+                title: " Moving ",
                 rows: &[
-                    ("r / d / t", "Toggle included addons, deps, and addon info"),
-                    ("↑/↓", "Scroll details when content overflows"),
+                    ("↑/↓", "Previous or next addon; Details stays open"),
+                    ("pgup/pgdn", "Scroll the Details sheet when it does not fit"),
                 ],
+            },
+            HelpSection {
+                title: " Close ",
+                rows: &[("enter / esc / q", "Close Details")],
             },
         ],
         HelpContext::InstallSearch => &[
@@ -287,7 +293,7 @@ impl App {
             ];
         }
         match self.shell_ui.overlay.active {
-            Some(OverlayKind::Inspect) => self.inspect_key_table(),
+            Some(OverlayKind::Inspect) => self.inspect_key_table(width),
             Some(OverlayKind::Help) => self.help_key_table(),
             Some(_) => self.sheet_key_table(),
             None => self.dashboard_key_table(width),
@@ -386,35 +392,74 @@ impl App {
         }
     }
 
-    fn inspect_key_table(&self) -> Vec<KeyHint> {
+    /// Details, as a sheet or docked beside the list. The keys act on the
+    /// addon Details shows; docked, the list keys keep working, so with a
+    /// selection `u` `c` `x` act on the selection as they do in the list.
+    fn inspect_key_table(&self, width: u16) -> Vec<KeyHint> {
         use FooterHintId as Id;
-        let Some(target) = self.inspect_resolved_target() else {
-            return vec![
-                KeyHint::key(Id::Close, "esc", "close", CLOSE),
-                self.help_hint(),
-            ];
+        let docked = self.details_docked();
+        if docked && self.dashboard.filter_editing() {
+            return self.dashboard_key_table(width);
+        }
+        let close = if docked {
+            KeyHint::key(Id::Close, "enter or esc", "close details", CLOSE_DETAILS).short("close")
+        } else {
+            KeyHint::key(Id::Close, "esc", "close", CLOSE_DETAILS)
         };
+        let Some(target) = self.inspect_resolved_target() else {
+            return vec![close, self.help_hint()];
+        };
+        let selected = if docked {
+            self.dashboard.selected_parent_count()
+        } else {
+            0
+        };
+        let mut hints = Vec::new();
+        if selected > 0 {
+            hints.push(KeyHint::text(format!("{selected} selected:")));
+        }
+        let status = self.dashboard_row_status(target.item);
+        let update = |label| KeyHint::primary(Id::Update, "u", label, &[KeyCode::Char('u')]);
+        if selected > 0 {
+            hints.push(update("update").main());
+        } else if status == RowStatus::UpdateReady && !self.dashboard.update_in_progress() {
+            hints.push(update("update"));
+        }
+        if selected > 0 || target.item.source != SourceKind::Manual {
+            let check = &[KeyCode::Char('c')];
+            hints.push(if selected == 0 && status == RowStatus::CheckFailed {
+                KeyHint::primary(Id::Check, "c", "try again", check)
+            } else {
+                KeyHint::key(Id::Check, "c", "check", check)
+            });
+        }
+        hints.push(KeyHint::key(
+            Id::Delete,
+            "x",
+            "delete",
+            &[KeyCode::Char('x')],
+        ));
         let select_label = if self.dashboard.is_parent_selected(&target.item.folder) {
             "deselect"
         } else {
             "select"
         };
-        let mut hints = vec![
-            KeyHint::key(Id::Select, "space", select_label, &[KeyCode::Char(' ')]),
-            KeyHint::key(Id::Check, "c", "check", &[KeyCode::Char('c')]),
-        ];
-        if is_refreshable_dashboard_item(target.item) {
-            hints.push(KeyHint::key(Id::Update, "u", "update", &[KeyCode::Char('u')]).main());
+        hints.push(KeyHint::key(
+            Id::Select,
+            "space",
+            select_label,
+            &[KeyCode::Char(' ')],
+        ));
+        if docked {
+            hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", UP_DOWN));
+        } else {
+            hints.push(
+                KeyHint::key(Id::Nav, "↑/↓", "previous or next addon", UP_DOWN)
+                    .short("other addons"),
+            );
+            hints.extend(self.sheet_scroll_hint(false));
         }
-        hints.extend([
-            KeyHint::key(Id::Delete, "x", "delete", &[KeyCode::Char('x')]),
-            KeyHint::key(Id::Relations, "r", "relations", &[KeyCode::Char('r')])
-                .short("rel")
-                .secondary(),
-            KeyHint::key(Id::Dependencies, "d", "deps", &[KeyCode::Char('d')]).secondary(),
-            KeyHint::key(Id::Technical, "t", "tech", &[KeyCode::Char('t')]).secondary(),
-        ]);
-        hints.extend(self.sheet_scroll_hint(true));
+        hints.push(close);
         hints.push(self.help_hint());
         hints
     }

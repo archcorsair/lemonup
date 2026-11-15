@@ -126,53 +126,9 @@ pub(crate) enum HelpContext {
     Backup,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum InspectSection {
-    IncludedAddons,
-    Dependencies,
-    AddonInfo,
-}
-
-impl InspectSection {
-    fn key(self) -> &'static str {
-        match self {
-            Self::IncludedAddons => "r",
-            Self::Dependencies => "d",
-            Self::AddonInfo => "t",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::IncludedAddons => "Included addons",
-            Self::Dependencies => "Dependencies",
-            Self::AddonInfo => "Addon info",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct InspectOverlayState {
-    open_sections: HashSet<InspectSection>,
-}
-
-impl InspectOverlayState {
-    fn toggle(mut self, section: InspectSection) -> Self {
-        if !self.open_sections.insert(section) {
-            self.open_sections.remove(&section);
-        }
-        self
-    }
-
-    fn is_open(&self, section: InspectSection) -> bool {
-        self.open_sections.contains(&section)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InspectResolvedTarget<'a> {
     item: &'a DashboardItem,
-    opened_from_child: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,9 +226,6 @@ enum FooterHintId {
     Results,
     Change,
     Save,
-    Relations,
-    Dependencies,
-    Technical,
     UpdateAll,
     CheckAll,
     Quit,
@@ -398,7 +351,6 @@ enum AppMessage {
     DashboardCloseOverlay,
     /// Scrolls the open sheet's body.
     SheetScroll(SheetMove),
-    InspectToggleSection(InspectSection),
     InspectToggleSelected,
     InspectRequestDelete,
     InspectRunCheck,
@@ -2315,7 +2267,6 @@ pub struct App {
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
     dashboard: DashboardState,
-    inspect_overlay: InspectOverlayState,
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
@@ -2326,6 +2277,9 @@ pub struct App {
     undo_delete: Option<DashboardUndoDeleteState>,
     undo_delete_in_progress: bool,
     last_dashboard_list_area: Option<Rect>,
+    /// The window width at the last draw: Details docks beside the list at
+    /// 120 columns and wider. `None` until the first draw.
+    last_frame_width: Option<u16>,
     /// The open sheet as last drawn, so keys can scroll it.
     sheet_scroll: std::cell::Cell<SheetScroll>,
     onboarding: OnboardingState,
@@ -2472,7 +2426,6 @@ impl App {
             effective_addon_dir,
             scan_state,
             dashboard: DashboardState::from_addons(addons),
-            inspect_overlay: InspectOverlayState::default(),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
@@ -2483,6 +2436,7 @@ impl App {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
+            last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding,
             task_events_tx,
@@ -2865,7 +2819,9 @@ impl App {
             return vec![];
         }
 
-        if self.shell_ui.overlay.active.is_some() {
+        // The list behind docked Details still takes the mouse; clicks in
+        // the panel fall outside the list area and do nothing.
+        if self.shell_ui.overlay.active.is_some() && !self.details_docked() {
             return vec![];
         }
 
@@ -2907,32 +2863,42 @@ impl App {
             };
         }
 
-        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
+        // Docked Details is not a mode: the list keys keep working, and only
+        // enter, esc and q close the panel. While the filter has focus its
+        // keys come first, so typing a q filters.
+        let docked_details = self.details_docked();
+        if docked_details
+            && !self.dashboard.filter_editing()
+            && let KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') = key.code
+        {
+            return vec![AppMessage::DashboardCloseOverlay];
+        }
+
+        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) && !docked_details {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
-                code if sheet_move_for_key(code, true).is_some() => {
+                // The arrows move to the previous or next addon; the sheet
+                // starts at the top for each one.
+                KeyCode::Down | KeyCode::Char('j') => vec![
+                    AppMessage::DashboardSelectionNext,
+                    AppMessage::SheetScroll(SheetMove::Top),
+                ],
+                KeyCode::Up | KeyCode::Char('k') => vec![
+                    AppMessage::DashboardSelectionPrevious,
+                    AppMessage::SheetScroll(SheetMove::Top),
+                ],
+                code if sheet_move_for_key(code, false).is_some() => {
                     vec![AppMessage::SheetScroll(
-                        sheet_move_for_key(code, true).expect("checked scroll key"),
+                        sheet_move_for_key(code, false).expect("checked scroll key"),
                     )]
                 }
                 KeyCode::Char('c') => vec![AppMessage::InspectRunCheck],
                 KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
                 KeyCode::Char(' ') => vec![AppMessage::InspectToggleSelected],
-                KeyCode::Char('r') => {
-                    vec![AppMessage::InspectToggleSection(
-                        InspectSection::IncludedAddons,
-                    )]
+                KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::DashboardCloseOverlay]
                 }
-                KeyCode::Char('d') => {
-                    vec![AppMessage::InspectToggleSection(
-                        InspectSection::Dependencies,
-                    )]
-                }
-                KeyCode::Char('t') => {
-                    vec![AppMessage::InspectToggleSection(InspectSection::AddonInfo)]
-                }
-                KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 _ => vec![],
             };
         }
@@ -2951,9 +2917,8 @@ impl App {
 
         // PgUp, PgDn, Home and End scroll any sheet, even where the arrows
         // move a cursor or a text box has focus.
-        if self.shell_ui.overlay.active.is_some()
-            && let Some(movement) = sheet_move_for_key(key.code, false)
-        {
+        let sheet_open = self.shell_ui.overlay.active.is_some() && !docked_details;
+        if sheet_open && let Some(movement) = sheet_move_for_key(key.code, false) {
             return vec![AppMessage::SheetScroll(movement)];
         }
 
@@ -2970,7 +2935,7 @@ impl App {
             return messages;
         }
 
-        if self.shell_ui.overlay.active.is_some() {
+        if sheet_open {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
                 KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
@@ -3467,12 +3432,11 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Overview,
-                        "select an addon row before opening inspect",
+                        "select an addon row before opening details",
                     ))]
                 } else {
                     vec![
                         AppAction::SetInspectOverlay(true),
-                        AppAction::SetInspectOverlayState(InspectOverlayState::default()),
                         AppAction::SetStatus(StatusMessage::cleared()),
                     ]
                 }
@@ -3486,7 +3450,6 @@ impl App {
                 if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
                     vec![
                         AppAction::SetInspectOverlay(false),
-                        AppAction::SetInspectOverlayState(InspectOverlayState::default()),
                         AppAction::SetStatus(StatusMessage::cleared()),
                     ]
                 } else if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
@@ -3501,9 +3464,6 @@ impl App {
                     ]
                 }
             }
-            AppMessage::InspectToggleSection(section) => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay.clone().toggle(section),
-            )],
             AppMessage::SheetScroll(movement) => vec![AppAction::SetSheetOffset(
                 self.sheet_scroll
                     .get()
@@ -3554,7 +3514,7 @@ impl App {
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Overview,
-                    "inspect has no addon target",
+                    "details has no addon to act on",
                 ))],
             },
             AppMessage::InspectRunCheck => match self.inspect_resolved_target() {
@@ -3573,7 +3533,7 @@ impl App {
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Overview,
-                    "inspect has no addon target",
+                    "details has no addon to act on",
                 ))],
             },
             AppMessage::InspectRunUpdate => {
@@ -3597,7 +3557,7 @@ impl App {
                         (_, None) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Note,
                             DetailMode::Overview,
-                            "inspect has no addon target",
+                            "details has no addon to act on",
                         ))],
                         (None, Some(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
@@ -5297,9 +5257,6 @@ impl App {
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
             }
-            AppAction::SetInspectOverlayState(state) => {
-                self.inspect_overlay = state;
-            }
             AppAction::SetSheetOffset(offset) => {
                 let mut scroll = self.sheet_scroll.get();
                 scroll.offset = offset;
@@ -5310,6 +5267,12 @@ impl App {
                     self.shell_ui.overlay.active = Some(OverlayKind::Help);
                 } else if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
                     self.shell_ui.overlay.active = match self.dashboard.detail_mode {
+                        // Help opened from Details goes back to it.
+                        DetailMode::Overview
+                            if self.shell_ui.help_context == HelpContext::Inspect =>
+                        {
+                            Some(OverlayKind::Inspect)
+                        }
                         DetailMode::Overview => None,
                         DetailMode::Install => Some(OverlayKind::Install),
                         DetailMode::Search => Some(OverlayKind::Search),
@@ -7037,10 +7000,7 @@ impl App {
 
     fn inspect_resolved_target(&self) -> Option<InspectResolvedTarget<'_>> {
         let item = self.dashboard.selected_item()?;
-        Some(InspectResolvedTarget {
-            item,
-            opened_from_child: self.dashboard.selected_owned_child_folder(),
-        })
+        Some(InspectResolvedTarget { item })
     }
 
     fn base_status_line(&self) -> String {
@@ -8313,16 +8273,6 @@ fn source_label(source: SourceKind) -> &'static str {
     }
 }
 
-fn source_badge_color(source: SourceKind) -> Color {
-    match source {
-        SourceKind::GitHub => Color::Cyan,
-        SourceKind::Tukui => Color::Yellow,
-        SourceKind::WowInterface => Color::Magenta,
-        SourceKind::Wago => Color::Blue,
-        SourceKind::Manual => Color::DarkGray,
-    }
-}
-
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -8400,13 +8350,12 @@ mod tests {
         ConfigEditState, ConfigField, ConfigPaneState, DashboardChildConnector,
         DashboardDeleteOutcome, DashboardJobKind, DashboardJobUiState, DashboardRow,
         DashboardSortColumn, DashboardState, DashboardUpdateOutcome, DetailMode, FooterHintId,
-        FooterKeyPulse, HelpContext, InspectOverlayState, InspectResolvedTarget, InspectSection,
-        InstallPaneState, OverlayKind, PendingWagoInstallRequest, ScanState, SearchInstallState,
-        SearchPaneState, SearchPresentationMode, ShellMode, ShellUiState, UiTheme,
-        WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome,
-        WagoSearchOutcome, child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
-        format_download_count, summarize_owned_folders, truncate_middle_text,
-        visible_search_result_window,
+        FooterKeyPulse, HelpContext, InstallPaneState, OverlayKind, PendingWagoInstallRequest,
+        ScanState, SearchInstallState, SearchPaneState, SearchPresentationMode, ShellMode,
+        ShellUiState, UiTheme, WagoInstallConfirmation, WagoInstallOutcome, WagoInstallSource,
+        WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix, child_row_prefix,
+        dashboard_item_version_label, format_download_count, summarize_owned_folders,
+        truncate_middle_text, visible_search_result_window,
     };
     use super::{
         DashboardItem, DashboardUndoDeleteState, SheetMove, SheetScroll, StatusKind, StatusMessage,
@@ -8497,13 +8446,13 @@ mod tests {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
+            last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
             active_onboarding_cancel: None,
             startup_notice: None,
-            inspect_overlay: InspectOverlayState::default(),
         }
     }
 
@@ -9403,18 +9352,45 @@ mod tests {
     }
 
     #[test]
-    fn inspect_overlay_keys_route_jk_to_scroll() {
+    fn details_arrows_and_jk_move_to_the_previous_or_next_addon() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+        let next = vec![
+            AppMessage::DashboardSelectionNext,
+            AppMessage::SheetScroll(SheetMove::Top),
+        ];
+        let previous = vec![
+            AppMessage::DashboardSelectionPrevious,
+            AppMessage::SheetScroll(SheetMove::Top),
+        ];
+        for code in [KeyCode::Down, KeyCode::Char('j')] {
+            assert_eq!(app.messages_for_key(KeyEvent::from(code)), next);
+        }
+        for code in [KeyCode::Up, KeyCode::Char('k')] {
+            assert_eq!(app.messages_for_key(KeyEvent::from(code)), previous);
+        }
 
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
-            vec![AppMessage::SheetScroll(SheetMove::LineDown)]
-        );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('k'))),
-            vec![AppMessage::SheetScroll(SheetMove::LineUp)]
-        );
+        // Details stays open on the next addon.
+        app.dashboard.list_state.select(Some(0));
+        let first = app
+            .inspect_resolved_target()
+            .expect("target")
+            .item
+            .folder
+            .clone();
+        for message in app.messages_for_key(KeyEvent::from(KeyCode::Down)) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+        assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+        let second = app
+            .inspect_resolved_target()
+            .expect("target")
+            .item
+            .folder
+            .clone();
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -9427,71 +9403,23 @@ mod tests {
         let resolved = app.inspect_resolved_target().expect("inspect target");
 
         assert_eq!(resolved.item.folder, "Second");
-        assert_eq!(resolved.opened_from_child, Some("Second_Config"));
     }
 
     #[test]
-    fn inspect_summary_hides_empty_author_placeholder_and_internal_noise() {
-        let app = app_for_tests(ShellMode::Dashboard);
-        let target = InspectResolvedTarget {
-            item: app
-                .dashboard
-                .items
-                .iter()
-                .find(|item| item.folder == "First")
-                .expect("first item"),
-            opened_from_child: None,
-        };
-
-        let summary = app
-            .inspect_summary_lines(target)
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(summary.contains("Version: 1.0.0"));
-        assert!(summary.contains("Folder: First"));
-        assert!(!summary.contains("Author:"));
-        assert!(!summary.contains("selection"));
-        assert!(!summary.contains("scan"));
-        assert!(!summary.contains("drift"));
-    }
-
-    #[test]
-    fn inspect_section_toggle_message_opens_and_closes_requested_section() {
+    fn details_no_longer_binds_section_toggles_or_find_online() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-
-        for action in app.update(AppMessage::InspectToggleSection(
-            InspectSection::IncludedAddons,
-        )) {
-            app.apply(action);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+        for code in ['r', 'd', 't', 'f'] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char(code))),
+                vec![],
+                "{code}"
+            );
         }
-        assert!(app.inspect_overlay.is_open(InspectSection::IncludedAddons));
-
-        for action in app.update(AppMessage::InspectToggleSection(
-            InspectSection::IncludedAddons,
-        )) {
-            app.apply(action);
+        let keys: Vec<&str> = app.key_table(80).iter().map(|hint| hint.key).collect();
+        for key in ["r", "d", "t", "f"] {
+            assert!(!keys.contains(&key), "{key} on the key line: {keys:?}");
         }
-        assert!(!app.inspect_overlay.is_open(InspectSection::IncludedAddons));
-    }
-
-    #[test]
-    fn inspect_detail_sections_start_collapsed() {
-        let app = app_for_tests(ShellMode::Dashboard);
-        let target = app.inspect_resolved_target().expect("inspect target");
-
-        let details = app
-            .inspect_detail_lines(target)
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            details,
-            vec!["▸ r Included addons", "▸ d Dependencies", "▸ t Addon info"]
-        );
     }
 
     #[test]
@@ -13149,16 +13077,31 @@ mod tests {
                 .collect()
         }
 
-        fn open_inspect(app: &mut App) {
+        fn open_details_on(app: &mut App, folder: &str) {
+            let index = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| {
+                    row.folder == folder && row.kind == crate::app::DashboardRowKind::Parent
+                })
+                .expect("addon row");
+            app.dashboard.list_state.select(Some(index));
             app.apply(AppAction::SetInspectOverlay(true));
-            // Every section open: the longest Details can get.
-            for section in [
-                InspectSection::IncludedAddons,
-                InspectSection::Dependencies,
-                InspectSection::AddonInfo,
-            ] {
-                apply_all(app, AppMessage::InspectToggleSection(section));
-            }
+        }
+
+        /// Details on Second: linked, with an author, a dependency and a
+        /// folder of its own. The longest Details the fixture has.
+        fn open_inspect(app: &mut App) {
+            open_details_on(app, "Second");
+        }
+
+        fn open_inspect_not_linked(app: &mut App) {
+            open_details_on(app, "First");
+        }
+
+        fn open_inspect_up_to_date(app: &mut App) {
+            open_details_on(app, "Third");
         }
 
         fn open_install_empty(app: &mut App) {
@@ -13231,18 +13174,36 @@ mod tests {
                     name: "inspect",
                     open: open_inspect,
                     labels: strings(&[
-                        "Summary",
-                        "Source:",
-                        "Status:",
-                        "Version:",
-                        "Folder:",
-                        "Details",
-                        "Included addons",
-                        "Dependencies",
-                        "Addon info",
-                        "Optional: Optional",
+                        "Second",
+                        "Not checked yet",
+                        "From",
+                        "GitHub",
+                        "Author",
+                        "Installed",
+                        "Folders",
+                        "Second_Config",
+                        "Needs",
+                        "Ace3",
                     ]),
-                    keys: &["space select", "c check", "x delete"],
+                    keys: &["c check", "x delete", "space select"],
+                },
+                Case {
+                    name: "inspect not linked",
+                    open: open_inspect_not_linked,
+                    labels: strings(&[
+                        "Not linked",
+                        "doesn't know where it came",
+                        "Folders",
+                        "Needs",
+                        "nothing else",
+                    ]),
+                    keys: &["x delete", "space select"],
+                },
+                Case {
+                    name: "inspect up to date",
+                    open: open_inspect_up_to_date,
+                    labels: strings(&["Up to date", "From", "Wago.io", "Made for", "WoW 11.0.5"]),
+                    keys: &["c check", "x delete", "space select"],
                 },
                 Case {
                     name: "install empty",
@@ -13851,6 +13812,294 @@ mod tests {
                 .find(|span| span.content == "enter/r")
                 .expect("enter/r key");
             assert_eq!(pulsed.style.bg, Some(app.ui_theme.roles.lemon));
+        }
+
+        fn press(app: &mut App, code: KeyCode) {
+            for message in app.messages_for_key(KeyEvent::from(code)) {
+                apply_all(app, message);
+            }
+        }
+
+        /// The column of a character in a rendered row.
+        fn column_of(row: &str, needle: char) -> Option<usize> {
+            row.chars().position(|character| character == needle)
+        }
+
+        #[test]
+        fn details_docks_at_120_columns_and_is_a_sheet_below() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            let rows = render_rows(&mut app, 119, 36);
+            let text = rows.join("\n");
+            assert!(!app.details_docked(), "{text}");
+            assert!(text.contains("╭─ Second"), "{text}");
+            assert!(!text.contains('┼'), "{text}");
+
+            let rows = render_rows(&mut app, 120, 36);
+            let text = rows.join("\n");
+            assert!(app.details_docked(), "{text}");
+            assert!(!text.contains("╭─"), "{text}");
+            // The divider joins the rule under the column header.
+            assert_eq!(column_of(&rows[4], '┼'), Some(78), "{text}");
+            assert_eq!(column_of(&rows[3], '│'), Some(78), "{text}");
+            assert_eq!(column_of(&rows[6], '│'), Some(78), "{text}");
+            assert!(
+                rows[3][..].ends_with("│ Second") || rows[3].contains("│ Second"),
+                "{text}"
+            );
+            // The list keeps Addon, Status and Version only.
+            assert!(rows[3].contains("Version"), "{text}");
+            assert!(!rows[3].contains("Author"), "{text}");
+            assert!(!rows[3].contains("Source"), "{text}");
+            // Header and the bottom lines still span the window.
+            assert!(rows[0].contains("█   █▀▀"), "{text}");
+            assert!(!rows[34].contains('│'), "{text}");
+            assert!(rows[35].contains("enter or esc close details"), "{text}");
+            assert!(rows[35].contains("↑/↓ move"), "{text}");
+        }
+
+        #[test]
+        fn docked_columns_are_78_1_41_at_120_and_the_panel_stops_near_52() {
+            let columns = crate::app::render_dashboard::ListColumns::for_docked(78);
+            assert_eq!(
+                (
+                    columns.name,
+                    columns.status,
+                    columns.version,
+                    columns.author,
+                    columns.source
+                ),
+                (30, 21, 22, 0, 0)
+            );
+            assert_eq!(columns.total(), 78);
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            for (width, list) in [(120u16, 78usize), (130, 83), (160, 107)] {
+                let rows = render_rows(&mut app, width, 40);
+                assert_eq!(column_of(&rows[4], '┼'), Some(list), "{width}");
+                let panel = usize::from(width) - list - 1;
+                assert!(panel <= 52, "{width}");
+                assert!(rows[4].chars().count() == usize::from(width), "{width}");
+            }
+            assert_eq!(render_rows(&mut app, 120, 40)[4].chars().count(), 120);
+        }
+
+        #[test]
+        fn docked_details_that_does_not_fit_ends_in_more() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            let rows = render_rows(&mut app, 120, 14);
+            let text = rows.join("\n");
+            // Six panel rows: five of content, then the count of the rest.
+            let panel: Vec<String> = rows[5..11]
+                .iter()
+                .map(|row| row.chars().skip(79).collect())
+                .collect();
+            assert!(panel[5].trim_start().starts_with("↓ "), "{text}");
+            assert!(panel[5].trim_end().ends_with(" more"), "{text}");
+            assert!(panel[1].contains("Not checked yet"), "{text}");
+        }
+
+        #[test]
+        fn resizing_switches_between_dock_and_sheet_without_closing() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            render_rows(&mut app, 120, 36);
+            assert!(app.details_docked());
+            let text = render_rows(&mut app, 110, 36).join("\n");
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+            assert!(text.contains("╭─ Second"), "{text}");
+            render_rows(&mut app, 120, 36);
+            assert!(app.details_docked());
+        }
+
+        #[test]
+        fn docked_esc_closes_details_then_clears_the_filter_then_the_selection() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDashboardFilter {
+                query: "e".to_string(),
+                editing: false,
+            });
+            app.apply(AppAction::SetSelectedDashboardParents(vec![
+                "Second".to_string(),
+            ]));
+            open_inspect(&mut app);
+            render_rows(&mut app, 120, 36);
+            assert!(app.details_docked());
+
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(app.shell_ui.overlay.active, None);
+            assert!(app.dashboard.has_filter());
+            press(&mut app, KeyCode::Esc);
+            assert!(!app.dashboard.has_filter());
+            assert_eq!(app.dashboard.selected_parent_count(), 1);
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(app.dashboard.selected_parent_count(), 0);
+        }
+
+        #[test]
+        fn q_and_enter_close_details_and_q_quits_only_from_the_list() {
+            for width in [80, 120] {
+                for code in [KeyCode::Char('q'), KeyCode::Enter] {
+                    let mut app = app_for_tests(ShellMode::Dashboard);
+                    open_inspect(&mut app);
+                    render_rows(&mut app, width, 36);
+                    assert_eq!(
+                        app.messages_for_key(KeyEvent::from(code)),
+                        vec![AppMessage::DashboardCloseOverlay],
+                        "{width} {code:?}"
+                    );
+                }
+            }
+            let app = app_for_tests(ShellMode::Dashboard);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+                vec![AppMessage::QuitRequested]
+            );
+        }
+
+        #[test]
+        fn docked_details_keeps_the_list_keys_and_the_mouse() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            render_rows(&mut app, 120, 36);
+            for (code, message) in [
+                (KeyCode::Down, AppMessage::DashboardSelectionNext),
+                (KeyCode::Char('/'), AppMessage::DashboardFilterBegin),
+                (KeyCode::Char('U'), AppMessage::DashboardRunUpdateAll),
+                (KeyCode::Char('C'), AppMessage::DashboardRunCheckAll),
+                (KeyCode::Char('u'), AppMessage::DashboardRunUpdateSelected),
+                (
+                    KeyCode::Char('1'),
+                    AppMessage::DashboardToggleSort(DashboardSortColumn::Name),
+                ),
+            ] {
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(code)),
+                    vec![message],
+                    "{code:?}"
+                );
+            }
+            // ↓ moves the list cursor and the panel follows it.
+            let before = app
+                .inspect_resolved_target()
+                .expect("target")
+                .item
+                .folder
+                .clone();
+            press(&mut app, KeyCode::Down);
+            let after = app
+                .inspect_resolved_target()
+                .expect("target")
+                .item
+                .folder
+                .clone();
+            assert_ne!(before, after);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+            let text = render_rows(&mut app, 120, 36).join("\n");
+            let name = app
+                .inspect_resolved_target()
+                .expect("target")
+                .item
+                .name
+                .clone();
+            assert!(text.contains(&format!("│ {name}")), "{text}");
+
+            // The list area stops at the divider: clicks in the panel do nothing.
+            let area = app.last_dashboard_list_area.expect("list area");
+            assert_eq!(area.width, 78);
+            let click = |column: u16| MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert_eq!(
+                app.messages_for_mouse(click(10)),
+                vec![AppMessage::DashboardPointerSelect {
+                    column: 10,
+                    row: area.y
+                }]
+            );
+            assert_eq!(app.dashboard_selection_for_pointer(100, area.y), None);
+
+            // Typing into the filter wins over closing Details.
+            press(&mut app, KeyCode::Char('/'));
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+                vec![AppMessage::DashboardFilterInputChar('q')]
+            );
+        }
+
+        #[test]
+        fn details_offers_update_only_when_an_update_is_ready() {
+            let keys = |app: &App| -> Vec<String> {
+                app.key_table(80)
+                    .iter()
+                    .map(|hint| format!("{} {}", hint.key, hint.label))
+                    .collect()
+            };
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect_up_to_date(&mut app);
+            assert!(
+                !keys(&app).contains(&"u update".to_string()),
+                "{:?}",
+                keys(&app)
+            );
+            assert!(keys(&app).contains(&"c check".to_string()));
+            let third = app
+                .dashboard
+                .items
+                .iter_mut()
+                .find(|item| item.folder == "Third")
+                .expect("third");
+            third.remote_version = Some("3.1.0".to_string());
+            assert!(
+                keys(&app).contains(&"u update".to_string()),
+                "{:?}",
+                keys(&app)
+            );
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(text.contains("↑ Update ready      3.0.0 → 3.1.0"), "{text}");
+
+            // Not linked: nothing to check or update.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect_not_linked(&mut app);
+            let shown = keys(&app);
+            assert!(
+                !shown
+                    .iter()
+                    .any(|key| key.starts_with("u ") || key.starts_with("c ")),
+                "{shown:?}"
+            );
+        }
+
+        #[test]
+        fn help_lists_the_details_keys_without_section_toggles() {
+            let rows: Vec<&str> = help_sections(HelpContext::Inspect)
+                .iter()
+                .flat_map(|section| section.rows.iter().map(|(key, _)| *key))
+                .collect();
+            assert!(rows.contains(&"↑/↓"), "{rows:?}");
+            assert!(rows.contains(&"u / c / x"), "{rows:?}");
+            assert!(rows.contains(&"enter / esc / q"), "{rows:?}");
+            assert!(
+                !rows.iter().any(|key| key.contains("r / d / t")),
+                "{rows:?}"
+            );
+            let texts: Vec<&str> = help_sections(HelpContext::Overview)
+                .iter()
+                .flat_map(|section| section.rows.iter().map(|(_, text)| *text))
+                .collect();
+            assert!(texts.contains(&"Open details"), "{texts:?}");
+
+            // Help opened from Details goes back to Details.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            press(&mut app, KeyCode::Char('?'));
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
         }
     }
 

@@ -44,12 +44,9 @@ impl App {
         let (title, subtitle) = match self.shell_ui.help_context {
             HelpContext::Overview => (
                 "Overview shortcuts",
-                "Navigate, inspect, select, and run bulk actions.",
+                "Navigate, open details, select, and run bulk actions.",
             ),
-            HelpContext::Inspect => (
-                "Inspect shortcuts",
-                "Review addon details and take direct actions.",
-            ),
+            HelpContext::Inspect => ("Details shortcuts", "Review an addon and act on it."),
             HelpContext::InstallSearch => (
                 "Install shortcuts",
                 "Search Wago or install from a GitHub, WoWInterface, TukUI or Wago URL.",
