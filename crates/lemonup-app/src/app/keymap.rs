@@ -20,6 +20,7 @@ const UP_DOWN: KeyCodes = &[
 ];
 const ARROWS: KeyCodes = &[KeyCode::Up, KeyCode::Down];
 const LEFT_RIGHT: KeyCodes = &[KeyCode::Left, KeyCode::Right];
+const TEXT_MOVE: KeyCodes = &[KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End];
 const CHANGE: KeyCodes = &[
     KeyCode::Left,
     KeyCode::Right,
@@ -170,8 +171,10 @@ impl KeyHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HelpWhen {
     Always,
-    /// No Wago.io key is saved: `,` opens Settings from the Install box.
+    /// No Wago.io key is saved: a name search asks for one in place.
     NoWagoKey,
+    /// The current addon is "Not linked": `f` finds it online.
+    NotLinked,
     /// The welcome card is on the list.
     FirstRunCard,
 }
@@ -266,10 +269,23 @@ const K_PAGE: &[KeyEvent] = &[press(KeyCode::PageUp), press(KeyCode::PageDown)];
 const K_ENDS: &[KeyEvent] = &[press(KeyCode::Home), press(KeyCode::End)];
 const K_ENTER: &[KeyEvent] = &[press(KeyCode::Enter)];
 const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
-const K_BACKSPACE: &[KeyEvent] = &[press(KeyCode::Backspace)];
 const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
 const K_HELP: &[KeyEvent] = &[ch('?')];
+const K_FIND: &[KeyEvent] = &[ch('f')];
 const K_CTRL_C: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
+const K_TEXT_MOVE: &[KeyEvent] = &[
+    press(KeyCode::Left),
+    press(KeyCode::Right),
+    press(KeyCode::Home),
+    press(KeyCode::End),
+];
+const K_TEXT_DELETE: &[KeyEvent] = &[press(KeyCode::Backspace), press(KeyCode::Delete)];
+const K_CTRL_U: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)];
+
+/// The editing keys every text box has, for the sections about typing.
+const TEXT_DELETE: HelpRow = HelpRow::key("backspace  del", "delete a letter", K_TEXT_DELETE);
+const TEXT_MOVE_ROW: HelpRow = HelpRow::key("← →  Home End", "move in the text", K_TEXT_MOVE);
+const TEXT_CLEAR: HelpRow = HelpRow::key("ctrl+u", "clear the text", K_CTRL_U);
 
 const QUESTIONS: HelpSection = HelpSection {
     title: "Questions",
@@ -291,7 +307,7 @@ const STATUS_WORDS: HelpSection = HelpSection {
         HelpRow::status(RowStatus::NotChecked, "linked, but not checked yet"),
         HelpRow::status(
             RowStatus::NotLinked,
-            "LemonUp can't update it yet; open details to see why",
+            "LemonUp can't update it yet; press f to fix that",
         ),
         HelpRow::status(RowStatus::CheckFailed, "open details to see why"),
     ],
@@ -338,7 +354,9 @@ static LIST_HELP: HelpPage = HelpPage {
             title: "While you type a filter",
             rows: &[
                 HelpRow::key("letters", "narrow the list", &[ch('w')]),
-                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
+                TEXT_DELETE,
+                TEXT_MOVE_ROW,
+                TEXT_CLEAR,
                 HelpRow::key("↑ ↓", "move through the matches", K_ARROWS),
                 HelpRow::key("enter", "keep the filter", K_ENTER),
                 HelpRow::key("esc", "clear the filter", K_ESC),
@@ -356,6 +374,8 @@ static LIST_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check this addon, or the selected ones", &[ch('c')]),
                 HelpRow::key("x", "delete this addon, or the selected ones", &[ch('x')]),
                 HelpRow::key("z", "undo the last delete", &[ch('z')]),
+                HelpRow::key("f", "find a \"Not linked\" addon online", K_FIND)
+                    .when(HelpWhen::NotLinked),
                 HelpRow::key("d", "hide the welcome card", &[ch('d')]).when(HelpWhen::FirstRunCard),
             ],
         },
@@ -390,6 +410,8 @@ static DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check it for updates", &[ch('c')]),
                 HelpRow::key("x", "delete it", &[ch('x')]),
                 HelpRow::key("space", "select or unselect it", &[ch(' ')]),
+                HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
+                    .when(HelpWhen::NotLinked),
             ],
         },
         HelpSection {
@@ -429,6 +451,8 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check it, or the selected ones", &[ch('c')]),
                 HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
+                HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
+                    .when(HelpWhen::NotLinked),
                 HelpRow::key(
                     "enter  esc  q",
                     "close Details",
@@ -494,12 +518,16 @@ static INSTALL_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Typing in the box",
             rows: &[
-                HelpRow::key("letters", "type a name, or paste a link", &[ch('w')]),
+                HelpRow::key(
+                    "letters",
+                    "type a name, or paste a link",
+                    &[ch('w'), ch('q')],
+                ),
                 HelpRow::key("enter", "search Wago.io, or install the link", K_ENTER),
-                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
-                HelpRow::key("esc", "stop typing", K_ESC),
-                HelpRow::key(",", "open Settings to add your Wago.io key", &[ch(',')])
-                    .when(HelpWhen::NoWagoKey),
+                TEXT_DELETE,
+                TEXT_MOVE_ROW,
+                TEXT_CLEAR,
+                HelpRow::key("esc", "close Install", K_ESC),
             ],
         },
         HelpSection {
@@ -517,7 +545,16 @@ static INSTALL_HELP: HelpPage = HelpPage {
             title: "Install from a link?",
             rows: &[
                 HelpRow::key("enter", "install it", K_ENTER),
-                HelpRow::key("esc  q", "don't install it", K_CLOSE),
+                HelpRow::key("esc", "not now", K_ESC),
+            ],
+        },
+        HelpSection {
+            title: "Your Wago.io key",
+            rows: &[
+                HelpRow::key("letters", "type or paste your key", &[ch('w')])
+                    .when(HelpWhen::NoWagoKey),
+                HelpRow::key("enter", "save the key and search", K_ENTER).when(HelpWhen::NoWagoKey),
+                HelpRow::key("esc", "back to the search box", K_ESC).when(HelpWhen::NoWagoKey),
             ],
         },
     ],
@@ -525,21 +562,30 @@ static INSTALL_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Results",
             rows: &[
-                HelpRow::key("↑ ↓  or  j k", "move through the results", K_MOVE),
+                HelpRow::key(
+                    "↓",
+                    "from the box into the results",
+                    &[press(KeyCode::Down)],
+                ),
+                HelpRow::key("↑ ↓", "move; ↑ on the first goes back to the box", K_ARROWS),
                 HelpRow::key("enter", "install the one you are on", K_ENTER),
-                HelpRow::key("/", "type in the box again", &[ch('/')]),
+                HelpRow::key("letters", "go back to the box and type", &[ch('w')]),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
                 HelpRow::key("Home End", "top, bottom", K_ENDS),
+                HelpRow::key("esc", "close Install", K_ESC),
             ],
         },
         QUESTIONS,
         HelpSection {
-            title: "When you are not typing",
-            rows: &[HelpRow::key("esc  q", "close Install", K_CLOSE), THIS_HELP],
-        },
-        HelpSection {
             title: "Everywhere",
-            rows: &[QUIT_ANYWHERE],
+            rows: &[
+                HelpRow::key(
+                    "?",
+                    "this help (in the results, or with the box empty)",
+                    K_HELP,
+                ),
+                QUIT_ANYWHERE,
+            ],
         },
     ],
 };
@@ -572,7 +618,9 @@ static SETTINGS_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("enter", "save it", K_ENTER),
                 HelpRow::key("esc", "cancel", K_ESC),
-                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
+                TEXT_DELETE,
+                TEXT_MOVE_ROW,
+                TEXT_CLEAR,
             ],
         },
     ],
@@ -686,8 +734,28 @@ impl App {
         })
     }
 
+    /// `f`, shown only while the current addon is not linked.
+    fn find_online_hint(&self) -> KeyHint {
+        KeyHint::primary(
+            FooterHintId::FindOnline,
+            "f",
+            "find online",
+            &[KeyCode::Char('f')],
+        )
+    }
+
     fn help_hint(&self) -> KeyHint {
         KeyHint::key(FooterHintId::Help, "?", "help", HELP)
+    }
+
+    /// The cursor and clear keys of a focused text box. They go last on
+    /// the key line, so a narrow one drops them first. Ctrl+U has no key
+    /// codes: a plain `u` is a letter in the box and must not pulse it.
+    fn text_box_hints(&self) -> [KeyHint; 2] {
+        [
+            KeyHint::key(FooterHintId::Cursor, "←/→", "cursor", TEXT_MOVE).secondary(),
+            KeyHint::key(FooterHintId::ClearText, "ctrl+u", "clear text", &[]).secondary(),
+        ]
     }
 
     fn close_hint(&self) -> KeyHint {
@@ -697,11 +765,13 @@ impl App {
     fn onboarding_key_table(&self) -> Vec<KeyHint> {
         use FooterHintId as Id;
         if self.onboarding.is_editing {
-            return vec![
+            let mut hints = vec![
                 KeyHint::key(Id::Save, "enter", "apply", ENTER).main(),
                 KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
                 KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary(),
             ];
+            hints.extend(self.text_box_hints());
+            return hints;
         }
         match self.onboarding.step {
             OnboardingStep::Theme => vec![
@@ -781,6 +851,9 @@ impl App {
         } else if status == RowStatus::UpdateReady && !self.dashboard.update_in_progress() {
             hints.push(update("update"));
         }
+        if target.item.source == SourceKind::Manual {
+            hints.push(self.find_online_hint().main());
+        }
         if selected > 0 || target.item.source != SourceKind::Manual {
             let check = &[KeyCode::Char('c')];
             hints.push(if selected == 0 && status == RowStatus::CheckFailed {
@@ -841,10 +914,12 @@ impl App {
         match self.dashboard.detail_mode {
             DetailMode::Install => {
                 if self.install_pane.is_editing {
-                    vec![
+                    let mut hints = vec![
                         KeyHint::key(Id::Save, "enter", "apply", ENTER).main(),
                         KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
-                    ]
+                    ];
+                    hints.extend(self.text_box_hints());
+                    hints
                 } else {
                     let mut hints = vec![
                         KeyHint::key(Id::Edit, "e", "edit", &[KeyCode::Char('e')]),
@@ -874,11 +949,13 @@ impl App {
             ],
             DetailMode::Config => {
                 if self.config_pane.edit.is_some() {
-                    return vec![
+                    let mut hints = vec![
                         KeyHint::key(Id::Save, "enter", "apply", ENTER).main(),
                         KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
                         KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary(),
                     ];
+                    hints.extend(self.text_box_hints());
+                    return hints;
                 }
                 let field = self.config_pane.selected_field();
                 let mut hints = vec![
@@ -941,50 +1018,94 @@ impl App {
         }
     }
 
+    /// Install: typing always goes to the box, so `q` and letters never
+    /// close or move anything, and `esc` is the way out.
     fn search_key_table(&self) -> Vec<KeyHint> {
         use FooterHintId as Id;
-        if self.search_pane.pending_direct_install().is_some() {
+        let pane = &self.search_pane;
+        let close = |label: &'static str| KeyHint::key(Id::Close, "esc", label, ESC).secondary();
+        if pane.pending_direct_install().is_some() {
             return vec![
-                KeyHint::key(Id::Confirm, "enter", "install", ENTER).kept(),
-                KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE).kept(),
+                KeyHint::key(Id::Confirm, "enter", "install", ENTER)
+                    .kept()
+                    .main(),
+                KeyHint::key(Id::Cancel, "esc", "not now", ESC).kept(),
             ];
         }
-        let intent = classify_search_input(&self.search_pane.query);
-        let submit_label = match intent {
-            SearchInputIntent::Direct(_) | SearchInputIntent::WagoUrl(_) => "install",
-            _ => "search",
-        };
-        let config = (self.wago_api_key.is_none())
-            .then(|| KeyHint::key(Id::Config, ",", "settings", &[KeyCode::Char(',')]));
-        if self.search_pane.is_editing {
-            let mut hints = Vec::new();
-            if !self.search_pane.in_progress {
-                hints.push(KeyHint::key(Id::Save, "enter", submit_label, ENTER).main());
-            }
-            hints.push(KeyHint::key(Id::Cancel, "esc", "cancel", ESC));
-            hints.push(KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary());
-            hints.extend(config);
+        if pane.key_box.is_some() {
+            let mut hints = vec![
+                KeyHint::key(Id::Save, "enter", "save the key and search", ENTER)
+                    .short("save and search")
+                    .main(),
+                KeyHint::key(Id::Back, "esc", "back", ESC),
+            ];
+            hints.extend(self.text_box_hints());
             return hints;
         }
-        let mut hints = Vec::new();
-        if self.search_pane.results.is_empty() {
-            let can_submit = self.wago_api_key.is_some() || !intent.needs_wago_key();
-            if can_submit && !self.search_pane.in_progress {
-                hints.push(KeyHint::key(Id::Install, "enter", submit_label, ENTER).main());
-            }
-            hints.push(KeyHint::key(Id::Edit, "/", "query", &[KeyCode::Char('/')]));
-            hints.extend(config);
-            hints.push(self.close_hint());
-            hints.extend(self.sheet_scroll_hint(true));
-        } else {
-            hints.push(KeyHint::key(Id::Results, "↑/↓", "results", UP_DOWN));
-            hints.push(KeyHint::key(Id::Install, "enter", "install", ENTER).main());
-            hints.push(KeyHint::key(Id::Edit, "/", "query", &[KeyCode::Char('/')]));
-            hints.extend(config);
-            hints.push(self.close_hint());
-            hints.extend(self.sheet_scroll_hint(false));
+        if pane.busy() {
+            return vec![
+                KeyHint::text(if pane.in_progress {
+                    "Searching Wago.io."
+                } else {
+                    "Installing. This takes a few seconds."
+                }),
+                close("close"),
+            ];
         }
-        hints.push(self.help_hint());
+        if pane.results_focused() {
+            let mut hints = vec![
+                KeyHint::text("type to change the search"),
+                KeyHint::key(Id::Results, "↑/↓", "choose", ARROWS),
+                KeyHint::key(Id::Install, "enter", "install", ENTER).main(),
+                close("close"),
+            ];
+            hints.extend(self.sheet_scroll_hint(false));
+            hints.push(self.help_hint());
+            return hints;
+        }
+        let empty = pane.query.is_empty();
+        match &pane.install_state {
+            SearchInstallState::Success { .. } if empty => {
+                return vec![
+                    KeyHint::key(Id::Install, "enter", "install another", ENTER).main(),
+                    close("back to my addons"),
+                    self.help_hint(),
+                ];
+            }
+            SearchInstallState::Error { .. } => {
+                let mut hints = vec![
+                    KeyHint::key(Id::Install, "enter", "try again", ENTER).main(),
+                    close("close"),
+                ];
+                if empty {
+                    hints.push(self.help_hint());
+                }
+                return hints;
+            }
+            _ => {}
+        }
+        let mut hints = Vec::new();
+        if empty {
+            hints.push(KeyHint::text("type or paste"));
+        }
+        match classify_search_input(pane.query.value()) {
+            SearchInputIntent::Direct(_) | SearchInputIntent::WagoUrl(_) => {
+                hints.push(KeyHint::key(Id::Install, "enter", "install", ENTER).main());
+            }
+            SearchInputIntent::WagoSearch(_) => {
+                hints.push(KeyHint::key(Id::Install, "enter", "search", ENTER).main());
+            }
+            SearchInputIntent::Empty | SearchInputIntent::InvalidUrl(_) => {}
+        }
+        if !pane.results.is_empty() {
+            hints.push(KeyHint::key(Id::Results, "↓", "results", &[KeyCode::Down]));
+        }
+        hints.push(close("close"));
+        if empty {
+            hints.push(self.help_hint());
+        } else {
+            hints.extend(self.text_box_hints());
+        }
         hints
     }
 
@@ -1002,6 +1123,7 @@ impl App {
             let mut hints = vec![KeyHint::text("type to filter")];
             if self.dashboard.rows.is_empty() {
                 hints.push(KeyHint::key(Id::Clear, "esc", "clear filter", ESC));
+                hints.extend(self.text_box_hints());
                 return hints;
             }
             hints.extend([
@@ -1019,6 +1141,7 @@ impl App {
                     ESC,
                 ),
             ]);
+            hints.extend(self.text_box_hints());
             return hints;
         }
         if self
@@ -1090,7 +1213,12 @@ impl App {
             .iter()
             .all(|item| item.source == SourceKind::Manual)
         {
-            let mut hints = vec![install_main(), details];
+            // `f` links the addon under the cursor; installing is for new ones.
+            let mut hints = vec![
+                self.find_online_hint().main(),
+                details,
+                KeyHint::key(Id::Install, "i", "install", &[KeyCode::Char('i')]),
+            ];
             if wide {
                 hints.push(KeyHint::key(Id::Select, "space", "select", SELECT));
             }
@@ -1124,6 +1252,9 @@ impl App {
         let check_all =
             |label: &'static str| KeyHint::key(Id::CheckAll, "C", label, &[KeyCode::Char('C')]);
         let select = KeyHint::key(Id::Select, "space", "select", SELECT);
+        let find = self
+            .not_linked_current_item()
+            .map(|_| self.find_online_hint());
         if updates > 0 {
             let update_all = KeyHint::primary(
                 Id::UpdateAll,
@@ -1131,7 +1262,7 @@ impl App {
                 format!("update all ({updates})"),
                 &[KeyCode::Char('U')],
             );
-            return if wide {
+            let mut hints = if wide {
                 vec![
                     update_all,
                     update,
@@ -1154,9 +1285,13 @@ impl App {
                     check_all("check all"),
                 ]
             };
+            if let Some(find) = find {
+                hints.insert(if wide { 4 } else { 3 }, find);
+            }
+            return hints;
         }
         let check_all = check_all(if checked { "check again" } else { "check all" }).main();
-        if wide {
+        let mut hints = if wide {
             vec![
                 check_all,
                 details,
@@ -1169,7 +1304,11 @@ impl App {
             ]
         } else {
             vec![check_all, details, install, filter, help]
+        };
+        if let Some(find) = find {
+            hints.insert(2, find);
         }
+        hints
     }
 }
 

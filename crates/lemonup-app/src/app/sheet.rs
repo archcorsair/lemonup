@@ -73,14 +73,6 @@ impl<'a> SheetBody<'a> {
         self
     }
 
-    pub(super) fn centered_text(&mut self, lines: Vec<Line<'static>>) -> &mut Self {
-        self.parts.push(SheetPart::Text {
-            lines,
-            alignment: Alignment::Center,
-        });
-        self
-    }
-
     pub(super) fn heading(&mut self, title: &'static str) -> &mut Self {
         self.parts.push(SheetPart::Heading(title));
         self
@@ -133,10 +125,26 @@ pub(super) fn text_height(lines: &[Line<'static>], width: u16) -> u16 {
 /// same wrapped rows, so its height is always exact. A word longer than the
 /// width is broken mid-word; the space a row breaks at is dropped.
 pub(super) fn wrap_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
+    wrap_lines_hanging(lines, width, 0)
+}
+
+/// `wrap_lines`, with every row after a line's first indented by `indent`
+/// columns, so a long value lines up under the text after its label.
+pub(super) fn wrap_lines_hanging(
+    lines: &[Line<'static>],
+    width: u16,
+    indent: u16,
+) -> Vec<Line<'static>> {
     let width = usize::from(width);
     if width == 0 {
         return Vec::new();
     }
+    // A hanging indent only when continuation rows keep some room.
+    let indent = if usize::from(indent) < width / 2 {
+        usize::from(indent)
+    } else {
+        0
+    };
     let mut out = Vec::new();
     for line in lines {
         let cells: Vec<(String, Style, usize)> = line
@@ -153,7 +161,12 @@ pub(super) fn wrap_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'stati
         let mut rows: Vec<Vec<(String, Style, usize)>> = vec![Vec::new()];
         let mut used = 0usize;
         for cell in cells {
-            if used + cell.2 > width && !rows.last().expect("a row").is_empty() {
+            let room = if rows.len() == 1 {
+                width
+            } else {
+                width - indent
+            };
+            if used + cell.2 > room && !rows.last().expect("a row").is_empty() {
                 let row = rows.last_mut().expect("a row");
                 // Break after the last space, if the row has one.
                 let carry = match row.iter().rposition(|(symbol, _, _)| symbol == " ") {
@@ -173,8 +186,11 @@ pub(super) fn wrap_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'stati
             used += cell.2;
             rows.last_mut().expect("a row").push(cell);
         }
-        for row in rows {
+        for (index, row) in rows.into_iter().enumerate() {
             let mut spans: Vec<Span<'static>> = Vec::new();
+            if index > 0 && indent > 0 {
+                spans.push(Span::raw(" ".repeat(indent)));
+            }
             for (symbol, style, _) in row {
                 match spans.last_mut() {
                     Some(last) if last.style == style => last.content.to_mut().push_str(&symbol),

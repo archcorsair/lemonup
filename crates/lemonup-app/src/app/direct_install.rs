@@ -9,11 +9,17 @@ use std::path::Path;
 
 use lemonup_core::StateDatabase;
 
-use super::{AddonScanOutcome, App, AppAction, DetailMode, StatusKind, sync_dashboard_state};
-use crate::github::{install_github_addon, parse_github_target};
-use crate::tukui::{install_tukui_addon, parse_tukui_target};
+use lemonup_core::SourceKind;
+
+use super::{
+    AddonScanOutcome, App, AppAction, DashboardItem, DetailMode, PendingWagoInstallRequest,
+    SearchPaneState, StatusKind, WagoInstallSource, sync_dashboard_state,
+};
+use crate::github::{install_github_addon_checked, parse_github_target};
+use crate::source_error::SourceError;
+use crate::tukui::{install_tukui_addon_checked, parse_tukui_target};
 use crate::wago::parse_wago_target;
-use crate::wowinterface::{install_wowinterface_addon, parse_wowinterface_target};
+use crate::wowinterface::{install_wowinterface_addon_checked, parse_wowinterface_target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectInstallProvider {
@@ -41,6 +47,23 @@ pub struct DirectInstallRequest {
     pub(super) target: String,
     /// Short label for the confirmation line, e.g. `owner/repo`.
     pub(super) display: String,
+}
+
+impl DirectInstallRequest {
+    /// The addon's name as far as the link tells: the repo for GitHub.
+    pub(super) fn name(&self) -> String {
+        match self.provider {
+            DirectInstallProvider::Github => self
+                .display
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.display)
+                .to_string(),
+            DirectInstallProvider::Wowinterface | DirectInstallProvider::Tukui => {
+                self.display.clone()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,55 +170,246 @@ fn looks_like_url(value: &str) -> bool {
 }
 
 impl App {
-    /// Status text when any overlay install (Wago or direct) is already running.
+    /// Whether an install from the Install sheet (Wago.io or direct) is running.
+    pub(super) fn install_running(&self) -> bool {
+        self.wago_install_in_progress || self.direct_install_in_progress
+    }
+
+    /// Why an install can't start now: another install, or an update,
+    /// delete or undo that is changing the AddOns folder.
     pub(super) fn install_busy_status(&self) -> Option<&'static str> {
         if self.wago_install_in_progress {
             Some("A Wago.io install is already running")
         } else if self.direct_install_in_progress {
             Some("an addon install is already running")
+        } else if self.dashboard.update_in_progress() {
+            Some("Wait for the update to finish first.")
+        } else if self.delete_in_progress {
+            Some("Wait for the delete to finish first.")
+        } else if self.undo_delete_in_progress {
+            Some("Wait for the undo to finish first.")
         } else {
             None
         }
     }
 
-    /// Submit of a direct target: ask for confirmation. Needs no Wago API key.
+    /// Why an update, delete or undo can't start now: an install is running.
+    pub(super) fn install_running_status(&self) -> Option<&'static str> {
+        self.install_running()
+            .then_some("Wait for the install to finish first.")
+    }
+
+    /// The addon `f` finds online: the current one, when it is not linked.
+    pub(super) fn not_linked_current_item(&self) -> Option<&DashboardItem> {
+        self.dashboard
+            .selected_item()
+            .filter(|item| item.source == SourceKind::Manual)
+    }
+
+    /// What enter does with the text in `pane`'s box: ask about a link,
+    /// search Wago.io, or open the key box when a search needs a key and
+    /// none is saved. An empty box after an install starts over.
+    pub(super) fn search_submit_actions(
+        &self,
+        pane: SearchPaneState,
+        api_key: Option<String>,
+    ) -> Vec<AppAction> {
+        let intent = classify_search_input(pane.query.value());
+        if pane.in_progress {
+            return vec![AppAction::SetSearchPaneState(pane)];
+        }
+        if let Some(busy) = self.install_busy_status() {
+            return vec![
+                AppAction::SetSearchPaneState(pane),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Search,
+                    busy,
+                )),
+            ];
+        }
+        match intent {
+            SearchInputIntent::Empty => {
+                vec![AppAction::SetSearchPaneState(pane.clear_install_state())]
+            }
+            // The line under the box already says why nothing happens.
+            SearchInputIntent::InvalidUrl(_) => vec![AppAction::SetSearchPaneState(pane)],
+            SearchInputIntent::Direct(request) => {
+                self.request_direct_install_actions(pane, request)
+            }
+            intent if intent.needs_wago_key() && api_key.is_none() => {
+                vec![AppAction::SetSearchPaneState(pane.open_key_box())]
+            }
+            _ if self.dashboard.pending_delete_folders().is_some() => vec![
+                AppAction::SetSearchPaneState(pane),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Search,
+                    "Answer the delete question first",
+                )),
+            ],
+            SearchInputIntent::WagoUrl(target) => {
+                let Some(addon_dir) = self.effective_addon_dir.clone() else {
+                    return vec![
+                        AppAction::SetSearchPaneState(pane),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Search,
+                            "LemonUp doesn't know your AddOns folder yet",
+                        )),
+                    ];
+                };
+                let name = pane.query.value().trim().to_string();
+                let request = PendingWagoInstallRequest {
+                    target: target.clone(),
+                    source: WagoInstallSource::DirectInput,
+                };
+                vec![
+                    AppAction::SetSearchPaneState(pane.start_direct_install_check(&target, &name)),
+                    AppAction::SetWagoInstallInProgress(true),
+                    AppAction::StartWagoInstall {
+                        addon_dir,
+                        api_key: api_key.expect("checked above"),
+                        request,
+                        replace_folders: None,
+                    },
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Working,
+                        DetailMode::Search,
+                        &format!("Installing {name} from Wago.io"),
+                    )),
+                ]
+            }
+            SearchInputIntent::WagoSearch(query) => vec![
+                AppAction::SetSearchPaneState(pane.start_search()),
+                AppAction::StartWagoSearch {
+                    query: query.clone(),
+                    api_key: api_key.expect("checked above"),
+                },
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Search,
+                    &format!("Searching Wago.io for \"{query}\""),
+                )),
+            ],
+        }
+    }
+
+    /// Submit of a direct target: ask once, by the addon's name. Needs no Wago API key.
     pub(super) fn request_direct_install_actions(
         &self,
+        pane: SearchPaneState,
         request: DirectInstallRequest,
     ) -> Vec<AppAction> {
+        if self.dashboard.pending_delete_folders().is_some() {
+            return vec![
+                AppAction::SetSearchPaneState(pane),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Search,
+                    "Answer the delete question first",
+                )),
+            ];
+        }
+        if self.effective_addon_dir.is_none() {
+            return vec![
+                AppAction::SetSearchPaneState(pane),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Problem,
+                    DetailMode::Search,
+                    "LemonUp doesn't know your AddOns folder yet",
+                )),
+            ];
+        }
+        vec![AppAction::SetSearchPaneState(
+            pane.request_direct_install(request),
+        )]
+    }
+
+    /// Enter on "Install X from GitHub?" (`replace_folders` empty), or yes to
+    /// replacing the folders the question listed. `name` is what the status says.
+    pub(super) fn start_direct_install_actions(
+        &self,
+        request: DirectInstallRequest,
+        replace_folders: Vec<String>,
+        name: String,
+    ) -> Vec<AppAction> {
+        if let Some(busy) = self.install_busy_status() {
+            return vec![AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Note,
+                DetailMode::Search,
+                busy,
+            ))];
+        }
         if self.dashboard.pending_delete_folders().is_some() {
             return vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
                 DetailMode::Search,
-                "confirm or cancel the pending delete before installing addons",
+                "Answer the delete question first",
             ))];
         }
-        if self.effective_addon_dir.is_none() {
+        let Some(addon_dir) = self.effective_addon_dir.clone() else {
             return vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Problem,
                 DetailMode::Search,
-                "addon directory is not configured",
+                "LemonUp doesn't know your AddOns folder yet",
             ))];
-        }
-        let status = direct_install_prompt(&request);
+        };
+        let verb = if replace_folders.is_empty() {
+            "Installing"
+        } else {
+            "Replacing your copy of"
+        };
         vec![
-            AppAction::SetSearchPaneState(self.search_pane.request_direct_install(request)),
+            AppAction::SetSearchPaneState(self.search_pane.start_direct_install(request.clone())),
+            AppAction::SetDirectInstallInProgress(true),
             AppAction::SetStatus(self.dashboard_status_for(
-                StatusKind::Note,
+                StatusKind::Working,
                 DetailMode::Search,
-                &status,
+                &format!("{verb} {name} from {}", request.provider.label()),
             )),
+            AppAction::StartDirectInstall {
+                addon_dir,
+                request,
+                replace_folders,
+            },
         ]
     }
-}
 
-/// The confirmation line, e.g. `Install from GitHub: owner/repo? enter confirm, esc cancel`.
-pub(super) fn direct_install_prompt(request: &DirectInstallRequest) -> String {
-    format!(
-        "Install from {}: {}? enter confirm, esc cancel",
-        request.provider.label(),
-        request.display
-    )
+    /// Enter in the Wago.io key box: saves the key the way Settings does,
+    /// then runs the search that asked for it. The key is never shown.
+    pub(super) fn save_wago_key_actions(&self) -> Vec<AppAction> {
+        let Some(key) = self
+            .search_pane
+            .key_box
+            .as_ref()
+            .map(|key| key.value().trim().to_string())
+            .filter(|key| !key.is_empty())
+        else {
+            return vec![];
+        };
+        let mut next = self.config_pane.clone();
+        next.draft.wago_api_key = Some(key.clone());
+        if let Err(error) = self.config_store.write_config(&next.draft) {
+            return vec![AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Problem,
+                DetailMode::Search,
+                &format!("Couldn't save your Wago.io key: {error}"),
+            ))];
+        }
+        let mut actions = vec![
+            AppAction::SetPersistedConfig(next.draft.clone()),
+            AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
+            AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Saved your Wago.io key",
+            )),
+        ];
+        let pane = self.search_pane.close_key_box().clear_install_state();
+        actions.extend(self.search_submit_actions(pane, Some(key)));
+        actions
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,39 +421,71 @@ pub(super) struct DirectInstallOutcome {
 }
 
 /// Installs through the provider functions the CLI install commands call (not a dry run);
-/// those apply the flavor detection and WoW Forever rules for `addon_dir`.
+/// those apply the flavor detection and WoW Forever rules for `addon_dir`. Folders already in
+/// AddOns (a "Not linked" copy, say) on `replace_folders` are taken over like an update; any
+/// other folder in the way comes back as `SourceErrorKind::FoldersInTheWay` (asked again), and
+/// a folder of a linked addon as `SourceErrorKind::FoldersOfLinkedAddon` (never replaced).
 pub(super) async fn run_direct_install_task(
     state_db_file: &Path,
     addon_dir: &Path,
     request: &DirectInstallRequest,
-) -> std::result::Result<DirectInstallOutcome, String> {
+    replace_folders: &[String],
+) -> std::result::Result<DirectInstallOutcome, SourceError> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     let (addon_name, parent_folder, warning) = match request.provider {
         DirectInstallProvider::Github => {
-            let summary =
-                install_github_addon(&mut database, addon_dir, &request.target, false).await?;
+            let summary = install_github_addon_checked(
+                &mut database,
+                addon_dir,
+                &request.target,
+                false,
+                replace_folders,
+            )
+            .await?;
             (summary.repo_name, summary.parent_folder, None)
         }
         DirectInstallProvider::Wowinterface => {
-            let summary =
-                install_wowinterface_addon(&mut database, addon_dir, &request.target, false)
-                    .await?;
+            let summary = install_wowinterface_addon_checked(
+                &mut database,
+                addon_dir,
+                &request.target,
+                false,
+                replace_folders,
+            )
+            .await?;
             (summary.addon_name, summary.parent_folder, summary.warning)
         }
         DirectInstallProvider::Tukui => {
-            let summary =
-                install_tukui_addon(&mut database, addon_dir, &request.target, false).await?;
+            let summary = install_tukui_addon_checked(
+                &mut database,
+                addon_dir,
+                &request.target,
+                false,
+                replace_folders,
+            )
+            .await?;
             (summary.addon_name, summary.parent_folder, None)
         }
     };
     drop(database);
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
+    // The installed addon's own name (its title) reads better than a repo slug.
+    let addon_name = installed_addon_name(&sync, &parent_folder).unwrap_or(addon_name);
     Ok(DirectInstallOutcome {
         addon_name,
         parent_folder,
         warning,
         sync,
     })
+}
+
+/// The name the addon list shows for the addon installed at `parent_folder`.
+pub(super) fn installed_addon_name(sync: &AddonScanOutcome, parent_folder: &str) -> Option<String> {
+    sync.addons
+        .iter()
+        .find(|addon| addon.folder == parent_folder)
+        .map(|addon| addon.name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 #[cfg(test)]

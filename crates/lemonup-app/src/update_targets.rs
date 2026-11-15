@@ -6,6 +6,8 @@ use std::path::Path;
 
 use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
 
+use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
+
 /// Plans the folders an update of `tracked` moves aside before copying `package_folders` in.
 ///
 /// - A tracked addon with authoritative (managed) ownership replaces its parent and every owned
@@ -85,9 +87,142 @@ fn tracked_owner_of(rows: &[AddonRecord], updating: &str, folder: &str) -> Optio
         .map(|row| row.folder.clone())
 }
 
+/// Sorts the folders a fresh install of a package brings into what is in the way.
+///
+/// - A package folder that is the parent or an owned folder of a linked (non-manual) addon is
+///   `linked`, on disk or not, since recording the install would take it from that addon.
+///   `reinstalling` is the parent folder of the very addon being installed again (a Wago.io
+///   reinstall); its own folders are not counted as linked.
+/// - Any other package folder already in the AddOns folder is `replaceable`: it has no record or
+///   a "Not linked" (manual) one.
+pub(crate) fn classify_install_folders(
+    rows: &[AddonRecord],
+    addon_dir: &Path,
+    package_folders: &[String],
+    parent_folder: &str,
+    reinstalling: Option<&str>,
+) -> FolderClash {
+    let mut clash = FolderClash::default();
+    for folder in package_folders {
+        let owner = rows
+            .iter()
+            .filter(|row| {
+                row.source != SourceKind::Manual && Some(row.folder.as_str()) != reinstalling
+            })
+            .find(|row| {
+                row.folder == *folder || row.owned_folders.iter().any(|owned| owned.name == *folder)
+            });
+        if let Some(owner) = owner {
+            let name = if owner.name.trim().is_empty() {
+                owner.folder.clone()
+            } else {
+                owner.name.clone()
+            };
+            clash.linked.push((folder.clone(), name));
+        } else if addon_dir.join(folder).exists() {
+            clash.replaceable.push(folder.clone());
+        }
+    }
+    // The "Not linked" addon already there: the package parent first, then any other folder.
+    let manual_name = |folder: &str| {
+        rows.iter()
+            .find(|row| row.source == SourceKind::Manual && row.folder == folder)
+            .map(|row| row.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    };
+    clash.existing_name = clash
+        .replaceable
+        .iter()
+        .find(|folder| folder.as_str() == parent_folder)
+        .and_then(|folder| manual_name(folder))
+        .or_else(|| {
+            clash
+                .replaceable
+                .iter()
+                .find_map(|folder| manual_name(folder))
+        });
+    clash
+}
+
+/// The folders a fresh install may move aside: those in the way that are on `confirmed` (the
+/// list the person said yes to; empty when nobody was asked).
+///
+/// Refuses with `FoldersOfLinkedAddon` when a package folder belongs to a linked addon, and with
+/// `FoldersInTheWay` (a new question) when a folder in the way is not on `confirmed`, so a
+/// download that changed since the question never replaces a folder nobody agreed to.
+pub(crate) fn plan_install_replacements(
+    database: &StateDatabase,
+    addon_dir: &Path,
+    package_folders: &[String],
+    parent_folder: &str,
+    confirmed: &[String],
+    reinstalling: Option<&str>,
+) -> Result<Vec<String>, SourceError> {
+    let rows = database.list_addons().map_err(|error| error.to_string())?;
+    plan_install_replacements_from_rows(
+        &rows,
+        addon_dir,
+        package_folders,
+        parent_folder,
+        confirmed,
+        reinstalling,
+    )
+}
+
+fn plan_install_replacements_from_rows(
+    rows: &[AddonRecord],
+    addon_dir: &Path,
+    package_folders: &[String],
+    parent_folder: &str,
+    confirmed: &[String],
+    reinstalling: Option<&str>,
+) -> Result<Vec<String>, SourceError> {
+    let clash = classify_install_folders(
+        rows,
+        addon_dir,
+        package_folders,
+        parent_folder,
+        reinstalling,
+    );
+    if !clash.linked.is_empty() {
+        return Err(linked_folders_error(clash));
+    }
+    if clash
+        .replaceable
+        .iter()
+        .any(|folder| !confirmed.contains(folder))
+    {
+        return Err(SourceError::folders(
+            SourceErrorKind::FoldersInTheWay,
+            format!(
+                "install refused because these addon folders already exist: {}",
+                clash.replaceable.join(", ")
+            ),
+            clash,
+        ));
+    }
+    Ok(clash.replaceable)
+}
+
+/// The refusal for package folders that belong to linked addons (`clash.linked`).
+pub(crate) fn linked_folders_error(clash: FolderClash) -> SourceError {
+    let named = clash
+        .linked
+        .iter()
+        .map(|(folder, owner)| format!("{folder} ({owner})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    SourceError::folders(
+        SourceErrorKind::FoldersOfLinkedAddon,
+        format!("install refused because these addon folders belong to linked addons: {named}"),
+        clash,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::plan_update_replacements_from_rows;
+    use super::{plan_install_replacements_from_rows, plan_update_replacements_from_rows};
+    use crate::source_error::SourceErrorKind;
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind};
     use tempfile::tempdir;
 
@@ -243,5 +378,145 @@ mod tests {
             error.ends_with("Shared_Lib (owned by tracked addon Bar)"),
             "{error}"
         );
+    }
+
+    fn manual(folder: &str, name: &str) -> AddonRecord {
+        AddonRecord::new(name, folder, SourceKind::Manual)
+    }
+
+    #[test]
+    fn install_with_nothing_in_the_way_replaces_nothing() {
+        let temp = tempdir().expect("tempdir");
+        let replaced = plan_install_replacements_from_rows(
+            &[],
+            temp.path(),
+            &folders(&["Hekili"]),
+            "Hekili",
+            &[],
+            None,
+        )
+        .expect("nothing in the way");
+        assert!(replaced.is_empty());
+    }
+
+    #[test]
+    fn install_asks_about_not_linked_folders_and_names_the_copy() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["hekili", "Hekili_Extra"]);
+        let rows = vec![manual("hekili", "Hekili")];
+        let error = plan_install_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &folders(&["hekili", "Hekili_Extra", "Hekili_New"]),
+            "hekili",
+            &[],
+            None,
+        )
+        .expect_err("folders in the way need a yes");
+        assert_eq!(error.kind, SourceErrorKind::FoldersInTheWay);
+        let clash = error.clash.expect("clash");
+        assert_eq!(clash.replaceable, folders(&["hekili", "Hekili_Extra"]));
+        assert!(clash.linked.is_empty());
+        assert_eq!(clash.existing_name.as_deref(), Some("Hekili"));
+    }
+
+    #[test]
+    fn install_replaces_exactly_the_confirmed_folders() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["hekili", "Hekili_Extra"]);
+        let confirmed = folders(&["hekili", "Hekili_Extra"]);
+        let replaced = plan_install_replacements_from_rows(
+            &[manual("hekili", "Hekili")],
+            temp.path(),
+            &folders(&["hekili", "Hekili_Extra"]),
+            "hekili",
+            &confirmed,
+            None,
+        )
+        .expect("confirmed");
+        assert_eq!(replaced, confirmed);
+    }
+
+    #[test]
+    fn install_asks_again_when_the_download_brings_a_new_folder_in_the_way() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["hekili", "Hekili_Extra"]);
+        // The question named only `hekili`; the fresh download also brings `Hekili_Extra`.
+        let error = plan_install_replacements_from_rows(
+            &[],
+            temp.path(),
+            &folders(&["hekili", "Hekili_Extra"]),
+            "hekili",
+            &folders(&["hekili"]),
+            None,
+        )
+        .expect_err("a folder nobody agreed to");
+        assert_eq!(error.kind, SourceErrorKind::FoldersInTheWay);
+        assert_eq!(
+            error.clash.expect("clash").replaceable,
+            folders(&["hekili", "Hekili_Extra"])
+        );
+    }
+
+    #[test]
+    fn install_refuses_a_folder_owned_by_a_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["DBM-Core", "DBM-Raids"]);
+        let mut linked = AddonRecord::new("Deadly Boss Mods", "DBM-Core", SourceKind::Wago);
+        linked.owned_folders = owned(&["DBM-Core", "DBM-Raids"]);
+        let error = plan_install_replacements_from_rows(
+            &[linked],
+            temp.path(),
+            &folders(&["MyRaidPack", "DBM-Raids"]),
+            "MyRaidPack",
+            // Even a yes never takes a linked addon's folder.
+            &folders(&["DBM-Raids"]),
+            None,
+        )
+        .expect_err("owned by a linked addon");
+        assert_eq!(error.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        let clash = error.clash.expect("clash");
+        assert_eq!(
+            clash.linked,
+            vec![("DBM-Raids".to_string(), "Deadly Boss Mods".to_string())]
+        );
+    }
+
+    #[test]
+    fn install_refuses_the_parent_folder_of_a_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Details"]);
+        let linked = AddonRecord::new("Details!", "Details", SourceKind::GitHub);
+        let error = plan_install_replacements_from_rows(
+            &[linked],
+            temp.path(),
+            &folders(&["Details"]),
+            "Details",
+            &folders(&["Details"]),
+            None,
+        )
+        .expect_err("parent of a linked addon");
+        assert_eq!(error.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(
+            error.clash.expect("clash").linked,
+            vec![("Details".to_string(), "Details!".to_string())]
+        );
+    }
+
+    #[test]
+    fn reinstalling_the_same_addon_does_not_count_its_own_folders_as_linked() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["AstralKeys"]);
+        let tracked = AddonRecord::new("AstralKeys", "AstralKeys", SourceKind::Wago);
+        let replaced = plan_install_replacements_from_rows(
+            &[tracked],
+            temp.path(),
+            &folders(&["AstralKeys"]),
+            "AstralKeys",
+            &folders(&["AstralKeys"]),
+            Some("AstralKeys"),
+        )
+        .expect("own folders");
+        assert_eq!(replaced, folders(&["AstralKeys"]));
     }
 }

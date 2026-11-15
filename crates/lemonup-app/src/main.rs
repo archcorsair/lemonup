@@ -8,6 +8,7 @@ mod event;
 mod github;
 mod onboarding;
 mod shimmer;
+mod source_error;
 mod theme;
 mod transfer;
 mod tui;

@@ -34,6 +34,7 @@ impl App {
         match when {
             HelpWhen::Always => true,
             HelpWhen::NoWagoKey => self.wago_api_key.is_none(),
+            HelpWhen::NotLinked => self.not_linked_current_item().is_some(),
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
         }
     }

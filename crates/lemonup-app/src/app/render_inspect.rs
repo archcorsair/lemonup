@@ -121,6 +121,8 @@ struct DetailsContent {
     versions: Vec<Span<'static>>,
     /// Empty unless the status needs explaining.
     sentence: Vec<Span<'static>>,
+    /// Lines after the sentence, each its own row: what to do about it.
+    follow_up: Vec<Vec<Span<'static>>>,
     rows: Vec<(&'static str, DetailValue)>,
 }
 
@@ -219,6 +221,22 @@ impl App {
             _ => Vec::new(),
         };
 
+        let follow_up = if status == RowStatus::NotLinked {
+            vec![
+                vec![
+                    Span::styled("Press ", text),
+                    key("f"),
+                    Span::styled(" to find it online. LemonUp then keeps it updated.", text),
+                ],
+                vec![Span::styled(
+                    "Your addon settings stay as they are.",
+                    Style::default().fg(roles.muted),
+                )],
+            ]
+        } else {
+            Vec::new()
+        };
+
         let mut rows = Vec::new();
         if linked {
             rows.push(("From", DetailValue::Text(source_name.to_string())));
@@ -287,6 +305,7 @@ impl App {
             status: status_spans,
             versions,
             sentence,
+            follow_up,
             rows,
         })
     }
@@ -303,6 +322,10 @@ impl App {
         let mut lines = vec![Line::from(first), Line::default()];
         if !content.sentence.is_empty() {
             lines.push(Line::from(content.sentence.clone()));
+            lines.push(Line::default());
+        }
+        if !content.follow_up.is_empty() {
+            lines.extend(content.follow_up.iter().cloned().map(Line::from));
             lines.push(Line::default());
         }
         let value_width = width.saturating_sub(SHEET_LABEL_WIDTH).max(8);
@@ -373,6 +396,13 @@ impl App {
                 u16::try_from(width).unwrap_or(u16::MAX),
             );
             lines.extend(sentence.into_iter().map(|line| with_pad(line.spans)));
+            lines.push(Line::default());
+        }
+        if !content.follow_up.is_empty() {
+            let follow_up: Vec<Line<'static>> =
+                content.follow_up.iter().cloned().map(Line::from).collect();
+            let follow_up = wrap_lines(&follow_up, u16::try_from(width).unwrap_or(u16::MAX));
+            lines.extend(follow_up.into_iter().map(|line| with_pad(line.spans)));
             lines.push(Line::default());
         }
         let blank_before = |lines: &mut Vec<Line<'static>>| {

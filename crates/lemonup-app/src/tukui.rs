@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
+use crate::source_error::{SourceError, SourceErrorKind};
 use crate::update_targets::folder_swap::FolderSwap;
 
 const API_URL: &str = "https://api.tukui.org/v1/addons";
@@ -186,12 +187,26 @@ pub(crate) async fn install_tukui_addon(
     target: &str,
     dry_run: bool,
 ) -> Result<TukuiInstallSummary, String> {
+    install_tukui_addon_checked(state_database, addon_dir, target, dry_run, &[])
+        .await
+        .map_err(String::from)
+}
+
+/// `install_tukui_addon` with the error kind kept. `replace` is the list of
+/// folders the person agreed to replace (see `plan_install_replacements`).
+pub(crate) async fn install_tukui_addon_checked(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    target: &str,
+    dry_run: bool,
+    replace: &[String],
+) -> Result<TukuiInstallSummary, SourceError> {
     let slug = parse_tukui_target(target)?;
     let client = build_tukui_client()?;
     let addon = resolve_tukui_addon(&client, &slug, false).await?;
     ensure_tukui_supports_flavor(&addon, GameFlavor::for_addons_dir(addon_dir), "install")?;
     let bytes = download_tukui_release_bytes(&client, &addon).await?;
-    install_downloaded_tukui_addon(state_database, addon_dir, &addon, &bytes, dry_run)
+    install_downloaded_tukui_addon(state_database, addon_dir, &addon, &bytes, dry_run, replace)
 }
 
 pub(crate) async fn fetch_tukui_remote_version(
@@ -287,7 +302,7 @@ async fn resolve_tukui_addon(
     client: &Client,
     slug: &str,
     force_refresh: bool,
-) -> Result<TukuiAddon, String> {
+) -> Result<TukuiAddon, SourceError> {
     let addons = fetch_tukui_addons(client, force_refresh).await?;
     addons
         .into_iter()
@@ -295,14 +310,17 @@ async fn resolve_tukui_addon(
             addon.slug.eq_ignore_ascii_case(slug) || addon.name.eq_ignore_ascii_case(slug)
         })
         .ok_or_else(|| {
-            format!("could not find canonical TukUI package '{slug}' in the TukUI API feed")
+            SourceError::new(
+                SourceErrorKind::NotFound,
+                format!("could not find canonical TukUI package '{slug}' in the TukUI API feed"),
+            )
         })
 }
 
 async fn fetch_tukui_addons(
     client: &Client,
     force_refresh: bool,
-) -> Result<Vec<TukuiAddon>, String> {
+) -> Result<Vec<TukuiAddon>, SourceError> {
     let cache = TUKUI_CACHE.get_or_init(|| Mutex::new(None));
     if !force_refresh {
         let guard = cache
@@ -320,14 +338,14 @@ async fn fetch_tukui_addons(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
 
     let addons = response
         .json::<Vec<TukuiAddon>>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
 
     let mut guard = cache
         .lock()
@@ -342,20 +360,20 @@ async fn fetch_tukui_addons(
 async fn download_tukui_release_bytes(
     client: &Client,
     addon: &TukuiAddon,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SourceError> {
     let download_url = validate_tukui_download_url(&addon.url)?;
     client
         .get(download_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| error.to_string())
+        .map_err(SourceError::from_keyless_reqwest)
 }
 
 fn install_downloaded_tukui_addon(
@@ -364,11 +382,12 @@ fn install_downloaded_tukui_addon(
     addon: &TukuiAddon,
     archive_bytes: &[u8],
     dry_run: bool,
-) -> Result<TukuiInstallSummary, String> {
+    replace: &[String],
+) -> Result<TukuiInstallSummary, SourceError> {
     let temp_root = create_temp_work_dir("tukui-install")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let outcome = (|| {
+    let outcome = (|| -> Result<TukuiInstallSummary, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -396,12 +415,20 @@ fn install_downloaded_tukui_addon(
             });
         }
 
-        preflight_install_targets(addon_dir, &layout.folders)?;
-        let swap = FolderSwap::apply(addon_dir, &layout.source_root, &layout.folders, &[])?;
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &layout.folders,
+            &layout.parent_folder,
+            replace,
+            None,
+        )?;
+        let swap = FolderSwap::apply(addon_dir, &layout.source_root, &layout.folders, &replaced)?;
 
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            return Err(swap.abort(error.to_string()));
+            return Err(swap.abort(error.to_string()).into());
         }
         swap.commit();
 
@@ -680,22 +707,6 @@ fn normalize_version(value: &str) -> String {
         .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
         .unwrap_or(trimmed);
     normalized.to_ascii_lowercase()
-}
-
-fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
-    let collisions = folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists())
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "install refused because these addon folders already exist: {}",
-            collisions.join(", ")
-        ))
-    }
 }
 
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {

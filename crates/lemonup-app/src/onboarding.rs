@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use lemonup_core::{AppConfig, ThemeMode, suggested_scan_roots};
 
+use crate::app::text_input::TextInput;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
     Theme,
@@ -154,6 +156,10 @@ pub struct OnboardingState {
     pub selected_suggestion: Option<usize>,
     pub settings_selection: OnboardingSettingsField,
     pub is_editing: bool,
+    /// The box being typed in while `is_editing`: the folder path on the
+    /// Directory step, the Wago.io key on the Wago step. Edits go through
+    /// it and are copied to `input` or the draft's key.
+    pub text_box: TextInput,
 }
 
 impl OnboardingState {
@@ -195,6 +201,7 @@ impl OnboardingState {
             selected_suggestion: Some(0),
             settings_selection: OnboardingSettingsField::BackupWtf,
             is_editing: false,
+            text_box: TextInput::default(),
         }
     }
 
@@ -300,6 +307,7 @@ impl OnboardingState {
     pub fn begin_directory_editing(&self) -> Self {
         let mut next = self.clone();
         next.is_editing = true;
+        next.text_box = TextInput::new(next.input.clone());
         if !matches!(
             next.phase,
             OnboardingPhase::Ready | OnboardingPhase::Error(_) | OnboardingPhase::Cancelled
@@ -312,6 +320,7 @@ impl OnboardingState {
     pub fn begin_wago_editing(&self) -> Self {
         let mut next = self.clone();
         next.is_editing = true;
+        next.text_box = TextInput::new(next.wago_api_key_value());
         next
     }
 
@@ -329,49 +338,35 @@ impl OnboardingState {
         next
     }
 
-    pub fn insert_char(&self, value: char) -> Self {
+    /// Applies `change` to the box of this step, at its cursor, and copies
+    /// the result to the folder path or the draft's Wago.io key. If the
+    /// text changed elsewhere since the box was opened (a suggestion was
+    /// picked, say), the box starts again from it, cursor at the end.
+    pub fn edit_text(&self, change: impl FnOnce(&mut TextInput)) -> Self {
         let mut next = self.clone();
+        let current = match next.step {
+            OnboardingStep::Directory => next.input.clone(),
+            OnboardingStep::Wago => next.wago_api_key_value().to_string(),
+            _ => return next,
+        };
+        if next.text_box.value() != current {
+            next.text_box = TextInput::new(current);
+        }
+        change(&mut next.text_box);
+        let value = next.text_box.value().to_string();
         match next.step {
-            OnboardingStep::Directory => next.input.push(value),
-            OnboardingStep::Wago => {
-                let value_ref = next.draft.wago_api_key.get_or_insert_with(String::new);
-                value_ref.push(value);
-            }
-            _ => {}
+            OnboardingStep::Directory => next.input = value,
+            _ => next.draft.wago_api_key = (!value.is_empty()).then_some(value),
         }
         next
     }
 
-    pub fn insert_str(&self, text: &str) -> Self {
-        let mut next = self.clone();
-        match next.step {
-            OnboardingStep::Directory => next.input.push_str(text),
-            OnboardingStep::Wago => {
-                let value_ref = next.draft.wago_api_key.get_or_insert_with(String::new);
-                value_ref.push_str(text);
-            }
-            _ => {}
-        }
-        next
+    pub fn insert_char(&self, value: char) -> Self {
+        self.edit_text(|text| text.insert_char(value))
     }
 
     pub fn backspace(&self) -> Self {
-        let mut next = self.clone();
-        match next.step {
-            OnboardingStep::Directory => {
-                next.input.pop();
-            }
-            OnboardingStep::Wago => {
-                if let Some(value) = &mut next.draft.wago_api_key {
-                    value.pop();
-                    if value.is_empty() {
-                        next.draft.wago_api_key = None;
-                    }
-                }
-            }
-            _ => {}
-        }
-        next
+        self.edit_text(TextInput::backspace)
     }
 
     pub fn next_suggestion(&self) -> Self {
@@ -500,6 +495,7 @@ mod tests {
     use super::{
         FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
     };
+    use crate::app::text_input::TextInput;
 
     #[test]
     fn with_input_prefills_without_suggestion_selection() {
@@ -520,6 +516,7 @@ mod tests {
             step: OnboardingStep::Directory,
             draft: AppConfig::new_unconfigured(),
             settings_selection: OnboardingSettingsField::BackupWtf,
+            text_box: TextInput::default(),
         };
 
         let next = state.next_suggestion();

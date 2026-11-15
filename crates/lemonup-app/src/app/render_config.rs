@@ -123,12 +123,8 @@ impl App {
                 .edit
                 .as_ref()
                 .expect("checked editing state");
-            let value = if edit.value.is_empty() {
-                "▌".to_string()
-            } else {
-                format!("{} ▌", edit.value)
-            };
-            spans.push(Span::styled(value, value_style));
+            let room = (width as usize).saturating_sub(2 + label_width).max(1);
+            spans.extend(edit.value.spans(room, value_style, value_style, true));
         } else {
             spans.push(Span::styled(
                 truncate_text(

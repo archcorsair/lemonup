@@ -859,8 +859,9 @@ impl App {
         // in, under the count's last character.
         let field_room = inner.saturating_sub(gutter.saturating_sub(1) + 1);
         let hint_room = spans_width(&hint) + 3;
-        let query: Vec<char> = self.dashboard.filter_query().chars().collect();
-        let cursor = || Span::styled("▌", Style::default().fg(roles.lemon));
+        let query = self.dashboard.filter_input();
+        let caret = Style::default().fg(roles.lemon);
+        let cursor = || Span::styled("▌", caret);
         let (field, show_hint) = if editing && query.is_empty() {
             // Says what the filter looks at; see `dashboard_item_filter_match`.
             let (placeholder, show_hint) = [
@@ -889,29 +890,16 @@ impl App {
                 show_hint,
             )
         } else {
-            let cursor_width = usize::from(editing);
-            let needed = query.len() + cursor_width;
+            let needed = query.width() + usize::from(editing);
             let show_hint = needed + hint_room <= field_room;
-            let text: String = if needed <= field_room {
-                query.iter().collect()
-            } else {
-                // Cut from the left: the end of the query is what was typed last.
-                let keep = field_room.saturating_sub(cursor_width + 1);
-                let tail: String = query[query.len() - keep.min(query.len())..]
-                    .iter()
-                    .collect();
-                format!("…{tail}")
-            };
             let style = if editing {
                 Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(roles.text)
             };
-            let mut field = vec![Span::styled(text, style)];
-            if editing {
-                field.push(cursor());
-            }
-            (field, show_hint)
+            // The shared text box: cut with "…" so the cursor stays in view,
+            // from the left when the cursor is at the end.
+            (query.spans(field_room, style, caret, editing), show_hint)
         };
         row.extend(field);
         let used = spans_width(&row);
@@ -1076,10 +1064,10 @@ impl App {
                     text,
                 )),
                 Line::from(vec![
-                    Span::styled("To link one, press ", text),
-                    key("i"),
+                    Span::styled("Pick an addon and press ", text),
+                    key("f"),
                     Span::styled(
-                        " and install it again from its source. LemonUp replaces your copy and keeps it updated.",
+                        " to find it online. Do that once per addon and LemonUp keeps it updated.",
                         text,
                     ),
                 ]),
@@ -1091,8 +1079,8 @@ impl App {
             width,
         );
         let keys = vec![
-            key("i"),
-            Span::styled(" install", muted),
+            key("f"),
+            Span::styled(" find online", muted),
             Span::raw("    "),
             Span::styled(
                 "d",

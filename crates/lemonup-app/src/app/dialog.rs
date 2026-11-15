@@ -14,7 +14,8 @@ use crate::theme::ColorRoles;
 const DIALOG_WIDTH: u16 = 64;
 /// Columns between the border and the text, on each side.
 const DIALOG_PADDING: u16 = 2;
-/// The most addon names a delete question lists before "and N more".
+/// The most addon names a delete question (or folders a replace question)
+/// lists before "and N more".
 const DIALOG_MAX_NAMES: usize = 8;
 
 /// An addon a delete question names, with the folders that go with it.
@@ -35,8 +36,13 @@ pub(super) enum Question {
     DeleteBackup {
         label: String,
     },
+    /// `direct` is a GitHub, WoWInterface or TukUI install, `source` its
+    /// label; otherwise Wago.io. `folders` are exactly what a yes replaces.
     ReplaceAddon {
         name: String,
+        source: &'static str,
+        direct: bool,
+        folders: Vec<String>,
     },
     /// `progress` is (done, total) once the update phase has started.
     QuitWhileUpdating {
@@ -53,7 +59,7 @@ impl Question {
             Self::DeleteAddons(targets) => format!("Delete {} addons?", targets.len()),
             Self::RestoreBackup { .. } => "Restore this backup?".to_string(),
             Self::DeleteBackup { .. } => "Delete this backup?".to_string(),
-            Self::ReplaceAddon { name } => format!("Replace your copy of {name}?"),
+            Self::ReplaceAddon { name, .. } => format!("Replace your copy of {name}?"),
             Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
         }
     }
@@ -92,6 +98,10 @@ impl Question {
             Self::DeleteBackup { .. } => (
                 AppMessage::BackupConfirmDelete,
                 AppMessage::BackupCancelRestore,
+            ),
+            Self::ReplaceAddon { direct: true, .. } => (
+                AppMessage::SearchConfirmReplace,
+                AppMessage::SearchCancelReplace,
             ),
             Self::ReplaceAddon { .. } => (
                 AppMessage::WagoConfirmInstall,
@@ -182,19 +192,49 @@ impl Question {
                 Line::from(""),
                 Line::from(Span::styled("This can't be undone.", text)),
             ],
-            Self::ReplaceAddon { name } => vec![
-                Line::from(Span::styled(
+            Self::ReplaceAddon {
+                name,
+                source,
+                folders,
+                ..
+            } => {
+                let mut lines = vec![Line::from(Span::styled(
                     format!(
-                        "{name} is already installed. Installing it from Wago.io replaces \
-                         the files in your AddOns folder."
+                        "{name} is already installed. Installing it from {source} replaces \
+                         the files in your AddOns folder, and LemonUp keeps it updated."
                     ),
                     text,
-                )),
-                Line::from(Span::styled(
+                ))];
+                if !folders.is_empty() {
+                    let these = if folders.len() == 1 {
+                        "This folder is replaced:"
+                    } else {
+                        "These folders are replaced:"
+                    };
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(these, muted)));
+                    let shown = if folders.len() > names {
+                        names.saturating_sub(1)
+                    } else {
+                        folders.len()
+                    };
+                    for folder in folders.iter().take(shown) {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                    if shown < folders.len() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  and {} more", folders.len() - shown),
+                            muted,
+                        )));
+                    }
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(
                     format!("Your {name} settings are kept."),
                     muted,
-                )),
-            ],
+                )));
+                lines
+            }
             Self::QuitWhileUpdating { progress } => {
                 let first = match progress {
                     Some((done, total)) => format!(
@@ -251,8 +291,8 @@ impl Question {
             lines
         };
         let mut names = match self {
-            Self::DeleteAddons(targets) if targets.len() > DIALOG_MAX_NAMES => DIALOG_MAX_NAMES,
-            Self::DeleteAddons(targets) => targets.len(),
+            Self::DeleteAddons(targets) => targets.len().min(DIALOG_MAX_NAMES),
+            Self::ReplaceAddon { folders, .. } => folders.len().min(DIALOG_MAX_NAMES),
             _ => 0,
         };
         let mut lines = build(names);
@@ -265,6 +305,32 @@ impl Question {
 }
 
 impl App {
+    /// Remembers the question a draw shows and when it first showed it.
+    pub(super) fn note_question_shown(&mut self, now: Instant) {
+        match self.active_question() {
+            Some(question) => {
+                if self
+                    .question_shown
+                    .as_ref()
+                    .is_none_or(|(shown, _)| *shown != question)
+                {
+                    self.question_shown = Some((question, now));
+                }
+            }
+            None => self.question_shown = None,
+        }
+    }
+
+    /// Whether `question` was on screen before the key being handled was read.
+    fn question_seen_before_key(&self, question: &Question) -> bool {
+        match &self.question_shown {
+            Some((shown, shown_at)) if shown == question => {
+                self.key_read_at.is_none_or(|read_at| read_at >= *shown_at)
+            }
+            _ => false,
+        }
+    }
+
     /// The question waiting for an answer, if any. Quitting comes first: it
     /// can be asked on top of another question.
     pub(super) fn active_question(&self) -> Option<Question> {
@@ -299,6 +365,19 @@ impl App {
         if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
             return Some(Question::ReplaceAddon {
                 name: confirmation.inspection.addon_name.clone(),
+                source: "Wago.io",
+                direct: false,
+                folders: confirmation.inspection.existing_folders.clone(),
+            });
+        }
+        if self.dashboard.detail_mode == DetailMode::Search
+            && let Some((request, name, folders)) = self.search_pane.pending_direct_replace()
+        {
+            return Some(Question::ReplaceAddon {
+                name: name.to_string(),
+                source: request.provider.label(),
+                direct: true,
+                folders: folders.to_vec(),
             });
         }
         if let Some(backup) = &self.backup_pane.pending_restore {
@@ -316,8 +395,18 @@ impl App {
 
     /// Keys while a question is open: `y` yes, `n` `esc` `q` no, and every
     /// other key does nothing. `None` when no question is open.
+    ///
+    /// A replace question arrives from a background install, so its `y`
+    /// counts only when read after the question was first drawn: a `y` typed
+    /// while the install ran never answers it.
     pub(super) fn question_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
         let question = self.active_question()?;
+        if key.code == KeyCode::Char('y')
+            && matches!(question, Question::ReplaceAddon { .. })
+            && !self.question_seen_before_key(&question)
+        {
+            return Some(vec![]);
+        }
         let (yes, no) = question.messages();
         Some(match key.code {
             KeyCode::Char('y') => vec![yes],

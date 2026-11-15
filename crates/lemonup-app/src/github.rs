@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::source_error::{SourceError, SourceErrorKind};
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
 };
@@ -110,11 +111,34 @@ pub(crate) async fn install_github_addon(
     target: &str,
     dry_run: bool,
 ) -> Result<GithubInstallSummary, String> {
+    install_github_addon_checked(state_database, addon_dir, target, dry_run, &[])
+        .await
+        .map_err(String::from)
+}
+
+/// `install_github_addon` with the error kind kept. `replace` is the list of
+/// folders the person agreed to replace: those of them already on disk are
+/// taken over (moved aside and restored on failure, like an update). Any other
+/// folder in the way refuses the install (see `plan_install_replacements`).
+pub(crate) async fn install_github_addon_checked(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    target: &str,
+    dry_run: bool,
+    replace: &[String],
+) -> Result<GithubInstallSummary, SourceError> {
     let repo = parse_github_repo_url(target)?;
     let client = build_github_client()?;
     let resolved = fetch_github_repo(&client, &repo).await?;
     let bytes = download_github_zipball_bytes(&client, &resolved).await?;
-    install_downloaded_github_addon(state_database, addon_dir, &resolved, &bytes, dry_run)
+    install_downloaded_github_addon(
+        state_database,
+        addon_dir,
+        &resolved,
+        &bytes,
+        dry_run,
+        replace,
+    )
 }
 
 pub(crate) async fn fetch_github_remote_version(
@@ -221,7 +245,8 @@ fn unix_now() -> i64 {
 }
 
 /// Returns a descriptive error when a response is a GitHub API rate-limit
-/// rejection (403/429 with `x-ratelimit-remaining: 0`, or 429 with `retry-after`).
+/// rejection (403/429 with `x-ratelimit-remaining: 0`, or 403/429 with `retry-after`,
+/// which is how GitHub sends a secondary rate limit).
 fn classify_rate_limit(status: StatusCode, headers: &HeaderMap, now_unix: i64) -> Option<String> {
     if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
         return None;
@@ -234,7 +259,7 @@ fn classify_rate_limit(status: StatusCode, headers: &HeaderMap, now_unix: i64) -
     let remaining_zero =
         header_str("x-ratelimit-remaining").is_some_and(|value| value.trim() == "0");
     let retry_after = header_i64("retry-after");
-    let throttled = status == StatusCode::TOO_MANY_REQUESTS && retry_after.is_some();
+    let throttled = retry_after.is_some();
     if !(remaining_zero || throttled) {
         return None;
     }
@@ -277,24 +302,29 @@ fn classify_rejected_token(status: StatusCode, token_sent: bool) -> Option<Strin
 }
 
 /// Maps a non-success response to an error, with a dedicated message for rate limits.
-fn ensure_github_success(response: Response) -> Result<Response, String> {
+fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
     if let Some(message) =
         classify_rejected_token(response.status(), github_token_from_env().is_some())
     {
-        return Err(message);
+        return Err(SourceError::new(SourceErrorKind::KeyRejected, message));
     }
     if let Some(message) = classify_rate_limit(response.status(), response.headers(), unix_now()) {
-        return Err(message);
+        return Err(SourceError::new(SourceErrorKind::SlowDown, message));
     }
-    response
-        .error_for_status()
-        .map_err(|error| error.to_string())
+    response.error_for_status().map_err(|error| {
+        let mut error = SourceError::from_reqwest(error);
+        // GitHub only rejects a token as a 401, handled above.
+        if error.kind == SourceErrorKind::KeyRejected {
+            error.kind = SourceErrorKind::Other;
+        }
+        error
+    })
 }
 
 async fn fetch_github_repo(
     client: &Client,
     repo: &GithubRepoRef,
-) -> Result<GithubResolvedRepo, String> {
+) -> Result<GithubResolvedRepo, SourceError> {
     let metadata = fetch_github_repo_metadata(client, repo).await?;
     let head_sha = fetch_github_head_commit(client, &metadata).await?;
     Ok(GithubResolvedRepo { metadata, head_sha })
@@ -303,19 +333,19 @@ async fn fetch_github_repo(
 async fn fetch_github_repo_metadata(
     client: &Client,
     repo: &GithubRepoRef,
-) -> Result<GithubRepoMetadata, String> {
+) -> Result<GithubRepoMetadata, SourceError> {
     let url = format!("{API_BASE}/repos/{}/{}", repo.owner, repo.repo);
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
 
     if response.status() == StatusCode::NOT_FOUND {
-        return Err(format!(
-            "GitHub repo '{}/{}' was not found",
-            repo.owner, repo.repo
+        return Err(SourceError::new(
+            SourceErrorKind::NotFound,
+            format!("GitHub repo '{}/{}' was not found", repo.owner, repo.repo),
         ));
     }
 
@@ -323,7 +353,7 @@ async fn fetch_github_repo_metadata(
     let parsed = response
         .json::<GithubRepoResponse>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
 
     Ok(GithubRepoMetadata {
         owner: repo.owner.clone(),
@@ -337,7 +367,7 @@ async fn fetch_github_repo_metadata(
 async fn fetch_github_head_commit(
     client: &Client,
     metadata: &GithubRepoMetadata,
-) -> Result<String, String> {
+) -> Result<String, SourceError> {
     let url = format!(
         "{API_BASE}/repos/{}/{}/commits/{}",
         metadata.owner, metadata.repo, metadata.default_branch
@@ -347,12 +377,15 @@ async fn fetch_github_head_commit(
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
 
     if response.status() == StatusCode::NOT_FOUND {
-        return Err(format!(
-            "GitHub repo '{}/{}' is missing default branch '{}'",
-            metadata.owner, metadata.repo, metadata.default_branch
+        return Err(SourceError::new(
+            SourceErrorKind::NotFound,
+            format!(
+                "GitHub repo '{}/{}' is missing default branch '{}'",
+                metadata.owner, metadata.repo, metadata.default_branch
+            ),
         ));
     }
 
@@ -360,14 +393,14 @@ async fn fetch_github_head_commit(
     let parsed = response
         .json::<GithubCommitResponse>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
     Ok(parsed.sha)
 }
 
 async fn download_github_zipball_bytes(
     client: &Client,
     resolved: &GithubResolvedRepo,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SourceError> {
     let url = format!(
         "{API_BASE}/repos/{}/{}/zipball/{}",
         resolved.metadata.owner, resolved.metadata.repo, resolved.head_sha
@@ -376,12 +409,12 @@ async fn download_github_zipball_bytes(
         .get(url)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
     ensure_github_success(response)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| error.to_string())
+        .map_err(SourceError::from_reqwest)
 }
 
 fn install_downloaded_github_addon(
@@ -390,11 +423,12 @@ fn install_downloaded_github_addon(
     resolved: &GithubResolvedRepo,
     archive_bytes: &[u8],
     dry_run: bool,
-) -> Result<GithubInstallSummary, String> {
+    replace: &[String],
+) -> Result<GithubInstallSummary, SourceError> {
     let temp_root = create_temp_work_dir("github-install")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let outcome = (|| {
+    let outcome = (|| -> Result<GithubInstallSummary, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -427,12 +461,25 @@ fn install_downloaded_github_addon(
             });
         }
 
-        preflight_install_targets(addon_dir, &extracted.folders)?;
-        let swap = FolderSwap::apply(addon_dir, &extracted.source_root, &extracted.folders, &[])?;
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            None,
+        )?;
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            &replaced,
+        )?;
 
         let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            return Err(swap.abort(error.to_string()));
+            return Err(swap.abort(error.to_string()).into());
         }
         swap.commit();
 
@@ -1075,22 +1122,6 @@ fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
-fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
-    let collisions = folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists())
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "install refused because these addon folders already exist: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -1277,6 +1308,19 @@ mod tests {
         );
         // 429 without any rate-limit hint stays a normal error.
         assert!(classify_rate_limit(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new(), 0).is_none());
+    }
+
+    #[test]
+    fn secondary_rate_limit_403_with_retry_after_is_a_rate_limit() {
+        // GitHub's secondary rate limit: 403, requests still remaining, retry-after set.
+        let message = classify_rate_limit(
+            StatusCode::FORBIDDEN,
+            &headers(&[("x-ratelimit-remaining", "42"), ("retry-after", "60")]),
+            1_000,
+        )
+        .expect("a 403 with retry-after is a rate limit");
+        assert!(message.contains("HTTP 403"), "{message}");
+        assert!(message.contains("resets in 1 minute"), "{message}");
     }
 
     fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
@@ -1766,6 +1810,7 @@ mod tests {
             &resolved_repo("AdiAddons", "AdiBags"),
             &bytes,
             false,
+            &[],
         )
         .expect("install");
 
@@ -2174,6 +2219,102 @@ mod tests {
     }
 
     #[test]
+    fn install_over_a_not_linked_folder_asks_first_then_replaces_and_links_it() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("AdiBags")).expect("not linked copy");
+        std::fs::write(addon_dir.join("AdiBags").join("old.lua"), "-- old").expect("old file");
+        let wtf = temp.path().join("_retail_").join("WTF");
+        std::fs::create_dir_all(&wtf).expect("wtf");
+        std::fs::write(wtf.join("AdiBags.lua"), "settings").expect("saved variables");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let resolved = resolved_repo("AdiAddons", "AdiBags");
+
+        let refused = install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved,
+            &adibags_shaped_zip("-- v1"),
+            false,
+            &[],
+        )
+        .expect_err("folder in the way");
+        assert_eq!(
+            refused.kind,
+            crate::source_error::SourceErrorKind::FoldersInTheWay
+        );
+        assert!(addon_dir.join("AdiBags").join("old.lua").exists());
+        let confirmed = refused.clash.expect("names the folders").replaceable;
+        assert_eq!(confirmed, vec!["AdiBags".to_string()]);
+
+        install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved,
+            &adibags_shaped_zip("-- v1"),
+            false,
+            &confirmed,
+        )
+        .expect("replace");
+        assert!(!addon_dir.join("AdiBags").join("old.lua").exists());
+        assert!(addon_dir.join("AdiBags").join("AdiBags.toc").exists());
+        let tracked = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("linked");
+        assert_eq!(tracked.source, SourceKind::GitHub);
+        assert_eq!(
+            std::fs::read_to_string(wtf.join("AdiBags.lua")).expect("wtf kept"),
+            "settings"
+        );
+    }
+
+    #[test]
+    fn install_never_replaces_a_folder_of_a_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("AdiBags")).expect("linked copy");
+        std::fs::write(addon_dir.join("AdiBags").join("old.lua"), "-- old").expect("old file");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut linked = AddonRecord::new("AdiBags", "AdiBags", SourceKind::Wago);
+        linked.source_url = Some("https://addons.wago.io/addons/adibags".to_string());
+        database.upsert_addon(&linked).expect("linked row");
+
+        let refused = install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved_repo("AdiAddons", "AdiBags"),
+            &adibags_shaped_zip("-- v1"),
+            false,
+            &["AdiBags".to_string()],
+        )
+        .expect_err("belongs to a linked addon");
+        assert_eq!(
+            refused.kind,
+            crate::source_error::SourceErrorKind::FoldersOfLinkedAddon
+        );
+        assert_eq!(
+            refused.clash.expect("clash").linked,
+            vec![("AdiBags".to_string(), "AdiBags".to_string())]
+        );
+        assert!(addon_dir.join("AdiBags").join("old.lua").exists());
+        assert!(!addon_dir.join("AdiBags_Config").exists());
+        let row = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("still there");
+        assert_eq!(row.source, SourceKind::Wago);
+    }
+
+    #[test]
     fn install_and_update_of_a_root_toc_repo_with_a_bundled_addon_keep_both_top_level() {
         let temp = tempdir().expect("tempdir");
         let addon_dir = temp
@@ -2191,6 +2332,7 @@ mod tests {
             &resolved,
             &adibags_shaped_zip("-- v1"),
             false,
+            &[],
         )
         .expect("install");
         assert_eq!(summary.parent_folder, "AdiBags");

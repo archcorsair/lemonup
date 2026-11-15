@@ -91,7 +91,7 @@ impl App {
             OverlayKind::Help => super::keymap::help_page(self.shell_ui.help_context)
                 .title
                 .to_string(),
-            OverlayKind::Install | OverlayKind::Search => "Install".to_string(),
+            OverlayKind::Install | OverlayKind::Search => "Install an addon".to_string(),
             OverlayKind::Update => "Update".to_string(),
             OverlayKind::Config => "Settings".to_string(),
             OverlayKind::Backup => "Backups of your game settings".to_string(),

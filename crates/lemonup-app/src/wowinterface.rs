@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
+use crate::source_error::{SourceError, SourceErrorKind};
 use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://api.mmoui.com/v3/game/WOW/filedetails";
@@ -118,11 +119,32 @@ pub(crate) async fn install_wowinterface_addon(
     target: &str,
     dry_run: bool,
 ) -> Result<WowinterfaceInstallSummary, String> {
+    install_wowinterface_addon_checked(state_database, addon_dir, target, dry_run, &[])
+        .await
+        .map_err(String::from)
+}
+
+/// `install_wowinterface_addon` with the error kind kept. `replace` is the
+/// list of folders the person agreed to replace (see `plan_install_replacements`).
+pub(crate) async fn install_wowinterface_addon_checked(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    target: &str,
+    dry_run: bool,
+    replace: &[String],
+) -> Result<WowinterfaceInstallSummary, SourceError> {
     let addon_id = normalize_wowinterface_install_target(target)?;
     let client = build_wowinterface_client()?;
     let addon = fetch_wowinterface_addon(&client, &addon_id).await?;
     let bytes = download_wowinterface_release_bytes(&client, &addon).await?;
-    install_downloaded_wowinterface_addon(state_database, addon_dir, &addon, &bytes, dry_run)
+    install_downloaded_wowinterface_addon(
+        state_database,
+        addon_dir,
+        &addon,
+        &bytes,
+        dry_run,
+        replace,
+    )
 }
 
 pub(crate) async fn fetch_wowinterface_remote_version(
@@ -198,35 +220,41 @@ fn build_wowinterface_client() -> Result<Client, String> {
 async fn fetch_wowinterface_addon(
     client: &Client,
     addon_id: &str,
-) -> Result<WowinterfaceAddon, String> {
+) -> Result<WowinterfaceAddon, SourceError> {
     let url = format!("{API_BASE}/{addon_id}.json");
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
 
     if response.status() == StatusCode::NOT_FOUND {
-        return Err(format!("WoWInterface addon '{addon_id}' was not found"));
+        return Err(SourceError::new(
+            SourceErrorKind::NotFound,
+            format!("WoWInterface addon '{addon_id}' was not found"),
+        ));
     }
 
     let response = response
         .error_for_status()
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
     match response
         .json::<WowinterfaceResponse>()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
     {
         WowinterfaceResponse::Addons(addons) => addons.into_iter().next().ok_or_else(|| {
-            format!("WoWInterface addon '{addon_id}' returned an empty details payload")
+            format!("WoWInterface addon '{addon_id}' returned an empty details payload").into()
         }),
         WowinterfaceResponse::Error(error) => {
             if error.error.contains("No AddOn found") {
-                Err(format!("WoWInterface addon '{addon_id}' was not found"))
+                Err(SourceError::new(
+                    SourceErrorKind::NotFound,
+                    format!("WoWInterface addon '{addon_id}' was not found"),
+                ))
             } else {
-                Err(format!("WoWInterface API error: {}", error.error))
+                Err(format!("WoWInterface API error: {}", error.error).into())
             }
         }
     }
@@ -235,20 +263,20 @@ async fn fetch_wowinterface_addon(
 async fn download_wowinterface_release_bytes(
     client: &Client,
     addon: &WowinterfaceAddon,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SourceError> {
     let download_url = validate_wowinterface_download_url(&addon.ui_download)?;
     client
         .get(download_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| error.to_string())
+        .map_err(SourceError::from_keyless_reqwest)
 }
 
 fn install_downloaded_wowinterface_addon(
@@ -257,11 +285,12 @@ fn install_downloaded_wowinterface_addon(
     addon: &WowinterfaceAddon,
     archive_bytes: &[u8],
     dry_run: bool,
-) -> Result<WowinterfaceInstallSummary, String> {
+    replace: &[String],
+) -> Result<WowinterfaceInstallSummary, SourceError> {
     let temp_root = create_temp_work_dir("wowi-install")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let outcome = (|| {
+    let outcome = (|| -> Result<WowinterfaceInstallSummary, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -296,12 +325,25 @@ fn install_downloaded_wowinterface_addon(
             });
         }
 
-        preflight_install_targets(addon_dir, &extracted.folders)?;
-        let swap = FolderSwap::apply(addon_dir, &extracted.source_root, &extracted.folders, &[])?;
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            None,
+        )?;
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            &replaced,
+        )?;
 
         let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            return Err(swap.abort(error.to_string()));
+            return Err(swap.abort(error.to_string()).into());
         }
         swap.commit();
 
@@ -686,22 +728,6 @@ fn normalize_version(value: &str) -> String {
     normalized.to_ascii_lowercase()
 }
 
-fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
-    let collisions = folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists())
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "install refused because these addon folders already exist: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -1081,9 +1107,15 @@ mod tests {
             "## Title: ElvUI WindTools\n## Version: 4.16\n## Interface: 120105, 16001\n",
         )]);
 
-        let summary =
-            install_downloaded_wowinterface_addon(&mut database, &addon_dir, &addon, &bytes, false)
-                .expect("install is allowed on Forever");
+        let summary = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            false,
+            &[],
+        )
+        .expect("install is allowed on Forever");
 
         assert!(addon_dir.join("ElvUI_WindTools").exists());
         let warning = summary.warning.expect("forever warning");

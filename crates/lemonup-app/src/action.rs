@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
+use crate::app::text_input::TextInput;
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
@@ -27,13 +28,14 @@ pub enum AppAction {
     SetDashboardSelection(Option<usize>),
     ToggleDashboardSort(DashboardSortColumn),
     SetDashboardFilter {
-        query: String,
+        query: TextInput,
         editing: bool,
     },
     SetPendingDelete(Option<Vec<String>>),
     SetDashboardUndoDelete(Option<DashboardUndoDeleteState>),
     SetDashboardDriftReport(Option<DriftReport>),
     SetDashboardUndoInProgress(bool),
+    SetDashboardDeleteInProgress(bool),
     SetDashboardUpdateInProgress(bool),
     SetDashboardAutoCheckInProgress(bool),
     SetDashboardJobUi(Option<DashboardJobUiState>),
@@ -112,12 +114,16 @@ pub enum AppAction {
         addon_dir: PathBuf,
         api_key: String,
         request: PendingWagoInstallRequest,
-        allow_replace: bool,
+        /// `None` asks first when folders are in the way; `Some` is the list
+        /// the person said yes to replacing.
+        replace_folders: Option<Vec<String>>,
     },
     /// GitHub, WoWInterface or TukUI install from the install/search overlay.
     StartDirectInstall {
         addon_dir: PathBuf,
         request: DirectInstallRequest,
+        /// The folders already in AddOns the person said yes to replacing.
+        replace_folders: Vec<String>,
     },
     ReplaceDashboardAddons(Vec<AddonRecord>),
     CompleteAddonScan {

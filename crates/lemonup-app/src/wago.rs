@@ -14,6 +14,7 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
+use crate::source_error::SourceError;
 use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://addons.wago.io";
@@ -281,9 +282,10 @@ pub async fn install_wago_addon(
         api_key,
         preferred_stability,
         dry_run,
-        false,
+        &[],
     )
     .await
+    .map_err(String::from)
 }
 
 pub(crate) async fn install_wago_addon_with_replace(
@@ -293,8 +295,8 @@ pub(crate) async fn install_wago_addon_with_replace(
     api_key: &str,
     preferred_stability: WagoStability,
     dry_run: bool,
-    replace_existing: bool,
-) -> Result<WagoInstallSummary, String> {
+    replace: &[String],
+) -> Result<WagoInstallSummary, SourceError> {
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
     let flavor = GameFlavor::for_addons_dir(addon_dir);
@@ -315,7 +317,7 @@ pub(crate) async fn install_wago_addon_with_replace(
         &bytes,
         resolved.stability,
         dry_run,
-        replace_existing,
+        replace,
     )
 }
 
@@ -323,10 +325,10 @@ pub(crate) async fn search_wago_addons(
     query: &str,
     api_key: &str,
     flavor: GameFlavor,
-) -> Result<Vec<WagoSearchResult>, String> {
+) -> Result<Vec<WagoSearchResult>, SourceError> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
-        return Err("Wago search query cannot be empty".to_string());
+        return Err("Wago search query cannot be empty".into());
     }
 
     let client = build_wago_client()?;
@@ -340,7 +342,7 @@ pub(crate) async fn inspect_wago_install_target(
     target: &str,
     api_key: &str,
     preferred_stability: WagoStability,
-) -> Result<WagoInstallInspection, String> {
+) -> Result<WagoInstallInspection, SourceError> {
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
     let flavor = GameFlavor::for_addons_dir(addon_dir);
@@ -467,12 +469,12 @@ fn install_downloaded_wago_addon(
     archive_bytes: &[u8],
     stability: WagoStability,
     dry_run: bool,
-    replace_existing: bool,
-) -> Result<WagoInstallSummary, String> {
+    replace: &[String],
+) -> Result<WagoInstallSummary, SourceError> {
     let temp_root = create_temp_work_dir("wago-install")?;
     let zip_path = temp_root.path().join("package.zip");
     let extract_root = temp_root.path().join("extract");
-    (|| {
+    (|| -> Result<WagoInstallSummary, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -505,26 +507,30 @@ fn install_downloaded_wago_addon(
             });
         }
 
-        // With `replace_existing` the package folders already on disk are taken over: they are
-        // moved aside and restored if anything fails, exactly like an update.
-        let replaced: &[String] = if replace_existing {
-            &extracted.folders
-        } else {
-            preflight_install_targets(addon_dir, &extracted.folders)?;
-            &[]
-        };
+        // Only folders on `replace` are taken over: moved aside and restored if anything
+        // fails, exactly like an update. A linked addon's folders are never taken, except the
+        // folders of this same Wago.io addon when it is installed again.
+        let reinstalling = tracked_wago_parent(state_database, &addon.id)?;
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            reinstalling.as_deref(),
+        )?;
         let swap = FolderSwap::apply(
             addon_dir,
             &extracted.source_root,
             &extracted.folders,
-            replaced,
+            &replaced,
         )?;
 
         let record =
             build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
 
         if let Err(error) = state_database.record_managed_addon(&record) {
-            return Err(swap.abort(error.to_string()));
+            return Err(swap.abort(error.to_string()).into());
         }
         swap.commit();
 
@@ -546,35 +552,32 @@ fn inspect_downloaded_wago_addon(
     addon: &WagoAddonSummary,
     archive_bytes: &[u8],
     stability: WagoStability,
-) -> Result<WagoInstallInspection, String> {
+) -> Result<WagoInstallInspection, SourceError> {
     let temp_root = create_temp_work_dir("wago-inspect")?;
     let zip_path = temp_root.path().join("package.zip");
     let extract_root = temp_root.path().join("extract");
-    (|| {
+    (|| -> Result<WagoInstallInspection, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
         let extracted = discover_extracted_folders(&extract_root)?;
         let parent_folder = determine_parent_folder(&extracted.folders, &addon.display_name)?;
-        let existing_folders = extracted
-            .folders
-            .iter()
-            .filter(|folder| addon_dir.join(folder).exists())
-            .cloned()
-            .collect::<Vec<_>>();
-        let tracked_parent = state_database
+        let tracked_parent = tracked_wago_parent(state_database, &addon.id)?;
+        let rows = state_database
             .list_addons()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|tracked| {
-                tracked.source == SourceKind::Wago
-                    && tracked
-                        .source_url
-                        .as_deref()
-                        .and_then(|url| parse_wago_target(url).ok())
-                        .is_some_and(|tracked_id| tracked_id == addon.id)
-            })
-            .map(|tracked| tracked.folder);
+            .map_err(|error| error.to_string())?;
+        let clash = crate::update_targets::classify_install_folders(
+            &rows,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            tracked_parent.as_deref(),
+        );
+        if !clash.linked.is_empty() {
+            // Never asked: a linked addon's folders are not LemonUp's to replace.
+            return Err(crate::update_targets::linked_folders_error(clash));
+        }
+        let existing_folders = clash.replaceable;
 
         Ok(WagoInstallInspection {
             addon_id: addon.id.clone(),
@@ -767,7 +770,7 @@ async fn resolve_wago_release(
     api_key: &str,
     flavor: GameFlavor,
     preferred_stability: Option<WagoStability>,
-) -> Result<WagoResolvedRelease, String> {
+) -> Result<WagoResolvedRelease, SourceError> {
     let addon = fetch_addon_details(client, addon_id, api_key, flavor).await?;
     let effective_stability = addon.best_available_stability().ok_or_else(|| {
         format!(
@@ -804,20 +807,20 @@ async fn download_wago_release_bytes(
     client: &Client,
     download_url: &Url,
     api_key: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SourceError> {
     client
         .get(download_url.clone())
         .bearer_auth(api_key)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_reqwest)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| error.to_string())
+        .map_err(SourceError::from_reqwest)
 }
 
 /// Wago `game_version` key for a client flavor (`forever` for WoW Forever installs).
@@ -854,7 +857,7 @@ async fn fetch_addon_details(
     addon_id: &str,
     api_key: &str,
     flavor: GameFlavor,
-) -> Result<WagoAddonSummary, String> {
+) -> Result<WagoAddonSummary, SourceError> {
     let url = addon_details_url(addon_id, flavor);
     let response = client
         .get(url)
@@ -862,14 +865,14 @@ async fn fetch_addon_details(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
 
     let parsed = response
         .json::<WagoAddonDetailsResponse>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
     Ok(WagoAddonSummary::from_response(parsed))
 }
 
@@ -878,7 +881,7 @@ async fn fetch_addon_search_results(
     query: &str,
     api_key: &str,
     flavor: GameFlavor,
-) -> Result<Vec<WagoAddonSummary>, String> {
+) -> Result<Vec<WagoAddonSummary>, SourceError> {
     let url = addon_search_url(query, flavor)?;
     let response = client
         .get(url)
@@ -886,14 +889,14 @@ async fn fetch_addon_search_results(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
 
     let parsed = response
         .json::<WagoSearchResponse>()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_reqwest)?;
     Ok(parsed
         .data
         .into_iter()
@@ -1025,20 +1028,25 @@ fn normalize_folder_like(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
-    let collisions = folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists())
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "install refused because these addon folders already exist: {}",
-            collisions.join(", ")
-        ))
-    }
+/// The parent folder of the Wago.io addon `addon_id` when it is already
+/// linked, so installing it again replaces its own folders.
+fn tracked_wago_parent(
+    state_database: &StateDatabase,
+    addon_id: &str,
+) -> Result<Option<String>, String> {
+    Ok(state_database
+        .list_addons()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|tracked| {
+            tracked.source == SourceKind::Wago
+                && tracked
+                    .source_url
+                    .as_deref()
+                    .and_then(|url| parse_wago_target(url).ok())
+                    .is_some_and(|tracked_id| tracked_id == addon_id)
+        })
+        .map(|tracked| tracked.folder))
 }
 
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
@@ -1156,7 +1164,8 @@ mod tests {
         inspect_downloaded_wago_addon, install_downloaded_wago_addon, parse_wago_target,
         release_version, update_downloaded_wago_addon, versions_match,
     };
-    use lemonup_core::{GameFlavor, OwnedFolder, SourceKind, StateDatabase};
+    use crate::source_error::SourceErrorKind;
+    use lemonup_core::{AddonRecord, GameFlavor, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
     use zip::CompressionMethod;
     use zip::write::SimpleFileOptions;
@@ -1376,7 +1385,7 @@ mod tests {
             &bytes,
             WagoStability::Stable,
             false,
-            false,
+            &[],
         )
         .expect("install addon");
 
@@ -1397,6 +1406,112 @@ mod tests {
             }]
         );
         assert!(installed[0].has_authoritative_owned_folders());
+    }
+
+    #[test]
+    fn replacing_install_takes_over_a_not_linked_folder_and_links_it() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addon_dir.join("Details")).expect("not linked copy");
+        fs::write(addon_dir.join("Details").join("old.lua"), "-- old").expect("old file");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let bytes = build_zip(&[(
+            "Details/Details.toc",
+            "## Title: Details! Damage Meter\n## Version: 11.2.0\n## Interface: 110205\n",
+        )]);
+
+        install_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &sample_addon(),
+            &bytes,
+            WagoStability::Stable,
+            false,
+            &["Details".to_string()],
+        )
+        .expect("replace not linked copy");
+
+        assert!(!addon_dir.join("Details").join("old.lua").exists());
+        assert!(addon_dir.join("Details").join("Details.toc").exists());
+        let installed = database.list_addons().expect("list addons");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].source, SourceKind::Wago);
+    }
+
+    #[test]
+    fn wago_install_asks_again_for_a_folder_nobody_agreed_to_replace() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addon_dir.join("Details")).expect("not linked copy");
+        fs::create_dir_all(addon_dir.join("Details_DataStorage")).expect("second copy");
+        fs::write(addon_dir.join("Details").join("old.lua"), "-- old").expect("old file");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let bytes = build_zip(&[
+            (
+                "Details/Details.toc",
+                "## Title: Details! Damage Meter\n## Version: 11.2.0\n## Interface: 110205\n",
+            ),
+            (
+                "Details_DataStorage/Details_DataStorage.toc",
+                "## Title: Details Data Storage\n## Interface: 110205\n",
+            ),
+        ]);
+
+        // The question named only `Details`.
+        let error = install_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &sample_addon(),
+            &bytes,
+            WagoStability::Stable,
+            false,
+            &["Details".to_string()],
+        )
+        .expect_err("a folder nobody agreed to");
+        assert_eq!(error.kind, SourceErrorKind::FoldersInTheWay);
+        assert!(addon_dir.join("Details").join("old.lua").exists());
+        assert!(database.list_addons().expect("list").is_empty());
+    }
+
+    #[test]
+    fn wago_inspection_refuses_a_folder_of_another_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addon_dir.join("Details")).expect("linked copy");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut linked = AddonRecord::new("Details!", "Details", SourceKind::GitHub);
+        linked.source_url = Some("https://github.com/Tercioo/Details-Damage-Meter".to_string());
+        database.upsert_addon(&linked).expect("linked row");
+        let bytes = build_zip(&[(
+            "Details/Details.toc",
+            "## Title: Details! Damage Meter\n## Interface: 110205\n",
+        )]);
+
+        let error = inspect_downloaded_wago_addon(
+            &database,
+            &addon_dir,
+            &sample_addon(),
+            &bytes,
+            WagoStability::Stable,
+        )
+        .expect_err("belongs to a linked addon");
+        assert_eq!(error.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(
+            error.clash.expect("clash").linked,
+            vec![("Details".to_string(), "Details!".to_string())]
+        );
     }
 
     #[test]
@@ -1422,7 +1537,7 @@ mod tests {
             &bytes,
             WagoStability::Stable,
             true,
-            false,
+            &[],
         )
         .expect("dry run install");
 
