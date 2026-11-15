@@ -102,6 +102,11 @@ impl App {
                 subtitle,
                 Style::default().fg(self.ui_theme.muted),
             )),
+            // The header no longer shows the version, so Help does.
+            Line::from(Span::styled(
+                format!("LemonUp {}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(self.ui_theme.muted),
+            )),
             Line::default(),
         ]
     }

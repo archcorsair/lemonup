@@ -35,6 +35,11 @@ pub enum AppAction {
     SetDashboardAutoCheckInProgress(bool),
     SetDashboardJobUi(Option<DashboardJobUiState>),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
+    /// Folders the last update run updated, and the ones it failed on.
+    SetDashboardUpdateResults {
+        updated: Vec<String>,
+        failed: Vec<String>,
+    },
     SetSelectedDashboardParents(Vec<String>),
     SetInstallPaneState(InstallPaneState),
     SetSearchPaneState(SearchPaneState),

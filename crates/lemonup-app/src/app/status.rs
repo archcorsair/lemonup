@@ -24,10 +24,21 @@ impl StatusKind {
     }
 }
 
+/// A key a message offers as the next step. The message stays on the status
+/// line for as long as that key still does what the message says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusOffer {
+    /// `z` brings back the addons that were just deleted.
+    UndoDelete,
+    /// `U` updates every addon that has an update ready.
+    UpdateAll,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StatusMessage {
     pub(crate) kind: StatusKind,
     pub(crate) text: String,
+    pub(crate) offer: Option<StatusOffer>,
 }
 
 impl StatusMessage {
@@ -35,7 +46,14 @@ impl StatusMessage {
         Self {
             kind,
             text: text.into(),
+            offer: None,
         }
+    }
+
+    /// The same message, offering `offer` as the next key.
+    pub(crate) fn offering(mut self, offer: StatusOffer) -> Self {
+        self.offer = Some(offer);
+        self
     }
 
     /// No message: what closing an overlay leaves behind.

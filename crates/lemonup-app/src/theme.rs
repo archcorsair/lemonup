@@ -36,6 +36,69 @@ pub(crate) struct UiTheme {
     pub(crate) job_update_bg: Color,
     pub(crate) installed_text: Color,
     pub(crate) package_icon: Color,
+    /// The redesign's colour roles. New frame and list code uses only these.
+    pub(crate) roles: ColorRoles,
+}
+
+/// Colour roles from the approved design. Each role has one meaning, so a
+/// colour never has to be guessed at from context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColorRoles {
+    /// Where you are and the main action: cursor bar, primary key, focus.
+    pub(crate) lemon: Color,
+    /// An update is ready, and the new version.
+    pub(crate) amber: Color,
+    /// Done, or nothing to do.
+    pub(crate) green: Color,
+    /// A problem, or a delete. Nothing else.
+    pub(crate) red: Color,
+    /// Keys you can press, and links.
+    pub(crate) blue: Color,
+    /// Everything that does not need you.
+    pub(crate) muted: Color,
+    /// Rules and separators.
+    pub(crate) dim: Color,
+    pub(crate) text: Color,
+    pub(crate) background: Color,
+    pub(crate) cursor_row: Color,
+    pub(crate) selected_row: Color,
+    pub(crate) sheet: Color,
+}
+
+impl ColorRoles {
+    pub(crate) fn dark() -> Self {
+        Self {
+            lemon: Color::Rgb(0xf0, 0xc8, 0x5a),
+            amber: Color::Rgb(0xff, 0x9e, 0x64),
+            green: Color::Rgb(0x9e, 0xce, 0x6a),
+            red: Color::Rgb(0xf7, 0x76, 0x8e),
+            blue: Color::Rgb(0x7a, 0xa2, 0xf7),
+            muted: Color::Rgb(0x8c, 0x96, 0xc0),
+            dim: Color::Rgb(0x45, 0x4b, 0x6c),
+            text: Color::Rgb(0xc5, 0xcd, 0xf2),
+            background: Color::Rgb(0x24, 0x28, 0x3b),
+            cursor_row: Color::Rgb(0x32, 0x38, 0x56),
+            selected_row: Color::Rgb(0x2c, 0x31, 0x48),
+            sheet: Color::Rgb(0x29, 0x2e, 0x45),
+        }
+    }
+
+    pub(crate) fn light() -> Self {
+        Self {
+            lemon: Color::Rgb(0x7a, 0x5a, 0x00),
+            amber: Color::Rgb(0x96, 0x50, 0x0a),
+            green: Color::Rgb(0x46, 0x64, 0x1e),
+            red: Color::Rgb(0xc0, 0x3a, 0x3a),
+            blue: Color::Rgb(0x1c, 0x5c, 0xbe),
+            muted: Color::Rgb(0x56, 0x5e, 0x86),
+            dim: Color::Rgb(0xa9, 0xaf, 0xc8),
+            text: Color::Rgb(0x2b, 0x31, 0x50),
+            background: Color::Rgb(0xe4, 0xe5, 0xeb),
+            cursor_row: Color::Rgb(0xcf, 0xd4, 0xe3),
+            selected_row: Color::Rgb(0xd8, 0xdb, 0xe6),
+            sheet: Color::Rgb(0xee, 0xef, 0xf4),
+        }
+    }
 }
 
 impl UiTheme {
@@ -74,6 +137,7 @@ impl UiTheme {
             job_update_bg: Color::Rgb(48, 38, 28),
             installed_text: Color::Rgb(172, 182, 220),
             package_icon: Color::Rgb(212, 175, 55),
+            roles: ColorRoles::dark(),
         }
     }
 
@@ -112,6 +176,7 @@ impl UiTheme {
             job_update_bg: Color::Rgb(226, 220, 209),
             installed_text: Color::Rgb(72, 89, 143),
             package_icon: Color::Rgb(177, 126, 0),
+            roles: ColorRoles::light(),
         }
     }
 

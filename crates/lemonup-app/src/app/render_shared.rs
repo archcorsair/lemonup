@@ -22,14 +22,6 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(padded);
 
-        if self.shell_mode == ShellMode::Dashboard {
-            if self.shell_ui.overlay.active.is_some() {
-                return;
-            }
-            self.render_dashboard_footer_grid(frame, &rows, &command_lines);
-            return;
-        }
-
         let status_lines = self.footer_status_lines();
 
         let right_width = command_lines
@@ -78,62 +70,6 @@ impl App {
 
     pub(super) fn line_is_empty(&self, line: &Line<'_>) -> bool {
         line.spans.iter().all(|span| span.content.is_empty())
-    }
-
-    pub(super) fn render_dashboard_footer_grid(
-        &self,
-        frame: &mut Frame<'_>,
-        rows: &[Rect],
-        command_lines: &[Vec<FooterCommandHint>],
-    ) {
-        let columns = command_lines.iter().map(Vec::len).max().unwrap_or(0);
-        if columns == 0 {
-            return;
-        }
-
-        let gap = 3u16;
-        let max_hint_width = command_lines
-            .iter()
-            .flat_map(|line| line.iter())
-            .map(|hint| self.footer_hint_line_width(std::slice::from_ref(hint)))
-            .max()
-            .unwrap_or(0) as u16;
-        let available_width = rows.iter().map(|row| row.width as usize).max().unwrap_or(0);
-        let grid_width = max_hint_width
-            .saturating_mul(columns as u16)
-            .saturating_add(gap.saturating_mul(columns.saturating_sub(1) as u16));
-
-        if available_width < grid_width as usize {
-            for (index, hints) in command_lines.iter().enumerate() {
-                if hints.is_empty() {
-                    continue;
-                }
-                let commands = Paragraph::new(self.footer_hint_line(hints))
-                    .alignment(Alignment::Center)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(commands, rows[index]);
-            }
-            return;
-        }
-
-        let constraints = vec![Constraint::Fill(1); columns];
-
-        for (row_index, hints) in command_lines.iter().enumerate() {
-            if hints.is_empty() {
-                continue;
-            }
-            let row = rows[row_index];
-            let cells = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(constraints.clone())
-                .split(row);
-            for (column_index, hint) in hints.iter().enumerate() {
-                let cell = cells[column_index];
-                let command = Paragraph::new(self.footer_hint_line(std::slice::from_ref(hint)))
-                    .alignment(Alignment::Left);
-                frame.render_widget(command, cell);
-            }
-        }
     }
 
     pub(super) fn render_overlay_host(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -286,100 +222,6 @@ impl App {
         }
     }
 
-    pub(super) fn header_logo_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        match self.header_variant(mode) {
-            HeaderVariant::FullLogo => {
-                lines.push(self.logo_line(LOGO_FULL[0], LogoStyle::FruitGradient));
-                lines.push(self.logo_line(LOGO_FULL[1], LogoStyle::FruitGradient));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "v2",
-                        Style::default()
-                            .fg(self.ui_theme.brand_gold)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "  World of Warcraft addon manager",
-                        Style::default().fg(self.ui_theme.info),
-                    ),
-                ]));
-            }
-            HeaderVariant::CompactLogo => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        LOGO_COMPACT,
-                        Style::default()
-                            .fg(self.ui_theme.brand_warm)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  v2", Style::default().fg(self.ui_theme.brand_gold)),
-                    Span::styled(
-                        "  World of Warcraft addon manager",
-                        Style::default().fg(self.ui_theme.info),
-                    ),
-                ]));
-            }
-        }
-        if mode == ShellLayoutMode::Compact {
-            lines.extend(self.header_meta_lines(mode));
-        }
-        lines
-    }
-
-    pub(super) fn header_meta_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
-        let mut status_spans = vec![Span::styled(
-            self.scan_status_with_motion(),
-            Style::default().fg(self.scan_status_color()),
-        )];
-        if self.runtime.profile_name != "default" {
-            status_spans.push(Span::raw("    "));
-            status_spans.push(Span::styled(
-                "Profile: ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-            status_spans.push(Span::styled(
-                self.runtime.profile_name.clone(),
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    self.game_client_label(),
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("   "),
-                Span::styled(
-                    self.friendly_addon_dir(),
-                    Style::default().fg(self.ui_theme.highlight),
-                ),
-            ]),
-            Line::from(status_spans),
-        ];
-        if self.shell_mode != ShellMode::Dashboard
-            && let Some(job_line) = self.dashboard_job_header_line()
-        {
-            lines.push(job_line);
-        }
-        if mode == ShellLayoutMode::Compact {
-            return lines;
-        }
-        if let Some(warning) = self.profile_warning() {
-            lines.push(Line::from(Span::styled(
-                warning,
-                Style::default()
-                    .fg(self.ui_theme.warning)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        }
-        lines
-    }
-
     pub(super) fn fruit_gradient_logo_line(&self, text: &str) -> Line<'static> {
         let anchors = [
             self.ui_theme.brand_hot,
@@ -413,42 +255,6 @@ impl App {
         }
 
         Line::from(spans)
-    }
-
-    pub(super) fn striped_legacy_logo_line(&self, text: &str) -> Line<'static> {
-        let palette = [
-            self.ui_theme.brand_hot,
-            self.ui_theme.brand_hot,
-            self.ui_theme.brand_warm,
-            self.ui_theme.brand_warm,
-            self.ui_theme.brand_gold,
-            self.ui_theme.brand_gold,
-        ];
-        let mut spans = Vec::with_capacity(text.len());
-        let mut visible_index = 0usize;
-        for ch in text.chars() {
-            if ch.is_whitespace() {
-                spans.push(Span::raw(ch.to_string()));
-            } else {
-                let color = palette[visible_index % palette.len()];
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
-                visible_index = visible_index.wrapping_add(1);
-            }
-        }
-        Line::from(spans)
-    }
-
-    pub(super) fn scan_status_color(&self) -> Color {
-        if matches!(self.scan_state, ScanState::Pending | ScanState::Running(_)) {
-            self.ui_theme.warning
-        } else if matches!(self.scan_state, ScanState::Succeeded { .. }) {
-            self.ui_theme.success
-        } else {
-            self.ui_theme.info
-        }
     }
 
     pub(super) fn dashboard_surface_label(&self) -> &'static str {
@@ -511,33 +317,27 @@ impl App {
         String::new()
     }
 
-    pub(super) fn dashboard_event_message(&self) -> Option<(String, DashboardEventKind)> {
-        self.shell_ui
-            .dashboard_toast
-            .as_ref()
-            .map(|toast| (toast.text.clone(), toast.kind))
-    }
-
-    pub(super) fn dashboard_toast_from_status(
-        &self,
-        status: &StatusMessage,
-    ) -> Option<DashboardToast> {
+    /// The status line message for `status`, or `None` when it is not
+    /// shown: a quiet kind, or a message from inside an overlay (overlays
+    /// show their own messages).
+    pub(super) fn status_flash_from_status(&self, status: &StatusMessage) -> Option<StatusFlash> {
         if self.shell_mode != ShellMode::Dashboard || self.shell_ui.overlay.active.is_some() {
             return None;
         }
 
         let summary = self.sanitized_status_text(status)?;
-        let kind = toast_kind_for_status(status.kind);
-        let duration = match kind {
-            DashboardEventKind::Info => StdDuration::from_millis(2500),
-            DashboardEventKind::Success => StdDuration::from_millis(3000),
-            DashboardEventKind::Error => StdDuration::from_millis(5000),
+        let expires_at = match status.kind {
+            StatusKind::Problem => None,
+            StatusKind::Done | StatusKind::Note | StatusKind::Working | StatusKind::Quiet => {
+                Some(Instant::now() + MESSAGE_FADE)
+            }
         };
 
-        Some(DashboardToast {
+        Some(StatusFlash {
             text: truncate_text(&summary, 160),
-            kind,
-            expires_at: Instant::now() + duration,
+            kind: status.kind,
+            offer: status.offer,
+            expires_at,
         })
     }
 
@@ -1157,103 +957,8 @@ impl App {
             };
         }
 
-        if self.dashboard.filter_editing() {
-            return vec![
-                FooterCommandHint {
-                    id: FooterHintId::Nav,
-                    key: "↑/↓",
-                    label: "move",
-                    tier: primary,
-                },
-                FooterCommandHint {
-                    id: FooterHintId::Save,
-                    key: "enter",
-                    label: "keep filter",
-                    tier: primary,
-                },
-                FooterCommandHint {
-                    id: FooterHintId::Clear,
-                    key: "esc",
-                    label: "clear filter",
-                    tier: primary,
-                },
-            ];
-        }
-
-        vec![
-            FooterCommandHint {
-                id: FooterHintId::Nav,
-                key: "↑/↓",
-                label: "move",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Inspect,
-                key: "enter",
-                label: "inspect",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Select,
-                key: "space/a",
-                label: if self.dashboard.selected_parent_count() > 0 {
-                    "deselect"
-                } else {
-                    "select"
-                },
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Check,
-                key: "c",
-                label: "check",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Filter,
-                key: "/",
-                label: "filter",
-                tier: primary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Update,
-                key: "u",
-                label: if self.dashboard.selected_parent_count() > 0 {
-                    "update sel"
-                } else {
-                    "update"
-                },
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Install,
-                key: "i",
-                label: "install",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Help,
-                key: "?",
-                label: "help",
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Delete,
-                key: "x",
-                label: if self.dashboard.selected_parent_count() > 0 {
-                    "delete sel"
-                } else {
-                    "delete"
-                },
-                tier: secondary,
-            },
-            FooterCommandHint {
-                id: FooterHintId::Sort,
-                key: "1-4",
-                label: "sort",
-                tier: secondary,
-            },
-        ]
+        // The addon list itself builds its key line in `dashboard_key_hints`.
+        Vec::new()
     }
 
     pub(super) fn footer_hint_line(&self, hints: &[FooterCommandHint]) -> Line<'static> {
@@ -1390,14 +1095,5 @@ pub(super) fn format_download_count(count: u64) -> String {
         THOUSAND..=999_999 => format_compact_count(count, THOUSAND, "K"),
         MILLION..=999_999_999 => format_compact_count(count, MILLION, "M"),
         _ => format_compact_count(count, BILLION, "B"),
-    }
-}
-
-/// Toast style for a status message, from its kind alone.
-pub(super) fn toast_kind_for_status(kind: StatusKind) -> DashboardEventKind {
-    match kind {
-        StatusKind::Done => DashboardEventKind::Success,
-        StatusKind::Problem => DashboardEventKind::Error,
-        StatusKind::Note | StatusKind::Working | StatusKind::Quiet => DashboardEventKind::Info,
     }
 }
