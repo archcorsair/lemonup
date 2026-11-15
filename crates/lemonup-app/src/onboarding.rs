@@ -33,8 +33,8 @@ impl OnboardingStep {
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
-            Self::Directory => "Directory",
-            Self::Wago => "Wago",
+            Self::Directory => "Game folder",
+            Self::Wago => "Wago.io",
             Self::Settings => "Settings",
             Self::Review => "Review",
         }
@@ -75,9 +75,9 @@ impl OnboardingSettingsField {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::BackupWtf => "Back up WTF",
-            Self::BackupRetention => "Backup retention",
-            Self::ShowLibs => "Show libraries",
+            Self::BackupWtf => "Back up game settings",
+            Self::BackupRetention => "Backups to keep",
+            Self::ShowLibs => "Show library folders",
         }
     }
 

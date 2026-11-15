@@ -14,6 +14,8 @@ use crate::onboarding::OnboardingState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     Quit,
+    /// Opens or closes the "quit while updating?" question.
+    SetQuitQuestion(bool),
     AdvanceMotionTick,
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),

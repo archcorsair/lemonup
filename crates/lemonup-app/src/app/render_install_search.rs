@@ -5,7 +5,7 @@ use super::sheet::{SheetBody, render_stateful, text_height};
 use super::*;
 
 const SEARCH_EMPTY_HINT_SOURCES: &str =
-    "Search Wago by name, or paste a GitHub, WoWInterface or Wago URL.";
+    "Search Wago.io by name, or paste a GitHub, WoWInterface or Wago.io link.";
 const SEARCH_EMPTY_HINT_TUKUI: &str = "Type elvui or tukui for TukUI.";
 
 impl App {
@@ -106,7 +106,7 @@ impl App {
         let mut lines = vec![Line::from(vec![
             Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
             Span::styled(
-                "Search Wago by addon name",
+                "Search Wago.io by addon name",
                 Style::default().fg(self.ui_theme.panel_title),
             ),
             Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
@@ -122,7 +122,7 @@ impl App {
                 Style::default().fg(self.ui_theme.muted),
             )];
             spans.extend(shimmer_text_spans(
-                "Searching Wago…",
+                "Searching Wago.io…",
                 self.ui_theme.warning,
                 self.ui_theme.shimmer_glow,
                 ShimmerConfig::action(),
@@ -149,7 +149,7 @@ impl App {
                         Style::default().fg(self.ui_theme.muted),
                     )];
                     spans.extend(shimmer_text_spans(
-                        "Installing from Wago…",
+                        "Installing from Wago.io…",
                         self.ui_theme.warning,
                         self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
@@ -211,7 +211,7 @@ impl App {
             Line::from(vec![
                 Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
-                    "Wago API key required for Wago search and installs",
+                    "Wago.io search and installs need your Wago.io key",
                     Style::default()
                         .fg(self.ui_theme.warning)
                         .add_modifier(Modifier::BOLD),
@@ -241,7 +241,7 @@ impl App {
                             "Press Enter to check this URL".to_string()
                         }
                         SearchInputIntent::WagoSearch(_) => {
-                            "Press Enter to search Wago".to_string()
+                            "Press Enter to search Wago.io".to_string()
                         }
                     },
                     Style::default().fg(self.ui_theme.panel_title),
@@ -298,20 +298,20 @@ impl App {
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "LemonUp is checking tracked state and preparing the package.",
+                        "LemonUp is checking your addon list and preparing the package.",
                         Style::default().fg(self.ui_theme.muted),
                     )),
                 ],
                 SearchInstallState::Installing { addon_name, .. } => vec![
                     Line::from(shimmer_text_spans(
-                        &format!("Installing {addon_name} from Wago…"),
+                        &format!("Installing {addon_name} from Wago.io…"),
                         self.ui_theme.warning,
                         self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "The addon will appear in Manage when install and sync complete.",
+                        "It will show up in your addon list when it is done.",
                         Style::default().fg(self.ui_theme.muted),
                     )),
                 ],
@@ -363,9 +363,7 @@ impl App {
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        format!(
-                            "Press y to reinstall over tracked addon {tracked_parent}, or n to cancel."
-                        ),
+                        format!("You have it as {tracked_parent}."),
                         Style::default().fg(self.ui_theme.muted),
                     )),
                 ],
@@ -405,7 +403,7 @@ impl App {
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "The addon will appear in Manage when install and sync complete.",
+                        "It will show up in your addon list when it is done.",
                         Style::default().fg(self.ui_theme.muted),
                     )),
                 ],
@@ -414,7 +412,7 @@ impl App {
         } else if self.search_pane.in_progress {
             vec![
                 Line::from(Span::styled(
-                    "Searching Wago…",
+                    "Searching Wago.io…",
                     Style::default()
                         .fg(self.ui_theme.highlight)
                         .add_modifier(Modifier::BOLD),
@@ -461,7 +459,7 @@ impl App {
         if self.wago_api_key.is_none() && self.active_search_install_state().is_none() {
             message.push(Line::from(""));
             message.push(Line::from(Span::styled(
-                "Wago search and Wago URLs need an API key: press , to open Config.",
+                "Wago.io search needs your Wago.io key: press , to open Settings.",
                 Style::default().fg(self.ui_theme.warning),
             )));
         }
@@ -587,7 +585,7 @@ impl App {
                         result
                             .download_count
                             .map(format_download_count)
-                            .unwrap_or_else(|| "—".to_string()),
+                            .unwrap_or_else(|| "-".to_string()),
                         Style::default().fg(self.ui_theme.muted),
                     )),
                 ])
@@ -652,7 +650,7 @@ impl App {
             match install_state {
                 Some(SearchInstallState::Checking { .. }) => {
                     lines.push(Line::from(shimmer_text_spans(
-                        "Checking tracked state and preparing install…",
+                        "Checking your addon list and preparing install…",
                         self.ui_theme.warning,
                         self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
@@ -660,7 +658,7 @@ impl App {
                 }
                 Some(SearchInstallState::Installing { .. }) => {
                     lines.push(Line::from(shimmer_text_spans(
-                        "Installing from Wago…",
+                        "Installing from Wago.io…",
                         self.ui_theme.warning,
                         self.ui_theme.shimmer_glow,
                         ShimmerConfig::action(),
@@ -691,7 +689,7 @@ impl App {
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("as {tracked_parent} · y reinstall · n cancel"),
+                            format!("as {tracked_parent}"),
                             Style::default().fg(self.ui_theme.panel_title),
                         ),
                     ]));
@@ -728,7 +726,6 @@ impl App {
             lines.extend([
                 self.overlay_kv_line("Author", author),
                 self.overlay_kv_line("Version", result.version.as_deref().unwrap_or("unknown")),
-                self.overlay_kv_line("Slug", result.id.as_str()),
                 self.overlay_kv_line(
                     "Summary",
                     result.summary.as_deref().unwrap_or("No summary provided."),

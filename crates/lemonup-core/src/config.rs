@@ -26,6 +26,9 @@ pub struct AppConfig {
     pub show_libs: bool,
     pub theme: ThemeMode,
     pub wago_api_key: Option<String>,
+    /// The welcome card on the addon list was hidden with `d`. Configs
+    /// written before it existed load as `false`.
+    pub hide_first_run_card: bool,
 }
 
 impl AppConfig {
@@ -44,6 +47,7 @@ impl AppConfig {
             show_libs: false,
             theme: ThemeMode::Dark,
             wago_api_key: None,
+            hide_first_run_card: false,
         }
     }
 }
@@ -124,6 +128,29 @@ mod tests {
 
         let loaded = store.load().expect("load config");
         assert_eq!(loaded, ConfigLoad::Loaded(config));
+    }
+
+    #[test]
+    fn hidden_first_run_card_round_trips_and_defaults_to_shown() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::new(path.clone());
+
+        let mut config = AppConfig::new_unconfigured();
+        assert!(!config.hide_first_run_card);
+        config.hide_first_run_card = true;
+        store.write_config(&config).expect("write config");
+        assert_eq!(
+            store.load().expect("load config"),
+            ConfigLoad::Loaded(config)
+        );
+
+        // A config written before the flag existed shows the card.
+        std::fs::write(&path, "schema_version = 1\ntheme = \"dark\"\n").expect("write old config");
+        match store.load().expect("load old config") {
+            ConfigLoad::Loaded(config) => assert!(!config.hide_first_run_card),
+            ConfigLoad::Missing(_) => panic!("old config should load"),
+        }
     }
 
     #[cfg(unix)]

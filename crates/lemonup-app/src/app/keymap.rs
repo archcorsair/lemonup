@@ -1,9 +1,10 @@
 //! The key table: for each state of the app, the keys that work there, what
 //! they are called, and which key presses they answer to.
 //!
-//! The one table feeds the key line (`key_table`), the pulse on a key press
-//! (`footer_hint_for_key`) and Help (`help_sections`), so they cannot drift
-//! apart.
+//! The one table feeds the key line (`key_table`) and the pulse on a key
+//! press (`footer_hint_for_key`). Help (`help_page`) lists every key of each
+//! context; a test presses each Help key in its context and checks that each
+//! key line key is in Help, so the two cannot drift apart.
 
 use super::render_dashboard::{RowStatus, WIDE_FRAME_MIN_WIDTH};
 use super::*;
@@ -47,7 +48,6 @@ const BACKSPACE: KeyCodes = &[KeyCode::Backspace];
 const CLOSE: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q')];
 /// Details closes on enter too, the key that opens it.
 const CLOSE_DETAILS: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q'), KeyCode::Enter];
-const NO: KeyCodes = &[KeyCode::Char('n'), KeyCode::Esc, KeyCode::Char('q')];
 const HELP: KeyCodes = &[KeyCode::Char('?')];
 const SELECT: KeyCodes = &[KeyCode::Char(' '), KeyCode::Char('a')];
 
@@ -128,7 +128,7 @@ impl KeyHint {
         self
     }
 
-    fn kept(mut self) -> Self {
+    pub(super) fn kept(mut self) -> Self {
         self.kept = true;
         self
     }
@@ -165,115 +165,476 @@ impl KeyHint {
     }
 }
 
-/// One group of Help: a title and (keys, what they do) rows.
-pub(super) struct HelpSection {
-    pub(super) title: &'static str,
-    pub(super) rows: &'static [(&'static str, &'static str)],
+/// What a Help row needs before its keys do anything. Help shows the row
+/// only then, so it never offers a key that does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HelpWhen {
+    Always,
+    /// No Wago.io key is saved: `,` opens Settings from the Install box.
+    NoWagoKey,
+    /// The welcome card is on the list.
+    FirstRunCard,
 }
 
-/// What Help lists for each context.
-pub(super) fn help_sections(context: HelpContext) -> &'static [HelpSection] {
+/// The left hand side of a Help row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HelpLabel {
+    /// Keys, as Help prints them.
+    Keys(&'static str),
+    /// A status word, as the Status column shows it.
+    Status(RowStatus),
+    /// Something to type into a box, not a key.
+    Typed(&'static str),
+}
+
+/// One row of Help: the keys, what they do, and the key presses that do it.
+/// A test presses each one in its context, so Help can't list a dead key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HelpRow {
+    pub(super) label: HelpLabel,
+    pub(super) text: &'static str,
+    pub(super) keys: &'static [KeyEvent],
+    pub(super) when: HelpWhen,
+}
+
+impl HelpRow {
+    const fn key(label: &'static str, text: &'static str, keys: &'static [KeyEvent]) -> Self {
+        Self {
+            label: HelpLabel::Keys(label),
+            text,
+            keys,
+            when: HelpWhen::Always,
+        }
+    }
+
+    const fn status(status: RowStatus, text: &'static str) -> Self {
+        Self {
+            label: HelpLabel::Status(status),
+            text,
+            keys: &[],
+            when: HelpWhen::Always,
+        }
+    }
+
+    const fn typed(label: &'static str, text: &'static str) -> Self {
+        Self {
+            label: HelpLabel::Typed(label),
+            text,
+            keys: &[],
+            when: HelpWhen::Always,
+        }
+    }
+
+    const fn when(mut self, when: HelpWhen) -> Self {
+        self.when = when;
+        self
+    }
+}
+
+/// One group of Help: a title and its rows.
+pub(super) struct HelpSection {
+    pub(super) title: &'static str,
+    pub(super) rows: &'static [HelpRow],
+}
+
+/// Help for one context: the sheet title and two columns of groups. A
+/// narrow window shows the right column under the left one.
+pub(super) struct HelpPage {
+    pub(super) title: &'static str,
+    pub(super) left: &'static [HelpSection],
+    pub(super) right: &'static [HelpSection],
+}
+
+impl HelpPage {
+    #[cfg(test)]
+    pub(super) fn sections(&self) -> impl Iterator<Item = &HelpSection> {
+        self.left.iter().chain(self.right.iter())
+    }
+}
+
+const fn press(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+const fn ch(character: char) -> KeyEvent {
+    press(KeyCode::Char(character))
+}
+
+const K_MOVE: &[KeyEvent] = &[press(KeyCode::Up), press(KeyCode::Down), ch('j'), ch('k')];
+const K_ARROWS: &[KeyEvent] = &[press(KeyCode::Up), press(KeyCode::Down)];
+const K_PAGE: &[KeyEvent] = &[press(KeyCode::PageUp), press(KeyCode::PageDown)];
+const K_ENDS: &[KeyEvent] = &[press(KeyCode::Home), press(KeyCode::End)];
+const K_ENTER: &[KeyEvent] = &[press(KeyCode::Enter)];
+const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
+const K_BACKSPACE: &[KeyEvent] = &[press(KeyCode::Backspace)];
+const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
+const K_HELP: &[KeyEvent] = &[ch('?')];
+const K_CTRL_C: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
+
+const QUESTIONS: HelpSection = HelpSection {
+    title: "Questions",
+    rows: &[
+        HelpRow::key("y", "yes", &[ch('y')]),
+        HelpRow::key("n  esc  q", "no", &[ch('n'), press(KeyCode::Esc), ch('q')]),
+    ],
+};
+
+const QUIT_ANYWHERE: HelpRow = HelpRow::key("ctrl+c", "quit from anywhere", K_CTRL_C);
+const THIS_HELP: HelpRow = HelpRow::key("?", "this help", K_HELP);
+
+const STATUS_WORDS: HelpSection = HelpSection {
+    title: "What the status means",
+    rows: &[
+        HelpRow::status(RowStatus::UpdateReady, "a newer version is out"),
+        HelpRow::status(RowStatus::UpToDate, "nothing to do"),
+        HelpRow::status(RowStatus::NewerThanSource, "yours is newer than the source"),
+        HelpRow::status(RowStatus::NotChecked, "linked, but not checked yet"),
+        HelpRow::status(
+            RowStatus::NotLinked,
+            "LemonUp can't update it yet; open details to see why",
+        ),
+        HelpRow::status(RowStatus::CheckFailed, "open details to see why"),
+    ],
+};
+
+static LIST_HELP: HelpPage = HelpPage {
+    title: "Help: your addon list",
+    left: &[
+        HelpSection {
+            title: "Your addon list",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "move", K_MOVE),
+                HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
+                HelpRow::key("Home End", "first, last", K_ENDS),
+                HelpRow::key(
+                    "→ ←  or  l h",
+                    "show, hide an addon's folders",
+                    &[
+                        press(KeyCode::Right),
+                        press(KeyCode::Left),
+                        ch('l'),
+                        ch('h'),
+                    ],
+                ),
+                HelpRow::key("] [", "show, hide all folders", &[ch(']'), ch('[')]),
+                HelpRow::key("enter", "open details", K_ENTER),
+                HelpRow::key("/", "filter the list", &[ch('/')]),
+                HelpRow::key(
+                    "1 2 3 4",
+                    "sort by name, status, author, source",
+                    &[ch('1'), ch('2'), ch('3'), ch('4')],
+                ),
+            ],
+        },
+        HelpSection {
+            title: "Selecting",
+            rows: &[
+                HelpRow::key("space", "select or unselect", &[ch(' ')]),
+                HelpRow::key("a", "select all, or none", &[ch('a')]),
+                HelpRow::key("esc", "clear the filter, then the selection", K_ESC),
+            ],
+        },
+        HelpSection {
+            title: "While you type a filter",
+            rows: &[
+                HelpRow::key("letters", "narrow the list", &[ch('w')]),
+                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
+                HelpRow::key("↑ ↓", "move through the matches", K_ARROWS),
+                HelpRow::key("enter", "keep the filter", K_ENTER),
+                HelpRow::key("esc", "clear the filter", K_ESC),
+            ],
+        },
+        STATUS_WORDS,
+    ],
+    right: &[
+        HelpSection {
+            title: "Getting things done",
+            rows: &[
+                HelpRow::key("U", "update every addon that has an update", &[ch('U')]),
+                HelpRow::key("u", "update this addon, or the selected ones", &[ch('u')]),
+                HelpRow::key("C", "check every addon for updates", &[ch('C')]),
+                HelpRow::key("c", "check this addon, or the selected ones", &[ch('c')]),
+                HelpRow::key("x", "delete this addon, or the selected ones", &[ch('x')]),
+                HelpRow::key("z", "undo the last delete", &[ch('z')]),
+                HelpRow::key("d", "hide the welcome card", &[ch('d')]).when(HelpWhen::FirstRunCard),
+            ],
+        },
+        HelpSection {
+            title: "Other screens",
+            rows: &[
+                HelpRow::key("i", "install an addon", &[ch('i')]),
+                HelpRow::key("b", "backups of your game settings", &[ch('b')]),
+                HelpRow::key(",", "settings", &[ch(',')]),
+                THIS_HELP,
+            ],
+        },
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc", "go back one step", K_ESC),
+                HelpRow::key("q", "quit (from the addon list)", &[ch('q')]),
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
+static DETAILS_HELP: HelpPage = HelpPage {
+    title: "Help: Details",
+    left: &[
+        HelpSection {
+            title: "This addon",
+            rows: &[
+                HelpRow::key("u", "update it", &[ch('u')]),
+                HelpRow::key("c", "check it for updates", &[ch('c')]),
+                HelpRow::key("x", "delete it", &[ch('x')]),
+                HelpRow::key("space", "select or unselect it", &[ch(' ')]),
+            ],
+        },
+        HelpSection {
+            title: "Moving",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "the previous or next addon", K_MOVE),
+                HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE),
+                HelpRow::key("Home End", "top, bottom of Details", K_ENDS),
+            ],
+        },
+    ],
+    right: &[
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key(
+                    "enter  esc  q",
+                    "close Details",
+                    &[press(KeyCode::Enter), press(KeyCode::Esc), ch('q')],
+                ),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
+static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
+    title: "Help: Details beside the list",
+    left: &[
+        HelpSection {
+            title: "Details",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "move; Details follows", K_MOVE),
+                HelpRow::key("u", "update it, or the selected ones", &[ch('u')]),
+                HelpRow::key("c", "check it, or the selected ones", &[ch('c')]),
+                HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
+                HelpRow::key("space", "select or unselect", &[ch(' ')]),
+                HelpRow::key(
+                    "enter  esc  q",
+                    "close Details",
+                    &[press(KeyCode::Enter), press(KeyCode::Esc), ch('q')],
+                ),
+            ],
+        },
+        HelpSection {
+            title: "The list keeps working",
+            rows: &[
+                HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
+                HelpRow::key("Home End", "first, last", K_ENDS),
+                HelpRow::key(
+                    "→ ←  or  l h",
+                    "show, hide an addon's folders",
+                    &[
+                        press(KeyCode::Right),
+                        press(KeyCode::Left),
+                        ch('l'),
+                        ch('h'),
+                    ],
+                ),
+                HelpRow::key("] [", "show, hide all folders", &[ch(']'), ch('[')]),
+                HelpRow::key("/", "filter the list", &[ch('/')]),
+                HelpRow::key(
+                    "1 2 3 4",
+                    "sort by name, status, author, source",
+                    &[ch('1'), ch('2'), ch('3'), ch('4')],
+                ),
+                HelpRow::key("a", "select all, or none", &[ch('a')]),
+            ],
+        },
+    ],
+    right: &[
+        HelpSection {
+            title: "Getting things done",
+            rows: &[
+                HelpRow::key("U", "update every addon that has an update", &[ch('U')]),
+                HelpRow::key("C", "check every addon for updates", &[ch('C')]),
+                HelpRow::key("z", "undo the last delete", &[ch('z')]),
+            ],
+        },
+        HelpSection {
+            title: "Other screens",
+            rows: &[
+                HelpRow::key("i", "install an addon", &[ch('i')]),
+                HelpRow::key("b", "backups of your game settings", &[ch('b')]),
+                HelpRow::key(",", "settings", &[ch(',')]),
+                THIS_HELP,
+            ],
+        },
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[QUIT_ANYWHERE],
+        },
+    ],
+};
+
+static INSTALL_HELP: HelpPage = HelpPage {
+    title: "Help: Install",
+    left: &[
+        HelpSection {
+            title: "Typing in the box",
+            rows: &[
+                HelpRow::key("letters", "type a name, or paste a link", &[ch('w')]),
+                HelpRow::key("enter", "search Wago.io, or install the link", K_ENTER),
+                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
+                HelpRow::key("esc", "stop typing", K_ESC),
+                HelpRow::key(",", "open Settings to add your Wago.io key", &[ch(',')])
+                    .when(HelpWhen::NoWagoKey),
+            ],
+        },
+        HelpSection {
+            title: "What you can type",
+            rows: &[
+                HelpRow::typed("a name", "searches Wago.io (needs your Wago.io key)"),
+                HelpRow::typed(
+                    "a link",
+                    "installs from GitHub, WoWInterface, Wago.io or TukUI",
+                ),
+                HelpRow::typed("elvui  tukui", "installs ElvUI or Tukui from TukUI"),
+            ],
+        },
+        HelpSection {
+            title: "Install from a link?",
+            rows: &[
+                HelpRow::key("enter", "install it", K_ENTER),
+                HelpRow::key("esc  q", "don't install it", K_CLOSE),
+            ],
+        },
+    ],
+    right: &[
+        HelpSection {
+            title: "Results",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "move through the results", K_MOVE),
+                HelpRow::key("enter", "install the one you are on", K_ENTER),
+                HelpRow::key("/", "type in the box again", &[ch('/')]),
+                HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
+                HelpRow::key("Home End", "top, bottom", K_ENDS),
+            ],
+        },
+        QUESTIONS,
+        HelpSection {
+            title: "When you are not typing",
+            rows: &[HelpRow::key("esc  q", "close Install", K_CLOSE), THIS_HELP],
+        },
+        HelpSection {
+            title: "Everywhere",
+            rows: &[QUIT_ANYWHERE],
+        },
+    ],
+};
+
+static SETTINGS_HELP: HelpPage = HelpPage {
+    title: "Help: Settings",
+    left: &[
+        HelpSection {
+            title: "Settings",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "move between settings", K_MOVE),
+                HelpRow::key("enter", "switch it on or off, or edit it", K_ENTER),
+                HelpRow::key(
+                    "← →  or  h l",
+                    "change a number or a choice",
+                    &[
+                        press(KeyCode::Left),
+                        press(KeyCode::Right),
+                        ch('h'),
+                        ch('l'),
+                    ],
+                ),
+                HelpRow::key("e", "edit it", &[ch('e')]),
+                HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
+                HelpRow::key("Home End", "top, bottom", K_ENDS),
+            ],
+        },
+        HelpSection {
+            title: "While you edit a value",
+            rows: &[
+                HelpRow::key("enter", "save it", K_ENTER),
+                HelpRow::key("esc", "cancel", K_ESC),
+                HelpRow::key("backspace", "delete a letter", K_BACKSPACE),
+            ],
+        },
+    ],
+    right: &[
+        HelpSection {
+            title: "More",
+            rows: &[
+                HelpRow::key("r", "run setup again", &[ch('r')]),
+                HelpRow::key("i", "load an addon list from a file", &[ch('i')]),
+                HelpRow::key("x", "save your addon list to a file", &[ch('x')]),
+            ],
+        },
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc  q", "close Settings", K_CLOSE),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
+static BACKUPS_HELP: HelpPage = HelpPage {
+    title: "Help: Backups",
+    left: &[HelpSection {
+        title: "Backups of your game settings",
+        rows: &[
+            HelpRow::key("↑ ↓  or  j k", "choose a backup", K_MOVE),
+            HelpRow::key(
+                "enter  r",
+                "put this backup back (asks first)",
+                &[press(KeyCode::Enter), ch('r')],
+            ),
+            HelpRow::key("n", "back up your game settings now", &[ch('n')]),
+            HelpRow::key("x", "delete this backup (asks first)", &[ch('x')]),
+            HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
+            HelpRow::key("Home End", "top, bottom", K_ENDS),
+        ],
+    }],
+    right: &[
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc  q", "close Backups", K_CLOSE),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
+/// What Help shows for each context.
+pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
     match context {
-        HelpContext::Overview => &[
-            HelpSection {
-                title: " Movement ",
-                rows: &[
-                    ("↑/↓", "Move through addons"),
-                    ("enter", "Open details"),
-                    ("/", "Filter installed addons (enter keeps it)"),
-                    ("esc", "Clear the filter, then the selection"),
-                ],
-            },
-            HelpSection {
-                title: " Actions ",
-                rows: &[
-                    ("space / a", "Select or deselect addons"),
-                    ("c / u / x", "Check, update, or delete"),
-                ],
-            },
-            HelpSection {
-                title: " More ",
-                rows: &[("i", "Open install and search"), ("1-4", "Sort the table")],
-            },
-        ],
-        HelpContext::Inspect => &[
-            HelpSection {
-                title: " Actions ",
-                rows: &[
-                    ("u / c / x", "Update, check, or delete"),
-                    ("space", "Select or deselect this addon"),
-                ],
-            },
-            HelpSection {
-                title: " Moving ",
-                rows: &[
-                    ("↑/↓", "Previous or next addon; Details stays open"),
-                    ("pgup/pgdn", "Scroll the Details sheet when it does not fit"),
-                ],
-            },
-            HelpSection {
-                title: " Close ",
-                rows: &[("enter / esc / q", "Close Details")],
-            },
-        ],
-        HelpContext::InstallSearch => &[
-            HelpSection {
-                title: " Query ",
-                rows: &[
-                    ("enter", "Search Wago by name or install a pasted URL"),
-                    ("elvui / tukui", "Install ElvUI or Tukui from TukUI"),
-                    ("/", "Edit the query again"),
-                ],
-            },
-            HelpSection {
-                title: " Direct install ",
-                rows: &[(
-                    "enter / esc",
-                    "Confirm or cancel a GitHub, WoWInterface or TukUI install",
-                )],
-            },
-            HelpSection {
-                title: " Results ",
-                rows: &[
-                    ("↑/↓", "Move through search results"),
-                    ("enter", "Install the selected result"),
-                ],
-            },
-            HelpSection {
-                title: " Setup ",
-                rows: &[(",", "Open Config for your Wago API key (Wago only)")],
-            },
-        ],
-        HelpContext::Config => &[
-            HelpSection {
-                title: " Fields ",
-                rows: &[
-                    ("↑/↓", "Move between settings"),
-                    ("enter", "Edit text or toggle the current field"),
-                ],
-            },
-            HelpSection {
-                title: " Adjust ",
-                rows: &[
-                    ("←/→", "Change booleans and numeric values"),
-                    ("r", "Run onboarding again"),
-                ],
-            },
-            HelpSection {
-                title: " Transfer ",
-                rows: &[("i", "Import addon list"), ("x", "Export addon list")],
-            },
-        ],
-        HelpContext::Backup => &[
-            HelpSection {
-                title: " Backups ",
-                rows: &[("↑/↓", "Choose a backup"), ("n", "Create a new backup now")],
-            },
-            HelpSection {
-                title: " Restore ",
-                rows: &[("enter / r", "Restore the selected backup")],
-            },
-        ],
+        HelpContext::Overview => &LIST_HELP,
+        HelpContext::Inspect => &DETAILS_HELP,
+        HelpContext::DetailsDocked => &DOCKED_DETAILS_HELP,
+        HelpContext::InstallSearch => &INSTALL_HELP,
+        HelpContext::Config => &SETTINGS_HELP,
+        HelpContext::Backup => &BACKUPS_HELP,
     }
 }
 
@@ -284,13 +645,8 @@ impl App {
         if self.shell_mode == ShellMode::Onboarding {
             return self.onboarding_key_table();
         }
-        if self.dashboard.pending_delete_folders().is_some()
-            || self.pending_wago_install_confirmation.is_some()
-        {
-            return vec![
-                KeyHint::key(FooterHintId::Confirm, "y", "confirm", &[KeyCode::Char('y')]).kept(),
-                KeyHint::key(FooterHintId::Cancel, "n/esc", "cancel", NO).kept(),
-            ];
+        if self.active_question().is_some() {
+            return self.question_key_table();
         }
         match self.shell_ui.overlay.active {
             Some(OverlayKind::Inspect) => self.inspect_key_table(width),
@@ -467,8 +823,15 @@ impl App {
     fn help_key_table(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         hints.extend(self.sheet_scroll_hint(true));
-        hints.push(KeyHint::key(FooterHintId::Help, "?", "close", HELP));
-        hints.push(self.close_hint());
+        hints.push(
+            KeyHint::key(
+                FooterHintId::Close,
+                "esc or ?",
+                "close",
+                &[KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')],
+            )
+            .secondary(),
+        );
         hints
     }
 
@@ -532,7 +895,7 @@ impl App {
                     hints.push(KeyHint::key(Id::Change, "←/→", "change", CHANGE));
                 }
                 hints.extend([
-                    KeyHint::key(Id::Run, "r", "onboarding", &[KeyCode::Char('r')]).short("setup"),
+                    KeyHint::key(Id::Run, "r", "setup", &[KeyCode::Char('r')]),
                     KeyHint::key(Id::Install, "i", "import", &[KeyCode::Char('i')]).secondary(),
                     KeyHint::key(Id::Delete, "x", "export", &[KeyCode::Char('x')]).secondary(),
                     self.close_hint(),
@@ -542,22 +905,6 @@ impl App {
                 hints
             }
             DetailMode::Backup => {
-                if self.backup_pane.pending_restore.is_some() {
-                    return vec![
-                        KeyHint::key(Id::Confirm, "y", "restore", &[KeyCode::Char('y')]).kept(),
-                        KeyHint::key(Id::Cancel, "n", "cancel", NO)
-                            .secondary()
-                            .kept(),
-                    ];
-                }
-                if self.backup_pane.pending_delete.is_some() {
-                    return vec![
-                        KeyHint::key(Id::Confirm, "y", "delete", &[KeyCode::Char('y')]).kept(),
-                        KeyHint::key(Id::Cancel, "n", "cancel", NO)
-                            .secondary()
-                            .kept(),
-                    ];
-                }
                 let selected = self.backup_pane.selected_backup().is_some();
                 let busy = self.backup_pane.in_progress;
                 let mut hints = Vec::new();
@@ -608,7 +955,7 @@ impl App {
             _ => "search",
         };
         let config = (self.wago_api_key.is_none())
-            .then(|| KeyHint::key(Id::Config, ",", "config", &[KeyCode::Char(',')]));
+            .then(|| KeyHint::key(Id::Config, ",", "settings", &[KeyCode::Char(',')]));
         if self.search_pane.is_editing {
             let mut hints = Vec::new();
             if !self.search_pane.in_progress {
@@ -714,6 +1061,59 @@ impl App {
                 esc,
                 help,
             ];
+        }
+        let settings = KeyHint::key(Id::Config, ",", "settings", &[KeyCode::Char(',')]);
+        let quit = KeyHint::key(Id::Quit, "q", "quit", &[KeyCode::Char('q')]);
+        let install_main =
+            || KeyHint::primary(Id::Install, "i", "install", &[KeyCode::Char('i')]).main();
+        // Nothing to list: only the keys that can help.
+        if self.dashboard.items.is_empty() {
+            return match self.scan_state {
+                ScanState::Pending | ScanState::Running(_) => vec![help, quit],
+                ScanState::Failed(_) => vec![settings.main(), help, quit],
+                _ => vec![install_main(), settings, help, quit],
+            };
+        }
+        if self.dashboard.rows.is_empty() {
+            return vec![
+                KeyHint::key(Id::Clear, "esc", "clear filter", ESC).main(),
+                filter,
+                install,
+                help,
+            ];
+        }
+        // Nothing is linked yet, so checking and updating have nothing to
+        // do; installing is how an addon gets linked.
+        if self
+            .dashboard
+            .items
+            .iter()
+            .all(|item| item.source == SourceKind::Manual)
+        {
+            let mut hints = vec![install_main(), details];
+            if wide {
+                hints.push(KeyHint::key(Id::Select, "space", "select", SELECT));
+            }
+            hints.push(filter);
+            if self.first_run_card_visible() {
+                hints.push(KeyHint::key(
+                    Id::HideCard,
+                    "d",
+                    "hide card",
+                    &[KeyCode::Char('d')],
+                ));
+            }
+            if wide {
+                hints.push(KeyHint::key(
+                    Id::Backup,
+                    "b",
+                    "backups",
+                    &[KeyCode::Char('b')],
+                ));
+                hints.push(settings);
+            }
+            hints.push(help);
+            return hints;
         }
         let updates = self.dashboard.update_ready_folders().len();
         let checked = self

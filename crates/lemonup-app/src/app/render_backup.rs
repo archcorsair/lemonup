@@ -2,9 +2,9 @@ use super::sheet::{SheetBody, text_height};
 use super::*;
 
 impl App {
-    /// The summary, the list of backups, and the card for the selected one
-    /// (or the restore or delete question). The list gets the rows the rest
-    /// leaves, so the card always shows.
+    /// The summary, the list of backups, and the card for the selected one.
+    /// The list gets the rows the rest leaves, so the card always shows.
+    /// Restoring and deleting ask in the question dialog, over this sheet.
     pub(super) fn backup_sheet_body(&self, width: u16, max_height: u16) -> SheetBody<'static> {
         let summary = self.backup_summary_lines();
         let selected = self.backup_selected_lines();
@@ -25,35 +25,21 @@ impl App {
         body.text(summary).gap(1).heading(" Recent backups ");
         if total == 0 {
             body.text(vec![Line::from(Span::styled(
-                "No backups created yet.",
+                "No backups of your game settings yet.",
                 Style::default().fg(self.ui_theme.muted),
             ))]);
         } else {
             let mut lines = self.backup_list_lines(rows);
             lines.extend(self.backup_overflow_line(rows));
             body.text(lines);
-            if self.backup_pane.pending_restore.is_none()
-                && self.backup_pane.pending_delete.is_none()
-            {
-                body.focus_last();
-            }
-        }
-        let title = if self.backup_pane.pending_delete.is_some() {
-            " Delete "
-        } else if self.backup_pane.pending_restore.is_some() {
-            " Restore "
-        } else {
-            " Selected "
-        };
-        body.gap(1).heading(title).text(selected);
-        if self.backup_pane.pending_restore.is_some() || self.backup_pane.pending_delete.is_some() {
             body.focus_last();
         }
+        body.gap(1).heading(" Selected ").text(selected);
         body
     }
 
     fn backup_summary_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
+        vec![
             Line::from(vec![
                 Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
@@ -62,7 +48,7 @@ impl App {
                 ),
                 Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
-                    "Restore a selected archive into WTF",
+                    "Restore one to put your game settings back",
                     Style::default().fg(self.ui_theme.panel_title),
                 ),
             ]),
@@ -72,31 +58,16 @@ impl App {
             self.overlay_kv_line(
                 "Policy",
                 format!(
-                    "{} · keep {} archive{}",
+                    "Back up before updates: {} · keeping the newest {}",
                     if self.config_pane.draft.backup_wtf {
-                        "WTF backup enabled"
+                        "On"
                     } else {
-                        "WTF backup disabled"
+                        "Off"
                     },
                     self.config_pane.draft.backup_retention,
-                    plural_suffix(self.config_pane.draft.backup_retention as usize)
                 ),
             ),
-        ];
-
-        if self.backup_pane.pending_restore.is_some() {
-            lines.push(Line::from(Span::styled(
-                "Restore will replace the current WTF folder after confirmation.",
-                Style::default().fg(self.ui_theme.warning),
-            )));
-        } else if self.backup_pane.pending_delete.is_some() {
-            lines.push(Line::from(Span::styled(
-                "Delete removes the selected backup archive after confirmation.",
-                Style::default().fg(self.ui_theme.error),
-            )));
-        }
-
-        lines
+        ]
     }
 
     fn backup_status_line(&self) -> Line<'static> {
@@ -104,11 +75,9 @@ impl App {
             .active_detail_status_message(DetailMode::Backup)
             .unwrap_or_else(|| {
                 if self.backup_pane.in_progress {
-                    "Backup work running".to_string()
-                } else if self.backup_pane.pending_restore.is_some() {
-                    "Awaiting restore confirmation".to_string()
+                    "Working on a backup…".to_string()
                 } else if self.backup_pane.backups.is_empty() {
-                    "No backups created yet".to_string()
+                    "No backups yet".to_string()
                 } else {
                     format!(
                         "{} backup{} ready",
@@ -118,13 +87,7 @@ impl App {
                 }
             });
 
-        let color = if self.backup_pane.pending_delete.is_some() {
-            self.ui_theme.error
-        } else if self.backup_pane.pending_restore.is_some() {
-            self.ui_theme.warning
-        } else {
-            self.ui_theme.highlight
-        };
+        let color = self.ui_theme.highlight;
 
         Line::from(vec![
             Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
@@ -180,55 +143,9 @@ impl App {
     }
 
     fn backup_selected_lines(&self) -> Vec<Line<'static>> {
-        if let Some(pending) = &self.backup_pane.pending_delete {
-            return vec![
-                Line::from(Span::styled(
-                    pending.label.clone(),
-                    Style::default()
-                        .fg(self.ui_theme.error)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "{}  {}",
-                        pending.file_name,
-                        format_backup_size(pending.size_bytes)
-                    ),
-                    Style::default().fg(self.ui_theme.panel_title),
-                )),
-                Line::from(Span::styled(
-                    "Press y to delete or n to cancel.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ];
-        }
-
-        if let Some(pending) = &self.backup_pane.pending_restore {
-            return vec![
-                Line::from(Span::styled(
-                    pending.label.clone(),
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "{}  {}",
-                        pending.file_name,
-                        format_backup_size(pending.size_bytes)
-                    ),
-                    Style::default().fg(self.ui_theme.panel_title),
-                )),
-                Line::from(Span::styled(
-                    "Press y to restore or n to cancel.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ];
-        }
-
         let Some(selected) = self.backup_pane.selected_backup() else {
             return vec![Line::from(Span::styled(
-                "Create a backup with n, then restore it here later.",
+                "Press n to back up your game settings now. You can put them back from here later.",
                 Style::default().fg(self.ui_theme.muted),
             ))];
         };
@@ -241,7 +158,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
-                Span::styled("Archive: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled("File: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
                     selected.file_name.clone(),
                     Style::default().fg(self.ui_theme.panel_title),
@@ -296,11 +213,11 @@ fn format_backup_size(size_bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     if size_bytes >= GIB {
-        format!("{:.1} GiB", size_bytes as f64 / GIB as f64)
+        format!("{:.1} GB", size_bytes as f64 / GIB as f64)
     } else if size_bytes >= MIB {
-        format!("{:.1} MiB", size_bytes as f64 / MIB as f64)
+        format!("{:.1} MB", size_bytes as f64 / MIB as f64)
     } else if size_bytes >= KIB {
-        format!("{:.1} KiB", size_bytes as f64 / KIB as f64)
+        format!("{:.1} KB", size_bytes as f64 / KIB as f64)
     } else {
         format!("{size_bytes} B")
     }

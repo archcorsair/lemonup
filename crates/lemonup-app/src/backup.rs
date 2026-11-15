@@ -208,8 +208,10 @@ impl PreUpdateBackup {
     /// Short note for the TUI status line; only worth showing when something happened.
     pub fn status_note(&self) -> Option<String> {
         match self {
-            Self::Created { .. } => Some("WTF backed up".to_string()),
-            Self::Warning(error) => Some(format!("WTF backup failed: {error}")),
+            Self::Created { .. } => Some("backed up your game settings first".to_string()),
+            Self::Warning(error) => Some(format!(
+                "couldn't back up your game settings ({error}), the update went ahead"
+            )),
             Self::Disabled | Self::Skipped { .. } => None,
         }
     }
@@ -843,7 +845,10 @@ mod tests {
                 .expect("line")
                 .starts_with("wtf backup: created ")
         );
-        assert_eq!(result.status_note().as_deref(), Some("WTF backed up"));
+        assert_eq!(
+            result.status_note().as_deref(),
+            Some("backed up your game settings first")
+        );
     }
 
     #[test]
@@ -921,7 +926,7 @@ mod tests {
             result
                 .status_note()
                 .expect("note")
-                .starts_with("WTF backup failed")
+                .starts_with("couldn't back up your game settings")
         );
     }
 

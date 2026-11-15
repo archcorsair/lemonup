@@ -1,6 +1,6 @@
 use super::keymap::fit_key_line;
 use super::render_inspect::docked_widths;
-use super::sheet::SheetScroll;
+use super::sheet::{SheetScroll, wrap_lines};
 use super::*;
 use crate::theme::ColorRoles;
 
@@ -554,6 +554,8 @@ impl App {
         } else {
             self.render_overlay_host(frame, layout.sheet_region(), layout.header.height);
         }
+        // A question sits on top of everything, sheets and docked Details too.
+        self.render_question(frame, layout.sheet_region());
         frame.render_widget(
             Paragraph::new(self.dashboard_status_line(area.width)),
             layout.status,
@@ -870,12 +872,39 @@ impl App {
         area: Rect,
         columns: ListColumns,
     ) {
-        self.last_dashboard_list_area = Some(area);
         let roles = self.ui_theme.roles;
         if self.dashboard.items.is_empty() || self.dashboard.rows.is_empty() {
-            frame.render_widget(Paragraph::new(self.dashboard_empty_lines()), area);
+            self.last_dashboard_list_area = Some(area);
+            frame.render_widget(Paragraph::new(self.dashboard_empty_lines(area.width)), area);
             return;
         }
+
+        let mut area = area;
+        if self.first_run_card_visible() {
+            let card = self.first_run_card_lines(area.width.saturating_sub(4 + 2 + 4));
+            let height = u16::try_from(card.len()).unwrap_or(u16::MAX) + 2;
+            // The card only shows when it leaves room for a few addons.
+            if area.width >= 30 && area.height >= height + 3 {
+                let card_area = Rect::new(area.x + 2, area.y, area.width - 4, height);
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(roles.lemon))
+                    .title(Line::from(vec![
+                        Span::styled("─ ", Style::default().fg(roles.lemon)),
+                        Span::styled(
+                            "Welcome. One thing before LemonUp can update your addons",
+                            Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                    ]));
+                let inner = block.inner(card_area).inner(Margin::new(2, 0));
+                frame.render_widget(block, card_area);
+                frame.render_widget(Paragraph::new(card), inner);
+                area = Rect::new(area.x, area.y + height, area.width, area.height - height);
+            }
+        }
+        self.last_dashboard_list_area = Some(area);
 
         let cursor = self.dashboard.list_state.selected();
         let rows = self
@@ -891,10 +920,100 @@ impl App {
         frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
     }
 
-    /// The list body when there is nothing to list.
-    fn dashboard_empty_lines(&self) -> Vec<Line<'static>> {
+    /// The one time card while nothing is linked: every addon is "Not
+    /// linked" and the card has not been hidden with `d`. Docked Details
+    /// and a filter hide it for the moment.
+    pub(super) fn first_run_card_visible(&self) -> bool {
+        self.shell_mode == ShellMode::Dashboard
+            && !self.config_pane.persisted.hide_first_run_card
+            && !self.dashboard.items.is_empty()
+            && self
+                .dashboard
+                .items
+                .iter()
+                .all(|item| item.source == SourceKind::Manual)
+            && !self.dashboard.has_filter()
+            && !self.dashboard.filter_editing()
+            && !self.details_docked()
+    }
+
+    /// What the welcome card says, wrapped at `width`, with its keys at the
+    /// end of the last row when they fit.
+    fn first_run_card_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let text = Style::default().fg(roles.text);
+        let muted = Style::default().fg(roles.muted);
+        let key = |label: &'static str| {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(roles.lemon)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        let mut lines = wrap_lines(
+            &[
+                Line::from(Span::styled(
+                    format!(
+                        "LemonUp found {} in your AddOns folder, but it only updates addons it knows the source of.",
+                        addon_count_label(self.dashboard.items.len())
+                    ),
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("To link one, press ", text),
+                    key("i"),
+                    Span::styled(
+                        " and install it again from its source. LemonUp replaces your copy and keeps it updated.",
+                        text,
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    "Your addon settings are never touched.",
+                    muted,
+                )),
+            ],
+            width,
+        );
+        let keys = vec![
+            key("i"),
+            Span::styled(" install", muted),
+            Span::raw("    "),
+            Span::styled(
+                "d",
+                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" hide this", muted),
+        ];
+        let keys_width: usize = keys.iter().map(Span::width).sum();
+        let last = lines.last().map_or(0, Line::width);
+        if last + 4 + keys_width <= usize::from(width) {
+            let pad = usize::from(width) - last - keys_width;
+            if let Some(line) = lines.last_mut() {
+                line.spans.push(Span::raw(" ".repeat(pad)));
+                line.spans.extend(keys);
+            }
+        } else {
+            lines.push(Line::from(keys));
+        }
+        lines
+    }
+
+    /// The list body when there is nothing to list: still looking, the
+    /// folder can't be read, it is empty, or the filter matches nothing.
+    fn dashboard_empty_lines(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
         let indent = || Span::raw("     ");
+        let key = |label: &'static str, primary: bool| {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(if primary { roles.lemon } else { roles.blue })
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        let text = Style::default().fg(roles.text);
+        let bold = text.add_modifier(Modifier::BOLD);
         let mut lines = vec![Line::default()];
         if !self.dashboard.items.is_empty() {
             lines.push(Line::from(vec![
@@ -904,21 +1023,18 @@ impl App {
                         "Nothing you have installed matches \"{}\".",
                         truncate_text(self.dashboard.filter_query(), 40)
                     ),
-                    Style::default().fg(roles.text),
+                    text,
                 ),
             ]));
             lines.push(Line::default());
             lines.push(Line::from(vec![
                 indent(),
-                Span::styled(
-                    "esc",
-                    Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
-                ),
+                key("esc", false),
                 Span::styled("  clear the filter", Style::default().fg(roles.muted)),
             ]));
             return lines;
         }
-        let text = match &self.scan_state {
+        match &self.scan_state {
             ScanState::Failed(error) => {
                 lines.push(Line::from(vec![
                     indent(),
@@ -926,10 +1042,33 @@ impl App {
                         "! ",
                         Style::default().fg(roles.red).add_modifier(Modifier::BOLD),
                     ),
+                    Span::styled("LemonUp couldn't read your AddOns folder.", bold),
+                ]));
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    indent(),
                     Span::styled(
-                        "LemonUp couldn't read your AddOns folder.",
-                        Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
+                        "The folder may have moved, or the drive it is on isn't connected.",
+                        text,
                     ),
+                ]));
+                let path = self.friendly_addon_dir();
+                if !path.is_empty() {
+                    lines.push(Line::from(vec![
+                        indent(),
+                        Span::styled(
+                            shorten_path_middle(&path, usize::from(width).saturating_sub(6)),
+                            Style::default().fg(roles.muted),
+                        ),
+                    ]));
+                }
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    indent(),
+                    key(",", true),
+                    Span::styled("  settings, where ", text),
+                    key("r", false),
+                    Span::styled(" chooses the game folder again", text),
                 ]));
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
@@ -939,15 +1078,53 @@ impl App {
                         Style::default().fg(roles.dim),
                     ),
                 ]));
-                return lines;
             }
-            ScanState::Pending | ScanState::Running(_) => "Looking through your AddOns folder…",
-            _ => "Your AddOns folder is empty.",
-        };
-        lines.push(Line::from(vec![
-            indent(),
-            Span::styled(text, Style::default().fg(roles.muted)),
-        ]));
+            ScanState::Pending | ScanState::Running(_) => {
+                lines.push(Line::from(vec![
+                    indent(),
+                    Span::styled(
+                        "Looking through your AddOns folder…",
+                        Style::default().fg(roles.muted),
+                    ),
+                ]));
+            }
+            _ => {
+                lines.push(Line::from(vec![
+                    indent(),
+                    Span::styled("Your AddOns folder is empty.", bold),
+                ]));
+                lines.push(Line::default());
+                let install = vec![
+                    key("i", true),
+                    Span::styled("  install your first addon", text),
+                ];
+                let settings = vec![
+                    key(",", false),
+                    Span::styled(
+                        "  settings, where r chooses a different game folder",
+                        Style::default().fg(roles.muted),
+                    ),
+                ];
+                let one_row: usize = 5
+                    + install.iter().map(Span::width).sum::<usize>()
+                    + 10
+                    + settings.iter().map(Span::width).sum::<usize>();
+                if one_row <= usize::from(width) {
+                    let mut spans = vec![indent()];
+                    spans.extend(install);
+                    spans.push(Span::raw(" ".repeat(10)));
+                    spans.extend(settings);
+                    lines.push(Line::from(spans));
+                } else {
+                    let mut first = vec![indent()];
+                    first.extend(install);
+                    lines.push(Line::from(first));
+                    let mut second = vec![indent()];
+                    second.extend(settings);
+                    lines.push(Line::from(second));
+                }
+            }
+        }
         lines
     }
 
@@ -1192,7 +1369,7 @@ impl App {
                 StatusOffer::UndoDelete => spans.extend([
                     dot(),
                     key("z", roles.blue),
-                    Span::styled(" brings them back", Style::default().fg(roles.muted)),
+                    Span::styled(" undo delete", Style::default().fg(roles.muted)),
                 ]),
                 StatusOffer::UpdateAll => {
                     let updates = self.dashboard.update_ready_folders().len();
@@ -1392,11 +1569,11 @@ pub(super) fn dashboard_item_status_text(item: &DashboardItem) -> String {
     match dashboard_item_update_status(item) {
         UpdateStatus::UpToDate => "Up to date".to_string(),
         UpdateStatus::UpdateAvailable => dashboard_item_remote_label(item)
-            .map(|version| format!("Update: {version}"))
-            .unwrap_or_else(|| "Update".to_string()),
-        UpdateStatus::RemoteOlder => "Remote older".to_string(),
-        UpdateStatus::Unknown => "Unknown".to_string(),
-        UpdateStatus::Error => "Error".to_string(),
+            .map(|version| format!("Update ready: {version}"))
+            .unwrap_or_else(|| "Update ready".to_string()),
+        UpdateStatus::RemoteOlder => "Newer than source".to_string(),
+        UpdateStatus::Unknown => "Not checked yet".to_string(),
+        UpdateStatus::Error => "Check failed".to_string(),
     }
 }
 

@@ -88,11 +88,13 @@ impl App {
                 .inspect_resolved_target()
                 .map(|target| target.item.name.clone())
                 .unwrap_or_else(|| "Details".to_string()),
-            OverlayKind::Help => "Help".to_string(),
+            OverlayKind::Help => super::keymap::help_page(self.shell_ui.help_context)
+                .title
+                .to_string(),
             OverlayKind::Install | OverlayKind::Search => "Install".to_string(),
             OverlayKind::Update => "Update".to_string(),
-            OverlayKind::Config => "Config".to_string(),
-            OverlayKind::Backup => "Backup".to_string(),
+            OverlayKind::Config => "Settings".to_string(),
+            OverlayKind::Backup => "Backups of your game settings".to_string(),
             OverlayKind::Confirm => "Confirm".to_string(),
         };
         let chrome = SheetChrome {
@@ -106,9 +108,11 @@ impl App {
                     self.inspect_sheet_body(width)
                 })
             }
-            OverlayKind::Help => self.render_sheet(frame, region, header, kind, chrome, |_, _| {
-                self.help_sheet_body()
-            }),
+            OverlayKind::Help => {
+                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
+                    self.help_sheet_body(width)
+                })
+            }
             OverlayKind::Install | OverlayKind::Search => {
                 self.render_sheet(frame, region, header, kind, chrome, |width, height| {
                     self.search_sheet_body(width, height)
@@ -171,7 +175,7 @@ impl App {
 
     pub(super) fn dashboard_surface_label(&self) -> &'static str {
         match self.shell_ui.overlay.active {
-            Some(OverlayKind::Inspect) => "Inspect",
+            Some(OverlayKind::Inspect) => "Details",
             _ => detail_mode_label(self.dashboard.detail_mode),
         }
     }

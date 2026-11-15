@@ -56,6 +56,7 @@ use crate::wago::{
 };
 use time::{Duration, OffsetDateTime};
 
+mod dialog;
 mod direct_install;
 mod keymap;
 mod render_backup;
@@ -121,6 +122,8 @@ pub(crate) enum HelpContext {
     #[default]
     Overview,
     Inspect,
+    /// Details docked beside the list, where the list keys keep working.
+    DetailsDocked,
     InstallSearch,
     Config,
     Backup,
@@ -230,6 +233,7 @@ enum FooterHintId {
     CheckAll,
     Quit,
     Scroll,
+    HideCard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +344,10 @@ fn sanitize_single_line_paste(text: &str) -> String {
 enum AppMessage {
     Tick,
     QuitRequested,
+    /// Yes to "quit while updating?".
+    QuitConfirmed,
+    /// No to "quit while updating?".
+    QuitCancelled,
     /// Bracketed-paste text, routed to whichever text field is being edited.
     Paste(String),
     TerminalResized {
@@ -348,6 +356,8 @@ enum AppMessage {
     },
     DashboardOpenInspect,
     DashboardOpenHelp,
+    /// `d` on the welcome card: hide it for good.
+    DashboardHideFirstRunCard,
     DashboardCloseOverlay,
     /// Scrolls the open sheet's body.
     SheetScroll(SheetMove),
@@ -596,14 +606,14 @@ impl ConfigField {
 
     fn label(self) -> &'static str {
         match self {
-            Self::WagoApiKey => "Wago API key",
-            Self::CheckInterval => "Check freshness",
-            Self::AutoCheckEnabled => "Auto-check enabled",
-            Self::AutoCheckInterval => "Auto-check interval",
-            Self::BackupWtf => "Backup WTF",
-            Self::BackupRetention => "Backup retention",
+            Self::WagoApiKey => "Wago.io key",
+            Self::CheckInterval => "Don't re-check for",
+            Self::AutoCheckEnabled => "Check automatically",
+            Self::AutoCheckInterval => "Check every",
+            Self::BackupWtf => "Back up game settings",
+            Self::BackupRetention => "Backups to keep",
             Self::Theme => "Theme",
-            Self::ShowLibs => "Show libs",
+            Self::ShowLibs => "Show library folders",
         }
     }
 
@@ -1539,11 +1549,12 @@ impl DashboardState {
                 folder,
                 ..
             }) => Ok(vec![folder.clone()]),
+            // A folder row acts for the addon it belongs to.
             Some(DashboardRow {
-                kind: DashboardRowKind::OwnedChild { .. },
+                kind: DashboardRowKind::OwnedChild { parent_folder },
                 ..
-            }) => Err("focus a parent row or select one or more parent addons first"),
-            None => Err("focus a parent row or select one or more parent addons first"),
+            }) => Ok(vec![parent_folder.clone()]),
+            None => Err("Move to an addon first"),
         }
     }
 
@@ -2288,6 +2299,8 @@ pub struct App {
     active_onboarding_cancel: Option<Arc<AtomicBool>>,
     /// One-line startup notice (v1 migration result) and whether it is an error.
     startup_notice: Option<(String, bool)>,
+    /// `q` or Ctrl+C during an update asked whether to quit.
+    quit_question_open: bool,
 }
 
 impl App {
@@ -2443,6 +2456,7 @@ impl App {
             task_events_rx,
             active_onboarding_cancel: None,
             startup_notice: None,
+            quit_question_open: false,
         };
         app.status_line = app.initial_status_line();
         if let Some(notice) = binding_notice {
@@ -2547,7 +2561,7 @@ impl App {
                     self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Overview,
-                        "using addon-dir override",
+                        "Using the AddOns folder from --addon-dir",
                     )
                 } else if matches!(self.scan_state, ScanState::Pending) {
                     self.dashboard_status_for(
@@ -2595,7 +2609,7 @@ impl App {
             Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
                 self.dashboard.detail_mode,
-                &format!("{message} before checking for updates"),
+                message,
             ))],
             Ok(folders) => {
                 let target_len = folders.len();
@@ -2609,7 +2623,7 @@ impl App {
                         StatusKind::Working,
                         self.dashboard.detail_mode,
                         &format!(
-                            "checking {} addon{} for updates",
+                            "Checking {} addon{} for updates",
                             target_len,
                             plural_suffix(target_len)
                         ),
@@ -2629,25 +2643,25 @@ impl App {
             vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
                 self.dashboard.detail_mode,
-                "selected addon update already running",
+                "An update is already running",
             ))]
         } else if self.dashboard.pending_delete_folders().is_some() {
             vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
                 self.dashboard.detail_mode,
-                "confirm or cancel the pending delete before applying selected updates",
+                "Answer the delete question first",
             ))]
         } else {
             match (self.effective_addon_dir.clone(), targets) {
                 (_, Err(message)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     self.dashboard.detail_mode,
-                    &format!("{message} before applying updates"),
+                    message,
                 ))],
                 (None, Ok(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     self.dashboard.detail_mode,
-                    "addon directory is not configured",
+                    "LemonUp doesn't know your AddOns folder yet",
                 ))],
                 (Some(addon_dir), Ok(folders)) => {
                     let selected_len = folders.len();
@@ -2663,7 +2677,7 @@ impl App {
                             StatusKind::Working,
                             self.dashboard.detail_mode,
                             &format!(
-                                "updating {} addon{}",
+                                "Updating {} addon{}",
                                 selected_len,
                                 plural_suffix(selected_len)
                             ),
@@ -2825,7 +2839,7 @@ impl App {
             return vec![];
         }
 
-        if self.dashboard.pending_delete_folders().is_some() {
+        if self.active_question().is_some() {
             return vec![];
         }
 
@@ -2843,24 +2857,9 @@ impl App {
     }
 
     fn dashboard_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
-        if self.dashboard.pending_delete_folders().is_some() {
-            return match key.code {
-                KeyCode::Char('y') => vec![AppMessage::DashboardConfirmDelete],
-                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
-                    vec![AppMessage::DashboardCancelPendingDelete]
-                }
-                _ => vec![],
-            };
-        }
-
-        if self.pending_wago_install_confirmation.is_some() {
-            return match key.code {
-                KeyCode::Char('y') => vec![AppMessage::WagoConfirmInstall],
-                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
-                    vec![AppMessage::WagoCancelInstall]
-                }
-                _ => vec![],
-            };
+        // An open question takes every key: only its answers do anything.
+        if let Some(messages) = self.question_messages_for_key(key) {
+            return messages;
         }
 
         // Docked Details is not a mode: the list keys keep working, and only
@@ -3009,6 +3008,9 @@ impl App {
             KeyCode::Char('C') => vec![AppMessage::DashboardRunCheckAll],
             KeyCode::Char(',') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
+            KeyCode::Char('d') if self.first_run_card_visible() => {
+                vec![AppMessage::DashboardHideFirstRunCard]
+            }
             _ => vec![],
         }
     }
@@ -3023,8 +3025,7 @@ impl App {
                 .then_some(PasteTarget::Onboarding);
         }
 
-        if self.dashboard.pending_delete_folders().is_some()
-            || self.pending_wago_install_confirmation.is_some()
+        if self.active_question().is_some()
             || matches!(
                 self.shell_ui.overlay.active,
                 Some(OverlayKind::Inspect | OverlayKind::Help)
@@ -3206,25 +3207,6 @@ impl App {
             return None;
         }
 
-        if self.backup_pane.pending_restore.is_some() {
-            return Some(match key.code {
-                KeyCode::Char('y') => vec![AppMessage::BackupConfirmRestore],
-                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
-                    vec![AppMessage::BackupCancelRestore]
-                }
-                _ => vec![],
-            });
-        }
-        if self.backup_pane.pending_delete.is_some() {
-            return Some(match key.code {
-                KeyCode::Char('y') => vec![AppMessage::BackupConfirmDelete],
-                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
-                    vec![AppMessage::BackupCancelRestore]
-                }
-                _ => vec![],
-            });
-        }
-
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::BackupSelectionNext]),
             KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::BackupSelectionPrevious]),
@@ -3358,7 +3340,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Overview,
-                            "background check running",
+                            "Checking for updates in the background",
                         )),
                         AppAction::StartDashboardCheckSelected {
                             folders,
@@ -3371,7 +3353,15 @@ impl App {
                     actions
                 }
             }
-            AppMessage::QuitRequested => vec![AppAction::Quit],
+            // During an update, q and Ctrl+C ask first; asked again (a
+            // second Ctrl+C), they quit.
+            AppMessage::QuitRequested
+                if self.dashboard.update_in_progress() && !self.quit_question_open =>
+            {
+                vec![AppAction::SetQuitQuestion(true)]
+            }
+            AppMessage::QuitRequested | AppMessage::QuitConfirmed => vec![AppAction::Quit],
+            AppMessage::QuitCancelled => vec![AppAction::SetQuitQuestion(false)],
             AppMessage::Paste(text) => self.paste_actions(&text),
             AppMessage::TerminalResized { width, height } => {
                 vec![AppAction::SetStatus(self.with_base_status(
@@ -3420,10 +3410,9 @@ impl App {
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Overview,
-                    &format!(
-                        "Sorted by {} {}",
-                        column.label(),
-                        self.dashboard.sort_config().toggled(column).direction.indicator()
+                    &sort_status_text(
+                        column,
+                        self.dashboard.sort_config().toggled(column).direction,
                     ),
                 )),
             ],
@@ -3432,13 +3421,33 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Overview,
-                        "select an addon row before opening details",
+                        "Move to an addon first",
                     ))]
                 } else {
                     vec![
                         AppAction::SetInspectOverlay(true),
                         AppAction::SetStatus(StatusMessage::cleared()),
                     ]
+                }
+            }
+            AppMessage::DashboardHideFirstRunCard => {
+                let mut saved = self.config_pane.persisted.clone();
+                saved.hide_first_run_card = true;
+                match self.config_store.write_config(&saved) {
+                    Ok(()) => {
+                        let mut pane = self.config_pane.clone();
+                        pane.persisted = saved.clone();
+                        pane.draft.hide_first_run_card = true;
+                        vec![
+                            AppAction::SetPersistedConfig(saved),
+                            AppAction::SetConfigPaneState(pane),
+                        ]
+                    }
+                    Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
+                        DetailMode::Overview,
+                        &format!("Couldn't save your settings: {error}"),
+                    ))],
                 }
             }
             AppMessage::DashboardOpenHelp => vec![
@@ -3484,7 +3493,7 @@ impl App {
                         AppAction::SetSelectedDashboardParents(folders),
                         AppAction::SetStatus(if was_selected {
                             self.dashboard_status_for(
-                                StatusKind::Note,
+                                StatusKind::Quiet,
                                 DetailMode::Overview,
                                 &format!("cleared {}", target.item.name),
                             )
@@ -3503,18 +3512,15 @@ impl App {
                 Some(target) => vec![
                     AppAction::SetPendingDelete(Some(vec![target.item.folder.clone()])),
                     AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Note,
+                        StatusKind::Quiet,
                         DetailMode::Overview,
-                        &format!(
-                            "delete {}? press y to confirm, n to cancel",
-                            target.item.name
-                        ),
+                        &format!("asked to delete {}", target.item.name),
                     )),
                 ],
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Overview,
-                    "details has no addon to act on",
+                    "Move to an addon first",
                 ))],
             },
             AppMessage::InspectRunCheck => match self.inspect_resolved_target() {
@@ -3527,13 +3533,13 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Working,
                         DetailMode::Overview,
-                        &format!("checking {} for updates", target.item.name),
+                        &format!("Checking {} for updates", target.item.name),
                     )),
                 ],
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Overview,
-                    "details has no addon to act on",
+                    "Move to an addon first",
                 ))],
             },
             AppMessage::InspectRunUpdate => {
@@ -3541,13 +3547,13 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Overview,
-                        "selected addon update already running",
+                        "An update is already running",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Overview,
-                        "confirm or cancel the pending delete before applying updates",
+                        "Answer the delete question first",
                     ))]
                 } else {
                     match (
@@ -3557,18 +3563,21 @@ impl App {
                         (_, None) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Note,
                             DetailMode::Overview,
-                            "details has no addon to act on",
+                            "Move to an addon first",
                         ))],
                         (None, Some(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Overview,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))],
                         (Some(_), Some(target)) if !is_refreshable_dashboard_item(target.item) => {
                             vec![AppAction::SetStatus(self.dashboard_status_for(
                                 StatusKind::Note,
                                 DetailMode::Overview,
-                                &format!("{} is not updateable", target.item.name),
+                                &format!(
+                                    "LemonUp can't update {} yet: it isn't linked",
+                                    target.item.name
+                                ),
                             ))]
                         }
                         (Some(addon_dir), Some(target)) => vec![
@@ -3582,7 +3591,7 @@ impl App {
                             AppAction::SetStatus(self.dashboard_status_for(
                                 StatusKind::Working,
                                 DetailMode::Overview,
-                                &format!("updating {}", target.item.name),
+                                &format!("Updating {}", target.item.name),
                             )),
                         ],
                     }
@@ -3610,7 +3619,7 @@ impl App {
                     Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        &format!("{message} before deleting"),
+                        message,
                     ))],
                     Ok(folders) => {
                         let question = if selected_count == 0 {
@@ -3618,10 +3627,10 @@ impl App {
                                 .dashboard
                                 .selected_row()
                                 .map_or_else(|| folders[0].clone(), |row| row.name.clone());
-                            format!("delete {name}? press y to confirm, n to cancel")
+                            format!("asked to delete {name}")
                         } else {
                             format!(
-                                "delete {} selected addon{}? press y to confirm, n to cancel",
+                                "asked to delete {} addon{}",
                                 folders.len(),
                                 plural_suffix(folders.len())
                             )
@@ -3629,7 +3638,7 @@ impl App {
                         vec![
                             AppAction::SetPendingDelete(Some(folders)),
                             AppAction::SetStatus(self.dashboard_status_for(
-                                StatusKind::Note,
+                                StatusKind::Quiet,
                                 self.dashboard.detail_mode,
                                 &question,
                             )),
@@ -3652,21 +3661,21 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Working,
                         self.dashboard.detail_mode,
-                        "delete running",
+                        "Deleting…",
                     )),
                 ],
                 _ => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     self.dashboard.detail_mode,
-                    "no pending delete to confirm",
+                    "Nothing to delete",
                 ))],
             },
             AppMessage::DashboardCancelPendingDelete => vec![
                 AppAction::SetPendingDelete(None),
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
-                    "delete cancelled",
+                    "delete question closed",
                 )),
             ],
             AppMessage::DashboardUndoDelete => {
@@ -3674,13 +3683,13 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "confirm or cancel the pending delete before undoing the last delete",
+                        "Answer the delete question first",
                     ))]
                 } else if self.undo_delete_in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "undo delete already running",
+                        "Already undoing the delete",
                     ))]
                 } else if let Some(undo) = self.undo_delete.clone() {
                     vec![
@@ -3690,7 +3699,7 @@ impl App {
                             StatusKind::Working,
                             self.dashboard.detail_mode,
                             &format!(
-                                "restoring last delete: {} parent addon{}, {} folder{}",
+                                "Undoing delete of {} addon{} ({} folder{})",
                                 undo.parent_count(),
                                 plural_suffix(undo.parent_count()),
                                 undo.moved_folder_count(),
@@ -3702,7 +3711,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "no delete undo is available",
+                        "Nothing to undo",
                     ))]
                 }
             }
@@ -3712,7 +3721,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "no linked addons to check",
+                        "Nothing to check: none of these addons are linked",
                     ))]
                 } else {
                     self.dashboard_check_actions(Ok(folders))
@@ -3724,7 +3733,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "no updates are ready",
+                        "No updates are ready",
                     ))]
                 } else {
                     self.dashboard_update_actions(Ok(folders))
@@ -3738,25 +3747,27 @@ impl App {
             }
             AppMessage::DashboardToggleSelected => {
                 vec![
-                AppAction::ToggleDashboardSelection,
-                AppAction::SetStatus(match self.dashboard.selected_row() {
-                    Some(DashboardRow {
-                        kind: DashboardRowKind::OwnedChild { .. },
-                        ..
-                    }) => self.dashboard_status_for(StatusKind::Note,
-                        self.dashboard.detail_mode,
-                        "owned child rows inherit parent actions | select the parent row instead",
-                    ),
-                    _ => self.dashboard_status_for(StatusKind::Quiet,
-                        self.dashboard.detail_mode,
-                        &format!(
-                            "selected {} addon{}",
-                            selection_count_after_toggle(&self.dashboard),
-                            plural_suffix(selection_count_after_toggle(&self.dashboard))
+                    AppAction::ToggleDashboardSelection,
+                    AppAction::SetStatus(match self.dashboard.selected_row() {
+                        Some(DashboardRow {
+                            kind: DashboardRowKind::OwnedChild { .. },
+                            ..
+                        }) => self.dashboard_status_for(
+                            StatusKind::Note,
+                            self.dashboard.detail_mode,
+                            "Move to the addon this folder belongs to first",
                         ),
-                    ),
-                }),
-            ]
+                        _ => self.dashboard_status_for(
+                            StatusKind::Quiet,
+                            self.dashboard.detail_mode,
+                            &format!(
+                                "selected {} addon{}",
+                                selection_count_after_toggle(&self.dashboard),
+                                plural_suffix(selection_count_after_toggle(&self.dashboard))
+                            ),
+                        ),
+                    }),
+                ]
             }
             AppMessage::DashboardSelectAll => vec![
                 AppAction::SelectAllDashboardParents,
@@ -3817,7 +3828,7 @@ impl App {
             AppMessage::DashboardExpandAllRelationships => vec![
                 AppAction::ExpandAllDashboardRelationships,
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
                     "expanded all relationship rows",
                 )),
@@ -3825,7 +3836,7 @@ impl App {
             AppMessage::DashboardCollapseAllRelationships => vec![
                 AppAction::CollapseAllDashboardRelationships,
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
                     "collapsed all relationship rows",
                 )),
@@ -3841,7 +3852,7 @@ impl App {
             AppMessage::SetDetailMode(detail_mode) => vec![
                 AppAction::SetDetailMode(detail_mode),
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     detail_mode,
                     &format!("{} selected", detail_mode_label(detail_mode)),
                 )),
@@ -3851,7 +3862,7 @@ impl App {
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Install,
-                    "editing Wago target | enter install | esc stop editing",
+                    "editing Wago.io link | enter install | esc stop editing",
                 )),
             ],
             AppMessage::InstallStopEditing => vec![
@@ -3859,7 +3870,7 @@ impl App {
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Install,
-                    "Wago direct install ready | e edit target | enter install",
+                    "Wago.io install ready | e edit link | enter install",
                 )),
             ],
             AppMessage::InstallInputChar(character) => vec![AppAction::SetInstallPaneState(
@@ -3879,25 +3890,25 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Install,
-                        "confirm or cancel the pending delete before installing addons",
+                        "Answer the delete question first",
                     ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Install,
-                        "Wago install unavailable: no API key configured",
+                        "Wago.io installs need your Wago.io key",
                     ))]
                 } else if self.install_pane.input.trim().is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Install,
-                        "enter a Wago slug or addon URL before installing",
+                        "Enter a Wago.io addon or link before installing",
                     ))]
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Install,
-                        "addon directory is not configured",
+                        "LemonUp doesn't know your AddOns folder yet",
                     ))]
                 } else {
                     let request = PendingWagoInstallRequest {
@@ -3915,7 +3926,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Install,
-                            "checking Wago package and preparing install",
+                            "Checking the Wago.io addon before installing",
                         )),
                     ]
                 }
@@ -3957,7 +3968,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "Wago search already running",
+                        "A Wago.io search is already running",
                     ))]
                 } else if let Some(busy) = self.install_busy_status() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -3975,7 +3986,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Search,
-                            &format!("cannot install from URL: {message}"),
+                            &format!("Couldn't install from that link: {message}"),
                         )),
                     ]
                 } else if let SearchInputIntent::Direct(request) = intent {
@@ -3990,20 +4001,20 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Search,
-                        "Wago search unavailable: no API key configured",
+                        "Wago.io search needs your Wago.io key",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "confirm or cancel the pending delete before installing addons",
+                        "Answer the delete question first",
                     ))]
                 } else if let Some(target) = self.search_direct_install_target() {
                     if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Search,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))]
                     } else {
                         let request = PendingWagoInstallRequest {
@@ -4028,7 +4039,7 @@ impl App {
                                 StatusKind::Working,
                                 DetailMode::Search,
                                 &format!(
-                                    "checking Wago addon '{}' for install",
+                                    "Checking {} on Wago.io before installing",
                                     self.search_pane.query.trim()
                                 ),
                             )),
@@ -4045,7 +4056,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Search,
-                            &format!("searching Wago for '{query}'"),
+                            &format!("Searching Wago.io for \"{query}\""),
                         )),
                     ]
                 }
@@ -4055,7 +4066,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "no Wago search results to select",
+                        "No Wago.io results to choose",
                     ))]
                 } else {
                     vec![
@@ -4073,7 +4084,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "no Wago search results to select",
+                        "No Wago.io results to choose",
                     ))]
                 } else {
                     vec![
@@ -4097,13 +4108,13 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Search,
-                        "Wago install unavailable: no API key configured",
+                        "Wago.io installs need your Wago.io key",
                     ))]
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Search,
-                        "addon directory is not configured",
+                        "LemonUp doesn't know your AddOns folder yet",
                     ))]
                 } else if let Some(result) = self.search_pane.selected_result() {
                     let request = PendingWagoInstallRequest {
@@ -4122,14 +4133,17 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Search,
-                            &format!("checking Wago result '{}' for install", result.display_name),
+                            &format!(
+                                "Checking {} on Wago.io before installing",
+                                result.display_name
+                            ),
                         )),
                     ]
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "select a Wago search result before installing",
+                        "Choose a Wago.io result before installing",
                     ))]
                 }
             }
@@ -4145,7 +4159,7 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Note,
                             DetailMode::Search,
-                            "confirm or cancel the pending delete before installing addons",
+                            "Answer the delete question first",
                         ))]
                     } else if let Some(addon_dir) = self.effective_addon_dir.clone() {
                         vec![
@@ -4157,7 +4171,7 @@ impl App {
                                 StatusKind::Working,
                                 DetailMode::Search,
                                 &format!(
-                                    "installing {} from {}",
+                                    "Installing {} from {}",
                                     request.display,
                                     request.provider.label()
                                 ),
@@ -4168,23 +4182,23 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Search,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))]
                     }
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
-                        "no direct install confirmation is pending",
+                        "Nothing to install",
                     ))]
                 }
             }
             AppMessage::SearchCancelDirectInstall => vec![
                 AppAction::SetSearchPaneState(self.search_pane.cancel_direct_install()),
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     DetailMode::Search,
-                    "install cancelled",
+                    "install question closed",
                 )),
             ],
             AppMessage::WagoConfirmInstall => {
@@ -4199,7 +4213,7 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             self.dashboard.detail_mode,
-                            "Wago install unavailable: no API key configured",
+                            "Wago.io installs need your Wago.io key",
                         ))]
                     } else if let Some(addon_dir) = self.effective_addon_dir.clone() {
                         let mut actions = vec![
@@ -4220,12 +4234,11 @@ impl App {
                         }
                         let status_message = if self.dashboard.detail_mode == DetailMode::Search {
                             format!(
-                                "reinstalling tracked addon '{}' from Wago",
+                                "Reinstalling {} from Wago.io",
                                 confirmation.inspection.addon_name
                             )
                         } else {
-                            "replacing existing addon folders from confirmed Wago install"
-                                .to_string()
+                            "Replacing your copy from Wago.io".to_string()
                         };
                         actions.push(AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
@@ -4237,14 +4250,14 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             self.dashboard.detail_mode,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))]
                     }
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "no Wago install confirmation is pending",
+                        "Nothing to replace",
                     ))]
                 }
             }
@@ -4252,9 +4265,9 @@ impl App {
                 AppAction::SetPendingWagoInstallConfirmation(None),
                 AppAction::SetSearchPaneState(self.search_pane.clear_install_state()),
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
-                    "Wago install cancelled",
+                    "replace question closed",
                 )),
             ],
             AppMessage::ConfigSelectionNext => vec![AppAction::SetConfigPaneState(
@@ -4295,7 +4308,7 @@ impl App {
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Config,
-                    &format!("config edit failed: {error}"),
+                    &format!("Couldn't save your settings: {error}"),
                 ))],
             },
             AppMessage::ConfigCancelEdit => {
@@ -4338,7 +4351,7 @@ impl App {
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Config,
-                    "re-entering onboarding",
+                    "Opening setup again",
                 )),
             ],
             AppMessage::ConfigExportAddons => match default_transfer_path() {
@@ -4360,14 +4373,14 @@ impl App {
                         Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
-                            &format!("addon export failed: {error}"),
+                            &format!("Couldn't export your addon list: {error}"),
                         ))],
                     }
                 }
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Config,
-                    &format!("addon export failed: {error}"),
+                    &format!("Couldn't export your addon list: {error}"),
                 ))],
             },
             AppMessage::ConfigImportAddons => match default_transfer_path() {
@@ -4376,7 +4389,7 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
-                            "configure an addon directory before importing",
+                            "Set your AddOns folder before importing",
                         ))]
                     } else {
                         vec![
@@ -4396,7 +4409,7 @@ impl App {
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Config,
-                    &format!("addon import failed: {error}"),
+                    &format!("Couldn't import the addon list: {error}"),
                 ))],
             },
             AppMessage::BackupRunNow => {
@@ -4404,7 +4417,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "WTF backup already running",
+                        "A backup is already running",
                     ))]
                 } else if let Some(last_completed) = self.backup_pane.last_completed_backup_at {
                     let elapsed = OffsetDateTime::now_utc() - last_completed;
@@ -4414,7 +4427,7 @@ impl App {
                             StatusKind::Note,
                             DetailMode::Backup,
                             &format!(
-                                "backup created recently; wait {} more second{}",
+                                "You backed up a moment ago; wait {} more second{}",
                                 remaining,
                                 plural_suffix(remaining as usize)
                             ),
@@ -4423,7 +4436,7 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Backup,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))]
                     } else {
                         vec![
@@ -4436,7 +4449,7 @@ impl App {
                             AppAction::SetStatus(self.dashboard_status_for(
                                 StatusKind::Working,
                                 DetailMode::Backup,
-                                "creating WTF backup",
+                                "Backing up your game settings…",
                             )),
                         ]
                     }
@@ -4444,7 +4457,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Backup,
-                        "addon directory is not configured",
+                        "LemonUp doesn't know your AddOns folder yet",
                     ))]
                 } else {
                     vec![
@@ -4457,7 +4470,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Backup,
-                            "creating WTF backup",
+                            "Backing up your game settings…",
                         )),
                     ]
                 }
@@ -4473,21 +4486,21 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "backup work already running",
+                        "A backup task is already running",
                     ))]
                 } else if self.backup_pane.selected_backup().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "select a backup before restoring",
+                        "Choose a backup first",
                     ))]
                 } else {
                     vec![
                         AppAction::SetBackupPaneState(self.backup_pane.request_restore()),
                         AppAction::SetStatus(self.dashboard_status_for(
-                            StatusKind::Note,
+                            StatusKind::Quiet,
                             DetailMode::Backup,
-                            "restore will replace the current WTF folder | y confirm | n cancel",
+                            "asked to restore a backup",
                         )),
                     ]
                 }
@@ -4497,21 +4510,21 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "backup work already running",
+                        "A backup task is already running",
                     ))]
                 } else if self.backup_pane.selected_backup().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "select a backup before deleting",
+                        "Choose a backup first",
                     ))]
                 } else {
                     vec![
                         AppAction::SetBackupPaneState(self.backup_pane.request_delete()),
                         AppAction::SetStatus(self.dashboard_status_for(
-                            StatusKind::Note,
+                            StatusKind::Quiet,
                             DetailMode::Backup,
-                            "delete selected backup? | y confirm | n cancel",
+                            "asked to delete a backup",
                         )),
                     ]
                 }
@@ -4521,14 +4534,14 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "backup work already running",
+                        "A backup task is already running",
                     ))]
                 } else if let Some(backup) = self.backup_pane.pending_restore.clone() {
                     if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Backup,
-                            "addon directory is not configured",
+                            "LemonUp doesn't know your AddOns folder yet",
                         ))]
                     } else {
                         vec![
@@ -4540,7 +4553,7 @@ impl App {
                             AppAction::SetStatus(self.dashboard_status_for(
                                 StatusKind::Working,
                                 DetailMode::Backup,
-                                "restoring WTF backup",
+                                "Putting back your game settings…",
                             )),
                         ]
                     }
@@ -4553,7 +4566,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Backup,
-                        "backup work already running",
+                        "A backup task is already running",
                     ))]
                 } else if let Some(backup) = self.backup_pane.pending_delete.clone() {
                     vec![
@@ -4565,7 +4578,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Working,
                             DetailMode::Backup,
-                            "deleting backup",
+                            "Deleting the backup…",
                         )),
                     ]
                 } else {
@@ -4575,9 +4588,9 @@ impl App {
             AppMessage::BackupCancelRestore => vec![
                 AppAction::SetBackupPaneState(self.backup_pane.cancel_restore().cancel_delete()),
                 AppAction::SetStatus(self.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     DetailMode::Backup,
-                    "backup action cancelled",
+                    "backup question closed",
                 )),
             ],
             AppMessage::OnboardingNextStep => match self.onboarding.step {
@@ -4585,12 +4598,12 @@ impl App {
                     AppAction::SetOnboardingState(self.onboarding.next_step()),
                     AppAction::SetStatus(self.with_base_status(
                         StatusKind::Note,
-                        "step 2/5 | choose or validate an AddOns path",
+                        "step 2/5 | choose or check an AddOns folder",
                     )),
                 ],
                 OnboardingStep::Directory => vec![AppAction::SetStatus(self.with_base_status(
                     StatusKind::Note,
-                    "validate or confirm a directory before continuing",
+                    "Check or choose a folder before continuing",
                 ))],
                 OnboardingStep::Wago => vec![
                     AppAction::SetOnboardingState(self.onboarding.next_step()),
@@ -4656,7 +4669,7 @@ impl App {
                     _ => self.onboarding.clone(),
                 };
                 let status = match self.onboarding.step {
-                    OnboardingStep::Directory => "editing path | enter validate | esc stop editing",
+                    OnboardingStep::Directory => "editing folder | enter check | esc stop editing",
                     OnboardingStep::Wago => "editing Wago API key | enter apply | esc cancel",
                     _ => "editing",
                 };
@@ -4671,7 +4684,7 @@ impl App {
                     OnboardingStep::Directory => self.location_finder_status(),
                     OnboardingStep::Wago => self.with_base_status(
                         StatusKind::Note,
-                        "wago step ready | e edit key | enter next",
+                        "Wago.io step | e edit key | enter next",
                     ),
                     _ => self.with_base_status(StatusKind::Note, "editing stopped"),
                 }),
@@ -4686,12 +4699,13 @@ impl App {
                 let current_path = PathBuf::from(self.onboarding.input.trim());
                 if self.is_guarded_path(&current_path) {
                     return vec![
-                        AppAction::SetOnboardingState(self.onboarding.error(
-                            "this profile cannot target the default profile AddOns directory",
-                        )),
+                        AppAction::SetOnboardingState(
+                            self.onboarding
+                                .error("this profile can't use the main AddOns folder"),
+                        ),
                         AppAction::SetStatus(self.with_base_status(
                             StatusKind::Problem,
-                            "blocked default target | choose another location",
+                            "main AddOns folder blocked | choose another folder",
                         )),
                     ];
                 }
@@ -4708,7 +4722,7 @@ impl App {
                         AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
                         AppAction::SetStatus(self.with_base_status(
                             StatusKind::Problem,
-                            &format!("validation failed: {error}"),
+                            &format!("That folder doesn't work: {error}"),
                         )),
                     ],
                 }
@@ -4751,16 +4765,15 @@ impl App {
                     AppAction::SetOnboardingState(
                         self.onboarding.apply_directory_to_draft().next_step(),
                     ),
-                    AppAction::SetStatus(self.with_base_status(
-                        StatusKind::Done,
-                        "directory confirmed | step 3/5 Wago setup",
-                    )),
+                    AppAction::SetStatus(
+                        self.with_base_status(StatusKind::Done, "folder chosen | step 3/5 Wago.io"),
+                    ),
                 ],
                 FoundAction::EnterDifferentPath => vec![
                     AppAction::SetOnboardingState(self.onboarding.begin_directory_editing()),
                     AppAction::SetStatus(self.with_base_status(
                         StatusKind::Note,
-                        "editing path | enter validate | esc stop editing",
+                        "editing folder | enter check | esc stop editing",
                     )),
                 ],
             },
@@ -4795,7 +4808,7 @@ impl App {
                 }
                 AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(_))) => vec![
                     AppAction::SetOnboardingState(self.onboarding.error(format!(
-                        "no WoW install found under {}",
+                        "Couldn't find World of Warcraft under {}",
                         self.onboarding.input.trim()
                     ))),
                     AppAction::SetStatus(self.with_base_status(
@@ -4808,7 +4821,7 @@ impl App {
                         AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
                         AppAction::SetStatus(self.with_base_status(
                             StatusKind::Problem,
-                            &format!("deep scan failed: {error}"),
+                            &format!("The search failed: {error}"),
                         )),
                     ]
                 }
@@ -4836,13 +4849,7 @@ impl App {
                         let status = self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
-                            &format!(
-                                "deleted {} addon{}, moved {} folder{} to trash, sync complete",
-                                outcome.deleted_parents,
-                                plural_suffix(outcome.deleted_parents),
-                                outcome.deleted_folders,
-                                plural_suffix(outcome.deleted_folders),
-                            ),
+                            &format!("Deleted {}", addon_count_label(outcome.deleted_parents)),
                         );
                         if outcome.undo_delete.is_some() {
                             status.offering(StatusOffer::UndoDelete)
@@ -4856,7 +4863,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         self.dashboard.detail_mode,
-                        &format!("delete failed: {error}"),
+                        &format!("Couldn't delete: {error}"),
                     )),
                 ],
                 AppTaskEvent::DashboardUndoFinished(Ok(outcome)) => vec![
@@ -4872,11 +4879,8 @@ impl App {
                         StatusKind::Done,
                         self.dashboard.detail_mode,
                         &format!(
-                            "undo complete: restored {} parent addon{} and {} folder{}",
-                            outcome.restored_parents,
-                            plural_suffix(outcome.restored_parents),
-                            outcome.restored_folders,
-                            plural_suffix(outcome.restored_folders)
+                            "Undid delete of {}",
+                            addon_count_label(outcome.restored_parents)
                         ),
                     )),
                 ],
@@ -4885,7 +4889,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         self.dashboard.detail_mode,
-                        &format!("undo delete failed: {error}"),
+                        &format!("Couldn't undo delete: {error}"),
                     )),
                 ],
                 AppTaskEvent::DashboardJobProgress(progress) => vec![
@@ -4894,7 +4898,7 @@ impl App {
                         StatusKind::Working,
                         self.dashboard.detail_mode,
                         &format!(
-                            "{} {} of {} | {}",
+                            "{} {} of {} · {}",
                             progress.kind.label().to_ascii_lowercase(),
                             progress.current_index,
                             progress.total,
@@ -4914,26 +4918,13 @@ impl App {
                                 StatusKind::Done
                             },
                             self.dashboard.detail_mode,
-                            &(if self.auto_check_in_progress {
-                                format!(
-                                    "background {}",
-                                    dashboard_check_status_message(
-                                        &outcome.targets,
-                                        outcome.total,
-                                        outcome.live_checked,
-                                        outcome.cached,
-                                        outcome.errors,
-                                    )
-                                )
-                            } else {
-                                dashboard_check_status_message(
-                                    &outcome.targets,
-                                    outcome.total,
-                                    outcome.live_checked,
-                                    outcome.cached,
-                                    outcome.errors,
-                                )
-                            }),
+                            &dashboard_check_status_message(
+                                &self.dashboard_names(&outcome.targets),
+                                outcome.total,
+                                outcome.live_checked,
+                                outcome.cached,
+                                outcome.errors,
+                            ),
                         )
                         // Shown only while some addon has an update ready.
                         .offering(StatusOffer::UpdateAll),
@@ -4945,15 +4936,12 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         self.dashboard.detail_mode,
-                        &if self.auto_check_in_progress {
-                            format!("background check failed: {error}")
-                        } else {
-                            format!("check failed: {error}")
-                        },
+                        &format!("Couldn't check for updates: {error}"),
                     )),
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => {
-                    let status_message = dashboard_update_status_message(&outcome);
+                    let failed_names = self.dashboard_names(&outcome.failed_folders);
+                    let status_message = dashboard_update_status_message(&outcome, &failed_names);
                     vec![
                         AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                         AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
@@ -4987,19 +4975,15 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         self.dashboard.detail_mode,
-                        &format!("selected addon update failed: {error}"),
+                        &format!("Couldn't update: {error}"),
                     )),
                 ],
                 AppTaskEvent::BackupFinished(Ok(outcome)) => {
-                    let mut message = format!(
-                        "backup complete: {} ({} bytes)",
-                        outcome.backup.label, outcome.backup.size_bytes
-                    );
+                    let mut message = "Backed up your game settings".to_string();
                     if !outcome.pruned_files.is_empty() {
                         message.push_str(&format!(
-                            " | pruned {} older backup{}",
-                            outcome.pruned_files.len(),
-                            plural_suffix(outcome.pruned_files.len())
+                            " · keeping the newest {}",
+                            self.config_pane.draft.backup_retention
                         ));
                     }
                     vec![
@@ -5021,7 +5005,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Backup,
-                        &format!("WTF backup failed: {error}"),
+                        &format!("Couldn't back up your game settings: {error}"),
                     )),
                 ],
                 AppTaskEvent::BackupRestoreFinished(Ok(outcome)) => vec![
@@ -5029,7 +5013,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Done,
                         DetailMode::Backup,
-                        &format!("restored WTF from {}", outcome.backup.label),
+                        &format!("Put back your game settings from {}", outcome.backup.label),
                     )),
                 ],
                 AppTaskEvent::BackupRestoreFinished(Err(error)) => vec![
@@ -5037,7 +5021,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Backup,
-                        &format!("WTF restore failed: {error}"),
+                        &format!("Couldn't put back your game settings: {error}"),
                     )),
                 ],
                 AppTaskEvent::BackupDeleteFinished(Ok(outcome)) => vec![
@@ -5049,7 +5033,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Done,
                         DetailMode::Backup,
-                        &format!("deleted backup {}", outcome.deleted.label),
+                        &format!("Deleted the backup from {}", outcome.deleted.label),
                     )),
                 ],
                 AppTaskEvent::BackupDeleteFinished(Err(error)) => vec![
@@ -5057,7 +5041,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Backup,
-                        &format!("backup delete failed: {error}"),
+                        &format!("Couldn't delete the backup: {error}"),
                     )),
                 ],
                 AppTaskEvent::TransferImportFinished(Ok(outcome)) => {
@@ -5085,7 +5069,7 @@ impl App {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Config,
-                        &format!("addon import failed: {error}"),
+                        &format!("Couldn't import the addon list: {error}"),
                     ))]
                 }
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
@@ -5097,7 +5081,7 @@ impl App {
                         StatusKind::Done,
                         DetailMode::Search,
                         &format!(
-                            "Wago search complete: {} result{}",
+                            "Found {} addon{} on Wago.io",
                             outcome.results.len(),
                             plural_suffix(outcome.results.len())
                         ),
@@ -5108,7 +5092,7 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Search,
-                        &format!("Wago search failed: {error}"),
+                        &format!("Couldn't search Wago.io: {error}"),
                     )),
                 ],
                 AppTaskEvent::WagoInstallFinished(Ok(
@@ -5118,9 +5102,9 @@ impl App {
                     },
                 )) => {
                     let confirmation_status = if inspection.tracked_parent.is_some() {
-                        "tracked addon already installed: press y to reinstall, n or esc to cancel"
+                        "asked to reinstall"
                     } else {
-                        "Wago install needs confirmation: press y to replace, n or esc to cancel"
+                        "asked to replace"
                     };
                     vec![
                         AppAction::SetSearchPaneState(
@@ -5134,7 +5118,7 @@ impl App {
                             },
                         )),
                         AppAction::SetStatus(self.dashboard_status_for(
-                            StatusKind::Note,
+                            StatusKind::Quiet,
                             self.dashboard.detail_mode,
                             confirmation_status,
                         )),
@@ -5158,10 +5142,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
-                            &format!(
-                                "installed Wago addon '{}' into {} | sync complete",
-                                outcome.summary.addon_name, outcome.summary.parent_folder
-                            ),
+                            &format!("{} is installed", outcome.summary.addon_name),
                         )),
                     ]
                 }
@@ -5177,7 +5158,7 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             self.dashboard.detail_mode,
-                            &format!("Wago install failed: {error}"),
+                            &format!("Couldn't install from Wago.io: {error}"),
                         )),
                     ]
                 }
@@ -5186,13 +5167,12 @@ impl App {
                     result: Ok(outcome),
                 } => {
                     let mut status = format!(
-                        "installed {} addon '{}' into {} | sync complete",
-                        request.provider.label(),
+                        "{} is installed from {}",
                         outcome.addon_name,
-                        outcome.parent_folder
+                        request.provider.label()
                     );
                     if let Some(warning) = &outcome.warning {
-                        status.push_str(&format!(" | warning: {warning}"));
+                        status.push_str(&format!(" | {warning}"));
                     }
                     vec![
                         AppAction::SetSearchPaneState(
@@ -5225,7 +5205,10 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Problem,
                         self.dashboard.detail_mode,
-                        &format!("{} install failed: {error}", request.provider.label()),
+                        &format!(
+                            "Couldn't install from {}: {error}",
+                            request.provider.label()
+                        ),
                     )),
                 ],
             },
@@ -5235,6 +5218,7 @@ impl App {
     fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.quit_requested = true,
+            AppAction::SetQuitQuestion(open) => self.quit_question_open = open,
             AppAction::AdvanceMotionTick => {
                 self.shell_ui.motion = self.shell_ui.motion.advance();
                 if self
@@ -5269,7 +5253,10 @@ impl App {
                     self.shell_ui.overlay.active = match self.dashboard.detail_mode {
                         // Help opened from Details goes back to it.
                         DetailMode::Overview
-                            if self.shell_ui.help_context == HelpContext::Inspect =>
+                            if matches!(
+                                self.shell_ui.help_context,
+                                HelpContext::Inspect | HelpContext::DetailsDocked
+                            ) =>
                         {
                             Some(OverlayKind::Inspect)
                         }
@@ -5322,6 +5309,10 @@ impl App {
             }
             AppAction::SetDashboardUpdateInProgress(in_progress) => {
                 self.dashboard.set_update_in_progress(in_progress);
+                if !in_progress {
+                    // Nothing is updating any more, so the question is moot.
+                    self.quit_question_open = false;
+                }
             }
             AppAction::SetDashboardAutoCheckInProgress(in_progress) => {
                 self.auto_check_in_progress = in_progress;
@@ -5414,7 +5405,7 @@ impl App {
             AppAction::ExpandAllDashboardRelationships => {
                 if self.dashboard.expand_all_relationships() {
                     self.status_line = self.dashboard_status_for(
-                        StatusKind::Note,
+                        StatusKind::Quiet,
                         self.dashboard.detail_mode,
                         "expanded all relationship rows",
                     );
@@ -5423,7 +5414,7 @@ impl App {
             AppAction::CollapseAllDashboardRelationships => {
                 if self.dashboard.collapse_all_relationships() {
                     self.status_line = self.dashboard_status_for(
-                        StatusKind::Note,
+                        StatusKind::Quiet,
                         self.dashboard.detail_mode,
                         "collapsed all relationship rows",
                     );
@@ -5533,7 +5524,7 @@ impl App {
                         .error("wizard cannot finish without a valid AddOns directory");
                     self.status_line = self.with_base_status(
                         StatusKind::Problem,
-                        "finish blocked | select a valid AddOns directory",
+                        "finish blocked | choose an AddOns folder that exists",
                     );
                     self.shell_mode = ShellMode::Onboarding;
                     return;
@@ -5541,10 +5532,10 @@ impl App {
                 if self.is_guarded_path(&path) {
                     self.onboarding = self
                         .onboarding
-                        .error("this profile cannot target the default profile AddOns directory");
+                        .error("this profile can't use the main AddOns folder");
                     self.status_line = self.with_base_status(
                         StatusKind::Problem,
-                        "refused to save default target into non-default profile",
+                        "refused to save the main AddOns folder into a non-default profile",
                     );
                     self.shell_mode = ShellMode::Onboarding;
                     return;
@@ -5633,7 +5624,7 @@ impl App {
                 self.status_line = self.dashboard_status_for(
                     StatusKind::Working,
                     self.dashboard.detail_mode,
-                    &format!("scanning {} and syncing state", path.display()),
+                    "Looking through your AddOns folder…",
                 );
 
                 let sender = self.task_events_tx.clone();
@@ -5893,11 +5884,12 @@ impl App {
                     path: path.clone(),
                     summary: summary.clone(),
                 };
+                // Looking through the folder ends with nothing to say.
                 self.status_line = self.dashboard_status_for(
-                    StatusKind::Done,
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
                     &format!(
-                        "scan complete | {} addons synced, {} removed",
+                        "looked through the AddOns folder: {} addons, {} removed",
                         summary.upserted_addons, summary.removed_addons
                     ),
                 );
@@ -5915,7 +5907,7 @@ impl App {
                 self.status_line = self.dashboard_status_for(
                     StatusKind::Problem,
                     self.dashboard.detail_mode,
-                    &format!("scan failed: {error}"),
+                    &format!("LemonUp couldn't read your AddOns folder: {error}"),
                 );
             }
         }
@@ -6236,7 +6228,7 @@ impl App {
             }
             OnboardingPhase::DeepScanning(progress) => {
                 lines.push(Line::from(Span::styled(
-                    format!("Scanning... {} directories checked", progress.dirs_scanned),
+                    format!("Searching… {} folders checked", progress.dirs_scanned),
                     Style::default().fg(self.ui_theme.warning),
                 )));
                 lines.push(Line::from(progress.current_path.clone()));
@@ -6297,7 +6289,7 @@ impl App {
                 if found.paths.len() > 1 {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
-                        "Each profile manages one AddOns folder. Use --profile <name> for the other install.",
+                        "LemonUp looks after one game version at a time. Use --profile <name> for the other one.",
                         Style::default().fg(self.ui_theme.muted),
                     )));
                 }
@@ -6374,17 +6366,31 @@ impl App {
         let value = self.onboarding.wago_api_key_value();
         vec![
             Line::from(Span::styled(
-                "Connect Wago (optional)",
+                "Wago.io key (you can skip this)",
                 Style::default()
                     .fg(self.ui_theme.highlight)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
+                "Wago.io is one of the sites LemonUp gets addons from. Searching it, and updating addons that came from it, needs your own Wago.io key. Wago gives one to its Patreon supporters:",
+                Style::default().fg(self.ui_theme.panel_title),
+            )),
+            Line::from(Span::styled(
+                "addons.wago.io/patreon",
+                Style::default().fg(self.ui_theme.info),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Addons from GitHub, WoWInterface and TukUI work without a key. You can add or change it later in Settings.",
+                Style::default().fg(self.ui_theme.muted),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
                 if value.is_empty() {
-                    "No API key configured yet."
+                    "No Wago.io key saved yet."
                 } else {
-                    "API key saved in draft."
+                    "Wago.io key entered."
                 },
                 Style::default().fg(self.ui_theme.info),
             )),
@@ -6471,26 +6477,29 @@ impl App {
                     ThemeMode::Light => "light",
                 }
             )),
-            Line::from(format!("AddOns path: {}", self.onboarding.input)),
+            Line::from(format!("AddOns folder: {}", self.onboarding.input)),
             Line::from(format!(
-                "Wago: {}",
+                "Wago.io key: {}",
                 if self.onboarding.wago_api_key_value().is_empty() {
                     "not configured".to_string()
                 } else {
                     format!(
-                        "configured ({} chars)",
+                        "saved ({} characters)",
                         self.onboarding.wago_api_key_value().len()
                     )
                 }
             )),
-            Line::from(format!("Back up WTF: {}", self.onboarding.draft.backup_wtf)),
             Line::from(format!(
-                "Backup retention: {}",
+                "Back up my game settings before updates: {}",
+                on_off(self.onboarding.draft.backup_wtf)
+            )),
+            Line::from(format!(
+                "Backups to keep: {}",
                 self.onboarding.draft.backup_retention
             )),
             Line::from(format!(
-                "Show libraries: {}",
-                self.onboarding.draft.show_libs
+                "Show library folders: {}",
+                on_off(self.onboarding.draft.show_libs)
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -6519,29 +6528,6 @@ impl App {
                 ),
             ));
             lines.push(self.overlay_kv_line("Targets", undo_delete.target_summary()));
-            lines.push(Line::from(""));
-        }
-
-        if let Some(pending_delete_folders) = self.dashboard.pending_delete_folders() {
-            lines.push(self.overlay_section_title("Delete pending"));
-            lines.push(self.overlay_kv_line(
-                "Batch",
-                format!(
-                    "{} parent{}",
-                    pending_delete_folders.len(),
-                    plural_suffix(pending_delete_folders.len())
-                ),
-            ));
-            lines.push(self.overlay_kv_line("Targets", pending_delete_folders.join(", ")));
-            lines.push(Line::from(""));
-        }
-
-        if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
-            lines.push(self.overlay_section_title("Replace pending"));
-            lines.push(self.overlay_kv_line("Addon", confirmation.inspection.addon_name.clone()));
-            lines.push(
-                self.overlay_kv_line("Parent", confirmation.inspection.parent_folder.clone()),
-            );
             lines.push(Line::from(""));
         }
 
@@ -6998,6 +6984,20 @@ impl App {
         lines
     }
 
+    /// The names the list shows for `folders`, in the same order.
+    fn dashboard_names(&self, folders: &[String]) -> Vec<String> {
+        folders
+            .iter()
+            .map(|folder| {
+                self.dashboard
+                    .items
+                    .iter()
+                    .find(|item| item.folder == *folder || item.name == *folder)
+                    .map_or_else(|| folder.clone(), |item| item.name.clone())
+            })
+            .collect()
+    }
+
     fn inspect_resolved_target(&self) -> Option<InspectResolvedTarget<'_>> {
         let item = self.dashboard.selected_item()?;
         Some(InspectResolvedTarget { item })
@@ -7161,20 +7161,20 @@ impl App {
                 .as_ref()
                 .map(|value| {
                     if value.is_empty() {
-                        "Configured".to_string()
+                        "Saved".to_string()
                     } else {
-                        format!("Configured ({} chars)", value.len())
+                        format!("Saved ({} characters)", value.len())
                     }
                 })
-                .unwrap_or_else(|| "Unset".to_string()),
+                .unwrap_or_else(|| "Not set".to_string()),
             ConfigField::CheckInterval => {
                 format!("{}s", self.config_pane.draft.check_interval_secs)
             }
             ConfigField::AutoCheckEnabled => {
                 if self.config_pane.draft.auto_check_enabled {
-                    "Enabled".to_string()
+                    "On".to_string()
                 } else {
-                    "Disabled".to_string()
+                    "Off".to_string()
                 }
             }
             ConfigField::AutoCheckInterval => {
@@ -7182,9 +7182,9 @@ impl App {
             }
             ConfigField::BackupWtf => {
                 if self.config_pane.draft.backup_wtf {
-                    "Enabled".to_string()
+                    "On".to_string()
                 } else {
-                    "Disabled".to_string()
+                    "Off".to_string()
                 }
             }
             ConfigField::BackupRetention => self.config_pane.draft.backup_retention.to_string(),
@@ -7194,9 +7194,9 @@ impl App {
             },
             ConfigField::ShowLibs => {
                 if self.config_pane.draft.show_libs {
-                    "Enabled".to_string()
+                    "On".to_string()
                 } else {
-                    "Disabled".to_string()
+                    "Off".to_string()
                 }
             }
         }
@@ -7204,11 +7204,15 @@ impl App {
 
     fn onboarding_setting_value(&self, field: OnboardingSettingsField) -> String {
         match field {
-            OnboardingSettingsField::BackupWtf => self.onboarding.draft.backup_wtf.to_string(),
+            OnboardingSettingsField::BackupWtf => {
+                on_off(self.onboarding.draft.backup_wtf).to_string()
+            }
             OnboardingSettingsField::BackupRetention => {
                 self.onboarding.draft.backup_retention.to_string()
             }
-            OnboardingSettingsField::ShowLibs => self.onboarding.draft.show_libs.to_string(),
+            OnboardingSettingsField::ShowLibs => {
+                on_off(self.onboarding.draft.show_libs).to_string()
+            }
         }
     }
 
@@ -7318,9 +7322,9 @@ impl App {
         match field {
             ConfigField::WagoApiKey => {
                 if config.wago_api_key.is_some() {
-                    "Wago API key updated".to_string()
+                    "Saved your Wago.io key".to_string()
                 } else {
-                    "Wago API key cleared".to_string()
+                    "Removed your Wago.io key".to_string()
                 }
             }
             ConfigField::CheckInterval => {
@@ -7689,7 +7693,11 @@ async fn run_dashboard_update_task(
         .status_note()
     })
     .await
-    .unwrap_or_else(|join_error| Some(format!("WTF backup failed: {join_error}")));
+    .unwrap_or_else(|join_error| {
+        Some(format!(
+            "couldn't back up your game settings ({join_error}), the update went ahead"
+        ))
+    });
     let run = apply_live_updates(
         &mut database,
         addon_dir,
@@ -7763,7 +7771,10 @@ fn transfer_import_status_message(
         ));
     }
     if !analysis.manual_addons.is_empty() {
-        segments.push(format!("{} manual skipped", analysis.manual_addons.len()));
+        segments.push(format!(
+            "{} not linked, skipped",
+            analysis.manual_addons.len()
+        ));
     }
     if !analysis.duplicate_addons.is_empty() {
         segments.push(format!(
@@ -7778,7 +7789,7 @@ fn transfer_import_status_message(
         ));
     }
     if !install_summary.errors.is_empty() {
-        segments.push(format!("{} errors", install_summary.errors.len()));
+        segments.push(format!("{} failed", install_summary.errors.len()));
     }
     segments.extend(install_summary.warnings.iter().cloned());
     segments.join(" · ")
@@ -8037,96 +8048,130 @@ fn dashboard_update_run_summary_from_live(summary: LiveUpdateSummary) -> Dashboa
     }
 }
 
-fn dashboard_update_status_message(outcome: &DashboardUpdateOutcome) -> String {
+/// The message an update run ends with. A failure names the addons that
+/// failed, `failed_names` in list order.
+fn dashboard_update_status_message(
+    outcome: &DashboardUpdateOutcome,
+    failed_names: &[String],
+) -> String {
     let summary = outcome.summary;
-    let headline = if summary.updated_addons == 1 {
-        if let Some(addon_name) = outcome.updated_addon_name.as_deref() {
-            format!("Updated {addon_name}")
-        } else {
-            "Updated 1 addon".to_string()
-        }
+    let mut parts = Vec::new();
+    if summary.updated_addons == 1 {
+        parts.push(match outcome.updated_addon_name.as_deref() {
+            Some(addon_name) => format!("Updated {addon_name}"),
+            None => "Updated 1 addon".to_string(),
+        });
     } else if summary.updated_addons > 0 {
-        format!("Updated {}", addon_count_label(summary.updated_addons))
+        parts.push(format!(
+            "Updated {}",
+            addon_count_label(summary.updated_addons)
+        ));
+    } else if summary.errors > 0 {
+        parts.push(format!(
+            "Couldn't update {}",
+            name_list(failed_names, summary.errors)
+        ));
     } else if summary.up_to_date > 0
         && summary.skipped_manual == 0
         && summary.skipped_no_api_key == 0
         && summary.remote_older == 0
-        && summary.errors == 0
     {
-        "Already up to date".to_string()
+        parts.push("Everything is up to date".to_string());
     } else {
-        "No changes".to_string()
-    };
+        parts.push("Nothing was updated".to_string());
+    }
 
-    let mut details = Vec::new();
-    if summary.up_to_date > 0 {
-        details.push(format!("{} current", summary.up_to_date));
+    if summary.updated_addons > 0 && summary.errors > 0 {
+        parts.push(format!(
+            "{} failed: {}",
+            summary.errors,
+            name_list(failed_names, summary.errors)
+        ));
+    }
+    if summary.up_to_date > 0 && (summary.updated_addons > 0 || summary.errors > 0) {
+        parts.push(format!("{} already up to date", summary.up_to_date));
     }
     if summary.skipped_manual > 0 {
-        details.push(format!("{} manual skipped", summary.skipped_manual));
+        parts.push(format!("{} not linked", summary.skipped_manual));
     }
     if summary.remote_older > 0 {
-        details.push(format!("{} remote older", summary.remote_older));
+        parts.push(format!("{} newer than source", summary.remote_older));
     }
     if summary.skipped_no_api_key > 0 {
-        details.push(format!(
-            "{} skipped (Wago API key not configured)",
-            summary.skipped_no_api_key
+        parts.push(format!(
+            "skipped {} Wago.io addon{}: add your Wago.io key in Settings (,) to update {}",
+            summary.skipped_no_api_key,
+            plural_suffix(summary.skipped_no_api_key),
+            if summary.skipped_no_api_key == 1 {
+                "it"
+            } else {
+                "them"
+            }
         ));
     }
-    if summary.errors > 0 {
-        details.push(format!(
-            "{} error{}",
-            summary.errors,
-            if summary.errors == 1 { "" } else { "s" }
-        ));
-    }
-    details.extend(outcome.warnings.iter().cloned());
+    parts.extend(outcome.warnings.iter().cloned());
+    parts.join(" · ")
+}
 
-    if details.is_empty() {
-        headline
-    } else {
-        format!("{headline} · {}", details.join(" · "))
+/// "Pawn", "Pawn and Hekili", "Pawn, Hekili and 3 more". `count` is how
+/// many there are, which can be more than the names known.
+fn name_list(names: &[String], count: usize) -> String {
+    const SHOWN: usize = 3;
+    let count = count.max(names.len());
+    if names.is_empty() {
+        return addon_count_label(count);
+    }
+    let shown: Vec<&str> = names.iter().take(SHOWN).map(String::as_str).collect();
+    let rest = count - shown.len();
+    match (shown.as_slice(), rest) {
+        ([only], 0) => (*only).to_string(),
+        (_, 0) => {
+            let (last, first) = shown.split_last().expect("two or more names");
+            format!("{} and {last}", first.join(", "))
+        }
+        _ => format!("{} and {rest} more", shown.join(", ")),
     }
 }
 
+/// The message a check ends with. `names` are the checked addons' names.
 fn dashboard_check_status_message(
-    targets: &[String],
+    names: &[String],
     total: usize,
     live_checked: usize,
     cached: usize,
     errors: usize,
 ) -> String {
-    if live_checked == 0 && errors == 0 && cached > 0 {
-        return if total == 1 {
-            format!(
-                "{} was checked recently",
-                targets.first().map(String::as_str).unwrap_or("This addon")
-            )
-        } else {
-            format!("{} addons were checked recently", cached)
-        };
+    let checked = live_checked + cached;
+    if checked == 0 && errors == 0 {
+        return "Nothing to check: none of these addons are linked".to_string();
     }
-
-    let mut details = Vec::new();
-    if live_checked > 0 {
-        details.push(format!("{live_checked} checked now"));
-    }
-    if cached > 0 {
-        details.push(format!("{cached} recently checked"));
-    }
-    if errors > 0 {
-        details.push(format!(
-            "{errors} error{}",
-            if errors == 1 { "" } else { "s" }
-        ));
-    }
-
-    if details.is_empty() {
-        "Nothing to check".to_string()
+    let headline = if checked == 0 {
+        format!("Couldn't check {}", name_list(names, errors.max(total)))
+    } else if total == 1 && errors == 0 {
+        format!("Checked {}", name_list(names, 1))
     } else {
-        format!("Check complete · {}", details.join(" · "))
+        format!("Checked {}", addon_count_label(checked))
+    };
+    if errors > 0 && checked > 0 {
+        format!("{headline} · couldn't check {errors}")
+    } else {
+        headline
     }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "On" } else { "Off" }
+}
+
+/// "Sorted by name, A to Z".
+fn sort_status_text(column: DashboardSortColumn, direction: DashboardSortDirection) -> String {
+    let order = match (column, direction) {
+        (DashboardSortColumn::Status, DashboardSortDirection::Asc) => "",
+        (DashboardSortColumn::Status, DashboardSortDirection::Desc) => ", reversed",
+        (_, DashboardSortDirection::Asc) => ", A to Z",
+        (_, DashboardSortDirection::Desc) => ", Z to A",
+    };
+    format!("Sorted by {}{order}", column.label().to_ascii_lowercase())
 }
 
 fn addon_count_label(count: usize) -> String {
@@ -8258,8 +8303,8 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
         DetailMode::Install => "Install",
         DetailMode::Search => "Install",
         DetailMode::Update => "Update",
-        DetailMode::Config => "Config",
-        DetailMode::Backup => "Backup",
+        DetailMode::Config => "Settings",
+        DetailMode::Backup => "Backups",
     }
 }
 
@@ -8453,6 +8498,7 @@ mod tests {
             task_events_rx,
             active_onboarding_cancel: None,
             startup_notice: None,
+            quit_question_open: false,
         }
     }
 
@@ -9309,7 +9355,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_cancelled_is_a_note_not_a_problem() {
+    fn keeping_the_addons_shows_no_message() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard
             .set_pending_delete_folders(Some(vec!["Second".to_string()]));
@@ -9318,13 +9364,10 @@ mod tests {
             app.apply(action);
         }
 
-        assert_eq!(app.status_line.kind, StatusKind::Note);
-        assert_eq!(app.footer_status_text(), "delete cancelled");
-        let line = app.footer_primary_status_line();
-        assert_eq!(line.spans[0].style.fg, Some(app.ui_theme.info));
-        let (text, kind) = app.status_line_message().expect("toast");
-        assert_eq!(text, "delete cancelled");
-        assert_eq!(kind, StatusKind::Note);
+        assert!(app.dashboard.pending_delete_folders().is_none());
+        assert_eq!(app.status_line.kind, StatusKind::Quiet);
+        assert_eq!(app.footer_status_text(), "");
+        assert!(app.status_line_message().is_none());
     }
 
     #[test]
@@ -9486,7 +9529,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Search,
-                    "searching Wago for 'WeakAuras'"
+                    "Searching Wago.io for \"WeakAuras\""
                 )),
             ]
         );
@@ -9525,7 +9568,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Search,
-                    "checking Wago addon 'https://addons.wago.io/addons/VBNBxKx5' for install",
+                    "Checking https://addons.wago.io/addons/VBNBxKx5 on Wago.io before installing",
                 )),
             ]
         );
@@ -9550,7 +9593,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Search,
-                    "searching Wago for 'details'"
+                    "Searching Wago.io for \"details\""
                 )),
             ]
         );
@@ -9675,7 +9718,7 @@ mod tests {
             vec![AppAction::SetStatus(app.dashboard_status_for(
                 StatusKind::Problem,
                 DetailMode::Search,
-                "Wago search unavailable: no API key configured",
+                "Wago.io search needs your Wago.io key",
             ))]
         );
     }
@@ -9730,7 +9773,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Search,
-                    "checking Wago result 'WeakAuras' for install",
+                    "Checking WeakAuras on Wago.io before installing",
                 )),
             ]
         );
@@ -9765,7 +9808,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Install,
-                    "checking Wago package and preparing install",
+                    "Checking the Wago.io addon before installing",
                 )),
             ]
         );
@@ -10037,7 +10080,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         match &actions[0] {
             AppAction::SetStatus(status) => {
-                assert!(status.text.contains("backup created recently"));
+                assert!(status.text.contains("You backed up a moment ago"));
                 assert!(status.text.contains("wait"));
             }
             other => panic!("expected throttled backup status, got {other:?}"),
@@ -10132,7 +10175,7 @@ mod tests {
             AppAction::SetStatus(app.dashboard_status_for(
                 StatusKind::Done,
                 DetailMode::Search,
-                "Wago search complete: 1 result"
+                "Found 1 addon on Wago.io"
             ))
         );
     }
@@ -10536,9 +10579,9 @@ mod tests {
             vec![
                 AppAction::SetPendingDelete(Some(vec![current.folder.clone()])),
                 AppAction::SetStatus(app.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     app.dashboard.detail_mode,
-                    &format!("delete {}? press y to confirm, n to cancel", current.name),
+                    &format!("asked to delete {}", current.name),
                 )),
             ]
         );
@@ -10556,7 +10599,7 @@ mod tests {
             vec![AppAction::SetStatus(app.dashboard_status_for(
                 StatusKind::Note,
                 app.dashboard.detail_mode,
-                "focus a parent row or select one or more parent addons first before deleting",
+                "Move to an addon first",
             ))]
         );
     }
@@ -10574,9 +10617,9 @@ mod tests {
             vec![
                 AppAction::SetPendingDelete(Some(vec!["Second".to_string()])),
                 AppAction::SetStatus(app.dashboard_status_for(
-                    StatusKind::Note,
+                    StatusKind::Quiet,
                     app.dashboard.detail_mode,
-                    "delete 1 selected addon? press y to confirm, n to cancel",
+                    "asked to delete 1 addon",
                 )),
             ]
         );
@@ -10594,20 +10637,27 @@ mod tests {
     }
 
     #[test]
-    fn update_selected_requires_parent_selection() {
+    fn update_on_a_folder_row_updates_the_addon_it_belongs_to() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Overview;
         app.dashboard.list_state.select(Some(1));
         app.apply(AppAction::ToggleDashboardExpanded);
         app.dashboard.list_state.select(Some(2));
+        assert_eq!(
+            app.dashboard.actionable_parent_targets(),
+            Ok(vec![app.dashboard.items[1].folder.clone()])
+        );
 
+        // With no addon row at all there is nothing to act on.
+        app.dashboard.list_state.select(None);
         let actions = app.update(AppMessage::DashboardRunUpdateSelected);
 
         assert_eq!(
             actions,
-            vec![AppAction::SetStatus(app.dashboard_status_for(StatusKind::Note,
+            vec![AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Note,
                 DetailMode::Overview,
-                "focus a parent row or select one or more parent addons first before applying updates",
+                "Move to an addon first",
             ))]
         );
     }
@@ -10639,7 +10689,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Overview,
-                    "updating 1 addon",
+                    "Updating 1 addon",
                 )),
             ]
         );
@@ -10664,7 +10714,7 @@ mod tests {
                 AppAction::SetStatus(app.dashboard_status_for(
                     StatusKind::Working,
                     DetailMode::Overview,
-                    "checking 1 addon for updates",
+                    "Checking 1 addon for updates",
                 )),
             ]
         );
@@ -10965,7 +11015,7 @@ mod tests {
             AppAction::SetStatus(app.dashboard_status_for(
                 StatusKind::Done,
                 DetailMode::Update,
-                "No changes · 1 manual skipped",
+                "Nothing was updated · 1 not linked",
             ))
         );
     }
@@ -11000,8 +11050,51 @@ mod tests {
         };
 
         assert_eq!(
-            super::dashboard_update_status_message(&outcome),
+            super::dashboard_update_status_message(&outcome, &[]),
             "Updated WeakAuras"
+        );
+    }
+
+    #[test]
+    fn dashboard_update_status_names_the_addons_that_failed() {
+        let summary = |updated, errors| LiveUpdateSummary {
+            target_addons: updated + errors,
+            updated_addons: updated,
+            up_to_date: 0,
+            skipped_manual: 0,
+            skipped_no_api_key: 0,
+            remote_older: 0,
+            errors,
+        };
+        let outcome = |updated, errors| DashboardUpdateOutcome {
+            summary: summary(updated, errors),
+            updated_folders: Vec::new(),
+            failed_folders: Vec::new(),
+            updated_addon_name: None,
+            warnings: Vec::new(),
+            sync: AddonScanOutcome {
+                path: PathBuf::from("AddOns"),
+                summary: ScanSummary::default(),
+                addons: vec![],
+                drift_report: DriftReport::empty(),
+            },
+        };
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            super::dashboard_update_status_message(&outcome(3, 1), &names(&["Pawn"])),
+            "Updated 3 addons · 1 failed: Pawn"
+        );
+        assert_eq!(
+            super::dashboard_update_status_message(
+                &outcome(2, 5),
+                &names(&["Pawn", "Hekili", "TomTom", "BugSack", "OmniCC"])
+            ),
+            "Updated 2 addons · 5 failed: Pawn, Hekili, TomTom and 2 more"
+        );
+        assert_eq!(
+            super::dashboard_update_status_message(&outcome(0, 2), &names(&["Pawn", "Hekili"])),
+            "Couldn't update Pawn and Hekili"
         );
     }
 
@@ -11009,7 +11102,7 @@ mod tests {
     fn dashboard_check_status_humanizes_recently_checked_single_target() {
         assert_eq!(
             super::dashboard_check_status_message(&["BigWigs".to_string()], 1, 0, 1, 0),
-            "BigWigs was checked recently"
+            "Checked BigWigs"
         );
     }
 
@@ -11467,7 +11560,7 @@ mod tests {
         let flash = app.shell_ui.status_flash.clone().expect("message");
         // No undo available: it fades like any done message, without the key.
         assert!(!app.status_flash_is_live(&flash, late));
-        assert!(!line_text(&app.dashboard_status_line(120)).contains("brings them back"));
+        assert!(!line_text(&app.dashboard_status_line(120)).contains("undo delete"));
 
         app.undo_delete = Some(DashboardUndoDeleteState {
             batch_dir: PathBuf::from("trash"),
@@ -11479,7 +11572,7 @@ mod tests {
         assert!(app.status_flash_is_live(&flash, late));
         let status = line_text(&app.dashboard_status_line(120));
         assert!(
-            status.contains("✓ Deleted 1 addon · z brings them back"),
+            status.contains("✓ Deleted 1 addon · z undo delete"),
             "{status}"
         );
 
@@ -11790,12 +11883,10 @@ mod tests {
         let rows = render_rows(&mut app, 120, 30);
         let text = rows.join("\n");
         assert!(rows[0].contains("█"), "{text}");
-        assert!(rows[29].contains("esc close"), "{text}");
-        // Help is a sheet now: nothing is clipped at 120 x 30.
-        assert!(
-            text.contains(&format!("LemonUp {}", env!("CARGO_PKG_VERSION"))),
-            "{text}"
-        );
+        assert!(rows[29].contains("esc or ? close"), "{text}");
+        // Help is a sheet: it scrolls to the rest.
+        assert!(text.contains("Getting things done"), "{text}");
+        assert!(rows[29].contains("↑/↓ scroll"), "{text}");
     }
 
     #[test]
@@ -11891,7 +11982,7 @@ mod tests {
             actions.first(),
             Some(&AppAction::SetOnboardingState(
                 app.onboarding
-                    .error("no WoW install found under /home/player")
+                    .error("Couldn't find World of Warcraft under /home/player")
             ))
         );
     }
@@ -11914,10 +12005,9 @@ mod tests {
                 AppAction::SetOnboardingState(
                     app.onboarding.apply_directory_to_draft().next_step()
                 ),
-                AppAction::SetStatus(app.with_base_status(
-                    StatusKind::Done,
-                    "directory confirmed | step 3/5 Wago setup"
-                ))
+                AppAction::SetStatus(
+                    app.with_base_status(StatusKind::Done, "folder chosen | step 3/5 Wago.io")
+                )
             ]
         );
     }
@@ -12036,7 +12126,7 @@ mod tests {
         assert!(
             app.status_line
                 .text
-                .contains("refused to save default target")
+                .contains("refused to save the main AddOns folder")
         );
     }
 
@@ -12399,7 +12489,11 @@ mod tests {
 
         assert_eq!(app.dashboard.items.len(), 1);
         assert_eq!(app.dashboard.items[0].name, "Details");
-        assert!(app.status_line.text.contains("scan complete"));
+        assert!(
+            app.status_line
+                .text
+                .contains("looked through the AddOns folder")
+        );
         assert!(matches!(app.scan_state, ScanState::Succeeded { .. }));
     }
 
@@ -13036,7 +13130,7 @@ mod tests {
 
     mod sheets {
         use super::*;
-        use crate::app::keymap::{KeyHint, help_sections};
+        use crate::app::keymap::{HelpLabel, HelpWhen, KeyHint, help_page};
         use crate::app::sheet::{SheetFrame, offset_for_focus, wrap_lines};
         use ratatui::style::Style;
         use ratatui::text::Span;
@@ -13161,14 +13255,20 @@ mod tests {
                 "Selected:",
                 "Changes save instantly",
             ]));
-            let mut help_labels: Vec<String> = help_sections(HelpContext::Overview)
-                .iter()
+            // Titles and the short rows, which never wrap.
+            let mut help_labels: Vec<String> = help_page(HelpContext::Overview)
+                .sections()
                 .flat_map(|section| {
-                    std::iter::once(section.title.trim().to_string())
-                        .chain(section.rows.iter().map(|(_, text)| text.to_string()))
+                    std::iter::once(section.title.to_string()).chain(
+                        section
+                            .rows
+                            .iter()
+                            .filter(|row| row.when == HelpWhen::Always && row.text.len() <= 20)
+                            .map(|row| row.text.to_string()),
+                    )
                 })
                 .collect();
-            help_labels.extend(["Context: Overview shortcuts".to_string(), version.clone()]);
+            help_labels.push(version.clone());
             vec![
                 Case {
                     name: "inspect",
@@ -13209,25 +13309,24 @@ mod tests {
                     name: "install empty",
                     open: open_install_empty,
                     labels: strings(&[
-                        "Use: Search Wago by addon name",
+                        "Use: Search Wago.io by addon name",
                         "Type an addon name or paste an addon URL",
                         "Start with an addon name or URL",
                         "Type elvui or tukui for TukUI.",
-                        "press , to open Config",
+                        "press , to open Settings",
                     ]),
-                    keys: &["/ query", ", config"],
+                    keys: &["/ query", ", settings"],
                 },
                 Case {
                     name: "install with results",
                     open: open_install_results,
                     labels: strings(&[
-                        "Use: Search Wago by addon name",
+                        "Use: Search Wago.io by addon name",
                         "Results",
                         "Name",
                         "Result Addon 0",
                         "more results below",
                         "Author: Owner",
-                        "Slug: slug0",
                         "Summary: Summary for result 0",
                     ]),
                     keys: &["↑/↓ results", "enter install", "/ query"],
@@ -13236,7 +13335,7 @@ mod tests {
                     name: "config",
                     open: open_config,
                     labels: config_labels,
-                    keys: &["↑/↓ fields", "enter edit", "r onboarding"],
+                    keys: &["↑/↓ fields", "enter edit", "r setup"],
                 },
                 Case {
                     name: "backups",
@@ -13247,8 +13346,8 @@ mod tests {
                         "Recent backups",
                         "2026-04-00 12:00:00.000Z",
                         "Selected",
-                        "Archive: WTF-20260400T120000.000Z.zip",
-                        "Size: 2.0 KiB",
+                        "File: WTF-20260400T120000.000Z.zip",
+                        "Size: 2.0 KB",
                     ]),
                     keys: &["↑/↓ backups", "enter/r restore", "n backup", "x delete"],
                 },
@@ -13256,9 +13355,9 @@ mod tests {
                     name: "backups empty",
                     open: open_backups_empty,
                     labels: strings(&[
-                        "Status: No backups created yet",
-                        "No backups created yet.",
-                        "Create a backup with n, then restore it here later.",
+                        "Status: No backups yet",
+                        "No backups of your game settings yet.",
+                        "Press n to back up your game settings now.",
                     ]),
                     keys: &["n backup", "esc close"],
                 },
@@ -13266,7 +13365,7 @@ mod tests {
                     name: "help",
                     open: open_help,
                     labels: help_labels,
-                    keys: &["? close", "esc close"],
+                    keys: &["esc or ? close"],
                 },
             ]
         }
@@ -13450,7 +13549,7 @@ mod tests {
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_config(&mut app);
             let rows = render_rows(&mut app, 80, 24);
-            assert!(rows[0].starts_with(" Config"), "{}", rows.join("\n"));
+            assert!(rows[0].starts_with(" Settings"), "{}", rows.join("\n"));
         }
 
         fn key_line_at(app: &mut App, width: u16) -> String {
@@ -13538,14 +13637,14 @@ mod tests {
             app.dashboard
                 .set_pending_delete_folders(Some(vec!["Second".to_string()]));
             let line = key_line_at(&mut app, 80);
-            assert_eq!(entries(&line), ["y confirm", "n/esc cancel"], "{line}");
+            assert_eq!(entries(&line), ["y yes", "n no", "esc no"], "{line}");
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_backups(&mut app);
             app.backup_pane.pending_restore = Some(backups(1).remove(0));
             let line = key_line_at(&mut app, 80);
-            assert_eq!(entries(&line), ["y restore", "n cancel"], "{line}");
+            assert_eq!(entries(&line), ["y yes", "n no", "esc no"], "{line}");
             let line = key_line_at(&mut app, 22);
-            assert_eq!(entries(&line), ["y restore", "n cancel"], "{line}");
+            assert_eq!(entries(&line), ["y yes", "n no", "esc no"], "{line}");
         }
 
         #[test]
@@ -13614,7 +13713,7 @@ mod tests {
             let rows = render_rows(&mut app, 80, 20);
             let text = rows.join("\n");
             assert!(text.contains("↑ "), "{text}");
-            assert!(text.contains("Sort the table"), "{text}");
+            assert!(text.contains("quit from anywhere"), "{text}");
             assert!(!has_more_below(&rows), "{text}");
 
             // Reopened, Help starts at the top again.
@@ -13622,7 +13721,7 @@ mod tests {
             render_rows(&mut app, 80, 24);
             open_help(&mut app);
             let rows = render_rows(&mut app, 80, 24).join("\n");
-            assert!(rows.contains("Context: Overview shortcuts"), "{rows}");
+            assert!(rows.contains("Your addon list"), "{rows}");
         }
 
         #[test]
@@ -13640,11 +13739,13 @@ mod tests {
 
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_backups(&mut app);
-            app.backup_pane.pending_restore = Some(backups(1).remove(0));
             assert_eq!(
                 app.messages_for_key(KeyEvent::from(KeyCode::Home)),
                 vec![AppMessage::SheetScroll(SheetMove::Top)]
             );
+            // With a question open, only its answers do anything.
+            app.backup_pane.pending_restore = Some(backups(1).remove(0));
+            assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Home)), vec![]);
 
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_install_empty(&mut app);
@@ -13690,19 +13791,21 @@ mod tests {
         }
 
         #[test]
-        fn backups_always_show_the_selected_and_confirm_cards() {
+        fn backups_always_show_the_selected_card_and_ask_in_the_dialog() {
             for (width, height) in SIZES {
                 let mut app = app_for_tests(ShellMode::Dashboard);
                 open_backups(&mut app);
                 app.backup_pane.selected_backup = 8;
                 let text = render_rows(&mut app, width, height).join("\n");
                 assert!(text.contains("› 2026-04-08"), "{text}");
-                assert!(text.contains("Archive: WTF-20260408"), "{text}");
+                assert!(text.contains("File: WTF-20260408"), "{text}");
 
                 app.backup_pane.pending_delete = Some(backups(9).remove(8));
                 let text = render_rows(&mut app, width, height).join("\n");
-                assert!(text.contains("Press y to delete or n to cancel."), "{text}");
-                assert!(text.contains("y delete"), "{text}");
+                assert!(text.contains("Delete this backup?"), "{text}");
+                assert!(text.contains("Backup from 2026-04-08"), "{text}");
+                assert!(text.contains("y  delete it"), "{text}");
+                assert!(text.contains("n  keep it"), "{text}");
             }
         }
 
@@ -14076,22 +14179,19 @@ mod tests {
 
         #[test]
         fn help_lists_the_details_keys_without_section_toggles() {
-            let rows: Vec<&str> = help_sections(HelpContext::Inspect)
-                .iter()
-                .flat_map(|section| section.rows.iter().map(|(key, _)| *key))
+            let labels: Vec<&str> = help_page(HelpContext::Inspect)
+                .sections()
+                .flat_map(|section| section.rows.iter())
+                .filter_map(|row| match row.label {
+                    HelpLabel::Keys(keys) => Some(keys),
+                    _ => None,
+                })
                 .collect();
-            assert!(rows.contains(&"↑/↓"), "{rows:?}");
-            assert!(rows.contains(&"u / c / x"), "{rows:?}");
-            assert!(rows.contains(&"enter / esc / q"), "{rows:?}");
-            assert!(
-                !rows.iter().any(|key| key.contains("r / d / t")),
-                "{rows:?}"
-            );
-            let texts: Vec<&str> = help_sections(HelpContext::Overview)
-                .iter()
-                .flat_map(|section| section.rows.iter().map(|(_, text)| *text))
-                .collect();
-            assert!(texts.contains(&"Open details"), "{texts:?}");
+            assert!(labels.contains(&"↑ ↓  or  j k"), "{labels:?}");
+            assert!(labels.contains(&"enter  esc  q"), "{labels:?}");
+            for gone in ["r", "d", "t", "f"] {
+                assert!(!labels.contains(&gone), "{labels:?}");
+            }
 
             // Help opened from Details goes back to Details.
             let mut app = app_for_tests(ShellMode::Dashboard);
@@ -14100,6 +14200,303 @@ mod tests {
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
             press(&mut app, KeyCode::Esc);
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+        }
+
+        /// The state each Help group's keys work in. A new group needs a
+        /// state here, or the test below fails.
+        fn help_state(context: HelpContext, title: &str) -> fn(&mut App) {
+            fn list(_: &mut App) {}
+            fn filter_typing(app: &mut App) {
+                apply_all(app, AppMessage::DashboardFilterBegin);
+            }
+            fn question(app: &mut App) {
+                app.pending_wago_install_confirmation = Some(pending_wago_confirmation());
+            }
+            fn docked(app: &mut App) {
+                app.last_frame_width = Some(160);
+                open_inspect(app);
+            }
+            fn install_typing(app: &mut App) {
+                apply_all(
+                    app,
+                    AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst),
+                );
+            }
+            fn install_link(app: &mut App) {
+                install_typing(app);
+                app.search_pane.query = "https://github.com/WeakAuras/WeakAuras2".to_string();
+                apply_all(app, AppMessage::SearchSubmit);
+            }
+            fn settings(app: &mut App) {
+                open_config(app);
+                // A setting with a value to change, not the key box.
+                app.config_pane.selected_field = 1;
+            }
+            fn settings_editing(app: &mut App) {
+                open_config(app);
+                apply_all(app, AppMessage::ConfigBeginEditing);
+            }
+            fn questions_in(open: fn(&mut App), app: &mut App) {
+                open(app);
+                question(app);
+            }
+            match (context, title) {
+                (HelpContext::Overview, "While you type a filter") => filter_typing,
+                (HelpContext::Overview, "Questions") => question,
+                (HelpContext::Overview, "What the status means") => list,
+                (HelpContext::Overview, _) => list,
+                (HelpContext::Inspect, "Questions") => |app| questions_in(open_inspect, app),
+                (HelpContext::Inspect, _) => open_inspect,
+                (HelpContext::DetailsDocked, "Questions") => |app| questions_in(docked, app),
+                (HelpContext::DetailsDocked, _) => docked,
+                (HelpContext::InstallSearch, "Typing in the box" | "What you can type") => {
+                    install_typing
+                }
+                (HelpContext::InstallSearch, "Install from a link?") => install_link,
+                (HelpContext::InstallSearch, "Questions") => {
+                    |app| questions_in(open_install_results, app)
+                }
+                (HelpContext::InstallSearch, _) => open_install_results,
+                (HelpContext::Config, "While you edit a value") => settings_editing,
+                (HelpContext::Config, _) => settings,
+                (HelpContext::Backup, "Questions") => |app| questions_in(open_backups, app),
+                (HelpContext::Backup, _) => open_backups,
+            }
+        }
+
+        const HELP_CONTEXTS: [HelpContext; 6] = [
+            HelpContext::Overview,
+            HelpContext::Inspect,
+            HelpContext::DetailsDocked,
+            HelpContext::InstallSearch,
+            HelpContext::Config,
+            HelpContext::Backup,
+        ];
+
+        fn help_test_app(context: HelpContext, title: &str, when: HelpWhen) -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            match when {
+                HelpWhen::Always => {}
+                HelpWhen::NoWagoKey => app.wago_api_key = None,
+                HelpWhen::FirstRunCard => {
+                    app.dashboard = DashboardState::from_addons(vec![
+                        AddonRecord::new("First", "First", SourceKind::Manual),
+                        AddonRecord::new("Other", "Other", SourceKind::Manual),
+                    ]);
+                }
+            }
+            help_state(context, title)(&mut app);
+            assert!(app.help_row_applies(when), "{context:?} {title}");
+            app
+        }
+
+        #[test]
+        fn every_key_help_lists_works_where_it_lists_it() {
+            for context in HELP_CONTEXTS {
+                for section in help_page(context).sections() {
+                    for row in section.rows {
+                        match row.label {
+                            HelpLabel::Keys(label) => {
+                                assert!(!row.keys.is_empty(), "{context:?} {label}");
+                                for key in row.keys {
+                                    let app = help_test_app(context, section.title, row.when);
+                                    assert!(
+                                        !app.messages_for_key(*key).is_empty(),
+                                        "{context:?} / {}: {label} ({key:?}) does nothing",
+                                        section.title
+                                    );
+                                }
+                            }
+                            // Status words and things to type are not keys.
+                            HelpLabel::Status(_) | HelpLabel::Typed(_) => {
+                                assert!(row.keys.is_empty(), "{context:?} {}", row.text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn every_key_line_key_is_in_help_and_opens_it_there() {
+            for context in HELP_CONTEXTS {
+                let page = help_page(context);
+                let listed: Vec<KeyEvent> = page
+                    .sections()
+                    .flat_map(|section| section.rows.iter())
+                    .flat_map(|row| row.keys.iter().copied())
+                    .collect();
+                for section in page.sections() {
+                    let mut whens = vec![HelpWhen::Always];
+                    whens.extend(section.rows.iter().map(|row| row.when));
+                    for when in whens {
+                        let app = help_test_app(context, section.title, when);
+                        for hint in app.key_table(u16::MAX) {
+                            for code in hint.codes {
+                                assert!(
+                                    listed.contains(&KeyEvent::from(*code)),
+                                    "{context:?} / {}: key line {} {} ({code:?}) is not in Help",
+                                    section.title,
+                                    hint.key,
+                                    hint.label
+                                );
+                            }
+                        }
+                    }
+                }
+                // `?` opens this page from the context's own state.
+                let mut app = help_test_app(context, "", HelpWhen::Always);
+                press(&mut app, KeyCode::Char('?'));
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+                assert_eq!(app.shell_ui.help_context, context);
+            }
+        }
+
+        fn nothing_linked_app(config_file: PathBuf) -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.config_store = ConfigStore::new(config_file);
+            app.dashboard = DashboardState::from_addons(vec![
+                AddonRecord::new("Alpha", "Alpha", SourceKind::Manual),
+                AddonRecord::new("Beta", "Beta", SourceKind::Manual),
+            ]);
+            app
+        }
+
+        #[test]
+        fn nothing_linked_shows_the_welcome_card_until_d_hides_it_for_good() {
+            let temp = tempdir().expect("tempdir");
+            let config_file = temp.path().join("config.toml");
+            let mut app = nothing_linked_app(config_file.clone());
+            for (width, height) in SIZES {
+                let rows = render_rows(&mut app, width, height);
+                let text = rows.join("\n");
+                assert!(text.contains("Welcome. One thing before LemonUp"), "{text}");
+                assert!(text.contains("LemonUp found 2 addons"), "{text}");
+                assert!(text.contains("d hide this"), "{text}");
+                assert!(text.contains("Alpha"), "{text}");
+                assert!(!text.contains("find online"), "{text}");
+                let keys = rows.last().expect("key line");
+                assert!(keys.contains("i install"), "{text}");
+                assert!(!keys.contains("C check"), "{text}");
+                if width >= 120 {
+                    assert!(keys.contains("d hide card"), "{text}");
+                }
+            }
+            // Help lists `d` while the card is there.
+            press_key(&mut app, KeyCode::Char('?'));
+            let text = render_rows(&mut app, 120, 60).join("\n");
+            assert!(text.contains("hide the welcome card"), "{text}");
+            press_key(&mut app, KeyCode::Esc);
+
+            press_key(&mut app, KeyCode::Char('d'));
+            let text = render_rows(&mut app, 120, 30).join("\n");
+            assert!(!text.contains("Welcome. One thing"), "{text}");
+            assert!(!text.contains("hide card"), "{text}");
+            assert!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('d')))
+                    .is_empty()
+            );
+
+            // Saved, so it stays hidden after a restart.
+            let ConfigLoad::Loaded(saved) = app.config_store.load().expect("load") else {
+                panic!("config written");
+            };
+            assert!(saved.hide_first_run_card);
+            let mut restarted = nothing_linked_app(config_file);
+            restarted.config_pane = ConfigPaneState::new(saved);
+            let text = render_rows(&mut restarted, 120, 30).join("\n");
+            assert!(!text.contains("Welcome. One thing"), "{text}");
+
+            // One linked addon and the card has nothing to say.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let text = render_rows(&mut app, 120, 30).join("\n");
+            assert!(!text.contains("Welcome. One thing"), "{text}");
+        }
+
+        #[test]
+        fn an_empty_list_says_why_and_offers_only_keys_that_work() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.dashboard = DashboardState::from_addons(Vec::new());
+
+            app.scan_state = ScanState::Running(PathBuf::from("/sandbox/AddOns"));
+            let rows = render_rows(&mut app, 80, 24);
+            let text = rows.join("\n");
+            assert!(
+                text.contains("Looking through your AddOns folder…"),
+                "{text}"
+            );
+            assert_eq!(rows[23].trim(), "? help  q quit", "{text}");
+
+            app.scan_state = ScanState::Succeeded {
+                path: PathBuf::from("/sandbox/AddOns"),
+                summary: ScanSummary::default(),
+            };
+            for (width, height) in SIZES {
+                let rows = render_rows(&mut app, width, height);
+                let text = rows.join("\n");
+                assert!(text.contains("Your AddOns folder is empty."), "{text}");
+                assert!(text.contains("i  install your first addon"), "{text}");
+                assert!(text.contains(",  settings, where r chooses"), "{text}");
+                assert!(!text.contains("wait"), "{text}");
+                let keys = rows.last().expect("key line");
+                assert!(
+                    keys.contains("i install") && keys.contains(", settings"),
+                    "{text}"
+                );
+                assert!(!keys.contains("check"), "{text}");
+            }
+
+            app.scan_state =
+                ScanState::Failed("No such file or directory (os error 2)".to_string());
+            let rows = render_rows(&mut app, 120, 30);
+            let text = rows.join("\n");
+            assert!(
+                text.contains("LemonUp couldn't read your AddOns folder."),
+                "{text}"
+            );
+            assert!(text.contains("may have moved"), "{text}");
+            assert!(text.contains("Technical detail: No such file"), "{text}");
+            assert!(rows[29].contains(", settings"), "{text}");
+            assert!(!rows[29].contains("i install"), "{text}");
+
+            // A kept filter that matches nothing.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            press_key(&mut app, KeyCode::Char('/'));
+            type_text(&mut app, "zzzz");
+            press_key(&mut app, KeyCode::Enter);
+            let rows = render_rows(&mut app, 80, 24);
+            let text = rows.join("\n");
+            assert!(
+                text.contains("Nothing you have installed matches \"zzzz\"."),
+                "{text}"
+            );
+            assert!(rows[23].contains("esc clear filter"), "{text}");
+            assert!(!rows[23].contains("enter"), "{text}");
+        }
+
+        #[test]
+        fn help_shows_two_columns_when_wide_and_one_when_narrow() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_help(&mut app);
+            let rows = render_rows(&mut app, 120, 40);
+            let text = rows.join("\n");
+            assert!(text.contains("Help: your addon list"), "{text}");
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Your addon list")
+                        && row.contains("Getting things done")),
+                "{text}"
+            );
+            assert!(!text.contains("hide the welcome card"), "{text}");
+            let rows = render_rows(&mut app, 80, 60);
+            let text = rows.join("\n");
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.contains("Your addon list")
+                        && row.contains("Getting things done")),
+                "{text}"
+            );
         }
     }
 
@@ -14292,7 +14689,7 @@ mod tests {
                     vec![AppAction::SetStatus(app.dashboard_status_for(
                         StatusKind::Problem,
                         DetailMode::Search,
-                        "Wago search unavailable: no API key configured",
+                        "Wago.io search needs your Wago.io key",
                     ))],
                     "{query}"
                 );
@@ -14358,12 +14755,12 @@ mod tests {
             assert!(
                 app.status_line
                     .text
-                    .contains("installed WoWInterface addon 'ElvUI WindTools'")
+                    .contains("ElvUI WindTools is installed from WoWInterface")
             );
             assert!(
                 app.status_line
                     .text
-                    .contains("warning: WoWInterface does not tag WoW Forever builds")
+                    .contains("| WoWInterface does not tag WoW Forever builds")
             );
 
             let tukui = request(DirectInstallProvider::Tukui, "elvui", "ElvUI");
@@ -14386,7 +14783,7 @@ mod tests {
                     message: refusal,
                 }
             );
-            assert!(app.status_line.text.contains("TukUI install failed"));
+            assert!(app.status_line.text.contains("Couldn't install from TukUI"));
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
         }
 
@@ -14408,11 +14805,13 @@ mod tests {
                 .join("\n");
 
             assert!(
-                rows.contains("Search Wago by name, or paste a GitHub, WoWInterface or Wago URL."),
+                rows.contains(
+                    "Search Wago.io by name, or paste a GitHub, WoWInterface or Wago.io link."
+                ),
                 "{rows}"
             );
             assert!(rows.contains("Type elvui or tukui for TukUI."), "{rows}");
-            assert!(rows.contains("press , to open Config"), "{rows}");
+            assert!(rows.contains("press , to open Settings"), "{rows}");
         }
 
         #[test]
@@ -14457,6 +14856,313 @@ mod tests {
             assert!(!rows.contains("World of Warcraft addon manager"), "{rows}");
             assert!(!rows.contains("v2"), "{rows}");
             assert!(rows.contains("█   █▀▀ █▀▄▀█"), "{rows}");
+        }
+    }
+
+    mod questions {
+        use super::*;
+        use crate::app::dialog::Question;
+
+        const SIZES: [(u16, u16); 2] = [(80, 24), (120, 36)];
+
+        fn apply_all(app: &mut App, message: AppMessage) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+
+        fn backup(label: &str) -> BackupEntry {
+            BackupEntry {
+                file_name: "WTF-20260401T120000.000Z.zip".to_string(),
+                path: PathBuf::from("/sandbox/WTF-1.zip"),
+                label: label.to_string(),
+                size_bytes: 2048,
+            }
+        }
+
+        /// The keys every question shares: y yes, n esc q no, enter and
+        /// anything else nothing.
+        fn assert_answers(app: &App, yes: AppMessage, no: AppMessage) {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+                vec![yes]
+            );
+            for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Char('q')] {
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(code)),
+                    vec![no.clone()],
+                    "{code:?}"
+                );
+            }
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Char('x'),
+                KeyCode::Down,
+                KeyCode::Home,
+            ] {
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(code)),
+                    vec![],
+                    "{code:?}"
+                );
+            }
+            let keys: Vec<String> = app
+                .key_table(80)
+                .iter()
+                .map(|hint| format!("{} {}", hint.key, hint.label))
+                .collect();
+            assert_eq!(keys, ["y yes", "n no", "esc no"]);
+        }
+
+        /// The dialog is drawn whole: its title row and its bottom border,
+        /// with every expected line in between.
+        fn assert_dialog(app: &mut App, title: &str, lines: &[&str]) {
+            for (width, height) in SIZES {
+                let rows = render_rows(app, width, height);
+                let text = rows.join("\n");
+                let top = rows
+                    .iter()
+                    .position(|row| row.contains(&format!("╭─ {title} ")))
+                    .unwrap_or_else(|| panic!("no {title:?} at {width}x{height}:\n{text}"));
+                let bottom = rows
+                    .iter()
+                    .skip(top + 1)
+                    .position(|row| row.contains('╰'))
+                    .map(|offset| top + 1 + offset)
+                    .unwrap_or_else(|| panic!("clipped at {width}x{height}:\n{text}"));
+                // Above the status line and the key line.
+                assert!(bottom < usize::from(height) - 2, "{text}");
+                for line in lines {
+                    assert!(
+                        rows[top..=bottom].iter().any(|row| row.contains(line)),
+                        "{line:?} missing at {width}x{height}:\n{text}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn deleting_one_addon_asks_and_only_y_deletes() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.effective_addon_dir = Some(PathBuf::from("/sandbox/AddOns"));
+            app.dashboard.list_state.select(Some(1));
+            press_key(&mut app, KeyCode::Char('x'));
+            let name = app.dashboard.items[1].name.clone();
+            assert!(matches!(
+                app.active_question(),
+                Some(Question::DeleteAddons(ref targets)) if targets.len() == 1
+            ));
+            assert_answers(
+                &app,
+                AppMessage::DashboardConfirmDelete,
+                AppMessage::DashboardCancelPendingDelete,
+            );
+            assert_dialog(
+                &mut app,
+                &format!("Delete {name}?"),
+                &[
+                    &name,
+                    "Your settings for this addon are not touched.",
+                    "You can undo the delete with z.",
+                    "y  delete it",
+                    "n  keep it",
+                ],
+            );
+
+            // Enter does nothing; n keeps the addon and closes the question.
+            press_key(&mut app, KeyCode::Enter);
+            assert!(app.dashboard.pending_delete_folders().is_some());
+            press_key(&mut app, KeyCode::Char('n'));
+            assert!(app.active_question().is_none());
+        }
+
+        #[test]
+        fn deleting_many_addons_lists_them_and_never_clips() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let folders: Vec<String> = (0..20).map(|index| format!("Addon{index:02}")).collect();
+            app.dashboard.set_pending_delete_folders(Some(folders));
+            assert_dialog(
+                &mut app,
+                "Delete 20 addons?",
+                &[
+                    "Addon00",
+                    "more",
+                    "You can undo the delete with z.",
+                    "y  delete them",
+                    "n  keep them",
+                ],
+            );
+            let rows = render_rows(&mut app, 80, 24).join("\n");
+            assert!(!rows.contains("Addon19"), "{rows}");
+        }
+
+        #[test]
+        fn restoring_a_backup_asks_and_enter_does_not_restore() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.backup_pane.backups = vec![backup("2026-04-01 12:00:00.000Z")];
+            press_key(&mut app, KeyCode::Enter);
+            assert!(app.backup_pane.pending_restore.is_some());
+            assert_answers(
+                &app,
+                AppMessage::BackupConfirmRestore,
+                AppMessage::BackupCancelRestore,
+            );
+            assert_dialog(
+                &mut app,
+                "Restore this backup?",
+                &[
+                    "Backup from 2026-04-01 12:00:00.000Z",
+                    "Close the game first",
+                    "y  restore",
+                    "n  keep what I have now",
+                ],
+            );
+            press_key(&mut app, KeyCode::Esc);
+            assert!(app.backup_pane.pending_restore.is_none());
+            // The Backups sheet is still open behind it.
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Backup));
+        }
+
+        #[test]
+        fn deleting_a_backup_asks_and_says_it_cannot_be_undone() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.backup_pane.backups = vec![backup("2026-04-01 12:00:00.000Z")];
+            press_key(&mut app, KeyCode::Char('x'));
+            assert!(app.backup_pane.pending_delete.is_some());
+            assert_answers(
+                &app,
+                AppMessage::BackupConfirmDelete,
+                AppMessage::BackupCancelRestore,
+            );
+            assert_dialog(
+                &mut app,
+                "Delete this backup?",
+                &["This can't be undone.", "y  delete it", "n  keep it"],
+            );
+            press_key(&mut app, KeyCode::Char('q'));
+            assert!(app.backup_pane.pending_delete.is_none());
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Backup));
+        }
+
+        #[test]
+        fn replacing_an_addon_asks_with_the_normal_border() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.pending_wago_install_confirmation = Some(pending_wago_confirmation());
+            let question = app.active_question().expect("question");
+            assert!(!question.danger());
+            assert_answers(
+                &app,
+                AppMessage::WagoConfirmInstall,
+                AppMessage::WagoCancelInstall,
+            );
+            assert_dialog(
+                &mut app,
+                "Replace your copy of WeakAuras?",
+                &[
+                    "WeakAuras is already installed.",
+                    "Your WeakAuras settings are kept.",
+                    "y  replace it",
+                    "n  leave it alone",
+                ],
+            );
+        }
+
+        #[test]
+        fn quitting_during_an_update_asks_first() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            app.apply(AppAction::SetDashboardJobUi(Some(DashboardJobUiState {
+                kind: DashboardJobKind::Update,
+                current_index: 3,
+                total: 4,
+                current_addon: app.dashboard.items[0].folder.clone(),
+            })));
+
+            press_key(&mut app, KeyCode::Char('q'));
+            assert!(!app.quit_requested);
+            assert_eq!(
+                app.active_question(),
+                Some(Question::QuitWhileUpdating {
+                    progress: Some((2, 4))
+                })
+            );
+            assert_answers(&app, AppMessage::QuitConfirmed, AppMessage::QuitCancelled);
+            assert_dialog(
+                &mut app,
+                "Quit while LemonUp is still updating?",
+                &["2 of 4 addons are done.", "y  quit", "n  keep going"],
+            );
+
+            // n keeps going.
+            press_key(&mut app, KeyCode::Char('n'));
+            assert!(app.active_question().is_none());
+            assert!(!app.quit_requested);
+
+            // Ctrl+C asks too, and a second Ctrl+C quits.
+            let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            for message in app.messages_for_key(ctrl_c) {
+                apply_all(&mut app, message);
+            }
+            assert!(app.active_question().is_some());
+            assert!(!app.quit_requested);
+            for message in app.messages_for_key(ctrl_c) {
+                apply_all(&mut app, message);
+            }
+            assert!(app.quit_requested);
+        }
+
+        #[test]
+        fn y_quits_and_a_finished_update_closes_the_question() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            press_key(&mut app, KeyCode::Char('q'));
+            assert_eq!(
+                app.active_question(),
+                Some(Question::QuitWhileUpdating { progress: None })
+            );
+            // The update ends: the question no longer holds.
+            app.apply(AppAction::SetDashboardUpdateInProgress(false));
+            assert!(app.active_question().is_none());
+
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            press_key(&mut app, KeyCode::Char('q'));
+            press_key(&mut app, KeyCode::Char('y'));
+            assert!(app.quit_requested);
+        }
+
+        #[test]
+        fn quitting_with_nothing_running_does_not_ask() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            press_key(&mut app, KeyCode::Char('q'));
+            assert!(app.quit_requested);
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            for message in app.messages_for_key(ctrl_c) {
+                apply_all(&mut app, message);
+            }
+            assert!(app.quit_requested);
+        }
+
+        #[test]
+        fn delete_and_restore_are_red_replace_and_quit_are_not() {
+            let label = "today".to_string();
+            assert!(Question::DeleteAddons(Vec::new()).danger());
+            assert!(
+                Question::RestoreBackup {
+                    label: label.clone()
+                }
+                .danger()
+            );
+            assert!(Question::DeleteBackup { label }.danger());
+            assert!(
+                !Question::ReplaceAddon {
+                    name: "Pawn".to_string()
+                }
+                .danger()
+            );
+            assert!(!Question::QuitWhileUpdating { progress: None }.danger());
         }
     }
 }

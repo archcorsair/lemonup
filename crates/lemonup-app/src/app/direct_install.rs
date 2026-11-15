@@ -63,7 +63,7 @@ impl SearchInputIntent {
 }
 
 const UNSUPPORTED_URL_MESSAGE: &str =
-    "Unsupported addon URL: paste a GitHub repo, WoWInterface addon page, TukUI or Wago addon URL";
+    "LemonUp doesn't know that site. It can install from GitHub, WoWInterface, Wago.io and TukUI.";
 
 /// Classifies overlay input in this order: GitHub repo URL, WoWInterface URL, TukUI target,
 /// Wago URL; everything else is a Wago name search unless it looks like a URL.
@@ -128,7 +128,7 @@ pub(super) fn classify_search_input(input: &str) -> SearchInputIntent {
         match wago {
             Err(error) => Some(error),
             Ok(_) => {
-                Some("Wago URL must look like https://addons.wago.io/addons/<slug>".to_string())
+                Some("A Wago.io link looks like https://addons.wago.io/addons/<name>".to_string())
             }
         }
     } else {
@@ -150,7 +150,7 @@ impl App {
     /// Status text when any overlay install (Wago or direct) is already running.
     pub(super) fn install_busy_status(&self) -> Option<&'static str> {
         if self.wago_install_in_progress {
-            Some("Wago install already running")
+            Some("A Wago.io install is already running")
         } else if self.direct_install_in_progress {
             Some("an addon install is already running")
         } else {
@@ -325,7 +325,10 @@ mod tests {
         }
         match classify_search_input("https://example.com/addon") {
             SearchInputIntent::InvalidUrl(message) => {
-                assert!(message.starts_with("Unsupported addon URL"), "{message}")
+                assert!(
+                    message.starts_with("LemonUp doesn't know that site"),
+                    "{message}"
+                )
             }
             other => panic!("expected invalid url, got {other:?}"),
         }
