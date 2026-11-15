@@ -28,7 +28,7 @@ regenerated after any UI change.
    lossless WebP files (2880x1620, a 2x image) to the output directory. It
    deletes a `NAME.png` left there by older versions of this script, for the
    screen names it writes only. Lossless WebP is about 44% smaller than the
-   optimised PNGs and pixel-identical.
+   optimized PNGs and pixel-identical.
 
 Every LemonUp run goes through a wrapper script (`/tmp/lemonup-demo/lemonup`)
 that sets `HOME` and the `XDG_*` directories inside the sandbox and points

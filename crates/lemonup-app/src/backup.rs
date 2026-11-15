@@ -25,6 +25,9 @@ pub struct BackupEntry {
     pub path: PathBuf,
     pub label: String,
     pub size_bytes: u64,
+    /// When the backup was made: the time in its file name, or the file's
+    /// modified time when the name carries none.
+    pub made_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +141,9 @@ pub fn list_backups(root: &Path) -> Result<Vec<BackupEntry>, String> {
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| backup_entry_from_path(&entry.path()).ok())
         .collect::<Vec<_>>();
-    backups.sort_by(|left, right| right.file_name.cmp(&left.file_name));
+    backups.sort_by(|left, right| {
+        (right.made_at, &right.file_name).cmp(&(left.made_at, &left.file_name))
+    });
     Ok(backups)
 }
 
@@ -381,8 +386,12 @@ fn backup_entry_from_path(path: &Path) -> Result<BackupEntry, String> {
         .ok_or_else(|| format!("invalid backup file name: {}", path.display()))?
         .to_string();
 
+    let made_at = backup_created_at(&file_name)
+        .or_else(|| metadata.modified().ok().map(OffsetDateTime::from))
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
     Ok(BackupEntry {
         label: render_backup_label(&file_name),
+        made_at,
         file_name,
         path: path.to_path_buf(),
         size_bytes: metadata.len(),
@@ -787,6 +796,32 @@ mod tests {
             zip.finish().expect("finish zip");
         }
         assert!(super::extract_wtf_archive(&evil_path, &workspace.path().join("out2")).is_err());
+    }
+
+    #[test]
+    fn a_name_without_a_time_falls_back_to_the_modified_time() {
+        let temp = tempdir().expect("tempdir");
+        let stamped = temp.path().join("WTF-20261112T091500000Z.zip");
+        let renamed = temp.path().join("my settings.zip");
+        fs::write(&stamped, b"zip").expect("write stamped");
+        fs::write(&renamed, b"zip").expect("write renamed");
+        let before = OffsetDateTime::now_utc() - Duration::minutes(1);
+
+        let backups = list_backups(temp.path()).expect("list");
+        let made = |name: &str| {
+            backups
+                .iter()
+                .find(|entry| entry.file_name == name)
+                .map(|entry| entry.made_at)
+                .expect(name)
+        };
+        assert_eq!(
+            made("WTF-20261112T091500000Z.zip"),
+            time::macros::datetime!(2026-11-12 09:15 UTC)
+        );
+        assert!(made("my settings.zip") >= before);
+        // Newest first, by when they were made rather than by name.
+        assert_eq!(backups[0].file_name, "my settings.zip");
     }
 
     fn wtf_layout(root: &Path) -> PathBuf {

@@ -16,7 +16,7 @@ use crate::theme::ColorRoles;
 pub(super) const SHEET_FULL_BELOW_WIDTH: u16 = 100;
 /// A window shorter than this shows sheets full screen.
 pub(super) const SHEET_FULL_BELOW_HEIGHT: u16 = 30;
-/// How much of the list's colour shows through behind a sheet.
+/// How much of the list's color shows through behind a sheet.
 const DIM_AMOUNT: f32 = 0.34;
 
 /// Widths from the design, for windows wide enough to show a sheet over the
@@ -42,8 +42,6 @@ pub(super) enum SheetPart<'a> {
         lines: Vec<Line<'static>>,
         alignment: Alignment,
     },
-    /// A section title on a rule, such as " Summary ".
-    Heading(&'static str),
     /// Blank rows.
     Gap(u16),
     /// Anything else, with a fixed height.
@@ -55,6 +53,8 @@ pub(super) enum SheetPart<'a> {
 pub(super) struct SheetBody<'a> {
     parts: Vec<SheetPart<'a>>,
     focus: Option<usize>,
+    /// Rows pinned under the body: they stay in place while it scrolls.
+    footer: Vec<Line<'static>>,
 }
 
 impl<'a> SheetBody<'a> {
@@ -62,7 +62,15 @@ impl<'a> SheetBody<'a> {
         Self {
             parts: Vec::new(),
             focus: None,
+            footer: Vec::new(),
         }
+    }
+
+    /// Text pinned to the bottom of the sheet, wrapped at the body width,
+    /// such as a description of the row under the cursor.
+    pub(super) fn footer(&mut self, lines: Vec<Line<'static>>) -> &mut Self {
+        self.footer = lines;
+        self
     }
 
     pub(super) fn text(&mut self, lines: Vec<Line<'static>>) -> &mut Self {
@@ -70,11 +78,6 @@ impl<'a> SheetBody<'a> {
             lines,
             alignment: Alignment::Left,
         });
-        self
-    }
-
-    pub(super) fn heading(&mut self, title: &'static str) -> &mut Self {
-        self.parts.push(SheetPart::Heading(title));
         self
     }
 
@@ -108,7 +111,6 @@ impl<'a> SheetBody<'a> {
             .iter()
             .map(|part| match part {
                 SheetPart::Text { lines, .. } => text_height(lines, width),
-                SheetPart::Heading(_) => 1,
                 SheetPart::Gap(rows) => *rows,
                 SheetPart::Widget { height, .. } => *height,
             })
@@ -270,6 +272,8 @@ pub(crate) enum SheetMove {
 /// The title row of a sheet.
 pub(super) struct SheetChrome {
     pub(super) title: String,
+    /// A muted note before "esc close", such as "changes save right away".
+    pub(super) note: Option<&'static str>,
     /// A delete or another step that cannot be undone: the outline is red.
     pub(super) danger: bool,
 }
@@ -307,7 +311,7 @@ impl SheetFrame {
     /// `window` is the whole terminal; `region` is everything above the
     /// status line and the key line.
     /// `header` is how many rows at the top of `region` the header uses: a
-    /// floating sheet centres below them and only grows over them when its
+    /// floating sheet centers below them and only grows over them when its
     /// content needs the room.
     pub(super) fn new(window: Rect, region: Rect, header: u16, preferred_width: u16) -> Self {
         let full = window.width < SHEET_FULL_BELOW_WIDTH || window.height < SHEET_FULL_BELOW_HEIGHT;
@@ -357,7 +361,7 @@ impl SheetFrame {
         }
         let height = (viewport + FLOAT_CHROME_ROWS).min(self.region.height);
         let x = self.region.x + (self.region.width.saturating_sub(self.width)) / 2;
-        // Centred between the header and the status line; taller content
+        // Centered between the header and the status line; taller content
         // grows upward over the header rows, never over the status line.
         let header = self.header.min(self.region.height);
         let below_header = self.region.height - header;
@@ -439,6 +443,8 @@ impl App {
         let body = build(sheet_frame.body_width, sheet_frame.max_body_height);
         let heights = body.part_heights(sheet_frame.body_width);
         let total = heights.iter().copied().fold(0u16, u16::saturating_add);
+        let footer = wrap_lines(&body.footer, sheet_frame.body_width);
+        let footer_rows = u16::try_from(footer.len()).unwrap_or(u16::MAX);
         let focus = body.focus.map(|index| {
             let start = heights[..index]
                 .iter()
@@ -446,7 +452,7 @@ impl App {
                 .fold(0u16, u16::saturating_add);
             (start, start.saturating_add(heights[index].max(1)))
         });
-        let geometry = sheet_frame.place(total);
+        let geometry = sheet_frame.place(total.saturating_add(footer_rows));
 
         if !geometry.full {
             dim_area(frame.buffer_mut(), region, roles);
@@ -460,7 +466,10 @@ impl App {
 
         // Scroll: a new overlay starts at the top, and a moved cursor is
         // brought back into view.
-        let viewport = geometry.body.height;
+        // The footer keeps its rows; the body scrolls in what is left, and
+        // always keeps at least one.
+        let footer_rows = footer_rows.min(geometry.body.height.saturating_sub(1));
+        let viewport = geometry.body.height - footer_rows;
         let previous = self.sheet_scroll.get();
         let mut offset = if previous.kind == Some(kind) {
             previous.offset
@@ -499,11 +508,6 @@ impl App {
                         .alignment(alignment)
                         .render(area, &mut canvas)
                 }
-                SheetPart::Heading(title) => Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(roles.dim))
-                    .title(Span::styled(title, Style::default().fg(roles.muted)))
-                    .render(area, &mut canvas),
                 SheetPart::Gap(_) => {}
                 SheetPart::Widget { draw, .. } => draw(area, &mut canvas),
             }
@@ -526,6 +530,17 @@ impl App {
                     buffer[target] = canvas[(column, source_y)].clone();
                 }
             }
+        }
+        if footer_rows > 0 {
+            let area = Rect::new(
+                geometry.body.x,
+                geometry.body.y + viewport,
+                geometry.body.width,
+                footer_rows,
+            );
+            Clear.render(area, buffer);
+            buffer.set_style(area, Style::default().bg(roles.sheet).fg(roles.text));
+            Paragraph::new(footer[..usize::from(footer_rows)].to_vec()).render(area, buffer);
         }
         let arrow_style = Style::default().fg(roles.muted).bg(roles.sheet);
         if show_up {
@@ -578,10 +593,19 @@ impl App {
 
         if geometry.full {
             let title = truncate_text(&chrome.title, width.saturating_sub(13));
-            let used = 1 + title.chars().count() + "esc close".len() + 1;
+            let mut used = 1 + title.chars().count() + "esc close".len() + 1;
             let mut spans = vec![Span::raw(" "), Span::styled(title, title_style)];
+            let note = chrome
+                .note
+                .filter(|note| used + note.chars().count() + 4 <= width);
+            if let Some(note) = note {
+                used += note.chars().count() + 3;
+            }
             if used <= width {
                 spans.push(Span::raw(" ".repeat(width - used)));
+                if let Some(note) = note {
+                    spans.push(Span::styled(format!("{note} · "), label_style));
+                }
                 spans.push(Span::styled("esc", key_style));
                 spans.push(Span::styled(" close", label_style));
             }
@@ -611,7 +635,11 @@ impl App {
         // "╭─ Title ───── esc close ─╮"
         let title = truncate_text(&chrome.title, width.saturating_sub(6));
         let left = 4 + title.chars().count();
-        let right = " esc close ─╮".chars().count();
+        let note = chrome.note.filter(|note| {
+            left + 1 + note.chars().count() + 3 + " esc close ─╮".chars().count() <= width
+        });
+        let right =
+            " esc close ─╮".chars().count() + note.map_or(0, |note| note.chars().count() + 3);
         let border = Style::default().fg(outline);
         let mut spans = vec![
             Span::styled("╭─ ", border),
@@ -621,6 +649,9 @@ impl App {
         if left + 1 + right <= width {
             spans.push(Span::styled("─".repeat(width - left - right), border));
             spans.push(Span::styled(" ", border));
+            if let Some(note) = note {
+                spans.push(Span::styled(format!("{note} · "), label_style));
+            }
             spans.push(Span::styled("esc", key_style));
             spans.push(Span::styled(" close", label_style));
             spans.push(Span::styled(" ─╮", border));

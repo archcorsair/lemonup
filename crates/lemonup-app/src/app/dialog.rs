@@ -1,4 +1,4 @@
-//! The question dialog: one centred box for every yes or no question.
+//! The question dialog: one centered box for every yes or no question.
 //!
 //! The title is the question, the body names exactly what is affected, and
 //! the two answers are written as outcomes ("keep them"). `y` says yes; `n`,
@@ -30,11 +30,14 @@ pub(super) struct DeleteTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Question {
     DeleteAddons(Vec<DeleteTarget>),
+    /// `when` is "today at 09:15", `ago` is "2 hours ago".
     RestoreBackup {
-        label: String,
+        when: String,
+        ago: String,
     },
     DeleteBackup {
-        label: String,
+        when: String,
+        ago: String,
     },
     /// `direct` is a GitHub, WoWInterface or TukUI install, `source` its
     /// label; otherwise Wago.io. `folders` are exactly what a yes replaces.
@@ -174,8 +177,11 @@ impl Question {
                 ]));
                 lines
             }
-            Self::RestoreBackup { label } => vec![
-                Line::from(Span::styled(format!("Backup from {label}"), strong)),
+            Self::RestoreBackup { when, ago } => vec![
+                Line::from(vec![
+                    Span::styled(format!("Backup from {when}"), strong),
+                    Span::styled(format!(" ({ago})"), muted),
+                ]),
                 Line::from(""),
                 Line::from(Span::styled(
                     "This puts back the keybinds, macros and addon setups from that moment \
@@ -187,8 +193,11 @@ impl Question {
                     Style::default().fg(roles.amber),
                 )),
             ],
-            Self::DeleteBackup { label } => vec![
-                Line::from(Span::styled(format!("Backup from {label}"), strong)),
+            Self::DeleteBackup { when, ago } => vec![
+                Line::from(vec![
+                    Span::styled(format!("Backup from {when}"), strong),
+                    Span::styled(format!(" ({ago})"), muted),
+                ]),
                 Line::from(""),
                 Line::from(Span::styled("This can't be undone.", text)),
             ],
@@ -382,12 +391,14 @@ impl App {
         }
         if let Some(backup) = &self.backup_pane.pending_restore {
             return Some(Question::RestoreBackup {
-                label: backup.label.clone(),
+                when: self.backup_when_phrase(backup),
+                ago: self.backup_age_phrase(backup),
             });
         }
         if let Some(backup) = &self.backup_pane.pending_delete {
             return Some(Question::DeleteBackup {
-                label: backup.label.clone(),
+                when: self.backup_when_phrase(backup),
+                ago: self.backup_age_phrase(backup),
             });
         }
         None
@@ -430,7 +441,7 @@ impl App {
         ]
     }
 
-    /// Draws the open question centred in `region`, the space above the
+    /// Draws the open question centered in `region`, the space above the
     /// status line and the key line, over a dimmed screen.
     pub(super) fn render_question(&self, frame: &mut Frame<'_>, region: Rect) {
         let Some(question) = self.active_question() else {

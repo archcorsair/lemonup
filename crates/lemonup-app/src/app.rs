@@ -451,7 +451,6 @@ enum AppMessage {
     WagoCancelInstall,
     ConfigSelectionNext,
     ConfigSelectionPrevious,
-    ConfigBeginEditing,
     ConfigInputChar(char),
     ConfigBackspace,
     ConfigCommitEdit,
@@ -612,55 +611,145 @@ pub(crate) struct DashboardJobUiState {
     current_addon: String,
 }
 
+/// One row of Settings that the cursor can stop on: a setting, or an action
+/// row that runs on enter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigField {
     WagoApiKey,
-    CheckInterval,
     AutoCheckEnabled,
     AutoCheckInterval,
+    CheckInterval,
     BackupWtf,
     BackupRetention,
     Theme,
     ShowLibs,
+    ChangeGameFolder,
+    SaveAddonList,
+    LoadAddonList,
 }
 
+/// How a Settings row changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigRowKind {
+    /// Typed into a text box on enter.
+    Text,
+    /// Two values: enter or ←/→ switch them.
+    Toggle,
+    /// ←/→ move through set steps.
+    Stepped,
+    /// Runs on enter.
+    Action,
+}
+
+/// The steps "Check every" and "Don't re-check an addon for" move through,
+/// in seconds: 1, 5, 15 and 30 minutes, then 1, 3, 6, 12 and 24 hours.
+const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 43_200, 86_400];
+
 impl ConfigField {
-    const ALL: [Self; 8] = [
+    /// Every row in the order Settings shows them.
+    const ALL: [Self; 11] = [
         Self::WagoApiKey,
-        Self::CheckInterval,
         Self::AutoCheckEnabled,
         Self::AutoCheckInterval,
+        Self::CheckInterval,
         Self::BackupWtf,
         Self::BackupRetention,
         Self::Theme,
         Self::ShowLibs,
+        Self::ChangeGameFolder,
+        Self::SaveAddonList,
+        Self::LoadAddonList,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::WagoApiKey => "Wago.io key",
-            Self::CheckInterval => "Don't re-check for",
-            Self::AutoCheckEnabled => "Check automatically",
+            Self::AutoCheckEnabled => "Check for updates automatically",
             Self::AutoCheckInterval => "Check every",
-            Self::BackupWtf => "Back up game settings",
+            Self::CheckInterval => "Don't re-check an addon for",
+            Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
-            Self::Theme => "Theme",
+            Self::Theme => "Colors",
             Self::ShowLibs => "Show library folders",
+            Self::ChangeGameFolder => "Change game folder…",
+            Self::SaveAddonList => "Save my addon list to a file…",
+            Self::LoadAddonList => "Load an addon list from a file…",
+        }
+    }
+
+    fn kind(self) -> ConfigRowKind {
+        match self {
+            Self::WagoApiKey => ConfigRowKind::Text,
+            Self::AutoCheckEnabled | Self::BackupWtf | Self::Theme | Self::ShowLibs => {
+                ConfigRowKind::Toggle
+            }
+            Self::AutoCheckInterval | Self::CheckInterval | Self::BackupRetention => {
+                ConfigRowKind::Stepped
+            }
+            Self::ChangeGameFolder | Self::SaveAddonList | Self::LoadAddonList => {
+                ConfigRowKind::Action
+            }
         }
     }
 
     fn is_textual(self) -> bool {
-        matches!(
-            self,
-            Self::WagoApiKey
-                | Self::CheckInterval
-                | Self::AutoCheckInterval
-                | Self::BackupRetention
-        )
+        self.kind() == ConfigRowKind::Text
     }
 
+    /// ←/→ change the value.
     fn supports_quick_adjust(self) -> bool {
-        !matches!(self, Self::WagoApiKey)
+        matches!(self.kind(), ConfigRowKind::Toggle | ConfigRowKind::Stepped)
+    }
+
+    /// What enter runs on an action row.
+    fn action_message(self) -> Option<AppMessage> {
+        match self {
+            Self::ChangeGameFolder => Some(AppMessage::ConfigRunOnboarding),
+            Self::SaveAddonList => Some(AppMessage::ConfigExportAddons),
+            Self::LoadAddonList => Some(AppMessage::ConfigImportAddons),
+            _ => None,
+        }
+    }
+}
+
+/// The next time step after `current` (`delta` > 0) or before it. A stored
+/// value between steps is kept as it is until it is changed, and then moves
+/// to the nearest step in that direction; past either end nothing changes.
+fn step_seconds(current: u64, delta: i16) -> u64 {
+    match delta.signum() {
+        1 => TIME_STEPS_SECS
+            .iter()
+            .copied()
+            .find(|step| *step > current)
+            .unwrap_or(current),
+        -1 => TIME_STEPS_SECS
+            .iter()
+            .rev()
+            .copied()
+            .find(|step| *step < current)
+            .unwrap_or(current),
+        _ => current,
+    }
+}
+
+/// Seconds in words, exactly: "5 minutes", "1 hour", "7 min 30 s",
+/// "1 h 30 min". Nothing is rounded, so any stored value reads true.
+fn human_duration(secs: u64) -> String {
+    let plural = |count: u64, unit: &str| {
+        if count == 1 {
+            format!("1 {unit}")
+        } else {
+            format!("{count} {unit}s")
+        }
+    };
+    let (hours, minutes, seconds) = (secs / 3_600, secs % 3_600 / 60, secs % 60);
+    match (hours, minutes, seconds) {
+        (0, 0, seconds) => plural(seconds, "second"),
+        (0, minutes, 0) => plural(minutes, "minute"),
+        (0, minutes, seconds) => format!("{minutes} min {seconds} s"),
+        (hours, 0, 0) => plural(hours, "hour"),
+        (hours, minutes, 0) => format!("{hours} h {minutes} min"),
+        (hours, minutes, seconds) => format!("{hours} h {minutes} min {seconds} s"),
     }
 }
 
@@ -712,9 +801,6 @@ impl ConfigPaneState {
         let field = self.selected_field();
         let value = match field {
             ConfigField::WagoApiKey => self.draft.wago_api_key.clone().unwrap_or_default(),
-            ConfigField::CheckInterval => self.draft.check_interval_secs.to_string(),
-            ConfigField::AutoCheckInterval => self.draft.auto_check_interval_secs.to_string(),
-            ConfigField::BackupRetention => self.draft.backup_retention.to_string(),
             _ => return self.clone(),
         };
         let mut next = self.clone();
@@ -753,48 +839,15 @@ impl ConfigPaneState {
             return Ok(self.clone());
         };
 
+        // The Wago.io key is the one setting typed in a box.
         let mut next = self.clone();
-        match edit.field {
-            ConfigField::WagoApiKey => {
-                let trimmed = edit.value.value().trim().to_string();
-                next.draft.wago_api_key = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                };
-            }
-            ConfigField::CheckInterval => {
-                let parsed =
-                    edit.value.value().trim().parse::<u64>().map_err(|_| {
-                        "check freshness must be a whole number of seconds".to_string()
-                    })?;
-                if parsed == 0 {
-                    return Err("check freshness must be at least 1 second".to_string());
-                }
-                next.draft.check_interval_secs = parsed;
-            }
-            ConfigField::AutoCheckInterval => {
-                let parsed = edit.value.value().trim().parse::<u64>().map_err(|_| {
-                    "auto-check interval must be a whole number of seconds".to_string()
-                })?;
-                if parsed == 0 {
-                    return Err("auto-check interval must be at least 1 second".to_string());
-                }
-                next.draft.auto_check_interval_secs = parsed;
-            }
-            ConfigField::BackupRetention => {
-                let parsed = edit
-                    .value
-                    .value()
-                    .trim()
-                    .parse::<u16>()
-                    .map_err(|_| "backup retention must be a whole number".to_string())?;
-                if parsed == 0 {
-                    return Err("backup retention must be at least 1".to_string());
-                }
-                next.draft.backup_retention = parsed;
-            }
-            _ => {}
+        if edit.field == ConfigField::WagoApiKey {
+            let trimmed = edit.value.value().trim().to_string();
+            next.draft.wago_api_key = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
         }
         next.edit = None;
         Ok(next)
@@ -802,34 +855,37 @@ impl ConfigPaneState {
 
     fn adjust_selected(&self, delta: i16) -> Self {
         let mut next = self.clone();
-        match next.selected_field() {
-            ConfigField::WagoApiKey => {}
+        let draft = &mut next.draft;
+        match self.selected_field() {
             ConfigField::CheckInterval => {
-                next.draft.check_interval_secs =
-                    adjust_u64(next.draft.check_interval_secs, delta, 60, 1);
+                draft.check_interval_secs = step_seconds(draft.check_interval_secs, delta);
             }
             ConfigField::AutoCheckEnabled => {
-                next.draft.auto_check_enabled = !next.draft.auto_check_enabled;
+                draft.auto_check_enabled = !draft.auto_check_enabled;
             }
             ConfigField::AutoCheckInterval => {
-                next.draft.auto_check_interval_secs =
-                    adjust_u64(next.draft.auto_check_interval_secs, delta, 300, 1);
+                draft.auto_check_interval_secs =
+                    step_seconds(draft.auto_check_interval_secs, delta);
             }
             ConfigField::BackupWtf => {
-                next.draft.backup_wtf = !next.draft.backup_wtf;
+                draft.backup_wtf = !draft.backup_wtf;
             }
             ConfigField::BackupRetention => {
-                next.draft.backup_retention = adjust_u16(next.draft.backup_retention, delta, 1, 1);
+                draft.backup_retention = adjust_u16(draft.backup_retention, delta, 1, 1);
             }
             ConfigField::Theme => {
-                next.draft.theme = match next.draft.theme {
+                draft.theme = match draft.theme {
                     ThemeMode::Dark => ThemeMode::Light,
                     ThemeMode::Light => ThemeMode::Dark,
                 };
             }
             ConfigField::ShowLibs => {
-                next.draft.show_libs = !next.draft.show_libs;
+                draft.show_libs = !draft.show_libs;
             }
+            ConfigField::WagoApiKey
+            | ConfigField::ChangeGameFolder
+            | ConfigField::SaveAddonList
+            | ConfigField::LoadAddonList => {}
         }
         next
     }
@@ -845,10 +901,6 @@ impl ConfigPaneState {
             selected_field: self.selected_field,
             edit: None,
         }
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.persisted != self.draft
     }
 }
 
@@ -3216,7 +3268,9 @@ impl App {
             KeyCode::Char('c') => vec![AppMessage::DashboardRunCheckSelected],
             KeyCode::Char('U') => vec![AppMessage::DashboardRunUpdateAll],
             KeyCode::Char('C') => vec![AppMessage::DashboardRunCheckAll],
-            KeyCode::Char(',') => vec![AppMessage::SetDetailMode(DetailMode::Config)],
+            KeyCode::Char('s') | KeyCode::Char(',') => {
+                vec![AppMessage::SetDetailMode(DetailMode::Config)]
+            }
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
             KeyCode::Char('d') if self.first_run_card_visible() => {
                 vec![AppMessage::DashboardHideFirstRunCard]
@@ -3451,11 +3505,20 @@ impl App {
                     vec![]
                 },
             ),
-            KeyCode::Char('e') => Some(vec![AppMessage::ConfigBeginEditing]),
-            KeyCode::Enter => Some(vec![AppMessage::ConfigToggleSelected]),
-            KeyCode::Char('r') => Some(vec![AppMessage::ConfigRunOnboarding]),
-            KeyCode::Char('x') => Some(vec![AppMessage::ConfigExportAddons]),
-            KeyCode::Char('i') => Some(vec![AppMessage::ConfigImportAddons]),
+            // Enter edits the key, switches a toggle or runs an action row.
+            // A stepped value changes with the arrows only.
+            KeyCode::Enter => Some(match self.config_pane.selected_field().kind() {
+                ConfigRowKind::Stepped => vec![],
+                ConfigRowKind::Action => self
+                    .config_pane
+                    .selected_field()
+                    .action_message()
+                    .into_iter()
+                    .collect(),
+                ConfigRowKind::Text | ConfigRowKind::Toggle => {
+                    vec![AppMessage::ConfigToggleSelected]
+                }
+            }),
             _ => None,
         }
     }
@@ -3468,7 +3531,8 @@ impl App {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => Some(vec![AppMessage::BackupSelectionNext]),
             KeyCode::Up | KeyCode::Char('k') => Some(vec![AppMessage::BackupSelectionPrevious]),
-            KeyCode::Char('n') => Some(vec![AppMessage::BackupRunNow]),
+            // `b` backs up; `n` is only ever "no".
+            KeyCode::Char('b') => Some(vec![AppMessage::BackupRunNow]),
             KeyCode::Char('r') | KeyCode::Enter => Some(vec![AppMessage::BackupRequestRestore]),
             KeyCode::Char('x') => Some(vec![AppMessage::BackupRequestDelete]),
             _ => None,
@@ -4401,21 +4465,12 @@ impl App {
                     "replace question closed",
                 )),
             ],
-            AppMessage::ConfigSelectionNext => vec![AppAction::SetConfigPaneState(
-                self.config_pane.select_next(),
-            )],
-            AppMessage::ConfigSelectionPrevious => vec![AppAction::SetConfigPaneState(
-                self.config_pane.select_previous(),
-            )],
-            AppMessage::ConfigBeginEditing => {
-                let field = self.config_pane.selected_field();
-                if field.is_textual() {
-                    vec![AppAction::SetConfigPaneState(
-                        self.config_pane.begin_editing(),
-                    )]
-                } else {
-                    vec![]
-                }
+            // A message under one row does not follow the cursor to the next.
+            AppMessage::ConfigSelectionNext => {
+                self.config_move_actions(self.config_pane.select_next())
+            }
+            AppMessage::ConfigSelectionPrevious => {
+                self.config_move_actions(self.config_pane.select_previous())
             }
             AppMessage::ConfigInputChar(character) => vec![AppAction::SetConfigPaneState(
                 self.config_pane.insert_char(character),
@@ -4449,10 +4504,14 @@ impl App {
             }
             AppMessage::ConfigToggleSelected => {
                 let field = self.config_pane.selected_field();
-                if field.is_textual() {
+                if let Some(action) = field.action_message() {
+                    self.update(action)
+                } else if field.is_textual() {
                     vec![AppAction::SetConfigPaneState(
                         self.config_pane.begin_editing(),
                     )]
+                } else if field.kind() == ConfigRowKind::Stepped {
+                    vec![]
                 } else {
                     let next = self.config_pane.toggle_selected();
                     match self.persist_config_pane(next, field) {
@@ -4468,13 +4527,18 @@ impl App {
             AppMessage::ConfigAdjustSelected(delta) => {
                 let field = self.config_pane.selected_field();
                 let next = self.config_pane.adjust_selected(delta);
-                match self.persist_config_pane(next, field) {
-                    Ok(actions) => actions,
-                    Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Problem,
-                        DetailMode::Config,
-                        &error,
-                    ))],
+                // At the end of the steps nothing changes, and nothing is saved.
+                if next.draft == self.config_pane.draft {
+                    vec![]
+                } else {
+                    match self.persist_config_pane(next, field) {
+                        Ok(actions) => actions,
+                        Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Config,
+                            &error,
+                        ))],
+                    }
                 }
             }
             AppMessage::ConfigRunOnboarding => vec![
@@ -4495,10 +4559,10 @@ impl App {
                             StatusKind::Done,
                             DetailMode::Config,
                             &format!(
-                                "exported {} addon{} to {}",
+                                "Saved {} addon{} to {}",
                                 exported.addons.len(),
                                 plural_suffix(exported.addons.len()),
-                                output_path.display()
+                                friendly_path(&output_path)
                             ),
                         ))],
                         Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -4520,14 +4584,14 @@ impl App {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
-                            "Set your AddOns folder before importing",
+                            "Choose a game folder before loading an addon list",
                         ))]
                     } else {
                         vec![
                             AppAction::SetStatus(self.dashboard_status_for(
                                 StatusKind::Working,
                                 DetailMode::Config,
-                                "importing addon list",
+                                "Loading the addon list…",
                             )),
                             AppAction::StartTransferImport {
                                 addon_dir: self.effective_addon_dir.clone().expect("checked above"),
@@ -5112,13 +5176,10 @@ impl App {
                     )),
                 ],
                 AppTaskEvent::BackupFinished(Ok(outcome)) => {
-                    let mut message = "Backed up your game settings".to_string();
-                    if !outcome.pruned_files.is_empty() {
-                        message.push_str(&format!(
-                            " · keeping the newest {}",
-                            self.config_pane.draft.backup_retention
-                        ));
-                    }
+                    let message = format!(
+                        "Backed up your game settings · keeping the newest {}",
+                        self.config_pane.draft.backup_retention
+                    );
                     vec![
                         AppAction::SetBackupPaneState(
                             self.backup_pane
@@ -5146,7 +5207,10 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Done,
                         DetailMode::Backup,
-                        &format!("Put back your game settings from {}", outcome.backup.label),
+                        &format!(
+                            "Put back your game settings from {}",
+                            self.backup_when_phrase(&outcome.backup)
+                        ),
                     )),
                 ],
                 AppTaskEvent::BackupRestoreFinished(Err(error)) => vec![
@@ -5166,7 +5230,10 @@ impl App {
                     AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Done,
                         DetailMode::Backup,
-                        &format!("Deleted the backup from {}", outcome.deleted.label),
+                        &format!(
+                            "Deleted the backup from {}",
+                            self.backup_when_phrase(&outcome.deleted)
+                        ),
                     )),
                 ],
                 AppTaskEvent::BackupDeleteFinished(Err(error)) => vec![
@@ -7000,133 +7067,20 @@ impl App {
                 }
             }
             DetailMode::Config => {
-                lines.push(self.overlay_section_title("Config"));
-                lines.push(self.overlay_kv_line("AddOns", self.rendered_target_path()));
-                lines.push(self.overlay_kv_line(
-                    "Config",
-                    if self.config_present {
-                        "present"
-                    } else {
-                        "missing"
-                    },
-                ));
-                lines.push(self.overlay_kv_line(
-                    "Draft",
-                    if self.config_pane.is_dirty() {
-                        "unsaved changes"
-                    } else {
-                        "saved"
-                    },
-                ));
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Fields"));
-                for (index, field) in ConfigField::ALL.iter().enumerate() {
-                    let marker = if self.config_pane.selected_field == index {
-                        "›"
-                    } else {
-                        " "
-                    };
-                    let mut value = self.render_config_field_value(*field);
-                    if self
-                        .config_pane
-                        .edit
-                        .as_ref()
-                        .is_some_and(|edit| edit.field == *field)
-                    {
-                        value = format!(
-                            "{} (editing)",
-                            self.config_pane
-                                .edit
-                                .as_ref()
-                                .map(|edit| edit.value.value().to_string())
-                                .unwrap_or(value)
+                lines.push(self.overlay_section_title("Settings"));
+                for field in ConfigField::ALL {
+                    if field.kind() != ConfigRowKind::Action {
+                        lines.push(
+                            self.overlay_kv_line(
+                                field.label(),
+                                self.render_config_field_value(field),
+                            ),
                         );
                     }
-                    lines.push(Line::from(format!("{marker} {}: {}", field.label(), value)));
-                }
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Actions"));
-                lines.push(self.overlay_hint_line(
-                    "j/k move | enter toggle/cycle | e edit text | s save | n reset | esc stop edit",
-                ));
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Addon transfer"));
-                lines.push(self.overlay_hint_line(&format!(
-                        "x export tracked addons | i import addon list | {}",
-                        default_transfer_path()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|error| format!("path unavailable: {error}"))
-                    )));
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Notes"));
-                lines.push(self.overlay_hint_line(
-                    "Only curated settings are editable here. Addon dir still stays read-only.",
-                ));
-                lines.push(self.overlay_hint_line(
-                    "Use 'Run onboarding again' to reopen the location finder manually.",
-                ));
-            }
-            DetailMode::Backup => {
-                lines.push(self.overlay_section_title("Backup now"));
-                lines.push(self.overlay_kv_line("AddOns", self.rendered_target_path()));
-                lines.push(self.overlay_kv_line("Store", self.backup_dir.display().to_string()));
-                lines.push(self.overlay_kv_line(
-                    "Policy",
-                    format!(
-                        "enabled={} | retention={}",
-                        self.config_pane.draft.backup_wtf, self.config_pane.draft.backup_retention
-                    ),
-                ));
-                lines.push(self.overlay_kv_line(
-                    "State",
-                    if self.backup_pane.in_progress {
-                        "running"
-                    } else if self.backup_pane.pending_restore.is_some() {
-                        "awaiting restore confirmation"
-                    } else {
-                        "ready"
-                    },
-                ));
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Actions"));
-                if let Some(pending) = &self.backup_pane.pending_restore {
-                    lines.push(self.overlay_hint_line(&format!(
-                        "Restore {} and replace the current WTF folder? y confirm | n cancel",
-                        pending.label
-                    )));
-                } else {
-                    lines.push(self.overlay_hint_line(
-                        "n create backup now | r/enter restore selected | j/k move",
-                    ));
-                }
-                lines.push(Line::from(""));
-                lines.push(self.overlay_section_title("Recent backups"));
-                if self.backup_pane.backups.is_empty() {
-                    lines.push(self.overlay_hint_line("No backups created yet."));
-                } else {
-                    for (index, entry) in self.backup_pane.backups.iter().take(8).enumerate() {
-                        lines.push(Line::from(format!(
-                            "{} {} | {} bytes",
-                            if index == self.backup_pane.selected_backup {
-                                ">"
-                            } else {
-                                " "
-                            },
-                            entry.label,
-                            entry.size_bytes
-                        )));
-                        lines.push(self.overlay_hint_line(&entry.file_name));
-                    }
-                    if self.backup_pane.backups.len() > 8 {
-                        let remaining = self.backup_pane.backups.len() - 8;
-                        lines.push(self.overlay_hint_line(&format!(
-                            "{} more backup{}",
-                            remaining,
-                            plural_suffix(remaining)
-                        )));
-                    }
                 }
             }
+            // Backups draws its own sheet (`render_backup.rs`).
+            DetailMode::Backup => {}
         }
 
         lines
@@ -7224,24 +7178,10 @@ impl App {
 
     /// The AddOns folder with the home folder shortened to `~` (not on Windows).
     fn friendly_addon_dir(&self) -> String {
-        let Some(path) = self.effective_addon_dir.as_deref() else {
-            return String::new();
-        };
-        if !cfg!(windows)
-            && let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
-            && let Ok(rest) = path.strip_prefix(&home)
-            && !home.as_os_str().is_empty()
-        {
-            return Path::new("~").join(rest).display().to_string();
-        }
-        path.display().to_string()
-    }
-
-    fn rendered_target_path(&self) -> String {
         self.effective_addon_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<unconfigured>".to_string())
+            .as_deref()
+            .map(friendly_path)
+            .unwrap_or_default()
     }
 
     fn auto_check_due_targets(&self) -> Option<Vec<String>> {
@@ -7300,54 +7240,9 @@ impl App {
         Some(folders)
     }
 
+    /// A setting's value in words. The Wago.io key itself is never shown.
     fn render_config_field_value(&self, field: ConfigField) -> String {
-        match field {
-            ConfigField::WagoApiKey => self
-                .config_pane
-                .draft
-                .wago_api_key
-                .as_ref()
-                .map(|value| {
-                    if value.is_empty() {
-                        "Saved".to_string()
-                    } else {
-                        format!("Saved ({} characters)", value.len())
-                    }
-                })
-                .unwrap_or_else(|| "Not set".to_string()),
-            ConfigField::CheckInterval => {
-                format!("{}s", self.config_pane.draft.check_interval_secs)
-            }
-            ConfigField::AutoCheckEnabled => {
-                if self.config_pane.draft.auto_check_enabled {
-                    "On".to_string()
-                } else {
-                    "Off".to_string()
-                }
-            }
-            ConfigField::AutoCheckInterval => {
-                format!("{}s", self.config_pane.draft.auto_check_interval_secs)
-            }
-            ConfigField::BackupWtf => {
-                if self.config_pane.draft.backup_wtf {
-                    "On".to_string()
-                } else {
-                    "Off".to_string()
-                }
-            }
-            ConfigField::BackupRetention => self.config_pane.draft.backup_retention.to_string(),
-            ConfigField::Theme => match self.config_pane.draft.theme {
-                ThemeMode::Dark => "Dark".to_string(),
-                ThemeMode::Light => "Light".to_string(),
-            },
-            ConfigField::ShowLibs => {
-                if self.config_pane.draft.show_libs {
-                    "On".to_string()
-                } else {
-                    "Off".to_string()
-                }
-            }
-        }
+        config_value_text(&self.config_pane.draft, field)
     }
 
     fn onboarding_setting_value(&self, field: OnboardingSettingsField) -> String {
@@ -7467,52 +7362,25 @@ impl App {
     }
 
     fn config_field_saved_message(&self, field: ConfigField, config: &AppConfig) -> String {
-        match field {
-            ConfigField::WagoApiKey => {
-                if config.wago_api_key.is_some() {
-                    "Saved your Wago.io key".to_string()
-                } else {
-                    "Removed your Wago.io key".to_string()
-                }
-            }
-            ConfigField::CheckInterval => {
-                format!("Check freshness set to {}s", config.check_interval_secs)
-            }
-            ConfigField::AutoCheckEnabled => {
-                if config.auto_check_enabled {
-                    "Background auto-check enabled".to_string()
-                } else {
-                    "Background auto-check disabled".to_string()
-                }
-            }
-            ConfigField::AutoCheckInterval => {
-                format!(
-                    "Auto-check interval set to {}s",
-                    config.auto_check_interval_secs
-                )
-            }
-            ConfigField::BackupWtf => {
-                if config.backup_wtf {
-                    "WTF backup enabled".to_string()
-                } else {
-                    "WTF backup disabled".to_string()
-                }
-            }
-            ConfigField::BackupRetention => {
-                format!("Backup retention set to {}", config.backup_retention)
-            }
-            ConfigField::Theme => match config.theme {
-                ThemeMode::Dark => "Theme set to Dark".to_string(),
-                ThemeMode::Light => "Theme set to Light".to_string(),
-            },
-            ConfigField::ShowLibs => {
-                if config.show_libs {
-                    "Show libs enabled".to_string()
-                } else {
-                    "Show libs disabled".to_string()
-                }
-            }
+        if field == ConfigField::WagoApiKey {
+            return if config.wago_api_key.is_some() {
+                "Saved your Wago.io key".to_string()
+            } else {
+                "Removed your Wago.io key".to_string()
+            };
         }
+        format!("{}: {}", field.label(), config_value_text(config, field))
+    }
+
+    fn config_move_actions(&self, next: ConfigPaneState) -> Vec<AppAction> {
+        let mut actions = vec![AppAction::SetConfigPaneState(next)];
+        if self
+            .active_detail_status_message(DetailMode::Config)
+            .is_some()
+        {
+            actions.push(AppAction::SetStatus(StatusMessage::cleared()));
+        }
+        actions
     }
 
     fn persist_config_pane(
@@ -7531,33 +7399,6 @@ impl App {
                 )),
             ]),
             Err(error) => Err(format!("failed to save {}: {error}", field.label())),
-        }
-    }
-
-    fn config_field_help_text(&self, field: ConfigField) -> &'static str {
-        match field {
-            ConfigField::WagoApiKey => {
-                "Used only for Wago installs, search, and Wago update checks."
-            }
-            ConfigField::CheckInterval => {
-                "How long a checked addon stays fresh before LemonUp fetches it again."
-            }
-            ConfigField::AutoCheckEnabled => {
-                "Refresh tracked addon status in the background while the dashboard is open."
-            }
-            ConfigField::AutoCheckInterval => {
-                "How often LemonUp runs background update checks for tracked addons."
-            }
-            ConfigField::BackupWtf => {
-                "Include WTF data when creating backups before risky operations."
-            }
-            ConfigField::BackupRetention => {
-                "How many recent backup archives LemonUp keeps before pruning older ones."
-            }
-            ConfigField::Theme => "Pick the shell color treatment used across the TUI.",
-            ConfigField::ShowLibs => {
-                "Show embedded library folders in addon scans and relationship views."
-            }
         }
     }
 }
@@ -8267,7 +8108,7 @@ fn dashboard_update_status_message(
     }
     if summary.skipped_no_api_key > 0 {
         parts.push(format!(
-            "skipped {} Wago.io addon{}: add your Wago.io key in Settings (,) to update {}",
+            "skipped {} Wago.io addon{}: add your Wago.io key in Settings (s) to update {}",
             summary.skipped_no_api_key,
             plural_suffix(summary.skipped_no_api_key),
             if summary.skipped_no_api_key == 1 {
@@ -8324,6 +8165,44 @@ fn dashboard_check_status_message(
         format!("{headline} · couldn't check {errors}")
     } else {
         headline
+    }
+}
+
+/// `path` with the home folder shortened to `~` (not on Windows).
+fn friendly_path(path: &Path) -> String {
+    if !cfg!(windows)
+        && let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Ok(rest) = path.strip_prefix(&home)
+        && !home.as_os_str().is_empty()
+    {
+        return Path::new("~").join(rest).display().to_string();
+    }
+    path.display().to_string()
+}
+
+/// A setting's value in `config`, in words. The Wago.io key itself is never
+/// shown.
+fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
+    match field {
+        ConfigField::WagoApiKey => if draft.wago_api_key.is_some() {
+            "Saved"
+        } else {
+            "Not set"
+        }
+        .to_string(),
+        ConfigField::CheckInterval => human_duration(draft.check_interval_secs),
+        ConfigField::AutoCheckEnabled => on_off(draft.auto_check_enabled).to_string(),
+        ConfigField::AutoCheckInterval => human_duration(draft.auto_check_interval_secs),
+        ConfigField::BackupWtf => on_off(draft.backup_wtf).to_string(),
+        ConfigField::BackupRetention => draft.backup_retention.to_string(),
+        ConfigField::Theme => match draft.theme {
+            ThemeMode::Dark => "Dark".to_string(),
+            ThemeMode::Light => "Light".to_string(),
+        },
+        ConfigField::ShowLibs => on_off(draft.show_libs).to_string(),
+        ConfigField::ChangeGameFolder | ConfigField::SaveAddonList | ConfigField::LoadAddonList => {
+            String::new()
+        }
     }
 }
 
@@ -8502,18 +8381,6 @@ fn selection_count_after_toggle(dashboard: &DashboardState) -> usize {
     }
 }
 
-fn adjust_u64(current: u64, delta: i16, step: u64, minimum: u64) -> u64 {
-    if delta >= 0 {
-        current
-            .saturating_add(step.saturating_mul(delta as u64))
-            .max(minimum)
-    } else {
-        current
-            .saturating_sub(step.saturating_mul((-delta) as u64))
-            .max(minimum)
-    }
-}
-
 fn adjust_u16(current: u16, delta: i16, step: u16, minimum: u16) -> u16 {
     if delta >= 0 {
         current
@@ -8567,8 +8434,8 @@ mod tests {
         ScanState, SearchFocus, SearchInstallState, SearchPaneState, SearchPresentationMode,
         ShellMode, ShellUiState, TextBox, UiTheme, WagoInstallConfirmation, WagoInstallOutcome,
         WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
-        child_row_prefix, dashboard_item_version_label, format_download_count,
-        summarize_owned_folders, truncate_middle_text, visible_search_result_window,
+        child_row_prefix, dashboard_item_version_label, format_download_count, human_duration,
+        step_seconds, summarize_owned_folders, truncate_middle_text, visible_search_result_window,
     };
     use super::{
         DashboardItem, DashboardUndoDeleteState, SheetMove, SheetScroll, StatusKind, StatusMessage,
@@ -9229,6 +9096,7 @@ mod tests {
             path: PathBuf::from("C:\\Temp\\WTF-20260405T120000.000Z.zip"),
             label: "2026-04-05 12:00:00.000Z".to_string(),
             size_bytes: 128,
+            made_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
@@ -9680,7 +9548,7 @@ mod tests {
     }
 
     #[test]
-    fn status_kind_sets_footer_colour() {
+    fn status_kind_sets_footer_color() {
         let app = app_for_tests(ShellMode::Dashboard);
         let theme = &app.ui_theme;
         assert_eq!(app.status_kind_color(StatusKind::Done), theme.success);
@@ -10781,23 +10649,18 @@ mod tests {
     #[test]
     fn config_mode_navigation_and_edit_keys_are_routed_to_config_pane() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Config;
-        app.config_pane.selected_field = ConfigField::ALL
-            .iter()
-            .position(|field| matches!(field, ConfigField::ShowLibs))
-            .expect("show libs field present");
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        let select = |app: &mut App, field: ConfigField| {
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|candidate| *candidate == field)
+                .expect("field present");
+        };
+        select(&mut app, ConfigField::ShowLibs);
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
             vec![AppMessage::ConfigSelectionNext]
-        );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('e'))),
-            vec![AppMessage::ConfigBeginEditing]
-        );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('r'))),
-            vec![AppMessage::ConfigRunOnboarding]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('l'))),
@@ -10807,8 +10670,28 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Left)),
             vec![AppMessage::ConfigAdjustSelected(-1)]
         );
+        // Enter switches a toggle.
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::ConfigToggleSelected]
+        );
+        // A stepped value changes with the arrows only.
+        select(&mut app, ConfigField::AutoCheckInterval);
+        assert!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter))
+                .is_empty()
+        );
+        // The key row has no value to step through.
+        select(&mut app, ConfigField::WagoApiKey);
+        assert!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Right))
+                .is_empty()
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::ConfigToggleSelected]
+        );
 
-        app.config_pane.selected_field = 0;
         app.apply(AppAction::SetConfigPaneState(
             app.config_pane.begin_editing(),
         ));
@@ -10823,18 +10706,40 @@ mod tests {
     }
 
     #[test]
-    fn config_mode_allows_global_quit_and_escape_when_not_editing() {
+    fn config_mode_closes_on_q_and_escape_when_not_editing() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Config;
-        app.apply(AppAction::SelectAllDashboardParents);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
 
+        for code in [KeyCode::Char('q'), KeyCode::Esc] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(code)),
+                vec![AppMessage::DashboardCloseOverlay],
+                "{code:?}"
+            );
+        }
+        apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+        assert_eq!(app.shell_ui.overlay.active, None);
+        assert_eq!(app.dashboard.detail_mode, DetailMode::Overview);
+    }
+
+    #[test]
+    fn s_and_comma_open_settings_from_the_list() {
+        for code in [KeyCode::Char('s'), KeyCode::Char(',')] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(code)),
+                vec![AppMessage::SetDetailMode(DetailMode::Config)],
+                "{code:?}"
+            );
+            apply_all(&mut app, AppMessage::SetDetailMode(DetailMode::Config));
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Config));
+        }
+        // While the filter has focus s is a letter.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
         assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
-            vec![AppMessage::QuitRequested]
-        );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
-            vec![AppMessage::DashboardClearSelection]
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('s'))),
+            vec![AppMessage::DashboardFilterInputChar('s')]
         );
     }
 
@@ -10973,12 +10878,152 @@ mod tests {
             app.apply(action);
         }
 
-        assert_eq!(app.config_pane.persisted.check_interval_secs, 360);
+        // 5 minutes steps up to 15.
+        assert_eq!(app.config_pane.persisted.check_interval_secs, 900);
         let saved = app.config_store.load().expect("load config");
         match saved {
-            ConfigLoad::Loaded(config) => assert_eq!(config.check_interval_secs, 360),
+            ConfigLoad::Loaded(config) => assert_eq!(config.check_interval_secs, 900),
             ConfigLoad::Missing(_) => panic!("config should have been written"),
         }
+    }
+
+    #[test]
+    fn stepped_values_keep_odd_stored_seconds_until_changed() {
+        assert_eq!(human_duration(60), "1 minute");
+        assert_eq!(human_duration(300), "5 minutes");
+        assert_eq!(human_duration(3_600), "1 hour");
+        assert_eq!(human_duration(86_400), "24 hours");
+        assert_eq!(human_duration(7), "7 seconds");
+        assert_eq!(human_duration(1), "1 second");
+        assert_eq!(human_duration(450), "7 min 30 s");
+        assert_eq!(human_duration(5_400), "1 h 30 min");
+        assert_eq!(human_duration(3_661), "1 h 1 min 1 s");
+        assert_eq!(human_duration(172_800), "48 hours");
+
+        // Between steps: the nearest step in the direction pressed.
+        assert_eq!(step_seconds(450, 1), 900);
+        assert_eq!(step_seconds(450, -1), 300);
+        assert_eq!(step_seconds(300, 1), 900);
+        assert_eq!(step_seconds(300, -1), 60);
+        assert_eq!(step_seconds(5_400, 1), 10_800);
+        // Past either end nothing changes, and below the first step the
+        // first step is next.
+        assert_eq!(step_seconds(86_400, 1), 86_400);
+        assert_eq!(step_seconds(60, -1), 60);
+        assert_eq!(step_seconds(7, -1), 7);
+        assert_eq!(step_seconds(7, 1), 60);
+        assert_eq!(step_seconds(172_800, 1), 172_800);
+        assert_eq!(step_seconds(172_800, -1), 86_400);
+    }
+
+    #[test]
+    fn stepped_values_load_odd_seconds_from_a_config_file_and_step_on_arrows() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let stored = AppConfig {
+            auto_check_interval_secs: 5_400,
+            check_interval_secs: 450,
+            ..AppConfig::default()
+        };
+        ConfigStore::new(config_path.clone())
+            .write_config(&stored)
+            .expect("write config");
+        let ConfigLoad::Loaded(loaded) = ConfigStore::new(config_path.clone())
+            .load()
+            .expect("load config")
+        else {
+            panic!("config should load");
+        };
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(config_path.clone());
+        app.config_pane = ConfigPaneState::new(loaded);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        // Nothing is rounded on load.
+        assert_eq!(app.config_pane.draft.check_interval_secs, 450);
+        let text = render_rows(&mut app, 120, 36).join("\n");
+        assert!(text.contains("‹ 1 h 30 min ›"), "{text}");
+        assert!(text.contains("‹ 7 min 30 s ›"), "{text}");
+
+        let select = |app: &mut App, field: ConfigField| {
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|candidate| *candidate == field)
+                .expect("field present");
+        };
+        select(&mut app, ConfigField::CheckInterval);
+        press_key(&mut app, KeyCode::Right);
+        assert_eq!(app.config_pane.persisted.check_interval_secs, 900);
+        select(&mut app, ConfigField::AutoCheckInterval);
+        press_key(&mut app, KeyCode::Left);
+        assert_eq!(app.config_pane.persisted.auto_check_interval_secs, 3_600);
+        let text = render_rows(&mut app, 120, 36).join("\n");
+        assert!(text.contains("‹ 15 minutes ›"), "{text}");
+        assert!(text.contains("‹ 1 hour ›"), "{text}");
+        let ConfigLoad::Loaded(saved) = app.config_store.load().expect("load config") else {
+            panic!("config should have been written");
+        };
+        assert_eq!(saved.check_interval_secs, 900);
+        assert_eq!(saved.auto_check_interval_secs, 3_600);
+
+        // At the last step → changes nothing and saves nothing.
+        app.config_pane.draft.auto_check_interval_secs = 86_400;
+        assert!(app.update(AppMessage::ConfigAdjustSelected(1)).is_empty());
+    }
+
+    #[test]
+    fn settings_shows_an_action_result_under_its_row_until_the_cursor_moves() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::SaveAddonList)
+            .expect("save row");
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Done,
+            DetailMode::Config,
+            "Saved 3 addons to ~/lemonup-addons.json",
+        )));
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(
+                text.contains("Saved 3 addons to ~/lemonup-addons.json"),
+                "{text}"
+            );
+        }
+        press_key(&mut app, KeyCode::Up);
+        let text = render_rows(&mut app, 120, 36).join("\n");
+        assert!(!text.contains("Saved 3 addons"), "{text}");
+    }
+
+    #[test]
+    fn settings_never_shows_the_wago_key() {
+        let secret = "SECRETKEY1234567890";
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.wago_api_key = Some(secret.to_string());
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(text.contains("Wago.io key"), "{text}");
+            assert!(text.contains("Saved"), "{text}");
+            assert!(!text.contains(secret), "{text}");
+        }
+
+        // Editing shows a dot for each character, never the text.
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        assert!(app.config_pane.edit.is_some());
+        type_text(&mut app, "XYZ");
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(!text.contains(secret), "{text}");
+            assert!(!text.contains("XYZ"), "{text}");
+            assert!(text.contains(&"•".repeat(secret.len() + 3)), "{text}");
+        }
+
+        app.config_pane.draft.wago_api_key = None;
+        app.config_pane.edit = None;
+        let text = render_rows(&mut app, 120, 36).join("\n");
+        assert!(text.contains("Not set"), "{text}");
     }
 
     #[test]
@@ -11064,6 +11109,7 @@ mod tests {
                     path: PathBuf::from("C:\\Temp\\WTF-20260324T120000Z.zip"),
                     label: "2026-03-24 12:00:00Z".to_string(),
                     size_bytes: 1024,
+                    made_at: OffsetDateTime::UNIX_EPOCH,
                 },
                 pruned_files: vec!["WTF-20260323T120000Z.zip".to_string()],
                 backups: vec![BackupEntry {
@@ -11071,6 +11117,7 @@ mod tests {
                     path: PathBuf::from("C:\\Temp\\WTF-20260324T120000Z.zip"),
                     label: "2026-03-24 12:00:00Z".to_string(),
                     size_bytes: 1024,
+                    made_at: OffsetDateTime::UNIX_EPOCH,
                 }],
             }),
         )));
@@ -12747,12 +12794,12 @@ mod tests {
         press_key(&mut app, KeyCode::Esc);
         assert!(!app.dashboard.has_filter());
 
-        // With nothing to update, settings is `,` until the `s` alias exists.
+        // With nothing to update, settings shows as `s`.
         app.dashboard =
             DashboardState::from_addons(vec![versioned(SourceKind::Wago, "1.0", Some("1.0"))]);
         let keys = line_text(&app.dashboard_key_line(120));
-        assert!(keys.contains(", settings"), "{keys}");
-        assert!(!keys.contains("s settings"), "{keys}");
+        assert!(keys.contains("s settings"), "{keys}");
+        assert!(!keys.contains(", settings"), "{keys}");
     }
 
     #[test]
@@ -13343,15 +13390,57 @@ mod tests {
     #[test]
     fn config_mode_routes_import_export_keys() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Config;
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
 
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('i'))),
-            vec![AppMessage::ConfigImportAddons]
-        );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('x'))),
-            vec![AppMessage::ConfigExportAddons]
+        // The old letters do nothing; enter on a row runs it.
+        for letter in ['r', 'x', 'i', 'e'] {
+            assert!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char(letter)))
+                    .is_empty(),
+                "{letter}"
+            );
+        }
+        for (field, message) in [
+            (
+                ConfigField::ChangeGameFolder,
+                AppMessage::ConfigRunOnboarding,
+            ),
+            (ConfigField::SaveAddonList, AppMessage::ConfigExportAddons),
+            (ConfigField::LoadAddonList, AppMessage::ConfigImportAddons),
+        ] {
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|candidate| *candidate == field)
+                .expect("action row");
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![message],
+                "{field:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_action_rows_run_on_enter() {
+        let temp = tempdir().expect("tempdir");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        app.effective_addon_dir = Some(temp.path().join("AddOns"));
+        let last = ConfigField::ALL.len() - 1;
+
+        // Down to "Change game folder…": enter opens setup.
+        app.config_pane.selected_field = last - 2;
+        let actions = app.update(AppMessage::ConfigToggleSelected);
+        assert!(matches!(actions[0], AppAction::ReenterOnboarding));
+
+        // "Load an addon list from a file…" starts the import.
+        app.config_pane.selected_field = last;
+        let actions = app.update(AppMessage::ConfigToggleSelected);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, AppAction::StartTransferImport { .. })),
+            "{actions:?}"
         );
     }
 
@@ -13380,6 +13469,7 @@ mod tests {
             path: PathBuf::from("C:\\Temp\\WTF-20260405T120000.000Z.zip"),
             label: "2026-04-05 12:00:00.000Z".to_string(),
             size_bytes: 128,
+            made_at: OffsetDateTime::UNIX_EPOCH,
         });
 
         assert_eq!(
@@ -13406,6 +13496,7 @@ mod tests {
             path: PathBuf::from("C:\\Temp\\WTF-20260405T120000.000Z.zip"),
             label: "2026-04-05 12:00:00.000Z".to_string(),
             size_bytes: 128,
+            made_at: OffsetDateTime::UNIX_EPOCH,
         });
 
         assert_eq!(
@@ -14379,6 +14470,9 @@ mod tests {
                     path: PathBuf::from(format!("/sandbox/WTF-{index}.zip")),
                     label: format!("2026-04-0{index} 12:00:00.000Z"),
                     size_bytes: 2048,
+                    made_at: OffsetDateTime::now_utc()
+                        - Duration::days(index as i64)
+                        - Duration::hours(1),
                 })
                 .collect()
         }
@@ -14459,12 +14553,13 @@ mod tests {
                 .map(|field| field.label().to_string())
                 .collect();
             config_labels.extend(strings(&[
-                "Credentials",
+                "Addon sources",
                 "Updates",
                 "Backups",
-                "Display",
-                "Selected:",
-                "Changes save instantly",
+                "Look",
+                "Your setup",
+                "Game folder",
+                "changes save right away",
             ]));
             // Titles and the short rows, which never wrap.
             let mut help_labels: Vec<String> = help_page(HelpContext::Overview)
@@ -14547,31 +14642,31 @@ mod tests {
                     name: "config",
                     open: open_config,
                     labels: config_labels,
-                    keys: &["↑/↓ fields", "enter edit", "r setup"],
+                    keys: &["↑/↓ choose", "enter edit", "esc close"],
                 },
                 Case {
                     name: "backups",
                     open: open_backups,
                     labels: strings(&[
-                        "Status: 9 backups ready",
-                        "Store:",
-                        "Recent backups",
-                        "2026-04-00 12:00:00.000Z",
-                        "Selected",
-                        "File: WTF-20260400T120000.000Z.zip",
-                        "Size: 2.0 KB",
+                        "Your keybinds, macros and addon setups",
+                        "LemonUp makes a backup before it updates addons, and keeps the newest",
+                        "Made",
+                        "Size",
+                        "1 hour ago",
+                        "8 days ago",
+                        "2.0 KB",
+                        "9 backups, kept in",
                     ]),
-                    keys: &["↑/↓ backups", "enter/r restore", "n backup", "x delete"],
+                    keys: &["↑/↓ choose", "enter restore", "b back up now", "x delete"],
                 },
                 Case {
                     name: "backups empty",
                     open: open_backups_empty,
                     labels: strings(&[
-                        "Status: No backups yet",
-                        "No backups of your game settings yet.",
-                        "Press n to back up your game settings now.",
+                        "Your keybinds, macros and addon setups",
+                        "No backups of your game settings yet. Press b to make one now.",
                     ]),
-                    keys: &["n backup", "esc close"],
+                    keys: &["b back up now", "esc close"],
                 },
                 Case {
                     name: "help",
@@ -14719,12 +14814,12 @@ mod tests {
         }
 
         #[test]
-        fn floating_sheets_centre_below_the_header_and_grow_over_it_only_when_needed() {
+        fn floating_sheets_center_below_the_header_and_grow_over_it_only_when_needed() {
             let window = Rect::new(0, 0, 120, 30);
             // Everything above the status line and the key line.
             let region = Rect::new(0, 0, 120, 28);
             let frame = SheetFrame::new(window, region, 2, 100);
-            // Short: centred in rows 2 to 27, clear of the header.
+            // Short: centered in rows 2 to 27, clear of the header.
             let placed = frame.place(10);
             assert_eq!((placed.outer.y, placed.outer.height), (8, 14));
             // Exactly the room below the header: still clear of it.
@@ -14783,37 +14878,25 @@ mod tests {
 
         #[test]
         fn the_key_line_fits_80_columns_by_tightening_then_dropping_by_priority() {
-            // Settings on a setting that steps: too long for 80 columns.
+            // Settings on a setting that steps fits at 80.
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_config(&mut app);
             press_key(&mut app, KeyCode::Down);
             let line = key_line_at(&mut app, 80);
             assert_eq!(
                 entries(&line),
-                [
-                    "↑/↓ fields",
-                    "enter edit",
-                    "←/→ change",
-                    "r setup",
-                    "i import",
-                    "esc close",
-                    "? help"
-                ],
+                ["↑/↓ choose", "←/→ change", "esc close", "? help"],
                 "{line}"
             );
-            // Tighter still: the rest goes from the end; enter, esc and ? stay.
-            let line = key_line_at(&mut app, 50);
-            assert_eq!(
-                entries(&line),
-                ["↑/↓ fields", "enter edit", "esc close", "? help"],
-                "{line}"
-            );
+            // Tighter: the rest goes from the end; the main key, esc and ? stay.
             let line = key_line_at(&mut app, 30);
             assert_eq!(
                 entries(&line),
-                ["enter edit", "esc close", "? help"],
+                ["←/→ change", "esc close", "? help"],
                 "{line}"
             );
+            let line = key_line_at(&mut app, 22);
+            assert_eq!(entries(&line), ["←/→ change", "esc close"], "{line}");
 
             // Backups fits at 80; at 60 it loses x delete first.
             let mut app = app_for_tests(ShellMode::Dashboard);
@@ -14822,9 +14905,9 @@ mod tests {
             assert_eq!(
                 entries(&line),
                 [
-                    "↑/↓ backups",
-                    "enter/r restore",
-                    "n backup",
+                    "↑/↓ choose",
+                    "enter restore",
+                    "b back up now",
                     "x delete",
                     "esc close",
                     "? help"
@@ -14835,9 +14918,9 @@ mod tests {
             assert_eq!(
                 entries(&line),
                 [
-                    "↑/↓ backups",
-                    "enter/r restore",
-                    "n backup",
+                    "↑/↓ choose",
+                    "enter restore",
+                    "b back up",
                     "esc close",
                     "? help"
                 ],
@@ -14984,7 +15067,7 @@ mod tests {
                     let text = rows.join("\n");
                     let row = rows
                         .iter()
-                        .find(|row| row.contains(field.label()) && row.contains('›'))
+                        .find(|row| row.contains(field.label()) && row.contains('▌'))
                         .unwrap_or_else(|| {
                             panic!(
                                 "{index} {:?} not in view at {width}x{height}:\n{text}",
@@ -15000,24 +15083,29 @@ mod tests {
                     render_rows(&mut app, width, height);
                 }
                 let rows = render_rows(&mut app, width, height).join("\n");
-                assert!(rows.contains("› Wago"), "{rows}");
+                assert!(rows.contains("▌ Wago"), "{rows}");
             }
         }
 
         #[test]
-        fn backups_always_show_the_selected_card_and_ask_in_the_dialog() {
+        fn backups_show_the_cursor_row_by_date_and_ask_in_the_dialog() {
             for (width, height) in SIZES {
                 let mut app = app_for_tests(ShellMode::Dashboard);
                 open_backups(&mut app);
                 app.backup_pane.selected_backup = 8;
                 let text = render_rows(&mut app, width, height).join("\n");
-                assert!(text.contains("› 2026-04-08"), "{text}");
-                assert!(text.contains("File: WTF-20260408"), "{text}");
+                let row = text
+                    .lines()
+                    .find(|row| row.contains("▌ ") && row.contains(" ago"))
+                    .expect("the cursor row");
+                assert!(row.contains("8 days ago"), "{text}");
+                assert!(!text.contains("WTF-"), "{text}");
 
                 app.backup_pane.pending_delete = Some(backups(9).remove(8));
                 let text = render_rows(&mut app, width, height).join("\n");
                 assert!(text.contains("Delete this backup?"), "{text}");
-                assert!(text.contains("Backup from 2026-04-08"), "{text}");
+                assert!(text.contains("Backup from "), "{text}");
+                assert!(text.contains("(8 days ago)"), "{text}");
                 assert!(text.contains("y  delete it"), "{text}");
                 assert!(text.contains("n  keep it"), "{text}");
             }
@@ -15111,7 +15199,7 @@ mod tests {
                 }
             }
 
-            // In Backups, enter pulses "enter/r restore", not "n backup".
+            // In Backups, enter pulses "enter restore", not "b back up now".
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_backups(&mut app);
             assert_eq!(
@@ -15126,8 +15214,8 @@ mod tests {
             let pulsed = line
                 .spans
                 .iter()
-                .find(|span| span.content == "enter/r")
-                .expect("enter/r key");
+                .find(|span| span.content == "enter")
+                .expect("enter key");
             assert_eq!(pulsed.style.bg, Some(app.ui_theme.roles.lemon));
         }
 
@@ -15454,7 +15542,8 @@ mod tests {
             }
             fn settings_editing(app: &mut App) {
                 open_config(app);
-                apply_all(app, AppMessage::ConfigBeginEditing);
+                app.config_pane.selected_field = 0;
+                apply_all(app, AppMessage::ConfigToggleSelected);
             }
             fn questions_in(open: fn(&mut App), app: &mut App) {
                 open(app);
@@ -15478,7 +15567,7 @@ mod tests {
                     |app| questions_in(open_install_results, app)
                 }
                 (HelpContext::InstallSearch, _) => open_install_results,
-                (HelpContext::Config, "While you edit a value") => settings_editing,
+                (HelpContext::Config, "While you type your key") => settings_editing,
                 (HelpContext::Config, _) => settings,
                 (HelpContext::Backup, "Questions") => |app| questions_in(open_backups, app),
                 (HelpContext::Backup, _) => open_backups,
@@ -15670,11 +15759,14 @@ mod tests {
                 let text = rows.join("\n");
                 assert!(text.contains("Your AddOns folder is empty."), "{text}");
                 assert!(text.contains("i  install your first addon"), "{text}");
-                assert!(text.contains(",  settings, where r chooses"), "{text}");
+                assert!(
+                    text.contains("s  check that this is the right game folder"),
+                    "{text}"
+                );
                 assert!(!text.contains("wait"), "{text}");
                 let keys = rows.last().expect("key line");
                 assert!(
-                    keys.contains("i install") && keys.contains(", settings"),
+                    keys.contains("i install") && keys.contains("s settings"),
                     "{text}"
                 );
                 assert!(!keys.contains("check"), "{text}");
@@ -15690,7 +15782,8 @@ mod tests {
             );
             assert!(text.contains("may have moved"), "{text}");
             assert!(text.contains("Technical detail: No such file"), "{text}");
-            assert!(rows[29].contains(", settings"), "{text}");
+            assert!(rows[29].contains("s settings"), "{text}");
+            assert!(text.contains("s  choose the game folder again"), "{text}");
             assert!(!rows[29].contains("i install"), "{text}");
 
             // A kept filter that matches nothing.
@@ -16111,6 +16204,7 @@ mod tests {
     mod questions {
         use super::*;
         use crate::app::dialog::Question;
+        use crate::app::keymap::{HelpLabel, help_page};
 
         const SIZES: [(u16, u16); 2] = [(80, 24), (120, 36)];
 
@@ -16126,6 +16220,7 @@ mod tests {
                 path: PathBuf::from("/sandbox/WTF-1.zip"),
                 label: label.to_string(),
                 size_bytes: 2048,
+                made_at: OffsetDateTime::now_utc() - Duration::hours(2),
             }
         }
 
@@ -16261,7 +16356,8 @@ mod tests {
                 &mut app,
                 "Restore this backup?",
                 &[
-                    "Backup from 2026-04-01 12:00:00.000Z",
+                    "Backup from ",
+                    "(2 hours ago)",
                     "Close the game first",
                     "y  restore",
                     "n  keep what I have now",
@@ -16271,6 +16367,135 @@ mod tests {
             assert!(app.backup_pane.pending_restore.is_none());
             // The Backups sheet is still open behind it.
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Backup));
+            // r asks the same question.
+            press_key(&mut app, KeyCode::Char('r'));
+            assert!(app.backup_pane.pending_restore.is_some());
+            press_key(&mut app, KeyCode::Enter);
+            assert!(!app.backup_pane.in_progress);
+            assert!(app.backup_pane.pending_restore.is_some());
+        }
+
+        #[test]
+        fn b_backs_up_and_n_does_nothing_in_backups() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.backup_pane.backups = vec![backup("")];
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
+                vec![AppMessage::BackupRunNow]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+                vec![]
+            );
+            // Empty, b still backs up and n still does nothing.
+            app.backup_pane.backups = Vec::new();
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('b'))),
+                vec![AppMessage::BackupRunNow]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+                vec![]
+            );
+            // b with the folder known starts a backup, and says so.
+            app.effective_addon_dir = Some(PathBuf::from(
+                "/sandbox/World of Warcraft/_retail_/Interface/AddOns",
+            ));
+            // As b does, without starting the background task.
+            for action in app.update(AppMessage::BackupRunNow) {
+                if !matches!(action, AppAction::StartBackupNow { .. }) {
+                    app.apply(action);
+                }
+            }
+            assert!(app.backup_pane.in_progress);
+            assert_eq!(
+                app.active_detail_status_message(DetailMode::Backup),
+                Some("Backing up your game settings…".to_string())
+            );
+            // While it runs, b is not offered and the sheet does not say "Press b".
+            let line = app.dashboard_key_line(120).to_string();
+            assert!(!line.contains("back up now"), "{line}");
+            let text = render_rows(&mut app, 120, 36).join("\n");
+            assert!(!text.contains("Press b"), "{text}");
+            assert!(text.contains("Backing up your game settings…"), "{text}");
+        }
+
+        #[test]
+        fn backup_messages_use_the_glossary_wording() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.config_pane.draft.backup_retention = 5;
+            let made = backup("");
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::BackupFinished(Ok(BackupRunOutcome {
+                    backup: made.clone(),
+                    pruned_files: Vec::new(),
+                    backups: vec![made.clone()],
+                }))),
+            );
+            assert_eq!(
+                app.active_detail_status_message(DetailMode::Backup),
+                Some("Backed up your game settings · keeping the newest 5".to_string())
+            );
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(
+                text.contains("✓ Backed up your game settings · keeping the newest 5"),
+                "{text}"
+            );
+
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::BackupRestoreFinished(Ok(
+                    crate::backup::BackupRestoreOutcome {
+                        backup: made.clone(),
+                    },
+                ))),
+            );
+            let message = app
+                .active_detail_status_message(DetailMode::Backup)
+                .expect("restore message");
+            assert!(
+                message.starts_with("Put back your game settings from "),
+                "{message}"
+            );
+            assert!(!message.contains("WTF-"), "{message}");
+
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::BackupDeleteFinished(Ok(
+                    crate::backup::BackupDeleteOutcome {
+                        deleted: made,
+                        backups: Vec::new(),
+                    },
+                ))),
+            );
+            let message = app
+                .active_detail_status_message(DetailMode::Backup)
+                .expect("delete message");
+            assert!(message.starts_with("Deleted the backup from "), "{message}");
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(
+                text.contains("No backups of your game settings yet. Press b to make one now."),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn backups_help_lists_b_and_not_n() {
+            let rows: Vec<&str> = help_page(HelpContext::Backup)
+                .sections()
+                .flat_map(|section| section.rows.iter())
+                .filter_map(|row| match row.label {
+                    HelpLabel::Keys(keys) => Some(keys),
+                    _ => None,
+                })
+                .collect();
+            assert!(rows.contains(&"b"), "{rows:?}");
+            assert!(rows.contains(&"enter  r"), "{rows:?}");
+            assert!(rows.contains(&"x"), "{rows:?}");
+            assert!(!rows.contains(&"n"), "{rows:?}");
         }
 
         #[test]
@@ -16419,15 +16644,17 @@ mod tests {
 
         #[test]
         fn delete_and_restore_are_red_replace_and_quit_are_not() {
-            let label = "today".to_string();
+            let when = "today at 09:15".to_string();
+            let ago = "2 hours ago".to_string();
             assert!(Question::DeleteAddons(Vec::new()).danger());
             assert!(
                 Question::RestoreBackup {
-                    label: label.clone()
+                    when: when.clone(),
+                    ago: ago.clone()
                 }
                 .danger()
             );
-            assert!(Question::DeleteBackup { label }.danger());
+            assert!(Question::DeleteBackup { when, ago }.danger());
             assert!(
                 !Question::ReplaceAddon {
                     name: "Pawn".to_string(),

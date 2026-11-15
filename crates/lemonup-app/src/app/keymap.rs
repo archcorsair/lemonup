@@ -50,6 +50,8 @@ const CLOSE: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q')];
 /// Details closes on enter too, the key that opens it.
 const CLOSE_DETAILS: KeyCodes = &[KeyCode::Esc, KeyCode::Char('q'), KeyCode::Enter];
 const HELP: KeyCodes = &[KeyCode::Char('?')];
+/// Settings opens on `s`, and on `,` as before.
+const SETTINGS: KeyCodes = &[KeyCode::Char('s'), KeyCode::Char(',')];
 const SELECT: KeyCodes = &[KeyCode::Char(' '), KeyCode::Char('a')];
 
 /// One entry of the key table, as the key line shows it.
@@ -384,7 +386,7 @@ static LIST_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("i", "install an addon", &[ch('i')]),
                 HelpRow::key("b", "backups of your game settings", &[ch('b')]),
-                HelpRow::key(",", "settings", &[ch(',')]),
+                HelpRow::key("s  or  ,", "settings", &[ch('s'), ch(',')]),
                 THIS_HELP,
             ],
         },
@@ -500,7 +502,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("i", "install an addon", &[ch('i')]),
                 HelpRow::key("b", "backups of your game settings", &[ch('b')]),
-                HelpRow::key(",", "settings", &[ch(',')]),
+                HelpRow::key("s  or  ,", "settings", &[ch('s'), ch(',')]),
                 THIS_HELP,
             ],
         },
@@ -596,11 +598,10 @@ static SETTINGS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Settings",
             rows: &[
-                HelpRow::key("↑ ↓  or  j k", "move between settings", K_MOVE),
-                HelpRow::key("enter", "switch it on or off, or edit it", K_ENTER),
+                HelpRow::key("↑ ↓  or  j k", "choose a setting", K_MOVE),
                 HelpRow::key(
                     "← →  or  h l",
-                    "change a number or a choice",
+                    "change it",
                     &[
                         press(KeyCode::Left),
                         press(KeyCode::Right),
@@ -608,40 +609,35 @@ static SETTINGS_HELP: HelpPage = HelpPage {
                         ch('l'),
                     ],
                 ),
-                HelpRow::key("e", "edit it", &[ch('e')]),
+                HelpRow::key(
+                    "enter",
+                    "switch it on or off, type your Wago.io key, or run a row such as \
+                     \"Change game folder…\"",
+                    K_ENTER,
+                ),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
                 HelpRow::key("Home End", "top, bottom", K_ENDS),
             ],
         },
         HelpSection {
-            title: "While you edit a value",
+            title: "While you type your key",
             rows: &[
                 HelpRow::key("enter", "save it", K_ENTER),
-                HelpRow::key("esc", "cancel", K_ESC),
+                HelpRow::key("esc", "keep the one you had", K_ESC),
                 TEXT_DELETE,
                 TEXT_MOVE_ROW,
                 TEXT_CLEAR,
             ],
         },
     ],
-    right: &[
-        HelpSection {
-            title: "More",
-            rows: &[
-                HelpRow::key("r", "run setup again", &[ch('r')]),
-                HelpRow::key("i", "load an addon list from a file", &[ch('i')]),
-                HelpRow::key("x", "save your addon list to a file", &[ch('x')]),
-            ],
-        },
-        HelpSection {
-            title: "Everywhere",
-            rows: &[
-                HelpRow::key("esc  q", "close Settings", K_CLOSE),
-                THIS_HELP,
-                QUIT_ANYWHERE,
-            ],
-        },
-    ],
+    right: &[HelpSection {
+        title: "Everywhere",
+        rows: &[
+            HelpRow::key("esc  q", "close Settings", K_CLOSE),
+            THIS_HELP,
+            QUIT_ANYWHERE,
+        ],
+    }],
 };
 
 static BACKUPS_HELP: HelpPage = HelpPage {
@@ -655,7 +651,7 @@ static BACKUPS_HELP: HelpPage = HelpPage {
                 "put this backup back (asks first)",
                 &[press(KeyCode::Enter), ch('r')],
             ),
-            HelpRow::key("n", "back up your game settings now", &[ch('n')]),
+            HelpRow::key("b", "back up your game settings now", &[ch('b')]),
             HelpRow::key("x", "delete this backup (asks first)", &[ch('x')]),
             HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
             HelpRow::key("Home End", "top, bottom", K_ENDS),
@@ -950,49 +946,41 @@ impl App {
             DetailMode::Config => {
                 if self.config_pane.edit.is_some() {
                     let mut hints = vec![
-                        KeyHint::key(Id::Save, "enter", "apply", ENTER).main(),
+                        KeyHint::key(Id::Save, "enter", "save", ENTER).main(),
                         KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
                         KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary(),
                     ];
                     hints.extend(self.text_box_hints());
                     return hints;
                 }
-                let field = self.config_pane.selected_field();
-                let mut hints = vec![
-                    KeyHint::key(Id::Fields, "↑/↓", "fields", UP_DOWN),
-                    KeyHint::key(
-                        Id::Toggle,
-                        "enter",
-                        if field.is_textual() { "edit" } else { "toggle" },
-                        ENTER,
-                    )
-                    .main(),
-                ];
-                if field.supports_quick_adjust() {
-                    hints.push(KeyHint::key(Id::Change, "←/→", "change", CHANGE));
-                }
-                hints.extend([
-                    KeyHint::key(Id::Run, "r", "setup", &[KeyCode::Char('r')]),
-                    KeyHint::key(Id::Install, "i", "import", &[KeyCode::Char('i')]).secondary(),
-                    KeyHint::key(Id::Delete, "x", "export", &[KeyCode::Char('x')]).secondary(),
-                    self.close_hint(),
-                ]);
+                // Only what works on the row under the cursor.
+                let mut hints = vec![KeyHint::key(Id::Fields, "↑/↓", "choose", UP_DOWN)];
+                hints.push(match self.config_pane.selected_field().kind() {
+                    ConfigRowKind::Text => KeyHint::key(Id::Toggle, "enter", "edit", ENTER).main(),
+                    ConfigRowKind::Toggle | ConfigRowKind::Stepped => {
+                        KeyHint::key(Id::Change, "←/→", "change", CHANGE).main()
+                    }
+                    ConfigRowKind::Action => KeyHint::key(Id::Run, "enter", "run", ENTER).main(),
+                });
+                hints.push(self.close_hint());
                 hints.extend(self.sheet_scroll_hint(false));
                 hints.push(self.help_hint());
                 hints
             }
             DetailMode::Backup => {
-                let selected = self.backup_pane.selected_backup().is_some();
+                // While a backup, restore or delete runs, only moving and
+                // closing do anything.
                 let busy = self.backup_pane.in_progress;
+                let selected = self.backup_pane.selected_backup().is_some();
                 let mut hints = Vec::new();
-                if !self.backup_pane.backups.is_empty() {
-                    hints.push(KeyHint::key(Id::Nav, "↑/↓", "backups", UP_DOWN));
+                if self.backup_pane.backups.len() > 1 {
+                    hints.push(KeyHint::key(Id::Nav, "↑/↓", "choose", UP_DOWN));
                 }
-                if selected {
+                if selected && !busy {
                     hints.push(
                         KeyHint::key(
                             Id::Confirm,
-                            "enter/r",
+                            "enter",
                             "restore",
                             &[KeyCode::Enter, KeyCode::Char('r')],
                         )
@@ -1001,7 +989,9 @@ impl App {
                 }
                 if !busy {
                     hints.push(
-                        KeyHint::key(Id::Run, "n", "backup", &[KeyCode::Char('n')]).secondary(),
+                        KeyHint::key(Id::Run, "b", "back up now", &[KeyCode::Char('b')])
+                            .short("back up")
+                            .secondary(),
                     );
                 }
                 if selected && !busy {
@@ -1185,7 +1175,7 @@ impl App {
                 help,
             ];
         }
-        let settings = KeyHint::key(Id::Config, ",", "settings", &[KeyCode::Char(',')]);
+        let settings = KeyHint::key(Id::Config, "s", "settings", SETTINGS);
         let quit = KeyHint::key(Id::Quit, "q", "quit", &[KeyCode::Char('q')]);
         let install_main =
             || KeyHint::primary(Id::Install, "i", "install", &[KeyCode::Char('i')]).main();
@@ -1299,7 +1289,7 @@ impl App {
                 filter,
                 install,
                 KeyHint::key(Id::Backup, "b", "backups", &[KeyCode::Char('b')]),
-                KeyHint::key(Id::Config, ",", "settings", &[KeyCode::Char(',')]),
+                KeyHint::key(Id::Config, "s", "settings", SETTINGS),
                 help,
             ]
         } else {

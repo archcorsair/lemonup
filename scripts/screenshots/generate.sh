@@ -153,8 +153,8 @@ fi
 log "post-processing into $OUT_DIR"
 for name in "${shots[@]}"; do
     # Round the window corners with real transparency (VHS would fill them
-    # with an opaque colour), keep the 2x size, -strip metadata, and encode
-    # lossless WebP (about 44% smaller than optimised PNG, pixel-identical).
+    # with an opaque color), keep the 2x size, -strip metadata, and encode
+    # lossless WebP (about 44% smaller than optimized PNG, pixel-identical).
     magick "$SANDBOX/shots/$name.png" \
         \( +clone -alpha off -fill black -colorize 100 -fill white \
            -draw "roundrectangle 0,0,%[fx:w-1],%[fx:h-1],$CORNER_RADIUS,$CORNER_RADIUS" \) \

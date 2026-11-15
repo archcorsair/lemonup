@@ -36,12 +36,12 @@ pub(crate) struct UiTheme {
     pub(crate) job_update_bg: Color,
     pub(crate) installed_text: Color,
     pub(crate) package_icon: Color,
-    /// The redesign's colour roles. New frame and list code uses only these.
+    /// The redesign's color roles. New frame and list code uses only these.
     pub(crate) roles: ColorRoles,
 }
 
-/// Colour roles from the approved design. Each role has one meaning, so a
-/// colour never has to be guessed at from context.
+/// Color roles from the approved design. Each role has one meaning, so a
+/// color never has to be guessed at from context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColorRoles {
     /// Where you are and the main action: cursor bar, primary key, focus.

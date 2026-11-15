@@ -1168,10 +1168,8 @@ impl App {
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
                     indent(),
-                    key(",", true),
-                    Span::styled("  settings, where ", text),
-                    key("r", false),
-                    Span::styled(" chooses the game folder again", text),
+                    key("s", true),
+                    Span::styled("  choose the game folder again", text),
                 ]));
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
@@ -1202,9 +1200,9 @@ impl App {
                     Span::styled("  install your first addon", text),
                 ];
                 let settings = vec![
-                    key(",", false),
+                    key("s", false),
                     Span::styled(
-                        "  settings, where r chooses a different game folder",
+                        "  check that this is the right game folder",
                         Style::default().fg(roles.muted),
                     ),
                 ];

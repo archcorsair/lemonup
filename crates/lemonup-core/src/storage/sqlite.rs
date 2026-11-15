@@ -620,7 +620,7 @@ fn merge_scanned_addon(
 
 /// A tracked GitHub row without a source URL cannot be updated (`update-all` would fail on it
 /// every run). When the scan finds a `.git` checkout there (a development clone that an older
-/// scan mislabelled as GitHub), the row is demoted to manual. Every other tracked row keeps its
+/// scan mislabeled as GitHub), the row is demoted to manual. Every other tracked row keeps its
 /// source.
 fn merge_scanned_source(
     scanned_addon: &ScannedAddon,
@@ -1943,7 +1943,7 @@ mod tests {
         let mut tracked = AddonRecord::new("Tracked", "Tracked", SourceKind::GitHub);
         tracked.source_url = Some("https://github.com/owner/tracked".to_string());
         database.upsert_addon(&tracked).expect("seed tracked");
-        // Left behind by an older scan that mislabelled a `.git` folder as GitHub.
+        // Left behind by an older scan that mislabeled a `.git` folder as GitHub.
         let broken = AddonRecord::new("Broken", "Broken", SourceKind::GitHub);
         database.upsert_addon(&broken).expect("seed broken");
 

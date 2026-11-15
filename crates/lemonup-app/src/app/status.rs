@@ -1,5 +1,5 @@
 //! Status messages carry an explicit kind, so how a message is shown (its
-//! colour, and whether it shows at all) never depends on its wording.
+//! color, and whether it shows at all) never depends on its wording.
 
 /// What a status message means. The first four are the kinds in the design;
 /// `Quiet` records a state change that is not worth showing (for example

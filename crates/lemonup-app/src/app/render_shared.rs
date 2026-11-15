@@ -99,6 +99,7 @@ impl App {
         };
         let chrome = SheetChrome {
             title,
+            note: (kind == OverlayKind::Config).then_some("changes save right away"),
             danger: kind == OverlayKind::Confirm
                 && self.dashboard.pending_delete_folders().is_some(),
         };
@@ -119,8 +120,8 @@ impl App {
                 })
             }
             OverlayKind::Config => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
-                    self.config_sheet_body(width)
+                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
+                    self.config_sheet_body(width, height)
                 })
             }
             OverlayKind::Backup => {
@@ -297,7 +298,7 @@ impl App {
         (!summary.is_empty()).then_some(summary)
     }
 
-    /// Footer colour for a status message, from its kind alone.
+    /// Footer color for a status message, from its kind alone.
     pub(super) fn status_kind_color(&self, kind: StatusKind) -> Color {
         match kind {
             StatusKind::Done => self.ui_theme.success,
