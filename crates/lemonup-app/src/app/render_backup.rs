@@ -55,7 +55,7 @@ impl App {
                 ),
             ]),
             self.backup_status_line(),
-            self.overlay_kv_line("Target", self.rendered_target_path()),
+            self.overlay_kv_line("AddOns", self.rendered_target_path()),
             self.overlay_kv_line("Store", self.backup_dir.display().to_string()),
             self.overlay_kv_line(
                 "Policy",

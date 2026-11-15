@@ -342,6 +342,19 @@ impl OnboardingState {
         next
     }
 
+    pub fn insert_str(&self, text: &str) -> Self {
+        let mut next = self.clone();
+        match next.step {
+            OnboardingStep::Directory => next.input.push_str(text),
+            OnboardingStep::Wago => {
+                let value_ref = next.draft.wago_api_key.get_or_insert_with(String::new);
+                value_ref.push_str(text);
+            }
+            _ => {}
+        }
+        next
+    }
+
     pub fn backspace(&self) -> Self {
         let mut next = self.clone();
         match next.step {

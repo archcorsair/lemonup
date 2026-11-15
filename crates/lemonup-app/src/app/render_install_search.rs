@@ -1,4 +1,9 @@
 use super::*;
+
+const SEARCH_EMPTY_HINT_SOURCES: &str =
+    "Search Wago by name, or paste a GitHub, WoWInterface or Wago URL.";
+const SEARCH_EMPTY_HINT_TUKUI: &str = "Type elvui or tukui for TukUI.";
+
 impl App {
     pub(super) fn render_search_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
         let content_area = area.inner(Margin {
@@ -56,7 +61,7 @@ impl App {
                 ));
             } else {
                 spans.push(Span::styled(
-                    "Type an addon name or paste a Wago URL",
+                    "Type an addon name or paste an addon URL",
                     Style::default().fg(self.ui_theme.muted),
                 ));
             }
@@ -99,22 +104,12 @@ impl App {
             ),
             Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
             Span::styled(
-                "Paste a Wago URL to install directly",
+                "Paste an addon URL to install directly",
                 Style::default().fg(self.ui_theme.panel_title),
             ),
         ])];
 
-        let status_line = if self.wago_api_key.is_none() {
-            Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    "Wago API key required for this screen",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-        } else if self.search_pane.in_progress {
+        let status_line = if self.search_pane.in_progress {
             let mut spans = vec![Span::styled(
                 "Status: ",
                 Style::default().fg(self.ui_theme.muted),
@@ -181,8 +176,40 @@ impl App {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]),
+                SearchInstallState::ConfirmDirect { .. } => Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                    Span::styled(
+                        "Waiting for confirmation",
+                        Style::default()
+                            .fg(self.ui_theme.highlight)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                SearchInstallState::InstallingDirect { request } => {
+                    let mut spans = vec![Span::styled(
+                        "Status: ",
+                        Style::default().fg(self.ui_theme.muted),
+                    )];
+                    spans.extend(shimmer_text_spans(
+                        &format!("Installing from {}…", request.provider.label()),
+                        self.ui_theme.warning,
+                        self.ui_theme.shimmer_glow,
+                        ShimmerConfig::action(),
+                    ));
+                    Line::from(spans)
+                }
                 SearchInstallState::Idle => self.default_search_status_line(),
             }
+        } else if self.wago_api_key.is_none() {
+            Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
+                Span::styled(
+                    "Wago API key required for Wago search and installs",
+                    Style::default()
+                        .fg(self.ui_theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
         } else {
             self.default_search_status_line()
         };
@@ -195,12 +222,20 @@ impl App {
             Line::from(vec![
                 Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
-                    if self.search_pane.query.trim().is_empty() {
-                        "Enter an addon name or Wago URL"
-                    } else if self.search_direct_install_target().is_some() {
-                        "Press Enter to install directly"
-                    } else {
-                        "Press Enter to search Wago"
+                    match classify_search_input(&self.search_pane.query) {
+                        SearchInputIntent::Empty => "Enter an addon name or URL".to_string(),
+                        SearchInputIntent::Direct(request) => {
+                            format!("Press Enter to install from {}", request.provider.label())
+                        }
+                        SearchInputIntent::WagoUrl(_) => {
+                            "Press Enter to install directly".to_string()
+                        }
+                        SearchInputIntent::InvalidUrl(_) => {
+                            "Press Enter to check this URL".to_string()
+                        }
+                        SearchInputIntent::WagoSearch(_) => {
+                            "Press Enter to search Wago".to_string()
+                        }
                     },
                     Style::default().fg(self.ui_theme.panel_title),
                 ),
@@ -235,22 +270,36 @@ impl App {
         })
     }
 
+    /// The Wago slug when the query is a Wago addon URL (after the GitHub, WoWInterface and
+    /// TukUI checks, which take precedence).
     pub(super) fn search_direct_install_target(&self) -> Option<String> {
-        let trimmed = self.search_pane.query.trim();
-        let parsed = parse_wago_target(trimmed).ok()?;
-        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-            return Some(parsed);
+        match classify_search_input(&self.search_pane.query) {
+            SearchInputIntent::WagoUrl(slug) => Some(slug),
+            _ => None,
         }
-        None
     }
 
     pub(super) fn search_action_line(&self) -> Line<'static> {
-        let submit_label = if self.search_direct_install_target().is_some() {
-            "install"
-        } else {
-            "search"
+        let intent = classify_search_input(&self.search_pane.query);
+        let submit_label = match intent {
+            SearchInputIntent::Direct(_) | SearchInputIntent::WagoUrl(_) => "install",
+            _ => "search",
         };
-        let chips: Vec<SearchActionChip> = if self.pending_wago_install_confirmation.is_some() {
+        let submit_enabled = self.wago_api_key.is_some() || !intent.needs_wago_key();
+        let chips: Vec<SearchActionChip> = if self.search_pane.pending_direct_install().is_some() {
+            vec![
+                SearchActionChip {
+                    key: "enter",
+                    label: "confirm",
+                    enabled: true,
+                },
+                SearchActionChip {
+                    key: "esc",
+                    label: "cancel",
+                    enabled: true,
+                },
+            ]
+        } else if self.pending_wago_install_confirmation.is_some() {
             vec![
                 SearchActionChip {
                     key: "y",
@@ -289,7 +338,7 @@ impl App {
                 SearchActionChip {
                     key: "enter",
                     label: submit_label,
-                    enabled: self.wago_api_key.is_some(),
+                    enabled: submit_enabled,
                 },
                 SearchActionChip {
                     key: "/",
@@ -393,25 +442,7 @@ impl App {
     }
 
     pub(super) fn render_search_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
-        let message = if self.wago_api_key.is_none() {
-            vec![
-                Line::from(Span::styled(
-                    "Wago install/search is unavailable",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "This screen installs from Wago only.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-                Line::from(Span::styled(
-                    "Press , to open Config and add your Wago API key.",
-                    Style::default().fg(self.ui_theme.panel_title),
-                )),
-            ]
-        } else if let Some(state) = self.active_search_install_state() {
+        let mut message = if let Some(state) = self.active_search_install_state() {
             match state {
                 SearchInstallState::Checking { addon_name, .. } => vec![
                     Line::from(shimmer_text_spans(
@@ -442,28 +473,38 @@ impl App {
                 SearchInstallState::Success {
                     addon_name,
                     parent_folder,
+                    warning,
                     ..
-                } => vec![
-                    Line::from(vec![
-                        Span::styled(
-                            "✓ ",
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("Installed {addon_name}"),
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!("Installed into {parent_folder}."),
-                        Style::default().fg(self.ui_theme.panel_title),
-                    )),
-                ],
+                } => {
+                    let mut lines = vec![
+                        Line::from(vec![
+                            Span::styled(
+                                "✓ ",
+                                Style::default()
+                                    .fg(self.ui_theme.success)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("Installed {addon_name}"),
+                                Style::default()
+                                    .fg(self.ui_theme.success)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            format!("Installed into {parent_folder}."),
+                            Style::default().fg(self.ui_theme.panel_title),
+                        )),
+                    ];
+                    if let Some(warning) = warning {
+                        lines.push(Line::from(Span::styled(
+                            warning.clone(),
+                            Style::default().fg(self.ui_theme.warning),
+                        )));
+                    }
+                    lines
+                }
                 SearchInstallState::ConfirmReplace {
                     addon_name,
                     tracked_parent,
@@ -494,6 +535,33 @@ impl App {
                     Line::from(Span::styled(
                         message.clone(),
                         Style::default().fg(self.ui_theme.error),
+                    )),
+                ],
+                SearchInstallState::ConfirmDirect { request } => vec![Line::from(Span::styled(
+                    format!(
+                        "Install from {}: {}?",
+                        request.provider.label(),
+                        request.display
+                    ),
+                    Style::default()
+                        .fg(self.ui_theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                ))],
+                SearchInstallState::InstallingDirect { request } => vec![
+                    Line::from(shimmer_text_spans(
+                        &format!(
+                            "Installing {} from {}…",
+                            request.display,
+                            request.provider.label()
+                        ),
+                        self.ui_theme.warning,
+                        self.ui_theme.shimmer_glow,
+                        ShimmerConfig::action(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "The addon will appear in Manage when install and sync complete.",
+                        Style::default().fg(self.ui_theme.muted),
                     )),
                 ],
                 SearchInstallState::Idle => unreachable!(),
@@ -529,18 +597,29 @@ impl App {
         } else {
             vec![
                 Line::from(Span::styled(
-                    "Start with an addon name or Wago URL",
+                    "Start with an addon name or URL",
                     Style::default()
                         .fg(self.ui_theme.highlight)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Press Enter to search Wago or install directly.",
+                    SEARCH_EMPTY_HINT_SOURCES,
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+                Line::from(Span::styled(
+                    SEARCH_EMPTY_HINT_TUKUI,
                     Style::default().fg(self.ui_theme.muted),
                 )),
             ]
         };
+        if self.wago_api_key.is_none() && self.active_search_install_state().is_none() {
+            message.push(Line::from(""));
+            message.push(Line::from(Span::styled(
+                "Wago search and Wago URLs need an API key: press , to open Config.",
+                Style::default().fg(self.ui_theme.warning),
+            )));
+        }
 
         let paragraph = Paragraph::new(message)
             .alignment(Alignment::Center)
@@ -890,6 +969,8 @@ impl App {
                         .fg(self.ui_theme.panel_title)
                         .add_modifier(Modifier::BOLD),
                 )),
+                SearchInstallState::ConfirmDirect { .. }
+                | SearchInstallState::InstallingDirect { .. } => {}
                 SearchInstallState::Error { .. } => spans.push(Span::styled(
                     "error",
                     Style::default()

@@ -17,19 +17,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use lemonup_core::binding::{BindingCheck, check_addon_dir_binding, rebind_addon_dir};
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
     analyze_import, default_transfer_path, detect_known_addons_paths, export_addons,
-    parse_import_file, paths_match, scan_addons_dir_with_tracked, search_for_wow_installs,
+    parse_import_file, paths_match, scan_addons_dir_report, search_for_wow_installs,
     validate_addons_path,
 };
 use tokio::sync::mpsc;
 
 use crate::action::AppAction;
 use crate::backup::{
-    BackupDeleteOutcome, BackupEntry, BackupRestoreOutcome, BackupRunOutcome, backup_root,
-    create_wtf_backup, delete_backup, list_backups, restore_wtf_backup,
+    BackupDeleteOutcome, BackupEntry, BackupRestoreOutcome, BackupRunOutcome,
+    PreUpdateBackupSettings, adopt_legacy_backups, backup_root, client_backup_dir,
+    create_wtf_backup, delete_backup, list_backups, restore_wtf_backup, run_pre_update_backup,
 };
 use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
@@ -49,11 +51,12 @@ use crate::update::{
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
-    inspect_wago_install_target, install_wago_addon_with_replace, parse_wago_target,
-    resolve_wago_api_key, search_wago_addons,
+    inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
+    search_wago_addons,
 };
 use time::{Duration, OffsetDateTime};
 
+mod direct_install;
 mod render_backup;
 mod render_config;
 mod render_dashboard;
@@ -62,6 +65,10 @@ mod render_inspect;
 mod render_install_search;
 mod render_shared;
 
+pub use self::direct_install::DirectInstallRequest;
+use self::direct_install::{
+    DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
+};
 #[cfg(test)]
 use self::render_dashboard::{
     child_row_detail_prefix, child_row_prefix, dashboard_item_version_line,
@@ -69,7 +76,7 @@ use self::render_dashboard::{
 use self::render_dashboard::{
     dashboard_item_author_sort_key, dashboard_item_management_summary,
     dashboard_item_sort_version_key, dashboard_item_source_label, dashboard_item_status_text,
-    dashboard_item_version_label,
+    dashboard_item_update_status, dashboard_item_version_label,
 };
 use self::render_shared::{
     format_download_count, summarize_owned_folders, truncate_middle_text, truncate_text,
@@ -296,7 +303,6 @@ enum FooterHintId {
     ThemeToggle,
     Next,
     Back,
-    DeepScan,
     Validate,
     Fields,
     Results,
@@ -342,19 +348,21 @@ pub enum DetailMode {
 pub struct AppRuntime {
     pub profile_name: String,
     pub addon_dir_override: Option<PathBuf>,
-    pub guarded_addon_dir: Option<PathBuf>,
+    /// AddOns folders this profile must never target: the default profile's configured
+    /// folder and the folder its state is bound to (they can differ or be set only one way).
+    pub guarded_addon_dirs: Vec<PathBuf>,
 }
 
 impl AppRuntime {
     pub fn new(
         profile_name: String,
         addon_dir_override: Option<PathBuf>,
-        guarded_addon_dir: Option<PathBuf>,
+        guarded_addon_dirs: Vec<PathBuf>,
     ) -> Self {
         Self {
             profile_name,
             addon_dir_override,
-            guarded_addon_dir,
+            guarded_addon_dirs,
         }
     }
 
@@ -367,10 +375,29 @@ impl AppRuntime {
             return false;
         }
 
-        self.guarded_addon_dir
-            .as_ref()
-            .is_some_and(|guarded| paths_match(candidate, guarded))
+        self.guarded_addon_dirs
+            .iter()
+            .any(|guarded| paths_match(candidate, guarded))
     }
+}
+
+/// A text field that can receive pasted text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteTarget {
+    Onboarding,
+    Search,
+    Install,
+    Config,
+    DashboardFilter,
+}
+
+/// Pasted text goes into single-line fields: drop newlines and other control
+/// characters (a trailing newline from the clipboard must not submit or
+/// corrupt a path or API key).
+fn sanitize_single_line_paste(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_control())
+        .collect()
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -378,7 +405,12 @@ impl AppRuntime {
 enum AppMessage {
     Tick,
     QuitRequested,
-    TerminalResized { width: u16, height: u16 },
+    /// Bracketed-paste text, routed to whichever text field is being edited.
+    Paste(String),
+    TerminalResized {
+        width: u16,
+        height: u16,
+    },
     DashboardOpenInspect,
     DashboardOpenHelp,
     DashboardCloseOverlay,
@@ -391,7 +423,10 @@ enum AppMessage {
     InspectRunUpdate,
     DashboardSelectionNext,
     DashboardSelectionPrevious,
-    DashboardPointerSelect { column: u16, row: u16 },
+    DashboardPointerSelect {
+        column: u16,
+        row: u16,
+    },
     DashboardRequestDelete,
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
@@ -427,6 +462,8 @@ enum AppMessage {
     SearchResultNext,
     SearchResultPrevious,
     SearchInstallSelected,
+    SearchConfirmDirectInstall,
+    SearchCancelDirectInstall,
     WagoConfirmInstall,
     WagoCancelInstall,
     ConfigSelectionNext,
@@ -486,6 +523,10 @@ enum AppTaskEvent {
     TransferImportFinished(std::result::Result<TransferImportOutcome, String>),
     WagoSearchFinished(std::result::Result<WagoSearchOutcome, String>),
     WagoInstallFinished(std::result::Result<WagoInstallTaskOutcome, String>),
+    DirectInstallFinished {
+        request: DirectInstallRequest,
+        result: std::result::Result<DirectInstallOutcome, String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +733,14 @@ impl ConfigPaneState {
         let mut next = self.clone();
         if let Some(edit) = next.edit.as_mut() {
             edit.value.push(character);
+        }
+        next
+    }
+
+    fn insert_str(&self, text: &str) -> Self {
+        let mut next = self.clone();
+        if let Some(edit) = next.edit.as_mut() {
+            edit.value.push_str(text);
         }
         next
     }
@@ -955,8 +1004,8 @@ pub struct DashboardUpdateRunSummary {
     unknown: usize,
     errors: usize,
     skipped_manual: usize,
-    skipped_unmanaged: usize,
-    skipped_unsupported: usize,
+    skipped_no_api_key: usize,
+    remote_older: usize,
     scanned_addons: usize,
 }
 
@@ -965,7 +1014,7 @@ struct DashboardRefreshabilitySummary {
     total: usize,
     refreshable: usize,
     manual: usize,
-    unmanaged: usize,
+    remote_older: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1280,14 +1329,12 @@ impl DashboardState {
                 self.restore_selection(&row.key);
                 true
             }
-            DashboardRowKind::OwnedChild { parent_folder } => {
-                if self.expanded_folders.remove(&parent_folder) {
-                    self.rebuild_rows();
-                    self.restore_selection(&DashboardRowKey::Parent(parent_folder));
-                    true
-                } else {
-                    false
-                }
+            DashboardRowKind::OwnedChild { parent_folder }
+                if self.expanded_folders.remove(&parent_folder) =>
+            {
+                self.rebuild_rows();
+                self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+                true
             }
             _ => false,
         }
@@ -1305,14 +1352,12 @@ impl DashboardState {
                 self.restore_selection(&row.key);
                 true
             }
-            DashboardRowKind::OwnedChild { parent_folder } => {
-                if self.expanded_folders.remove(&parent_folder) {
-                    self.rebuild_rows();
-                    self.restore_selection(&DashboardRowKey::Parent(parent_folder));
-                    true
-                } else {
-                    false
-                }
+            DashboardRowKind::OwnedChild { parent_folder }
+                if self.expanded_folders.remove(&parent_folder) =>
+            {
+                self.rebuild_rows();
+                self.restore_selection(&DashboardRowKey::Parent(parent_folder));
+                true
             }
             _ => false,
         }
@@ -1790,6 +1835,12 @@ impl InstallPaneState {
         next
     }
 
+    fn insert_str(&self, text: &str) -> Self {
+        let mut next = self.clone();
+        next.input.push_str(text);
+        next
+    }
+
     fn backspace(&self) -> Self {
         let mut next = self.clone();
         next.input.pop();
@@ -1836,6 +1887,14 @@ enum SearchInstallState {
         addon_id: String,
         addon_name: String,
         parent_folder: String,
+        warning: Option<String>,
+    },
+    /// A GitHub, WoWInterface or TukUI target waiting for enter (install) or esc (cancel).
+    ConfirmDirect {
+        request: DirectInstallRequest,
+    },
+    InstallingDirect {
+        request: DirectInstallRequest,
     },
     Error {
         addon_id: Option<String>,
@@ -1882,6 +1941,12 @@ impl SearchPaneState {
     fn insert_char(&self, character: char) -> Self {
         let mut next = self.clone();
         next.query.push(character);
+        next
+    }
+
+    fn insert_str(&self, text: &str) -> Self {
+        let mut next = self.clone();
+        next.query.push_str(text);
         next
     }
 
@@ -2002,8 +2067,56 @@ impl SearchPaneState {
             addon_id: summary.addon_id.clone(),
             addon_name: summary.addon_name.clone(),
             parent_folder: summary.parent_folder.clone(),
+            warning: None,
         };
         next
+    }
+
+    /// Shows the confirmation line for a direct (non-Wago) target; earlier Wago results are
+    /// cleared so the overlay body shows the confirmation and then the install progress.
+    fn request_direct_install(&self, request: DirectInstallRequest) -> Self {
+        let mut next = self.clone();
+        next.is_editing = false;
+        next.results.clear();
+        next.selected_result = None;
+        next.last_query = None;
+        next.install_state = SearchInstallState::ConfirmDirect { request };
+        next
+    }
+
+    fn cancel_direct_install(&self) -> Self {
+        let mut next = self.clone();
+        next.is_editing = true;
+        next.install_state = SearchInstallState::Idle;
+        next
+    }
+
+    fn start_direct_install(&self, request: DirectInstallRequest) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::InstallingDirect { request };
+        next
+    }
+
+    fn finish_direct_install(
+        &self,
+        request: &DirectInstallRequest,
+        outcome: &DirectInstallOutcome,
+    ) -> Self {
+        let mut next = self.clone();
+        next.install_state = SearchInstallState::Success {
+            addon_id: request.target.clone(),
+            addon_name: outcome.addon_name.clone(),
+            parent_folder: outcome.parent_folder.clone(),
+            warning: outcome.warning.clone(),
+        };
+        next
+    }
+
+    fn pending_direct_install(&self) -> Option<&DirectInstallRequest> {
+        match &self.install_state {
+            SearchInstallState::ConfirmDirect { request } => Some(request),
+            _ => None,
+        }
     }
 
     fn fail_install(
@@ -2048,6 +2161,10 @@ impl SearchPaneState {
                 addon_name,
                 ..
             } => (Some(addon_id.clone()), Some(addon_name.clone())),
+            SearchInstallState::ConfirmDirect { request }
+            | SearchInstallState::InstallingDirect { request } => {
+                (Some(request.target.clone()), Some(request.display.clone()))
+            }
             SearchInstallState::Error {
                 addon_id,
                 addon_name,
@@ -2097,6 +2214,9 @@ pub struct App {
     config_store: ConfigStore,
     state_db_file: PathBuf,
     trash_dir: PathBuf,
+    /// Profile data folder: holds the backup store and pre-rebind snapshots.
+    data_dir: PathBuf,
+    /// WTF backups of the current client (`backup_root/<client>`).
     backup_dir: PathBuf,
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
@@ -2107,6 +2227,7 @@ pub struct App {
     search_pane: SearchPaneState,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
     wago_install_in_progress: bool,
+    direct_install_in_progress: bool,
     auto_check_in_progress: bool,
     last_auto_check_started_at: Option<Instant>,
     undo_delete: Option<DashboardUndoDeleteState>,
@@ -2126,7 +2247,8 @@ impl App {
         let config_state = config_store.load()?;
         let state_db_file = paths.state_db_file.clone();
         let trash_dir = paths.data_dir.join("trash");
-        let backup_dir = backup_root(&paths.data_dir);
+        let data_dir = paths.data_dir.clone();
+        let backup_store = backup_root(&data_dir);
         let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
@@ -2162,7 +2284,48 @@ impl App {
             }
             None => None,
         };
-        let effective_addon_dir = validated_override.or(configured_addon_dir.clone());
+        let mut effective_addon_dir = validated_override.or(configured_addon_dir.clone());
+
+        // The profile's state belongs to one AddOns folder. An `--addon-dir` for another
+        // folder is refused outright; a config pointing elsewhere (edited by hand) sends
+        // the user through setup, where confirming a folder rebinds on purpose.
+        let mut binding_notice = None;
+        if let Some(path) = effective_addon_dir.as_ref()
+            && validate_addons_path(path).is_ok()
+            && !runtime.is_guarded_path(path)
+        {
+            match check_addon_dir_binding(
+                &database,
+                &runtime.profile_name,
+                configured_addon_dir.as_deref(),
+                path,
+                true,
+            )? {
+                BindingCheck::Bound => {
+                    if let Err(error) = adopt_legacy_backups(&backup_store, path) {
+                        tracing::warn!(%error, "could not move legacy WTF backups into the client folder");
+                    }
+                }
+                BindingCheck::Mismatch(mismatch) => {
+                    if runtime.addon_dir_override.is_some() {
+                        return Err(lemonup_core::LemonupError::InvalidArgument(format!(
+                            "invalid --addon-dir for profile '{}': {mismatch}",
+                            runtime.profile_name
+                        )));
+                    }
+                    binding_notice = Some(format!(
+                        "this profile tracks addons in {} but the config points at {} | confirm the AddOns folder below to move the profile there (tracked addons are kept and exported to a snapshot first), or use a separate --profile for another install",
+                        mismatch.bound.display(),
+                        mismatch.requested.display()
+                    ));
+                    effective_addon_dir = None;
+                }
+            }
+        }
+        let backup_dir = effective_addon_dir
+            .as_deref()
+            .map(|path| client_backup_dir(&backup_store, path))
+            .unwrap_or_else(|| backup_store.clone());
 
         let onboarding = runtime
             .addon_dir_override
@@ -2208,6 +2371,7 @@ impl App {
             config_store,
             state_db_file,
             trash_dir,
+            data_dir,
             backup_dir,
             runtime,
             effective_addon_dir,
@@ -2218,6 +2382,7 @@ impl App {
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
             wago_install_in_progress: false,
+            direct_install_in_progress: false,
             auto_check_in_progress: false,
             last_auto_check_started_at: None,
             undo_delete: None,
@@ -2230,6 +2395,9 @@ impl App {
             startup_notice: None,
         };
         app.status_line = app.initial_status_line();
+        if let Some(notice) = binding_notice {
+            app.show_startup_notice(&notice, true);
+        }
         Ok(app)
     }
 
@@ -2265,8 +2433,8 @@ impl App {
                 break;
             };
 
-            let messages = self.messages_for_event(event);
-            if let Some(pulse) = self.footer_pulse_for_event(event, &messages) {
+            let messages = self.messages_for_event(&event);
+            if let Some(pulse) = self.footer_pulse_for_event(&event, &messages) {
                 self.apply(AppAction::SetFooterKeyPulse(Some(pulse)));
             }
             for message in messages {
@@ -2374,20 +2542,24 @@ impl App {
         }
     }
 
-    fn messages_for_event(&self, event: TerminalEvent) -> Vec<AppMessage> {
+    fn messages_for_event(&self, event: &TerminalEvent) -> Vec<AppMessage> {
         match event {
             TerminalEvent::Tick => vec![AppMessage::Tick],
             TerminalEvent::Resize(width, height) => {
-                vec![AppMessage::TerminalResized { width, height }]
+                vec![AppMessage::TerminalResized {
+                    width: *width,
+                    height: *height,
+                }]
             }
-            TerminalEvent::Key(key) => self.messages_for_key(key),
-            TerminalEvent::Mouse(mouse) => self.messages_for_mouse(mouse),
+            TerminalEvent::Key(key) => self.messages_for_key(*key),
+            TerminalEvent::Mouse(mouse) => self.messages_for_mouse(*mouse),
+            TerminalEvent::Paste(text) => vec![AppMessage::Paste(text.clone())],
         }
     }
 
     fn footer_pulse_for_event(
         &self,
-        event: TerminalEvent,
+        event: &TerminalEvent,
         messages: &[AppMessage],
     ) -> Option<FooterKeyPulse> {
         if messages.is_empty() {
@@ -2398,7 +2570,7 @@ impl App {
             return None;
         };
 
-        self.footer_hint_for_key(key).map(|hint| FooterKeyPulse {
+        self.footer_hint_for_key(*key).map(|hint| FooterKeyPulse {
             hint,
             expires_at_tick: self.shell_ui.motion.tick_count + 2,
         })
@@ -2439,8 +2611,7 @@ impl App {
                         KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
                             Some(FooterHintId::Nav)
                         }
-                        KeyCode::Enter => Some(FooterHintId::Validate),
-                        KeyCode::Char('d') => Some(FooterHintId::DeepScan),
+                        KeyCode::Enter | KeyCode::Char('d') => Some(FooterHintId::Validate),
                         KeyCode::Char('e') => Some(FooterHintId::Edit),
                         KeyCode::Esc => Some(FooterHintId::Back),
                         _ => None,
@@ -2520,7 +2691,13 @@ impl App {
                     }
                 }
                 DetailMode::Search => {
-                    if self.search_pane.is_editing {
+                    if self.search_pane.pending_direct_install().is_some() {
+                        match key.code {
+                            KeyCode::Enter => Some(FooterHintId::Confirm),
+                            KeyCode::Esc => Some(FooterHintId::Cancel),
+                            _ => None,
+                        }
+                    } else if self.search_pane.is_editing {
                         match key.code {
                             KeyCode::Enter => Some(FooterHintId::Save),
                             KeyCode::Esc => Some(FooterHintId::Cancel),
@@ -2814,11 +2991,97 @@ impl App {
         }
     }
 
+    /// Which text field (if any) currently has focus. Mirrors the key routing
+    /// order so pasted text lands exactly where typed characters would.
+    fn paste_target(&self) -> Option<PasteTarget> {
+        if self.shell_mode == ShellMode::Onboarding {
+            return self
+                .onboarding
+                .is_editing
+                .then_some(PasteTarget::Onboarding);
+        }
+
+        if self.dashboard.pending_delete_folders().is_some()
+            || self.pending_wago_install_confirmation.is_some()
+            || matches!(
+                self.shell_ui.overlay.active,
+                Some(OverlayKind::Inspect | OverlayKind::Help)
+            )
+        {
+            return None;
+        }
+
+        match self.dashboard.detail_mode {
+            DetailMode::Search
+                if self.search_pane.pending_direct_install().is_none()
+                    && self.search_pane.is_editing =>
+            {
+                return Some(PasteTarget::Search);
+            }
+            DetailMode::Install if self.install_pane.is_editing => {
+                return Some(PasteTarget::Install);
+            }
+            DetailMode::Config if self.config_pane.edit.is_some() => {
+                return Some(PasteTarget::Config);
+            }
+            _ => {}
+        }
+
+        if self.shell_ui.overlay.active.is_none() && self.dashboard.filter_editing() {
+            return Some(PasteTarget::DashboardFilter);
+        }
+
+        None
+    }
+
+    fn paste_actions(&self, text: &str) -> Vec<AppAction> {
+        let Some(target) = self.paste_target() else {
+            return vec![];
+        };
+        let text = sanitize_single_line_paste(text);
+        if text.is_empty() {
+            return vec![];
+        }
+
+        match target {
+            PasteTarget::Onboarding => vec![AppAction::SetOnboardingState(
+                self.onboarding.insert_str(&text),
+            )],
+            PasteTarget::Search => vec![AppAction::SetSearchPaneState(
+                self.search_pane.insert_str(&text),
+            )],
+            PasteTarget::Install => vec![AppAction::SetInstallPaneState(
+                self.install_pane.insert_str(&text),
+            )],
+            PasteTarget::Config => vec![AppAction::SetConfigPaneState(
+                self.config_pane.insert_str(&text),
+            )],
+            PasteTarget::DashboardFilter => {
+                let mut query = self.dashboard.filter_query().to_string();
+                query.push_str(&text);
+                vec![AppAction::SetDashboardFilter {
+                    query,
+                    editing: true,
+                }]
+            }
+        }
+    }
+
     fn search_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
         if self.dashboard.detail_mode != DetailMode::Search {
             return None;
         }
 
+        if self.search_pane.pending_direct_install().is_some() {
+            return Some(match key.code {
+                KeyCode::Enter => vec![AppMessage::SearchConfirmDirectInstall],
+                KeyCode::Esc => vec![AppMessage::SearchCancelDirectInstall],
+                _ => vec![],
+            });
+        }
+
+        // Deliberate exception: with no Wago key the compose overlay advertises
+        // `,` to open Config, so it stays a hotkey even while the query is focused.
         if self.wago_api_key.is_none() && matches!(key.code, KeyCode::Char(',')) {
             return Some(vec![AppMessage::SetDetailMode(DetailMode::Config)]);
         }
@@ -2885,7 +3148,6 @@ impl App {
                 KeyCode::Enter => vec![AppMessage::ConfigCommitEdit],
                 KeyCode::Esc => vec![AppMessage::ConfigCancelEdit],
                 KeyCode::Backspace => vec![AppMessage::ConfigBackspace],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char(character) => vec![AppMessage::ConfigInputChar(character)],
                 _ => vec![],
             });
@@ -3002,8 +3264,7 @@ impl App {
                             vec![AppMessage::OnboardingSuggestionPrevious]
                         }
                         KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
-                        KeyCode::Enter => vec![AppMessage::OnboardingValidateInput],
-                        KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
+                        KeyCode::Enter | KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
                         KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
                         KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                         _ => vec![],
@@ -3083,6 +3344,7 @@ impl App {
                 }
             }
             AppMessage::QuitRequested => vec![AppAction::Quit],
+            AppMessage::Paste(text) => self.paste_actions(&text),
             AppMessage::TerminalResized { width, height } => vec![AppAction::SetStatus(
                 self.with_base_status(&format!("terminal resized to {width}x{height}")),
             )],
@@ -3579,11 +3841,10 @@ impl App {
                 self.install_pane.backspace(),
             )],
             AppMessage::InstallSubmit => {
-                if self.wago_install_in_progress {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Install,
-                        "Wago install already running",
-                    ))]
+                if let Some(busy) = self.install_busy_status() {
+                    vec![AppAction::SetStatus(
+                        self.dashboard_status_for(DetailMode::Install, busy),
+                    )]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Install,
@@ -3636,7 +3897,7 @@ impl App {
                 AppAction::SetDetailMode(DetailMode::Search),
                 AppAction::SetStatus(self.dashboard_status_for(
                     DetailMode::Search,
-                    "install from Wago | type a name or Wago URL and press enter",
+                    "install addons | type a name or paste an addon URL and press enter",
                 )),
             ],
             AppMessage::SearchStopEditing => vec![
@@ -3652,25 +3913,39 @@ impl App {
                 vec![AppAction::SetSearchPaneState(self.search_pane.backspace())]
             }
             AppMessage::SearchSubmit => {
+                let intent = classify_search_input(&self.search_pane.query);
                 if self.search_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
                         "Wago search already running",
                     ))]
-                } else if self.wago_install_in_progress {
+                } else if let Some(busy) = self.install_busy_status() {
+                    vec![AppAction::SetStatus(
+                        self.dashboard_status_for(DetailMode::Search, busy),
+                    )]
+                } else if let SearchInputIntent::InvalidUrl(message) = intent {
+                    vec![
+                        AppAction::SetSearchPaneState(self.search_pane.fail_install(
+                            None,
+                            None,
+                            message.clone(),
+                        )),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            &format!("cannot install from URL: {message}"),
+                        )),
+                    ]
+                } else if let SearchInputIntent::Direct(request) = intent {
+                    self.request_direct_install_actions(request)
+                } else if intent == SearchInputIntent::Empty {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
-                        "Wago install already running",
+                        "enter an addon name or URL before submitting",
                     ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
                         "Wago search unavailable: no API key configured",
-                    ))]
-                } else if self.search_pane.query.trim().is_empty() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Search,
-                        "enter an addon name or Wago URL before submitting",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
@@ -3757,11 +4032,10 @@ impl App {
                 }
             }
             AppMessage::SearchInstallSelected => {
-                if self.wago_install_in_progress {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        DetailMode::Search,
-                        "Wago install already running",
-                    ))]
+                if let Some(busy) = self.install_busy_status() {
+                    vec![AppAction::SetStatus(
+                        self.dashboard_status_for(DetailMode::Search, busy),
+                    )]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         DetailMode::Search,
@@ -3798,13 +4072,58 @@ impl App {
                     ))]
                 }
             }
+            AppMessage::SearchConfirmDirectInstall => {
+                if let Some(request) = self.search_pane.pending_direct_install().cloned() {
+                    if let Some(busy) = self.install_busy_status() {
+                        vec![AppAction::SetStatus(
+                            self.dashboard_status_for(DetailMode::Search, busy),
+                        )]
+                    } else if self.dashboard.pending_delete_folders().is_some() {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            "confirm or cancel the pending delete before installing addons",
+                        ))]
+                    } else if let Some(addon_dir) = self.effective_addon_dir.clone() {
+                        vec![
+                            AppAction::SetSearchPaneState(
+                                self.search_pane.start_direct_install(request.clone()),
+                            ),
+                            AppAction::SetDirectInstallInProgress(true),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                DetailMode::Search,
+                                &format!(
+                                    "installing {} from {}",
+                                    request.display,
+                                    request.provider.label()
+                                ),
+                            )),
+                            AppAction::StartDirectInstall { addon_dir, request },
+                        ]
+                    } else {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            DetailMode::Search,
+                            "addon directory is not configured",
+                        ))]
+                    }
+                } else {
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        DetailMode::Search,
+                        "no direct install confirmation is pending",
+                    ))]
+                }
+            }
+            AppMessage::SearchCancelDirectInstall => vec![
+                AppAction::SetSearchPaneState(self.search_pane.cancel_direct_install()),
+                AppAction::SetStatus(
+                    self.dashboard_status_for(DetailMode::Search, "install cancelled"),
+                ),
+            ],
             AppMessage::WagoConfirmInstall => {
                 if let Some(confirmation) = self.pending_wago_install_confirmation.clone() {
-                    if self.wago_install_in_progress {
-                        vec![AppAction::SetStatus(self.dashboard_status_for(
-                            self.dashboard.detail_mode,
-                            "Wago install already running",
-                        ))]
+                    if let Some(busy) = self.install_busy_status() {
+                        vec![AppAction::SetStatus(
+                            self.dashboard_status_for(self.dashboard.detail_mode, busy),
+                        )]
                     } else if self.wago_api_key.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             self.dashboard.detail_mode,
@@ -4215,9 +4534,7 @@ impl App {
                     _ => self.onboarding.clone(),
                 };
                 let status = match self.onboarding.step {
-                    OnboardingStep::Directory => {
-                        "editing path | enter validate | d deep scan | esc stop editing"
-                    }
+                    OnboardingStep::Directory => "editing path | enter validate | esc stop editing",
                     OnboardingStep::Wago => "editing Wago API key | enter apply | esc cancel",
                     _ => "editing",
                 };
@@ -4273,21 +4590,14 @@ impl App {
                     ],
                 }
             }
-            AppMessage::OnboardingDeepScan => {
-                let root = PathBuf::from(self.onboarding.input.trim());
-                vec![
-                    AppAction::SetOnboardingState(self.onboarding.start_deep_scan()),
-                    AppAction::SetStatus(self.with_base_status("deep scan running | esc cancel")),
-                    AppAction::StartOnboardingDeepScan(root),
-                ]
-            }
+            AppMessage::OnboardingDeepScan => self.onboarding_scan_actions(),
             AppMessage::OnboardingCancel => {
                 if matches!(self.onboarding.phase, OnboardingPhase::DeepScanning(_)) {
                     vec![
                         AppAction::CancelOnboardingScan,
                         AppAction::SetOnboardingState(self.onboarding.cancelled()),
                         AppAction::SetStatus(self.with_base_status(
-                            "deep scan cancelled | enter validate | d deep scan | e edit path",
+                            "scan stopped | j/k pick a folder | enter scan | e edit path",
                         )),
                     ]
                 } else {
@@ -4323,9 +4633,9 @@ impl App {
                 ],
                 FoundAction::EnterDifferentPath => vec![
                     AppAction::SetOnboardingState(self.onboarding.begin_directory_editing()),
-                    AppAction::SetStatus(self.with_base_status(
-                        "editing path | enter validate | d deep scan | esc stop editing",
-                    )),
+                    AppAction::SetStatus(
+                        self.with_base_status("editing path | enter validate | esc stop editing"),
+                    ),
                 ],
             },
             AppMessage::BackgroundTask(event) => match event {
@@ -4339,12 +4649,9 @@ impl App {
                         AppAction::SetStatus(status),
                     ]
                 }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(_)) => vec![
-                    AppAction::SetOnboardingState(self.onboarding.ready()),
-                    AppAction::SetStatus(self.with_base_status(
-                        "no install found yet | enter validate | d deep scan | e edit path",
-                    )),
-                ],
+                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(_)) => {
+                    self.onboarding_scan_actions()
+                }
                 AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanProgress(progress)) => {
                     vec![AppAction::SetOnboardingState(
                         self.onboarding.set_scan_progress(progress),
@@ -4361,12 +4668,12 @@ impl App {
                     ]
                 }
                 AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(_))) => vec![
-                    AppAction::SetOnboardingState(
-                        self.onboarding
-                            .error("no WoW installation found from this root".to_string()),
-                    ),
+                    AppAction::SetOnboardingState(self.onboarding.error(format!(
+                        "no WoW install found under {}",
+                        self.onboarding.input.trim()
+                    ))),
                     AppAction::SetStatus(self.with_base_status(
-                        "deep scan finished with no result | e edit path | d scan again",
+                        "no install found | j/k pick a folder | enter scan | e edit path",
                     )),
                 ],
                 AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Err(error))) => {
@@ -4701,6 +5008,50 @@ impl App {
                         )),
                     ]
                 }
+                AppTaskEvent::DirectInstallFinished {
+                    request,
+                    result: Ok(outcome),
+                } => {
+                    let mut status = format!(
+                        "installed {} addon '{}' into {} | sync complete",
+                        request.provider.label(),
+                        outcome.addon_name,
+                        outcome.parent_folder
+                    );
+                    if let Some(warning) = &outcome.warning {
+                        status.push_str(&format!(" | warning: {warning}"));
+                    }
+                    vec![
+                        AppAction::SetSearchPaneState(
+                            self.search_pane.finish_direct_install(&request, &outcome),
+                        ),
+                        AppAction::ReplaceDashboardAddons(outcome.sync.addons),
+                        AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
+                        AppAction::CompleteAddonScan {
+                            path: outcome.sync.path,
+                            summary: outcome.sync.summary,
+                        },
+                        AppAction::SetDirectInstallInProgress(false),
+                        AppAction::SetStatus(
+                            self.dashboard_status_for(self.dashboard.detail_mode, &status),
+                        ),
+                    ]
+                }
+                AppTaskEvent::DirectInstallFinished {
+                    request,
+                    result: Err(error),
+                } => vec![
+                    AppAction::SetSearchPaneState(self.search_pane.fail_install(
+                        Some(request.target.clone()),
+                        Some(request.display.clone()),
+                        error.clone(),
+                    )),
+                    AppAction::SetDirectInstallInProgress(false),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        self.dashboard.detail_mode,
+                        &format!("{} install failed: {error}", request.provider.label()),
+                    )),
+                ],
             },
         }
     }
@@ -4825,6 +5176,9 @@ impl App {
             }
             AppAction::SetWagoInstallInProgress(in_progress) => {
                 self.wago_install_in_progress = in_progress;
+            }
+            AppAction::SetDirectInstallInProgress(in_progress) => {
+                self.direct_install_in_progress = in_progress;
             }
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
@@ -4993,12 +5347,59 @@ impl App {
                     return;
                 }
 
+                // Confirming a folder in setup is the deliberate way to (re)bind the
+                // profile's tracked state to it.
+                let rebind = match StateDatabase::open(&self.state_db_file).and_then(|database| {
+                    rebind_addon_dir(
+                        &database,
+                        &path,
+                        &self.data_dir.join("rebind"),
+                        OffsetDateTime::now_utc(),
+                    )
+                }) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        self.onboarding = self.onboarding.error(error.to_string());
+                        self.status_line = self.with_base_status(&format!(
+                            "failed to bind profile to {}: {error}",
+                            path.display()
+                        ));
+                        self.shell_mode = ShellMode::Onboarding;
+                        return;
+                    }
+                };
+
                 match self.config_store.write_new_config(&config) {
                     Ok(()) => {
                         self.config_present = true;
                         self.config_pane = self.config_pane.mark_saved(config.clone());
                         self.wago_api_key = config.wago_api_key.clone();
                         self.effective_addon_dir = Some(path.clone());
+                        let backup_store = backup_root(&self.data_dir);
+                        if let Err(error) = adopt_legacy_backups(&backup_store, &path) {
+                            tracing::warn!(%error, "could not move legacy WTF backups into the client folder");
+                        }
+                        self.backup_dir = client_backup_dir(&backup_store, &path);
+                        self.backup_pane.backups =
+                            list_backups(&self.backup_dir).unwrap_or_default();
+                        self.backup_pane.selected_backup = 0;
+                        if let (Some(previous), Some(snapshot)) =
+                            (&rebind.previous, &rebind.snapshot)
+                        {
+                            self.startup_notice = None;
+                            self.shell_ui.dashboard_toast = Some(DashboardToast {
+                                text: truncate_text(
+                                    &format!(
+                                        "Moved profile from {} · tracked addons saved to {}",
+                                        previous.display(),
+                                        snapshot.display()
+                                    ),
+                                    160,
+                                ),
+                                kind: DashboardEventKind::Success,
+                                expires_at: Instant::now() + StdDuration::from_secs(12),
+                            });
+                        }
                         self.shell_mode = ShellMode::Dashboard;
                         if tokio::runtime::Handle::try_current().is_ok() {
                             self.apply(AppAction::StartAddonScan(path));
@@ -5077,6 +5478,11 @@ impl App {
             } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
+                let backup_settings = PreUpdateBackupSettings {
+                    enabled: self.config_pane.draft.backup_wtf,
+                    retention: self.config_pane.draft.backup_retention,
+                    backup_dir: self.backup_dir.clone(),
+                };
                 tokio::spawn(async move {
                     let result = run_dashboard_update_task(
                         &state_db_file,
@@ -5084,6 +5490,7 @@ impl App {
                         &folders,
                         wago_api_key,
                         check_interval_secs,
+                        backup_settings,
                         {
                             let sender = sender.clone();
                             move |kind, current_index, total, addon_name| {
@@ -5158,9 +5565,10 @@ impl App {
                 backup_path,
             } => {
                 let sender = self.task_events_tx.clone();
+                let backup_dir = self.backup_dir.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        restore_wtf_backup(&addon_dir, &backup_path)
+                        restore_wtf_backup(&addon_dir, &backup_dir, &backup_path)
                     })
                     .await
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
@@ -5249,6 +5657,27 @@ impl App {
                     let _ = sender.send(AppTaskEvent::WagoInstallFinished(result));
                 });
             }
+            AppAction::StartDirectInstall { addon_dir, request } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let task_request = request.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|error| error.to_string())?;
+                        runtime.block_on(run_direct_install_task(
+                            &state_db_file,
+                            &addon_dir,
+                            &task_request,
+                        ))
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+                    let _ = sender.send(AppTaskEvent::DirectInstallFinished { request, result });
+                });
+            }
             AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
             AppAction::CompleteAddonScan { path, summary } => {
                 self.scan_state = ScanState::Succeeded {
@@ -5262,6 +5691,13 @@ impl App {
                         summary.upserted_addons, summary.removed_addons
                     ),
                 );
+                if let Some(text) = scan_warning_text(&summary) {
+                    self.shell_ui.dashboard_toast = Some(DashboardToast {
+                        text: truncate_text(&text, 160),
+                        kind: DashboardEventKind::Error,
+                        expires_at: Instant::now() + StdDuration::from_secs(10),
+                    });
+                }
             }
             AppAction::FailAddonScan(error) => {
                 self.scan_state = ScanState::Failed(error.clone());
@@ -5661,33 +6097,7 @@ impl App {
                     )));
                     lines.push(Line::from(""));
                 }
-                lines.push(Line::from(format!(
-                    "Current path: {}",
-                    self.onboarding.input
-                )));
-                lines.push(Line::from(""));
-                for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
-                    let selected = self.onboarding.selected_suggestion == Some(index);
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            Style::default().fg(self.ui_theme.highlight),
-                        ),
-                        Span::styled(
-                            suggestion.clone(),
-                            if selected {
-                                Style::default().fg(self.ui_theme.highlight)
-                            } else {
-                                Style::default().fg(self.ui_theme.info)
-                            },
-                        ),
-                    ]));
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Enter validates. d runs a deep scan. e edits the path manually.",
-                    Style::default().fg(self.ui_theme.muted),
-                )));
+                self.push_onboarding_folder_choices(&mut lines);
             }
             OnboardingPhase::DeepScanning(progress) => {
                 lines.push(Line::from(Span::styled(
@@ -5697,7 +6107,7 @@ impl App {
                 lines.push(Line::from(progress.current_path.clone()));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Esc cancels the deep scan.",
+                    "Esc stops the scan so you can pick a folder yourself.",
                     Style::default().fg(self.ui_theme.muted),
                 )));
             }
@@ -5759,25 +6169,19 @@ impl App {
             }
             OnboardingPhase::Error(message) => {
                 lines.push(Line::from(Span::styled(
-                    format!("Validation failed: {message}"),
+                    format!("✗ {message}"),
                     Style::default().fg(self.ui_theme.warning),
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Edit the path, pick another suggestion, or scan again.",
-                    Style::default().fg(self.ui_theme.muted),
-                )));
+                self.push_onboarding_folder_choices(&mut lines);
             }
             OnboardingPhase::Cancelled => {
                 lines.push(Line::from(Span::styled(
-                    "Deep scan cancelled.",
+                    "Scan stopped.",
                     Style::default().fg(self.ui_theme.warning),
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Pick another root or edit the path manually.",
-                    Style::default().fg(self.ui_theme.muted),
-                )));
+                self.push_onboarding_folder_choices(&mut lines);
             }
         }
 
@@ -5790,6 +6194,45 @@ impl App {
         }
 
         lines
+    }
+
+    /// Folders to scan from (home first), shown when no install was found automatically.
+    fn push_onboarding_folder_choices(&self, lines: &mut Vec<Line<'static>>) {
+        lines.push(Line::from(
+            "Pick a folder to search, or type the AddOns path:",
+        ));
+        lines.push(Line::from(""));
+        for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
+            let selected = self.onboarding.selected_suggestion == Some(index);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(self.ui_theme.highlight),
+                ),
+                Span::styled(
+                    suggestion.clone(),
+                    if selected {
+                        Style::default().fg(self.ui_theme.highlight)
+                    } else {
+                        Style::default().fg(self.ui_theme.info)
+                    },
+                ),
+            ]));
+        }
+        if self.onboarding.selected_suggestion.is_none() && !self.onboarding.is_editing {
+            lines.push(Line::from(vec![
+                Span::styled("› ", Style::default().fg(self.ui_theme.highlight)),
+                Span::styled(
+                    self.onboarding.input.clone(),
+                    Style::default().fg(self.ui_theme.highlight),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Enter searches the selected folder. e types a path.",
+            Style::default().fg(self.ui_theme.muted),
+        )));
     }
 
     fn onboarding_wago_lines(&self) -> Vec<Line<'static>> {
@@ -6064,9 +6507,7 @@ impl App {
                 lines.push(self.overlay_section_title("Actions"));
                 if self.wago_api_key.is_none() {
                     lines.push(self.overlay_hint_line("Set Wago API key before install can run."));
-                    lines.push(self.overlay_hint_line(
-                        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env.",
-                    ));
+                    lines.push(self.overlay_hint_line(crate::wago::wago_api_key_sources_hint()));
                 } else {
                     lines.push(
                         self.overlay_hint_line("Accepts a slug or addons.wago.io addon URL."),
@@ -6112,9 +6553,7 @@ impl App {
                 lines.push(self.overlay_section_title("Actions"));
                 if self.wago_api_key.is_none() {
                     lines.push(self.overlay_hint_line("Set Wago API key before search can run."));
-                    lines.push(self.overlay_hint_line(
-                        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env.",
-                    ));
+                    lines.push(self.overlay_hint_line(crate::wago::wago_api_key_sources_hint()));
                 } else {
                     lines.push(self.overlay_hint_line("Retail and stable only."));
                     lines.push(self.overlay_hint_line(if self.search_pane.is_editing {
@@ -6241,18 +6680,18 @@ impl App {
                 lines.push(self.overlay_kv_line(
                     "Inventory",
                     format!(
-                        "{} tracked | {} ready | {} manual | {} unmgd",
+                        "{} tracked | {} ready | {} manual | {} older",
                         inventory.total,
                         inventory.refreshable,
                         inventory.manual,
-                        inventory.unmanaged
+                        inventory.remote_older
                     ),
                 ));
                 lines.push(self.overlay_kv_line(
                     "Selection",
                     format!(
-                        "{} ready | {} manual | {} unmgd",
-                        selection.refreshable, selection.manual, selection.unmanaged
+                        "{} ready | {} manual | {} older",
+                        selection.refreshable, selection.manual, selection.remote_older
                     ),
                 ));
                 lines.push(self.overlay_kv_line(
@@ -6279,13 +6718,13 @@ impl App {
                     lines.push(self.overlay_kv_line(
                         "Results",
                         format!(
-                            "{} targets | {} updated | {} current | {} manual | {} unmgd | {} unsupported | {} errors",
+                            "{} targets | {} updated | {} current | {} older | {} manual | {} no key | {} errors",
                             last_summary.targets,
                             last_summary.updated_addons,
                             last_summary.up_to_date,
+                            last_summary.remote_older,
                             last_summary.skipped_manual,
-                            last_summary.skipped_unmanaged,
-                            last_summary.skipped_unsupported,
+                            last_summary.skipped_no_api_key,
                             last_summary.errors
                         ),
                     ));
@@ -6293,7 +6732,7 @@ impl App {
             }
             DetailMode::Config => {
                 lines.push(self.overlay_section_title("Config"));
-                lines.push(self.overlay_kv_line("Target", self.rendered_target_path()));
+                lines.push(self.overlay_kv_line("AddOns", self.rendered_target_path()));
                 lines.push(self.overlay_kv_line(
                     "Config",
                     if self.config_present {
@@ -6360,7 +6799,7 @@ impl App {
             }
             DetailMode::Backup => {
                 lines.push(self.overlay_section_title("Backup now"));
-                lines.push(self.overlay_kv_line("Target", self.rendered_target_path()));
+                lines.push(self.overlay_kv_line("AddOns", self.rendered_target_path()));
                 lines.push(self.overlay_kv_line("Store", self.backup_dir.display().to_string()));
                 lines.push(self.overlay_kv_line(
                     "Policy",
@@ -6465,8 +6904,46 @@ impl App {
             .map(ToOwned::to_owned)
     }
 
+    /// Starts a scan from the current onboarding path. The scan accepts an AddOns folder
+    /// directly, so this both checks a typed path and searches a folder such as home.
+    fn onboarding_scan_actions(&self) -> Vec<AppAction> {
+        let root = PathBuf::from(self.onboarding.input.trim());
+        vec![
+            AppAction::SetOnboardingState(self.onboarding.start_deep_scan()),
+            AppAction::SetStatus(self.with_base_status("scanning for WoW installs | esc stop")),
+            AppAction::StartOnboardingDeepScan(root),
+        ]
+    }
+
     fn location_finder_status(&self) -> String {
-        self.with_base_status("location finder | enter validate | d deep scan | e edit path")
+        self.with_base_status("location finder | enter scan | e edit path")
+    }
+
+    /// The game client the AddOns folder belongs to, for the header.
+    fn game_client_label(&self) -> String {
+        match self.effective_addon_dir.as_deref() {
+            None => "No AddOns folder set".to_string(),
+            Some(path) => match GameFlavor::detect_from_path(path) {
+                Some(GameFlavor::Forever) => "WoW Forever".to_string(),
+                Some(_) => "Retail".to_string(),
+                None => "AddOns".to_string(),
+            },
+        }
+    }
+
+    /// The AddOns folder with the home folder shortened to `~` (not on Windows).
+    fn friendly_addon_dir(&self) -> String {
+        let Some(path) = self.effective_addon_dir.as_deref() else {
+            return String::new();
+        };
+        if !cfg!(windows)
+            && let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && let Ok(rest) = path.strip_prefix(&home)
+            && !home.as_os_str().is_empty()
+        {
+            return Path::new("~").join(rest).display().to_string();
+        }
+        path.display().to_string()
     }
 
     fn rendered_target_path(&self) -> String {
@@ -6487,6 +6964,7 @@ impl App {
             || self.undo_delete_in_progress
             || self.backup_pane.in_progress
             || self.wago_install_in_progress
+            || self.direct_install_in_progress
             || self.pending_wago_install_confirmation.is_some()
             || self.effective_addon_dir.is_none()
             || !matches!(self.scan_state, ScanState::Succeeded { .. })
@@ -6501,11 +6979,13 @@ impl App {
             return None;
         }
 
+        // Every tracked row is checked, including ones whose remote is currently older, so a
+        // fixed provider page is noticed.
         let folders = self
             .dashboard
             .items
             .iter()
-            .filter(|item| is_refreshable_dashboard_item(item))
+            .filter(|item| item.source != SourceKind::Manual)
             .map(|item| item.folder.clone())
             .collect::<Vec<_>>();
         if folders.is_empty() {
@@ -6671,14 +7151,17 @@ impl App {
 
     fn scan_status_label(&self) -> String {
         match &self.scan_state {
-            ScanState::Idle => "idle".to_string(),
-            ScanState::Pending => "pending".to_string(),
-            ScanState::Running(path) => format!("running ({})", path.display()),
-            ScanState::Succeeded { summary, .. } => format!(
-                "synced {} addons, removed {}",
-                summary.upserted_addons, summary.removed_addons
-            ),
-            ScanState::Failed(error) => format!("failed ({error})"),
+            ScanState::Idle => "not scanned yet".to_string(),
+            ScanState::Pending | ScanState::Running(_) => "Scanning…".to_string(),
+            ScanState::Succeeded { summary, .. } => {
+                let count = summary.upserted_addons;
+                let mut label = format!("{count} {}", if count == 1 { "addon" } else { "addons" });
+                if summary.removed_addons > 0 {
+                    label.push_str(&format!(" · {} removed", summary.removed_addons));
+                }
+                label
+            }
+            ScanState::Failed(error) => format!("scan failed: {error}"),
         }
     }
 
@@ -7032,6 +7515,7 @@ async fn run_dashboard_update_task(
     folders: &[String],
     wago_api_key: Option<String>,
     check_interval_secs: u64,
+    backup_settings: PreUpdateBackupSettings,
     mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
 ) -> std::result::Result<DashboardUpdateOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
@@ -7044,6 +7528,18 @@ async fn run_dashboard_update_task(
         &mut on_progress,
     )
     .await?;
+    // Best-effort WTF backup before addons change; a failure only adds a status note.
+    let backup_addon_dir = addon_dir.to_path_buf();
+    let backup_note = tokio::task::spawn_blocking(move || {
+        run_pre_update_backup(
+            &backup_settings,
+            &backup_addon_dir,
+            OffsetDateTime::now_utc(),
+        )
+        .status_note()
+    })
+    .await
+    .unwrap_or_else(|join_error| Some(format!("WTF backup failed: {join_error}")));
     let run = apply_live_updates(
         &mut database,
         addon_dir,
@@ -7065,7 +7561,7 @@ async fn run_dashboard_update_task(
     } else {
         None
     };
-    let warnings = run
+    let mut warnings: Vec<String> = run
         .results
         .iter()
         .filter(|result| {
@@ -7073,6 +7569,7 @@ async fn run_dashboard_update_task(
         })
         .filter_map(|result| result.message.clone())
         .collect();
+    warnings.extend(backup_note);
     let summary = run.summary;
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
@@ -7234,18 +7731,36 @@ fn is_check_stale(addon: &AddonRecord, check_interval_secs: u64) -> bool {
     OffsetDateTime::now_utc() - last_checked_at >= interval
 }
 
+/// Toast text for what a scan could not read or left behind, if anything.
+fn scan_warning_text(summary: &ScanSummary) -> Option<String> {
+    let mut parts = Vec::new();
+    if !summary.skipped_folders.is_empty() {
+        let count = summary.skipped_folders.len();
+        parts.push(format!(
+            "{count} addon folder{} could not be read; see log",
+            plural_suffix(count)
+        ));
+    }
+    if !summary.leftover_staging.is_empty() {
+        parts.push(format!(
+            "leftover update staging folder {} may contain previous addon versions; see Troubleshooting",
+            summary.leftover_staging.join(", ")
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 fn sync_dashboard_state(
     state_db_file: &Path,
     addon_dir: &Path,
 ) -> std::result::Result<AddonScanOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     let tracked = database.list_addons().map_err(|error| error.to_string())?;
-    let scanned =
-        scan_addons_dir_with_tracked(addon_dir, GameFlavor::for_addons_dir(addon_dir), &tracked)
-            .map_err(|error| error.to_string())?;
-    let drift_report = compute_drift_report(&tracked, &scanned);
+    let report = scan_addons_dir_report(addon_dir, GameFlavor::for_addons_dir(addon_dir), &tracked)
+        .map_err(|error| error.to_string())?;
+    let drift_report = compute_drift_report(&tracked, &report.addons);
     let summary = database
-        .reconcile_scanned_addons(&scanned)
+        .reconcile_scan(&report)
         .map_err(|error| error.to_string())?;
     let addons = database.list_addons().map_err(|error| error.to_string())?;
 
@@ -7282,8 +7797,11 @@ fn dashboard_item_to_addon_record(item: &DashboardItem) -> AddonRecord {
     addon
 }
 
+/// Tracked rows can be updated whatever their ownership (the provider takes the folder set from
+/// the package); rows whose remote version is older than the installed one are held back.
 fn is_refreshable_dashboard_item(item: &DashboardItem) -> bool {
-    item.source != SourceKind::Manual && item.has_authoritative_owned_folders
+    item.source != SourceKind::Manual
+        && dashboard_item_update_status(item) != UpdateStatus::RemoteOlder
 }
 
 fn summarize_refreshability(items: &[&DashboardItem]) -> DashboardRefreshabilitySummary {
@@ -7291,16 +7809,16 @@ fn summarize_refreshability(items: &[&DashboardItem]) -> DashboardRefreshability
         total: items.len(),
         refreshable: 0,
         manual: 0,
-        unmanaged: 0,
+        remote_older: 0,
     };
 
     for item in items {
         if item.source == SourceKind::Manual {
             summary.manual += 1;
-        } else if item.has_authoritative_owned_folders {
+        } else if is_refreshable_dashboard_item(item) {
             summary.refreshable += 1;
         } else {
-            summary.unmanaged += 1;
+            summary.remote_older += 1;
         }
     }
 
@@ -7324,6 +7842,10 @@ fn summarize_checks(checks: &[CheckResult]) -> DashboardUpdateRunSummary {
         .iter()
         .filter(|check| check.status == UpdateStatus::Error)
         .count();
+    let remote_older = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::RemoteOlder)
+        .count();
 
     DashboardUpdateRunSummary {
         targets: checks.len(),
@@ -7333,8 +7855,8 @@ fn summarize_checks(checks: &[CheckResult]) -> DashboardUpdateRunSummary {
         unknown,
         errors,
         skipped_manual: 0,
-        skipped_unmanaged: 0,
-        skipped_unsupported: 0,
+        skipped_no_api_key: 0,
+        remote_older,
         scanned_addons: 0,
     }
 }
@@ -7348,8 +7870,8 @@ fn dashboard_update_run_summary_from_live(summary: LiveUpdateSummary) -> Dashboa
         unknown: 0,
         errors: summary.errors,
         skipped_manual: summary.skipped_manual,
-        skipped_unmanaged: summary.skipped_unmanaged,
-        skipped_unsupported: summary.skipped_unsupported,
+        skipped_no_api_key: summary.skipped_no_api_key,
+        remote_older: summary.remote_older,
         scanned_addons: 0,
     }
 }
@@ -7366,8 +7888,8 @@ fn dashboard_update_status_message(outcome: &DashboardUpdateOutcome) -> String {
         format!("Updated {}", addon_count_label(summary.updated_addons))
     } else if summary.up_to_date > 0
         && summary.skipped_manual == 0
-        && summary.skipped_unmanaged == 0
-        && summary.skipped_unsupported == 0
+        && summary.skipped_no_api_key == 0
+        && summary.remote_older == 0
         && summary.errors == 0
     {
         "Already up to date".to_string()
@@ -7382,13 +7904,13 @@ fn dashboard_update_status_message(outcome: &DashboardUpdateOutcome) -> String {
     if summary.skipped_manual > 0 {
         details.push(format!("{} manual skipped", summary.skipped_manual));
     }
-    if summary.skipped_unmanaged > 0 {
-        details.push(format!("{} unmanaged skipped", summary.skipped_unmanaged));
+    if summary.remote_older > 0 {
+        details.push(format!("{} remote older", summary.remote_older));
     }
-    if summary.skipped_unsupported > 0 {
+    if summary.skipped_no_api_key > 0 {
         details.push(format!(
-            "{} unsupported skipped",
-            summary.skipped_unsupported
+            "{} skipped (Wago API key not configured)",
+            summary.skipped_no_api_key
         ));
     }
     if summary.errors > 0 {
@@ -7654,7 +8176,7 @@ fn adjust_u16(current: u16, delta: i16, step: u16, minimum: u16) -> u16 {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
@@ -7682,7 +8204,7 @@ mod tests {
         summarize_owned_folders, truncate_middle_text, visible_search_result_window,
     };
     use crate::action::AppAction;
-    use crate::backup::{BackupEntry, BackupRunOutcome};
+    use crate::backup::{BackupEntry, BackupRunOutcome, backup_root};
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
     use crate::onboarding::{
@@ -7745,8 +8267,9 @@ mod tests {
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
+            data_dir: std::env::temp_dir().join("lemonup-test-data"),
             backup_dir: std::env::temp_dir().join("lemonup-test-backups"),
-            runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
+            runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
             dashboard: DashboardState::from_addons(vec![first, second, third]),
@@ -7754,6 +8277,7 @@ mod tests {
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
             wago_install_in_progress: false,
+            direct_install_in_progress: false,
             auto_check_in_progress: false,
             last_auto_check_started_at: None,
             undo_delete: None,
@@ -7865,13 +8389,13 @@ mod tests {
     fn mouse_wheel_moves_dashboard_selection_one_row() {
         let app = app_for_tests(ShellMode::Dashboard);
 
-        let down = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+        let down = app.messages_for_event(&TerminalEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 0,
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
-        let up = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+        let up = app.messages_for_event(&TerminalEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
             row: 0,
@@ -7886,7 +8410,7 @@ mod tests {
     fn left_click_emits_pointer_select_message() {
         let app = app_for_tests(ShellMode::Dashboard);
 
-        let messages = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+        let messages = app.messages_for_event(&TerminalEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 5,
             row: 4,
@@ -7903,7 +8427,7 @@ mod tests {
     fn left_drag_emits_pointer_select_message() {
         let app = app_for_tests(ShellMode::Dashboard);
 
-        let messages = app.messages_for_event(TerminalEvent::Mouse(MouseEvent {
+        let messages = app.messages_for_event(&TerminalEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 5,
             row: 5,
@@ -8084,6 +8608,45 @@ mod tests {
     }
 
     #[test]
+    fn scan_with_unreadable_or_leftover_folders_shows_a_warning_toast() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let path = PathBuf::from("C:\\Sandbox\\AddOns");
+
+        app.apply(AppAction::CompleteAddonScan {
+            path: path.clone(),
+            summary: ScanSummary::default(),
+        });
+        assert!(
+            app.dashboard_event_message().is_none(),
+            "clean scan: no toast"
+        );
+
+        app.apply(AppAction::CompleteAddonScan {
+            path: path.clone(),
+            summary: ScanSummary {
+                skipped_folders: vec!["Locked".to_string(), "Pawn".to_string()],
+                ..Default::default()
+            },
+        });
+        let (message, _) = app.dashboard_event_message().expect("skipped toast");
+        assert!(
+            message.contains("2 addon folders could not be read; see log"),
+            "{message}"
+        );
+
+        app.apply(AppAction::CompleteAddonScan {
+            path,
+            summary: ScanSummary {
+                leftover_staging: vec![".lemonup-staging-1-2-0".to_string()],
+                ..Default::default()
+            },
+        });
+        let (message, _) = app.dashboard_event_message().expect("staging toast");
+        assert!(message.contains(".lemonup-staging-1-2-0"), "{message}");
+        assert!(message.contains("Troubleshooting"), "{message}");
+    }
+
+    #[test]
     fn dashboard_toast_expires_after_duration() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.apply(AppAction::SetStatus(
@@ -8118,9 +8681,9 @@ mod tests {
     fn recognized_key_sets_matching_footer_pulse() {
         let app = app_for_tests(ShellMode::Dashboard);
         let event = TerminalEvent::Key(KeyEvent::from(KeyCode::Char('c')));
-        let messages = app.messages_for_event(event);
+        let messages = app.messages_for_event(&event);
 
-        let pulse = app.footer_pulse_for_event(event, &messages);
+        let pulse = app.footer_pulse_for_event(&event, &messages);
 
         assert_eq!(
             pulse,
@@ -9126,6 +9689,7 @@ mod tests {
                             scanned_addons: 1,
                             upserted_addons: 1,
                             removed_addons: 0,
+                            ..Default::default()
                         },
                         addons: Vec::new(),
                         drift_report: DriftReport::empty(),
@@ -9406,19 +9970,24 @@ mod tests {
     }
 
     #[test]
-    fn selecting_refreshable_updates_targets_managed_tracked_parents_only() {
+    fn selecting_refreshable_updates_targets_tracked_parents_whatever_their_ownership() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Update;
 
         let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
 
+        // "Third" is a tracked Wago row without authoritative ownership (as migrated from v1):
+        // it is updateable, and the provider takes its folder set from the package.
         assert_eq!(
             actions,
             vec![
-                AppAction::SetSelectedDashboardParents(vec!["Second".to_string()]),
+                AppAction::SetSelectedDashboardParents(vec![
+                    "Second".to_string(),
+                    "Third".to_string()
+                ]),
                 AppAction::SetStatus(app.dashboard_status_for(
                     DetailMode::Update,
-                    "selected 1 updateable tracked addon",
+                    "selected 2 updateable tracked addons",
                 )),
             ]
         );
@@ -9428,9 +9997,13 @@ mod tests {
     fn selecting_refreshable_updates_reports_when_none_are_available() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Update;
+        // A tracked row whose remote version is older than the installed one is held back.
+        let mut stale = AddonRecord::new("Postal", "Postal", SourceKind::WowInterface);
+        stale.version = Some("v4.3.5".to_string());
+        stale.remote_version = Some("v3.6.6".to_string());
         app.apply(AppAction::ReplaceDashboardAddons(vec![
             AddonRecord::new("First", "First", SourceKind::Manual),
-            AddonRecord::new("Third", "Third", SourceKind::Wago),
+            stale,
         ]));
 
         let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
@@ -9600,6 +10173,7 @@ mod tests {
                 scanned_addons: 1,
                 upserted_addons: 1,
                 removed_addons: 0,
+                ..Default::default()
             },
             addons: vec![AddonRecord::new("First", "First", SourceKind::Manual)],
             drift_report: DriftReport::empty(),
@@ -9643,6 +10217,7 @@ mod tests {
                 scanned_addons: 1,
                 upserted_addons: 1,
                 removed_addons: 0,
+                ..Default::default()
             },
             addons: vec![AddonRecord::new("Second", "Second", SourceKind::GitHub)],
             drift_report: DriftReport::empty(),
@@ -9687,6 +10262,7 @@ mod tests {
                 scanned_addons: 1,
                 upserted_addons: 1,
                 removed_addons: 0,
+                ..Default::default()
             },
             addons: vec![AddonRecord::new("Second", "Second", SourceKind::GitHub)],
             drift_report: DriftReport::empty(),
@@ -9697,8 +10273,8 @@ mod tests {
             updated_addons: 1,
             up_to_date: 0,
             skipped_manual: 0,
-            skipped_unmanaged: 0,
-            skipped_unsupported: 0,
+            skipped_no_api_key: 0,
+            remote_older: 0,
             errors: 0,
         };
 
@@ -9746,6 +10322,7 @@ mod tests {
                 scanned_addons: 3,
                 upserted_addons: 3,
                 removed_addons: 0,
+                ..Default::default()
             },
             addons: vec![
                 AddonRecord::new("First", "First", SourceKind::Manual),
@@ -9759,8 +10336,8 @@ mod tests {
             updated_addons: 0,
             up_to_date: 0,
             skipped_manual: 1,
-            skipped_unmanaged: 0,
-            skipped_unsupported: 0,
+            skipped_no_api_key: 0,
+            remote_older: 0,
             errors: 0,
         };
 
@@ -9789,8 +10366,8 @@ mod tests {
                 updated_addons: 1,
                 up_to_date: 0,
                 skipped_manual: 0,
-                skipped_unmanaged: 0,
-                skipped_unsupported: 0,
+                skipped_no_api_key: 0,
+                remote_older: 0,
                 errors: 0,
             },
             updated_addon_name: Some("WeakAuras".to_string()),
@@ -9801,6 +10378,7 @@ mod tests {
                     scanned_addons: 1,
                     upserted_addons: 1,
                     removed_addons: 0,
+                    ..Default::default()
                 },
                 addons: vec![],
                 drift_report: DriftReport::empty(),
@@ -10031,6 +10609,67 @@ mod tests {
     }
 
     #[test]
+    fn empty_quick_check_starts_a_scan_from_the_current_path() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding.phase = OnboardingPhase::QuickChecking;
+        app.onboarding.input = "/home/player".to_string();
+
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Vec::new()),
+        )));
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetOnboardingState(app.onboarding.start_deep_scan()),
+                AppAction::SetStatus(app.with_base_status("scanning for WoW installs | esc stop")),
+                AppAction::StartOnboardingDeepScan(PathBuf::from("/home/player")),
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_on_folder_choice_searches_it() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        for phase in [
+            OnboardingPhase::Ready,
+            OnboardingPhase::Cancelled,
+            OnboardingPhase::Error("nothing".to_string()),
+        ] {
+            app.onboarding.phase = phase;
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![AppMessage::OnboardingDeepScan]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('d'))),
+                vec![AppMessage::OnboardingDeepScan]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_scan_result_names_the_folder_it_searched() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding.input = "/home/player".to_string();
+
+        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+            crate::onboarding::OnboardingTaskEvent::DeepScanFinished(Ok(Vec::new())),
+        )));
+
+        assert_eq!(
+            actions.first(),
+            Some(&AppAction::SetOnboardingState(
+                app.onboarding
+                    .error("no WoW install found under /home/player")
+            ))
+        );
+    }
+
+    #[test]
     fn found_confirmation_uses_selected_action() {
         let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.input =
@@ -10123,9 +10762,9 @@ mod tests {
         app.runtime = AppRuntime::new(
             "dev".to_string(),
             None,
-            Some(PathBuf::from(
+            vec![PathBuf::from(
                 "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
-            )),
+            )],
         );
 
         let path = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
@@ -10153,9 +10792,9 @@ mod tests {
         app.runtime = AppRuntime::new(
             "dev".to_string(),
             None,
-            Some(PathBuf::from(
+            vec![PathBuf::from(
                 "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
-            )),
+            )],
         );
 
         let mut config = app.config_pane.draft.clone();
@@ -10184,7 +10823,11 @@ mod tests {
 
         let error = match App::bootstrap(
             paths,
-            AppRuntime::new("dev".to_string(), Some(PathBuf::from("D:\\bad-path")), None),
+            AppRuntime::new(
+                "dev".to_string(),
+                Some(PathBuf::from("D:\\bad-path")),
+                Vec::new(),
+            ),
         ) {
             Ok(_) => panic!("invalid override should fail"),
             Err(error) => error,
@@ -10213,7 +10856,7 @@ mod tests {
         let guarded = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
         let error = match App::bootstrap(
             paths,
-            AppRuntime::new("dev".to_string(), Some(guarded.clone()), Some(guarded)),
+            AppRuntime::new("dev".to_string(), Some(guarded.clone()), vec![guarded]),
         ) {
             Ok(_) => panic!("guarded override should fail"),
             Err(error) => error,
@@ -10224,6 +10867,139 @@ mod tests {
                 .to_string()
                 .contains("matches the default profile AddOns directory")
         );
+    }
+
+    /// A WoW root with retail and Forever clients and a default-profile config for retail.
+    fn two_client_profile(root: &Path) -> (AppPaths, PathBuf, PathBuf) {
+        let wow = root.join("World of Warcraft");
+        std::fs::create_dir_all(wow.join("Data")).expect("data dir");
+        let mut clients = Vec::new();
+        for client in ["_retail_", "_forever_"] {
+            let addons = wow.join(client).join("Interface").join("AddOns");
+            std::fs::create_dir_all(&addons).expect("addons dir");
+            std::fs::create_dir_all(wow.join(client).join("WTF")).expect("wtf dir");
+            std::fs::write(wow.join(client).join("Wow.exe"), "").expect("wow exe");
+            clients.push(addons);
+        }
+        let paths = AppPaths {
+            profile: DEFAULT_PROFILE.to_string(),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            log_dir: root.join("data").join("logs"),
+            config_file: root.join("config").join("config.toml"),
+            state_db_file: root.join("data").join("state.sqlite"),
+        };
+        let mut config = AppConfig::new_unconfigured();
+        config.addon_dir = Some(clients[0].clone());
+        ConfigStore::new(paths.config_file.clone())
+            .write_new_config(&config)
+            .expect("write config");
+        let forever = clients.pop().expect("forever");
+        let retail = clients.pop().expect("retail");
+        (paths, retail, forever)
+    }
+
+    #[test]
+    fn bootstrap_refuses_addon_dir_override_for_another_client() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, forever) = two_client_profile(temp.path());
+        let state_db_file = paths.state_db_file.clone();
+
+        let error = match App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), Some(forever), Vec::new()),
+        ) {
+            Ok(_) => panic!("forever override must be refused for a retail profile"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("is bound to the AddOns folder"));
+        let database = StateDatabase::open(&state_db_file).expect("open");
+        assert_eq!(database.bound_addon_dir().expect("binding"), Some(retail));
+    }
+
+    #[test]
+    fn bootstrap_with_config_moved_off_the_bound_folder_reopens_setup() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, forever) = two_client_profile(temp.path());
+        StateDatabase::open(&paths.state_db_file)
+            .expect("open")
+            .bind_addon_dir(&forever)
+            .expect("bind forever");
+
+        let app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+
+        assert_eq!(app.shell_mode, ShellMode::Onboarding);
+        assert_eq!(app.effective_addon_dir, None);
+        let (notice, is_error) = app.startup_notice.clone().expect("binding notice");
+        assert!(is_error);
+        assert!(notice.contains(&forever.display().to_string()), "{notice}");
+        assert!(notice.contains(&retail.display().to_string()), "{notice}");
+    }
+
+    #[test]
+    fn bootstrap_uses_the_bound_clients_backup_folder() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, _retail, _forever) = two_client_profile(temp.path());
+        let data_dir = paths.data_dir.clone();
+        let legacy = backup_root(&data_dir).join("WTF-20260101T000000000Z.zip");
+        std::fs::create_dir_all(legacy.parent().expect("root")).expect("store");
+        std::fs::write(&legacy, b"legacy").expect("legacy archive");
+
+        let app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+
+        assert_eq!(app.backup_dir, backup_root(&data_dir).join("retail"));
+        assert!(!legacy.exists());
+        assert_eq!(app.backup_pane.backups.len(), 1);
+    }
+
+    #[test]
+    fn confirming_a_new_folder_in_setup_rebinds_and_snapshots_tracking() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, forever) = two_client_profile(temp.path());
+        let state_db_file = paths.state_db_file.clone();
+        let data_dir = paths.data_dir.clone();
+        {
+            let database = StateDatabase::open(&state_db_file).expect("open");
+            database.bind_addon_dir(&retail).expect("bind retail");
+            database
+                .upsert_addon(&AddonRecord::new(
+                    "GitAddon",
+                    "GitAddon",
+                    SourceKind::GitHub,
+                ))
+                .expect("seed");
+        }
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(forever.clone());
+        app.apply(AppAction::SaveOnboardingConfig(config));
+
+        let database = StateDatabase::open(&state_db_file).expect("open");
+        assert_eq!(
+            database.bound_addon_dir().expect("binding"),
+            Some(forever.clone())
+        );
+        assert_eq!(database.list_addons().expect("rows").len(), 1);
+        let snapshots = std::fs::read_dir(data_dir.join("rebind"))
+            .expect("snapshot dir")
+            .count();
+        assert_eq!(snapshots, 1);
+        assert_eq!(app.backup_dir, backup_root(&data_dir).join("forever"));
+        assert_eq!(app.effective_addon_dir, Some(forever));
     }
 
     #[test]
@@ -10256,6 +11032,7 @@ mod tests {
                 scanned_addons: 3,
                 upserted_addons: 3,
                 removed_addons: 0,
+                ..Default::default()
             },
         };
         app.effective_addon_dir = Some(PathBuf::from(
@@ -10364,6 +11141,7 @@ mod tests {
                     scanned_addons: 1,
                     upserted_addons: 1,
                     removed_addons: 0,
+                    ..Default::default()
                 },
                 addons: vec![stored.clone()],
                 drift_report: DriftReport::empty(),
@@ -10421,7 +11199,7 @@ mod tests {
 
         let app = App::bootstrap(
             paths,
-            AppRuntime::new("dev".to_string(), None, Some(PathBuf::from("D:\\guarded"))),
+            AppRuntime::new("dev".to_string(), None, vec![PathBuf::from("D:\\guarded")]),
         )
         .expect("bootstrap app");
 
@@ -10471,7 +11249,7 @@ mod tests {
 
         let app = App::bootstrap(
             paths,
-            AppRuntime::new("dev".to_string(), None, Some(PathBuf::from("D:\\guarded"))),
+            AppRuntime::new("dev".to_string(), None, vec![PathBuf::from("D:\\guarded")]),
         )
         .expect("bootstrap app");
 
@@ -10491,6 +11269,143 @@ mod tests {
         for character in text.chars() {
             press_key(app, KeyCode::Char(character));
         }
+    }
+
+    fn paste_text(app: &mut App, text: &str) {
+        for message in app.messages_for_event(&TerminalEvent::Paste(text.to_string())) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+    }
+
+    fn start_config_edit(app: &mut App, value: &str) {
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.edit = Some(ConfigEditState {
+            field: ConfigField::WagoApiKey,
+            value: value.to_string(),
+        });
+    }
+
+    fn config_edit_value(app: &App) -> String {
+        app.config_pane
+            .edit
+            .as_ref()
+            .expect("config edit active")
+            .value
+            .clone()
+    }
+
+    #[test]
+    fn config_edit_captures_quit_and_action_letters_as_text() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        start_config_edit(&mut app, "");
+
+        for character in ['q', 'e', 'r', 'x', 'i', 'j', 'k', 'h', 'l', '?', ','] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char(character))),
+                vec![AppMessage::ConfigInputChar(character)]
+            );
+        }
+        type_text(&mut app, "qWAGOqrxij");
+        assert_eq!(config_edit_value(&app), "qWAGOqrxij");
+        assert!(!app.quit_requested);
+        assert_eq!(app.dashboard.detail_mode, DetailMode::Config);
+    }
+
+    #[test]
+    fn paste_into_config_edit_appends_and_strips_newlines() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        start_config_edit(&mut app, "pre-");
+
+        paste_text(&mut app, "abc-quit-q\r\nxyz\n");
+
+        assert_eq!(config_edit_value(&app), "pre-abc-quit-qxyz");
+        assert!(!app.quit_requested);
+    }
+
+    #[test]
+    fn paste_into_dashboard_filter_appends_to_query() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "a");
+
+        paste_text(&mut app, "q\nu");
+
+        assert_eq!(app.dashboard.filter_query(), "aqu");
+        assert!(app.dashboard.filter_editing());
+        assert!(!app.quit_requested);
+    }
+
+    #[test]
+    fn paste_into_search_query_appends_to_query() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane = app.search_pane.begin_editing();
+
+        paste_text(&mut app, "quest log\r\n");
+
+        assert_eq!(app.search_pane.query, "quest log");
+        assert!(app.search_pane.is_editing);
+        assert!(!app.quit_requested);
+    }
+
+    #[test]
+    fn paste_into_install_target_appends_to_input() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Install;
+        app.install_pane = app.install_pane.begin_editing();
+
+        paste_text(&mut app, "12345\n");
+
+        assert_eq!(app.install_pane.input, "12345");
+    }
+
+    #[test]
+    fn paste_into_onboarding_inputs_appends_text() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding.input = String::new();
+        app.onboarding.is_editing = true;
+
+        paste_text(&mut app, "/games/q\n/AddOns");
+        assert_eq!(app.onboarding.input, "/games/q/AddOns");
+
+        app.onboarding.step = OnboardingStep::Wago;
+        app.onboarding.draft.wago_api_key = None;
+        paste_text(&mut app, "key-with-q\n");
+        assert_eq!(
+            app.onboarding.draft.wago_api_key.as_deref(),
+            Some("key-with-q")
+        );
+        assert!(!app.quit_requested);
+    }
+
+    #[test]
+    fn paste_is_ignored_when_no_text_field_is_editing() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let config_before = app.config_pane.clone();
+
+        paste_text(&mut app, "quit\n");
+        assert_eq!(app.dashboard.filter_query(), "");
+        assert!(!app.dashboard.filter_editing());
+        assert!(!app.quit_requested);
+        assert!(app.config_pane.edit.is_none());
+
+        app.dashboard.detail_mode = DetailMode::Config;
+        paste_text(&mut app, "quit\n");
+        assert_eq!(app.config_pane.draft, config_before.draft);
+        assert!(app.config_pane.edit.is_none());
+
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane = app.search_pane.stop_editing();
+        paste_text(&mut app, "quit\n");
+        assert_eq!(app.search_pane.query, "");
+
+        app.dashboard.detail_mode = DetailMode::Overview;
+        app.shell_ui.overlay.active = Some(OverlayKind::Help);
+        paste_text(&mut app, "quit\n");
+        assert!(!app.quit_requested);
     }
 
     fn visible_folders(app: &App) -> Vec<String> {
@@ -10848,5 +11763,364 @@ mod tests {
         assert_eq!(app.dashboard_selection_for_pointer(2, 3), Some(0));
         assert_eq!(app.dashboard_selection_for_pointer(2, 4), Some(1));
         assert_eq!(app.dashboard_selection_for_pointer(2, 5), None);
+    }
+
+    mod direct_install_overlay {
+        use super::*;
+        use crate::app::direct_install::{DirectInstallProvider, direct_install_prompt};
+        use crate::app::{DirectInstallOutcome, DirectInstallRequest};
+        use lemonup_core::ScanSummary;
+
+        const ADDON_DIR: &str = "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns";
+
+        fn search_app(query: &str) -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.effective_addon_dir = Some(PathBuf::from(ADDON_DIR));
+            app.search_pane.query = query.to_string();
+            app
+        }
+
+        /// Applies the resulting actions except the background task spawn, so no provider
+        /// network call runs; tests assert on the `StartDirectInstall` action instead.
+        fn run(app: &mut App, message: AppMessage) -> Vec<AppAction> {
+            let actions = app.update(message);
+            for action in actions.clone() {
+                if !matches!(action, AppAction::StartDirectInstall { .. }) {
+                    app.apply(action);
+                }
+            }
+            actions
+        }
+
+        fn request(
+            provider: DirectInstallProvider,
+            target: &str,
+            display: &str,
+        ) -> DirectInstallRequest {
+            DirectInstallRequest {
+                provider,
+                target: target.to_string(),
+                display: display.to_string(),
+            }
+        }
+
+        fn start_install_request(actions: &[AppAction]) -> Option<&DirectInstallRequest> {
+            actions.iter().find_map(|action| match action {
+                AppAction::StartDirectInstall { request, .. } => Some(request),
+                _ => None,
+            })
+        }
+
+        fn sync_outcome() -> AddonScanOutcome {
+            AddonScanOutcome {
+                path: PathBuf::from(ADDON_DIR),
+                summary: ScanSummary {
+                    scanned_addons: 1,
+                    upserted_addons: 1,
+                    removed_addons: 0,
+                    ..Default::default()
+                },
+                addons: Vec::new(),
+                drift_report: DriftReport::empty(),
+            }
+        }
+
+        #[test]
+        fn github_url_asks_for_confirmation_then_installs_without_wago_key() {
+            let mut app = search_app("https://github.com/WeakAuras/WeakAuras2");
+            app.wago_api_key = None;
+            let expected = request(
+                DirectInstallProvider::Github,
+                "https://github.com/WeakAuras/WeakAuras2",
+                "WeakAuras/WeakAuras2",
+            );
+
+            let actions = app.update(AppMessage::SearchSubmit);
+            assert_eq!(
+                actions,
+                vec![
+                    AppAction::SetSearchPaneState(
+                        app.search_pane.request_direct_install(expected.clone())
+                    ),
+                    AppAction::SetStatus(app.dashboard_status_for(
+                        DetailMode::Search,
+                        "Install from GitHub: WeakAuras/WeakAuras2? enter confirm, esc cancel",
+                    )),
+                ]
+            );
+            assert_eq!(
+                direct_install_prompt(&expected),
+                "Install from GitHub: WeakAuras/WeakAuras2? enter confirm, esc cancel"
+            );
+            for action in actions {
+                app.apply(action);
+            }
+            assert_eq!(app.search_pane.pending_direct_install(), Some(&expected));
+
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![AppMessage::SearchConfirmDirectInstall]
+            );
+            let actions = run(&mut app, AppMessage::SearchConfirmDirectInstall);
+            assert!(actions.contains(&AppAction::SetDirectInstallInProgress(true)));
+            assert!(actions.contains(&AppAction::StartDirectInstall {
+                addon_dir: PathBuf::from(ADDON_DIR),
+                request: expected.clone(),
+            }));
+            assert_eq!(
+                app.search_pane.install_state,
+                SearchInstallState::InstallingDirect { request: expected }
+            );
+            assert!(app.direct_install_in_progress);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
+
+            // A second submit while the install runs is refused.
+            app.search_pane.query = "details".to_string();
+            assert_eq!(
+                app.update(AppMessage::SearchSubmit),
+                vec![AppAction::SetStatus(app.dashboard_status_for(
+                    DetailMode::Search,
+                    "an addon install is already running",
+                ))]
+            );
+        }
+
+        #[test]
+        fn esc_cancels_pending_direct_install_and_resumes_editing() {
+            let mut app = search_app("elvui");
+            run(&mut app, AppMessage::SearchSubmit);
+            assert!(app.search_pane.pending_direct_install().is_some());
+            assert!(!app.search_pane.is_editing);
+            // Other keys are swallowed while the confirmation is pending.
+            assert!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('x')))
+                    .is_empty()
+            );
+
+            let messages = app.messages_for_key(KeyEvent::from(KeyCode::Esc));
+            assert_eq!(messages, vec![AppMessage::SearchCancelDirectInstall]);
+            let actions = run(&mut app, AppMessage::SearchCancelDirectInstall);
+
+            assert!(start_install_request(&actions).is_none());
+            assert_eq!(app.search_pane.install_state, SearchInstallState::Idle);
+            assert!(app.search_pane.is_editing);
+            assert_eq!(app.search_pane.query, "elvui");
+            assert!(!app.direct_install_in_progress);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
+        }
+
+        #[test]
+        fn install_task_carries_provider_and_cli_target_for_each_source() {
+            let cases = [
+                (
+                    "https://www.wowinterface.com/downloads/info25687-ElvUI_WindTools.html",
+                    request(DirectInstallProvider::Wowinterface, "25687", "addon 25687"),
+                ),
+                (
+                    "elvui",
+                    request(DirectInstallProvider::Tukui, "elvui", "ElvUI"),
+                ),
+                (
+                    "tukui",
+                    request(DirectInstallProvider::Tukui, "tukui", "Tukui"),
+                ),
+                (
+                    "https://github.com/AdiAddons/AdiBags",
+                    request(
+                        DirectInstallProvider::Github,
+                        "https://github.com/AdiAddons/AdiBags",
+                        "AdiAddons/AdiBags",
+                    ),
+                ),
+            ];
+            for (query, expected) in cases {
+                let mut app = search_app(query);
+                run(&mut app, AppMessage::SearchSubmit);
+                let actions = run(&mut app, AppMessage::SearchConfirmDirectInstall);
+                assert_eq!(start_install_request(&actions), Some(&expected), "{query}");
+            }
+        }
+
+        #[test]
+        fn wago_inputs_without_key_keep_todays_blocked_status() {
+            for query in ["WeakAuras", "https://addons.wago.io/addons/VBNBxKx5"] {
+                let mut app = search_app(query);
+                app.wago_api_key = None;
+                assert_eq!(
+                    app.update(AppMessage::SearchSubmit),
+                    vec![AppAction::SetStatus(app.dashboard_status_for(
+                        DetailMode::Search,
+                        "Wago search unavailable: no API key configured",
+                    ))],
+                    "{query}"
+                );
+            }
+        }
+
+        #[test]
+        fn unparsable_url_shows_error_without_closing_overlay() {
+            let mut app = search_app("https://github.com/WeakAuras");
+            app.wago_api_key = None;
+            let actions = run(&mut app, AppMessage::SearchSubmit);
+
+            assert!(start_install_request(&actions).is_none());
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, AppAction::StartWagoSearch { .. }))
+            );
+            match &app.search_pane.install_state {
+                SearchInstallState::Error { message, .. } => {
+                    assert!(message.contains("github.com/<owner>/<repo>"), "{message}")
+                }
+                other => panic!("expected error state, got {other:?}"),
+            }
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
+        }
+
+        #[test]
+        fn direct_install_success_and_failure_events_update_overlay_state() {
+            let wowi = request(DirectInstallProvider::Wowinterface, "25687", "addon 25687");
+            let mut app = search_app("");
+            app.direct_install_in_progress = true;
+            app.search_pane = app.search_pane.start_direct_install(wowi.clone());
+
+            let actions = run(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                    request: wowi.clone(),
+                    result: Ok(DirectInstallOutcome {
+                        addon_name: "ElvUI WindTools".to_string(),
+                        parent_folder: "ElvUI_WindTools".to_string(),
+                        warning: Some("WoWInterface does not tag WoW Forever builds".to_string()),
+                        sync: sync_outcome(),
+                    }),
+                }),
+            );
+            assert!(actions.contains(&AppAction::SetDirectInstallInProgress(false)));
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| matches!(action, AppAction::ReplaceDashboardAddons(_)))
+            );
+            assert!(!app.direct_install_in_progress);
+            assert_eq!(
+                app.search_pane.install_state,
+                SearchInstallState::Success {
+                    addon_id: "25687".to_string(),
+                    addon_name: "ElvUI WindTools".to_string(),
+                    parent_folder: "ElvUI_WindTools".to_string(),
+                    warning: Some("WoWInterface does not tag WoW Forever builds".to_string()),
+                }
+            );
+            assert!(
+                app.status_line
+                    .contains("installed WoWInterface addon 'ElvUI WindTools'")
+            );
+            assert!(
+                app.status_line
+                    .contains("warning: WoWInterface does not tag WoW Forever builds")
+            );
+
+            let tukui = request(DirectInstallProvider::Tukui, "elvui", "ElvUI");
+            app.direct_install_in_progress = true;
+            app.search_pane = app.search_pane.start_direct_install(tukui.clone());
+            let refusal = "TukUI addon 'ElvUI' does not list WoW Forever support".to_string();
+            run(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                    request: tukui,
+                    result: Err(refusal.clone()),
+                }),
+            );
+            assert!(!app.direct_install_in_progress);
+            assert_eq!(
+                app.search_pane.install_state,
+                SearchInstallState::Error {
+                    addon_id: Some("elvui".to_string()),
+                    addon_name: Some("ElvUI".to_string()),
+                    message: refusal,
+                }
+            );
+            assert!(app.status_line.contains("TukUI install failed"));
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
+        }
+
+        #[test]
+        fn empty_overlay_renders_source_hints_and_wago_key_hint() {
+            use ratatui::{Terminal, backend::TestBackend};
+
+            let mut app = search_app("");
+            app.wago_api_key = None;
+            let mut terminal = Terminal::new(TestBackend::new(160, 45)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let width = buffer.area.width as usize;
+            let rows = buffer
+                .content()
+                .chunks(width)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                rows.contains("Search Wago by name, or paste a GitHub, WoWInterface or Wago URL."),
+                "{rows}"
+            );
+            assert!(rows.contains("Type elvui or tukui for TukUI."), "{rows}");
+            assert!(rows.contains("press , to open Config"), "{rows}");
+        }
+
+        #[test]
+        fn confirm_overlay_states_the_prompt_once() {
+            use ratatui::{Terminal, backend::TestBackend};
+
+            let mut app = search_app("https://github.com/WeakAuras/WeakAuras2");
+            app.wago_api_key = None;
+            for action in app.update(AppMessage::SearchSubmit) {
+                app.apply(action);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(160, 45)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let width = buffer.area.width as usize;
+            let rows = buffer
+                .content()
+                .chunks(width)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(rows.contains("Status: Waiting for confirmation"), "{rows}");
+            assert_eq!(
+                rows.matches("Install from GitHub: WeakAuras/WeakAuras2?")
+                    .count(),
+                1,
+                "{rows}"
+            );
+            assert!(!rows.contains("enter confirm, esc cancel"), "{rows}");
+            assert!(rows.contains("enter  confirm"), "{rows}");
+            assert!(rows.contains("esc  cancel"), "{rows}");
+        }
+
+        #[test]
+        fn header_shows_product_tagline() {
+            use ratatui::{Terminal, backend::TestBackend};
+
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let mut terminal = Terminal::new(TestBackend::new(160, 45)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let rows = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+
+            assert!(rows.contains("World of Warcraft addon manager"), "{rows}");
+            assert!(!rows.contains("single-surface"), "{rows}");
+        }
     }
 }

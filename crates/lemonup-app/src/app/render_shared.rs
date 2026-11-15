@@ -300,7 +300,7 @@ impl App {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "  single-surface shell",
+                        "  World of Warcraft addon manager",
                         Style::default().fg(self.ui_theme.info),
                     ),
                 ]));
@@ -315,7 +315,7 @@ impl App {
                     ),
                     Span::styled("  v2", Style::default().fg(self.ui_theme.brand_gold)),
                     Span::styled(
-                        "  single-surface shell",
+                        "  World of Warcraft addon manager",
                         Style::default().fg(self.ui_theme.info),
                     ),
                 ]));
@@ -328,39 +328,38 @@ impl App {
     }
 
     pub(super) fn header_meta_lines(&self, mode: ShellLayoutMode) -> Vec<Line<'static>> {
+        let mut status_spans = vec![Span::styled(
+            self.scan_status_with_motion(),
+            Style::default().fg(self.scan_status_color()),
+        )];
+        if self.runtime.profile_name != "default" {
+            status_spans.push(Span::raw("    "));
+            status_spans.push(Span::styled(
+                "Profile: ",
+                Style::default().fg(self.ui_theme.muted),
+            ));
+            status_spans.push(Span::styled(
+                self.runtime.profile_name.clone(),
+                Style::default()
+                    .fg(self.ui_theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Profile: ", Style::default().fg(self.ui_theme.muted)),
                 Span::styled(
-                    self.runtime.profile_name.clone(),
+                    self.game_client_label(),
                     Style::default()
-                        .fg(self.ui_theme.highlight)
+                        .fg(self.ui_theme.panel_title)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("    "),
-                Span::styled("Surface: ", Style::default().fg(self.ui_theme.muted)),
+                Span::raw("   "),
                 Span::styled(
-                    match self.shell_mode {
-                        ShellMode::Onboarding => "setup".to_string(),
-                        ShellMode::Dashboard => self.dashboard_surface_label().to_string(),
-                    },
-                    Style::default().fg(self.ui_theme.panel_title),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Target: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    self.rendered_target_path(),
+                    self.friendly_addon_dir(),
                     Style::default().fg(self.ui_theme.highlight),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled("Scan: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    self.scan_status_with_motion(),
-                    Style::default().fg(self.scan_status_color()),
-                ),
-            ]),
+            Line::from(status_spans),
         ];
         if self.shell_mode != ShellMode::Dashboard
             && let Some(job_line) = self.dashboard_job_header_line()
@@ -445,7 +444,7 @@ impl App {
     pub(super) fn scan_status_color(&self) -> Color {
         if matches!(self.scan_state, ScanState::Pending | ScanState::Running(_)) {
             self.ui_theme.warning
-        } else if self.scan_status_label().starts_with("synced") {
+        } else if matches!(self.scan_state, ScanState::Succeeded { .. }) {
             self.ui_theme.success
         } else {
             self.ui_theme.info
@@ -703,7 +702,7 @@ impl App {
                     OnboardingPhase::DeepScanning(_) => vec![FooterCommandHint {
                         id: FooterHintId::Cancel,
                         key: "esc",
-                        label: "cancel scan",
+                        label: "stop scan",
                         tier: primary,
                     }],
                     _ => vec![
@@ -716,20 +715,14 @@ impl App {
                         FooterCommandHint {
                             id: FooterHintId::Validate,
                             key: "enter",
-                            label: "validate",
-                            tier: primary,
-                        },
-                        FooterCommandHint {
-                            id: FooterHintId::DeepScan,
-                            key: "d",
-                            label: "deep scan",
+                            label: "search",
                             tier: primary,
                         },
                         FooterCommandHint {
                             id: FooterHintId::Edit,
                             key: "e",
-                            label: "edit",
-                            tier: secondary,
+                            label: "type path",
+                            tier: primary,
                         },
                         FooterCommandHint {
                             id: FooterHintId::Back,
@@ -937,12 +930,31 @@ impl App {
                     }
                 }
                 DetailMode::Search => {
-                    if self.search_pane.is_editing {
+                    if self.search_pane.pending_direct_install().is_some() {
+                        vec![
+                            FooterCommandHint {
+                                id: FooterHintId::Confirm,
+                                key: "enter",
+                                label: "install",
+                                tier: primary,
+                            },
+                            FooterCommandHint {
+                                id: FooterHintId::Cancel,
+                                key: "esc",
+                                label: "cancel",
+                                tier: primary,
+                            },
+                        ]
+                    } else if self.search_pane.is_editing {
                         vec![
                             FooterCommandHint {
                                 id: FooterHintId::Save,
                                 key: "enter",
-                                label: "search",
+                                label: match classify_search_input(&self.search_pane.query) {
+                                    SearchInputIntent::Direct(_)
+                                    | SearchInputIntent::WagoUrl(_) => "install",
+                                    _ => "search",
+                                },
                                 tier: primary,
                             },
                             FooterCommandHint {

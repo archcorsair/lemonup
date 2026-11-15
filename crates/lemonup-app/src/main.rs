@@ -13,23 +13,31 @@ mod transfer;
 mod tui;
 mod tukui;
 mod update;
+mod update_targets;
 mod wago;
 mod wowinterface;
 
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
+use lemonup_core::binding::{BindingCheck, check_addon_dir_binding};
 use lemonup_core::{
     AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    StateDatabase, UpdateStatus, V1Location, V1MigrationOutcome, analyze_import,
+    ScanSummary, StateDatabase, UpdateStatus, V1Location, V1MigrationOutcome, analyze_import,
     default_transfer_path, export_addons, migrate_v1_if_needed, parse_import_file,
-    scan_addons_dir_with_tracked, validate_addons_path,
+    scan_addons_dir_report, validate_addons_path,
 };
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::app::{App, AppRuntime};
-use crate::backup::{backup_root, list_backups, restore_wtf_backup};
+use crate::backup::{
+    PreUpdateBackupSettings, adopt_legacy_backups, backup_root, client_backup_dir, list_backups,
+    restore_wtf_backup, run_pre_update_backup,
+};
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
 use crate::github::install_github_addon;
@@ -45,20 +53,70 @@ use crate::update::{
 use crate::wago::{WagoStability, install_wago_addon, resolve_wago_api_key};
 use crate::wowinterface::install_wowinterface_addon;
 
+/// How a command that ran to completion maps to the process exit status.
+///
+/// Fatal errors never reach this type: they come back as `Err` from `run` and exit 1. This
+/// covers the other case, where the command finished and printed its normal output but some
+/// addon/target errored (v1 parity: any failed addon exits 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandOutcome {
+    Success,
+    /// Finished, but this many addons/targets errored.
+    Failures(usize),
+    /// The command could not run (no addon dir, no Wago API key) and printed a skip message.
+    /// Scripts must see this as a failure, so it exits 1.
+    Skipped,
+}
+
+impl CommandOutcome {
+    fn from_error_count(errors: usize) -> Self {
+        if errors == 0 {
+            Self::Success
+        } else {
+            Self::Failures(errors)
+        }
+    }
+
+    fn exit_status(self) -> u8 {
+        match self {
+            Self::Success => 0,
+            Self::Failures(_) | Self::Skipped => 1,
+        }
+    }
+}
+
+/// Number of checks that ended in an error status. `update_available` is not an error.
+fn count_check_errors(checks: &[crate::update::CheckResult]) -> usize {
+    checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::Error)
+        .count()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(outcome) => ExitCode::from(outcome.exit_status()),
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let runtime = AppRuntime::new(
         cli.profile.clone(),
         cli.addon_dir.clone(),
-        load_guarded_addon_dir(&cli.profile)?,
+        load_guarded_addon_dirs(&cli.profile)?,
     );
     let paths = AppPaths::discover(cli.profile)?;
     paths.ensure()?;
 
-    configure_tracing();
-
     let command = cli.command.unwrap_or(Commands::Tui);
+    configure_tracing(log_destination(&command, &paths));
+
     let startup_notice = run_v1_migration(&paths, V1Location::discover());
     if let Some(notice) = startup_notice.as_ref()
         && !matches!(command, Commands::Tui)
@@ -66,8 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notice.print();
     }
 
-    match command {
-        Commands::Tui => run_tui(paths, runtime, startup_notice).await?,
+    let outcome = match command {
+        Commands::Tui => {
+            run_tui(paths, runtime, startup_notice).await?;
+            CommandOutcome::Success
+        }
         Commands::Sync => run_sync(paths, runtime)?,
         Commands::Check { addons } => run_check(paths, runtime, addons).await?,
         Commands::Update {
@@ -78,6 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::UpdateAll { force, dry_run } => {
             run_update(paths, runtime, Vec::new(), force, dry_run).await?
         }
+        // Install commands target a single addon: a failed install is a fatal `Err` (exit 1).
         Commands::InstallWago {
             addon,
             stability,
@@ -92,26 +154,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::InstallGithub { addon, dry_run } => {
             run_install_github(paths, runtime, &addon, dry_run).await?
         }
-        Commands::ExportAddons { output } => run_export_addons(paths, output)?,
+        Commands::ExportAddons { output } => {
+            run_export_addons(paths, output)?;
+            CommandOutcome::Success
+        }
         Commands::ImportAddons { input, dry_run } => {
             run_import_addons(paths, runtime, input, dry_run).await?
         }
-        Commands::RestoreBackup { archive } => run_restore_backup(paths, runtime, archive)?,
-    }
+        Commands::RestoreBackup { archive } => {
+            run_restore_backup(paths, runtime, archive)?;
+            CommandOutcome::Success
+        }
+    };
 
-    Ok(())
+    Ok(outcome)
 }
 
-fn configure_tracing() {
+/// Log filter used when `RUST_LOG` is unset or invalid: quiet (`warn`) for
+/// release builds so CLI runs and cron jobs stay clean, verbose for debug builds.
+fn default_log_filter(debug_build: bool) -> &'static str {
+    if debug_build {
+        "info,lemonup_app=debug,lemonup_core=debug"
+    } else {
+        "warn"
+    }
+}
+
+/// Where tracing output goes for a given command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LogDestination {
+    /// CLI commands: stderr, so logs never mix with the `key=value` result lines on stdout.
+    Stderr,
+    /// The TUI owns the terminal (alternate screen), so logs go to this file instead.
+    File(PathBuf),
+}
+
+/// File the TUI appends its logs to: `<data_dir>/logs/lemonup.log` for the active profile.
+fn tui_log_file(paths: &AppPaths) -> PathBuf {
+    paths.log_dir.join("lemonup.log")
+}
+
+fn log_destination(command: &Commands, paths: &AppPaths) -> LogDestination {
+    match command {
+        Commands::Tui => LogDestination::File(tui_log_file(paths)),
+        _ => LogDestination::Stderr,
+    }
+}
+
+/// Opens (creating if needed) the log file in append mode. `None` when it cannot be opened.
+fn open_log_file(path: &Path) -> Option<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+/// Writer for a destination. A log file that cannot be opened silences logging for the TUI
+/// rather than falling back to stderr, which would draw over the alternate screen.
+fn log_writer(destination: &LogDestination) -> BoxMakeWriter {
+    match destination {
+        LogDestination::Stderr => BoxMakeWriter::new(std::io::stderr),
+        LogDestination::File(path) => match open_log_file(path) {
+            Some(file) => BoxMakeWriter::new(std::sync::Mutex::new(file)),
+            None => BoxMakeWriter::new(std::io::sink),
+        },
+    }
+}
+
+fn configure_tracing(destination: LogDestination) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,lemonup_app=debug,lemonup_core=debug"));
+        .unwrap_or_else(|_| EnvFilter::new(default_log_filter(cfg!(debug_assertions))));
 
     fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_writer(log_writer(&destination))
         .json()
         .init();
+}
+
+/// The command that opens the TUI for `profile`. Global options such as
+/// `--profile` must come before the subcommand.
+fn tui_command_hint(profile: &str) -> String {
+    if profile == DEFAULT_PROFILE {
+        "lemonup tui".to_string()
+    } else {
+        format!("lemonup --profile {profile} tui")
+    }
 }
 
 /// Result of the one-time v1 migration, shown once at startup.
@@ -214,7 +343,7 @@ async fn run_check(
     paths: AppPaths,
     runtime: AppRuntime,
     addons: Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let mut database = StateDatabase::open(paths.state_db_file)?;
@@ -224,7 +353,29 @@ async fn run_check(
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
     };
-    let effective_addon_dir = runtime.addon_dir_override.clone().or(configured_addon_dir);
+    let effective_addon_dir = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone());
+    // `check` is read-only toward the folder: against a folder this profile is not bound
+    // to it still reports, but on a throwaway copy so no row is written.
+    let mut scratch = None;
+    if let Some(addon_dir) = effective_addon_dir.as_deref()
+        && let BindingCheck::Mismatch(mismatch) = check_addon_dir_binding(
+            &database,
+            &runtime.profile_name,
+            configured_addon_dir.as_deref(),
+            addon_dir,
+            false,
+        )?
+    {
+        eprintln!("check warning: {mismatch} | running read-only, results are not saved");
+        let dir = tempfile::tempdir()?;
+        let copy = dir.path().join("state.sqlite");
+        database.copy_to(&copy)?;
+        database = StateDatabase::open(&copy)?;
+        scratch = Some(dir);
+    }
     let checks = refresh_live_update_checks(
         &mut database,
         &addons,
@@ -233,6 +384,8 @@ async fn run_check(
     )
     .await
     .map_err(Box::<dyn std::error::Error>::from)?;
+    drop(database);
+    drop(scratch);
 
     let up_to_date = checks
         .iter()
@@ -242,17 +395,18 @@ async fn run_check(
         .iter()
         .filter(|check| check.status == UpdateStatus::UpdateAvailable)
         .count();
+    let remote_older = checks
+        .iter()
+        .filter(|check| check.status == UpdateStatus::RemoteOlder)
+        .count();
     let unknown = checks
         .iter()
         .filter(|check| check.status == UpdateStatus::Unknown)
         .count();
-    let errors = checks
-        .iter()
-        .filter(|check| check.status == UpdateStatus::Error)
-        .count();
+    let errors = count_check_errors(&checks);
 
     println!(
-        "check summary: targets={}, checked={}, up_to_date={}, update_available={}, unknown={}, errors={}",
+        "check summary: targets={}, checked={}, up_to_date={}, update_available={}, remote_older={}, unknown={}, errors={}",
         if addons.is_empty() {
             "all".to_string()
         } else {
@@ -261,6 +415,7 @@ async fn run_check(
         checks.len(),
         up_to_date,
         update_available,
+        remote_older,
         unknown,
         errors
     );
@@ -281,7 +436,7 @@ async fn run_check(
         );
     }
 
-    Ok(())
+    Ok(CommandOutcome::from_error_count(errors))
 }
 
 async fn run_update(
@@ -290,12 +445,11 @@ async fn run_update(
     addons: Vec<String>,
     force: bool,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
-    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
     let installed = database.list_addons()?;
-
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -317,15 +471,24 @@ async fn run_update(
         validate_addons_path(path).map_err(|error| {
             Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
         })?;
+        ensure_bound_addon_dir(
+            &database,
+            &paths,
+            &runtime,
+            configured_addon_dir.as_deref(),
+            path,
+            !dry_run,
+        )?;
     }
 
-    match config_state {
+    let outcome = match config_state {
         ConfigLoad::Missing(path) if runtime.addon_dir_override.is_none() => {
             println!(
-                "config missing at {}. run `lemonup tui --profile {}` to initialize v2 first.",
+                "config missing at {}. run `{}` to initialize v2 first.",
                 path.display(),
-                runtime.profile_name
+                tui_command_hint(&runtime.profile_name)
             );
+            CommandOutcome::Skipped
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
             println!(
@@ -336,10 +499,23 @@ async fn run_update(
                 force,
                 dry_run
             );
+            CommandOutcome::Skipped
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
             let api_key = resolve_wago_api_key(&config_state);
+            if !dry_run {
+                let backup_settings =
+                    pre_update_backup_settings(&config_state, &paths.data_dir, &addon_dir);
+                let backup = run_pre_update_backup(
+                    &backup_settings,
+                    &addon_dir,
+                    time::OffsetDateTime::now_utc(),
+                );
+                if let Some(line) = backup.cli_line() {
+                    println!("{line}");
+                }
+            }
             let run = apply_live_updates(
                 &mut database,
                 &addon_dir,
@@ -352,27 +528,55 @@ async fn run_update(
             .await?;
             let summary = run.summary;
             println!(
-                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, skipped_manual={}, skipped_unmanaged={}, skipped_unsupported={}, errors={}, force={}, dry_run={}",
+                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, remote_older={}, skipped_manual={}, skipped_no_api_key={}, errors={}, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
                 render_target_list(&addons),
                 summary.updated_addons,
                 summary.up_to_date,
+                summary.remote_older,
                 summary.skipped_manual,
-                summary.skipped_unmanaged,
-                summary.skipped_unsupported,
+                summary.skipped_no_api_key,
                 summary.errors,
                 force,
                 dry_run
             );
             print_update_details(&addons, &run.results);
+            CommandOutcome::from_error_count(summary.errors)
         }
-    }
+    };
 
-    Ok(())
+    Ok(outcome)
 }
 
-fn run_sync(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::error::Error>> {
+/// Backup settings from the loaded config; a missing config uses the defaults.
+/// The backup folder is `addon_dir`'s client folder, so the 60-minute throttle and
+/// retention never count another client's archives.
+fn pre_update_backup_settings(
+    config_state: &ConfigLoad,
+    data_dir: &std::path::Path,
+    addon_dir: &std::path::Path,
+) -> PreUpdateBackupSettings {
+    let defaults;
+    let config = match config_state {
+        ConfigLoad::Loaded(config) => config,
+        ConfigLoad::Missing(_) => {
+            defaults = lemonup_core::AppConfig::default();
+            &defaults
+        }
+    };
+    PreUpdateBackupSettings {
+        enabled: config.backup_wtf,
+        retention: config.backup_retention,
+        backup_dir: client_backup_dir(&backup_root(data_dir), addon_dir),
+    }
+}
+
+fn run_sync(
+    paths: AppPaths,
+    runtime: AppRuntime,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let mut outcome = CommandOutcome::Success;
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let configured_addon_dir = match &config_state {
@@ -391,12 +595,14 @@ fn run_sync(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::err
                 runtime.profile_name,
                 path.display()
             );
+            outcome = CommandOutcome::Skipped;
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
             println!(
                 "sync skipped: profile={}, addon_dir=<unconfigured>",
                 runtime.profile_name
             );
+            outcome = CommandOutcome::Skipped;
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
@@ -412,27 +618,75 @@ fn run_sync(paths: AppPaths, runtime: AppRuntime) -> Result<(), Box<dyn std::err
                 Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
             })?;
 
-            let mut database = StateDatabase::open(paths.state_db_file)?;
+            let mut database = StateDatabase::open(&paths.state_db_file)?;
+            ensure_bound_addon_dir(
+                &database,
+                &paths,
+                &runtime,
+                configured_addon_dir.as_deref(),
+                &addon_dir,
+                true,
+            )?;
             let tracked = database.list_addons()?;
-            let scanned = scan_addons_dir_with_tracked(
+            let report = scan_addons_dir_report(
                 &addon_dir,
                 GameFlavor::for_addons_dir(&addon_dir),
                 &tracked,
             )?;
-            let summary = database.reconcile_scanned_addons(&scanned)?;
+            let summary = database.reconcile_scan(&report)?;
 
             println!(
-                "sync summary: profile={}, addon_dir={}, scanned_addons={}, upserted_addons={}, removed_addons={}",
-                runtime.profile_name,
-                addon_dir.display(),
-                summary.scanned_addons,
-                summary.upserted_addons,
-                summary.removed_addons
+                "{}",
+                format_sync_summary(&runtime.profile_name, &addon_dir, &summary)
             );
+            if let Some(detail) = format_skipped_detail(&summary) {
+                println!("{detail}");
+            }
+            for warning in leftover_staging_warnings(&addon_dir, &summary) {
+                eprintln!("{warning}");
+            }
         }
     }
 
-    Ok(())
+    Ok(outcome)
+}
+
+/// The `sync summary:` line. New fields are appended at the end so parsers that read the
+/// earlier `key=value` pairs keep working.
+fn format_sync_summary(profile: &str, addon_dir: &Path, summary: &ScanSummary) -> String {
+    format!(
+        "sync summary: profile={}, addon_dir={}, scanned_addons={}, upserted_addons={}, removed_addons={}, skipped={}",
+        profile,
+        addon_dir.display(),
+        summary.scanned_addons,
+        summary.upserted_addons,
+        summary.removed_addons,
+        summary.skipped_folders.len()
+    )
+}
+
+/// Names the addon folders the scan could not read (they were left as they were).
+fn format_skipped_detail(summary: &ScanSummary) -> Option<String> {
+    (!summary.skipped_folders.is_empty()).then(|| {
+        format!(
+            "sync detail: skipped (unreadable): {}",
+            summary.skipped_folders.join(", ")
+        )
+    })
+}
+
+/// One warning per `.lemonup-staging-*` folder an earlier update left in the AddOns folder.
+fn leftover_staging_warnings(addon_dir: &Path, summary: &ScanSummary) -> Vec<String> {
+    summary
+        .leftover_staging
+        .iter()
+        .map(|name| {
+            format!(
+                "warning: leftover update staging folder {} may contain previous addon versions; see Troubleshooting",
+                addon_dir.join(name).display()
+            )
+        })
+        .collect()
 }
 
 fn render_target_list(addons: &[String]) -> String {
@@ -464,7 +718,7 @@ async fn run_import_addons(
     runtime: AppRuntime,
     input: Option<PathBuf>,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let input_path = input.unwrap_or(default_transfer_path()?);
     let transfer = parse_import_file(&input_path)?;
 
@@ -479,7 +733,31 @@ async fn run_import_addons(
         .clone()
         .or(configured_addon_dir.clone());
 
-    let database = StateDatabase::open(paths.state_db_file.clone())?;
+    let mut database = StateDatabase::open(paths.state_db_file.clone())?;
+    // Same order as every other command: guard, validate, and only then bind. A dry run
+    // checks the folder against the binding but never adopts one (and moves no backups),
+    // so previewing an import cannot bind the profile to a folder it has not used yet.
+    if let Some(addon_dir) = effective_addon_dir.as_deref() {
+        if runtime.is_guarded_path(addon_dir) {
+            return Err(Box::new(LemonupError::InvalidArgument(format!(
+                "profile '{}' refuses to target the default profile addon directory: {}",
+                runtime.profile_name,
+                addon_dir.display()
+            ))));
+        }
+
+        validate_addons_path(addon_dir).map_err(|error| {
+            Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+        })?;
+        ensure_bound_addon_dir(
+            &database,
+            &paths,
+            &runtime,
+            configured_addon_dir.as_deref(),
+            addon_dir,
+            !dry_run,
+        )?;
+    }
     let tracked = database.list_addons()?;
     let existing_folders =
         collect_existing_import_folders(effective_addon_dir.as_deref(), &tracked).map_err(
@@ -489,7 +767,7 @@ async fn run_import_addons(
     print_import_analysis(&input_path, &analysis);
 
     if dry_run {
-        return Ok(());
+        return Ok(CommandOutcome::Success);
     }
 
     let Some(addon_dir) = effective_addon_dir else {
@@ -498,20 +776,7 @@ async fn run_import_addons(
         )));
     };
 
-    if runtime.is_guarded_path(&addon_dir) {
-        return Err(Box::new(LemonupError::InvalidArgument(format!(
-            "profile '{}' refuses to target the default profile addon directory: {}",
-            runtime.profile_name,
-            addon_dir.display()
-        ))));
-    }
-
-    validate_addons_path(&addon_dir).map_err(|error| {
-        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
-    })?;
-
     let wago_api_key = resolve_wago_api_key(&config_state);
-    let mut database = StateDatabase::open(paths.state_db_file)?;
     let summary = install_transfer_addons(
         &mut database,
         &addon_dir,
@@ -530,13 +795,14 @@ async fn run_import_addons(
         analysis.unsupported_addons.len(),
         summary.errors.len()
     );
+    let error_count = summary.errors.len();
     for error in summary.errors {
         println!("import error: {error}");
     }
     for warning in summary.warnings {
         println!("import warning: {warning}");
     }
-    Ok(())
+    Ok(CommandOutcome::from_error_count(error_count))
 }
 
 fn run_restore_backup(
@@ -553,7 +819,7 @@ fn run_restore_backup(
     let effective_addon_dir = runtime
         .addon_dir_override
         .clone()
-        .or(configured_addon_dir)
+        .or(configured_addon_dir.clone())
         .ok_or_else(|| {
             Box::new(LemonupError::InvalidArgument(
                 "cannot restore backup without a configured addon directory".to_string(),
@@ -572,9 +838,21 @@ fn run_restore_backup(
         Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
     })?;
 
+    let database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &effective_addon_dir,
+        true,
+    )?;
+    drop(database);
+
+    let backup_dir = client_backup_dir(&backup_root(&paths.data_dir), &effective_addon_dir);
     let backup_path = match archive {
         Some(path) => path,
-        None => list_backups(&backup_root(&paths.data_dir))?
+        None => list_backups(&backup_dir)?
             .into_iter()
             .next()
             .map(|entry| entry.path)
@@ -585,7 +863,7 @@ fn run_restore_backup(
             })?,
     };
 
-    restore_wtf_backup(&effective_addon_dir, &backup_path)
+    restore_wtf_backup(&effective_addon_dir, &backup_dir, &backup_path)
         .map_err(Box::<dyn std::error::Error>::from)?;
     println!("restore summary: archive={}", backup_path.display());
     Ok(())
@@ -618,31 +896,28 @@ fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) ->
         .iter()
         .filter(|result| result.status == LiveUpdateStatus::SkippedManual)
         .count();
-    let skipped_unmanaged = results
+    let skipped_no_api_key = results
         .iter()
-        .filter(|result| result.status == LiveUpdateStatus::SkippedUnmanaged)
+        .filter(|result| result.status == LiveUpdateStatus::SkippedNoApiKey)
         .count();
-    let skipped_unsupported = results
-        .iter()
-        .filter(|result| result.status == LiveUpdateStatus::SkippedUnsupported)
-        .count();
-    // Errors, plus updates that succeeded but carry a warning (for example the WoWInterface
-    // Forever notice), stay visible in the aggregated view. Up-to-date results carry a
-    // boilerplate message and are intentionally not listed.
+    // Errors, held-back older remotes, plus updates that succeeded but carry a warning (for
+    // example the WoWInterface Forever notice), stay visible in the aggregated view. Up-to-date
+    // results carry a boilerplate message and are intentionally not listed.
     let attention_lines = results
         .iter()
         .filter(|result| {
             result.status == LiveUpdateStatus::Error
+                || result.status == LiveUpdateStatus::RemoteOlder
                 || (result.status == LiveUpdateStatus::Updated && result.message.is_some())
         })
         .map(format_update_result_line)
         .collect::<Vec<_>>();
 
     let mut lines = Vec::new();
-    if skipped_manual > 0 || skipped_unmanaged > 0 || skipped_unsupported > 0 {
+    if skipped_manual > 0 || skipped_no_api_key > 0 {
         lines.push(format!(
-            "update detail: skipped manual={}, unmanaged={}, unsupported={} | rerun `lemonup update <addon...>` for per-addon detail",
-            skipped_manual, skipped_unmanaged, skipped_unsupported
+            "update detail: skipped manual={}, no_api_key={} | rerun `lemonup update <addon...>` for per-addon detail",
+            skipped_manual, skipped_no_api_key
         ));
     }
 
@@ -685,7 +960,7 @@ async fn run_install_wago(
     addon: &str,
     stability: WagoStability,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let configured_addon_dir = match &config_state {
@@ -701,7 +976,7 @@ async fn run_install_wago(
             "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
             runtime.profile_name, addon, dry_run
         );
-        return Ok(());
+        return Ok(CommandOutcome::Skipped);
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -716,15 +991,24 @@ async fn run_install_wago(
         Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
     })?;
 
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        !dry_run,
+    )?;
+
     let Some(api_key) = resolve_wago_api_key(&config_state) else {
         println!(
             "install skipped: profile={}, addon={}, reason=no Wago API key configured",
             runtime.profile_name, addon
         );
-        return Ok(());
+        return Ok(CommandOutcome::Skipped);
     };
 
-    let mut database = StateDatabase::open(paths.state_db_file)?;
     let summary = install_wago_addon(
         &mut database,
         &addon_dir,
@@ -748,7 +1032,7 @@ async fn run_install_wago(
         summary.dry_run
     );
 
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_install_tukui(
@@ -756,7 +1040,7 @@ async fn run_install_tukui(
     runtime: AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let configured_addon_dir = match &config_state {
@@ -772,7 +1056,7 @@ async fn run_install_tukui(
             "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
             runtime.profile_name, addon, dry_run
         );
-        return Ok(());
+        return Ok(CommandOutcome::Skipped);
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -787,7 +1071,16 @@ async fn run_install_tukui(
         Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
     })?;
 
-    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        !dry_run,
+    )?;
+
     let summary = install_tukui_addon(&mut database, &addon_dir, addon, dry_run)
         .await
         .map_err(Box::<dyn std::error::Error>::from)?;
@@ -803,7 +1096,7 @@ async fn run_install_tukui(
         summary.dry_run
     );
 
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_install_wowinterface(
@@ -811,7 +1104,7 @@ async fn run_install_wowinterface(
     runtime: AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let configured_addon_dir = match &config_state {
@@ -827,7 +1120,7 @@ async fn run_install_wowinterface(
             "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
             runtime.profile_name, addon, dry_run
         );
-        return Ok(());
+        return Ok(CommandOutcome::Skipped);
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -842,7 +1135,16 @@ async fn run_install_wowinterface(
         Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
     })?;
 
-    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        !dry_run,
+    )?;
+
     let summary = install_wowinterface_addon(&mut database, &addon_dir, addon, dry_run)
         .await
         .map_err(Box::<dyn std::error::Error>::from)?;
@@ -861,7 +1163,7 @@ async fn run_install_wowinterface(
         println!("wowinterface warning: {warning}");
     }
 
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn run_install_github(
@@ -869,7 +1171,7 @@ async fn run_install_github(
     runtime: AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
     let configured_addon_dir = match &config_state {
@@ -885,7 +1187,7 @@ async fn run_install_github(
             "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
             runtime.profile_name, addon, dry_run
         );
-        return Ok(());
+        return Ok(CommandOutcome::Skipped);
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -900,7 +1202,16 @@ async fn run_install_github(
         Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
     })?;
 
-    let mut database = StateDatabase::open(paths.state_db_file)?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        !dry_run,
+    )?;
+
     let summary = install_github_addon(&mut database, &addon_dir, addon, dry_run)
         .await
         .map_err(Box::<dyn std::error::Error>::from)?;
@@ -917,39 +1228,325 @@ async fn run_install_github(
         summary.dry_run
     );
 
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
-fn load_guarded_addon_dir(profile: &str) -> lemonup_core::Result<Option<PathBuf>> {
+/// Refuses to let `addon_dir` touch this profile's tracked state or backups unless it is
+/// the folder that state is bound to. A database from before binding existed adopts the
+/// profile's configured folder (or `addon_dir` when none is configured) first. On a match,
+/// archives in the legacy flat backup root move into the bound client's backup folder.
+///
+/// Callers validate `addon_dir` (default-profile guard, `validate_addons_path`) first so an
+/// unvalidated path can never become a binding. `adopt` is false for dry runs: the check
+/// still refuses a different folder, but nothing is bound and no backups are moved.
+fn ensure_bound_addon_dir(
+    database: &StateDatabase,
+    paths: &AppPaths,
+    runtime: &AppRuntime,
+    configured_addon_dir: Option<&Path>,
+    addon_dir: &Path,
+    adopt: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match check_addon_dir_binding(
+        database,
+        &runtime.profile_name,
+        configured_addon_dir,
+        addon_dir,
+        adopt,
+    )? {
+        BindingCheck::Bound => {
+            if adopt
+                && let Err(error) = adopt_legacy_backups(&backup_root(&paths.data_dir), addon_dir)
+            {
+                tracing::warn!(%error, "could not move legacy WTF backups into the client folder");
+            }
+            Ok(())
+        }
+        BindingCheck::Mismatch(mismatch) => Err(Box::new(LemonupError::InvalidArgument(
+            mismatch.to_string(),
+        ))),
+    }
+}
+
+/// Folders a non-default profile must never target: the default profile's configured
+/// AddOns folder and the folder its state database is bound to. A default profile that was
+/// only ever pointed at its folder with `--addon-dir` has a binding but no config entry.
+/// The default profile's files are only read, never created or modified.
+fn load_guarded_addon_dirs(profile: &str) -> lemonup_core::Result<Vec<PathBuf>> {
     if profile == DEFAULT_PROFILE {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    let default_paths = AppPaths::discover(DEFAULT_PROFILE)?;
-    let config_store = ConfigStore::new(default_paths.config_file);
-    match config_store.load()? {
-        ConfigLoad::Missing(_) => Ok(None),
-        ConfigLoad::Loaded(config) => Ok(config.addon_dir),
+    guarded_dirs_of(&AppPaths::discover(DEFAULT_PROFILE)?)
+}
+
+fn guarded_dirs_of(default_paths: &AppPaths) -> lemonup_core::Result<Vec<PathBuf>> {
+    let mut guarded = Vec::new();
+    let config_store = ConfigStore::new(default_paths.config_file.clone());
+    if let ConfigLoad::Loaded(config) = config_store.load()?
+        && let Some(addon_dir) = config.addon_dir
+    {
+        guarded.push(addon_dir);
     }
+    if let Some(bound) = StateDatabase::read_bound_addon_dir(&default_paths.state_db_file)? {
+        guarded.push(bound);
+    }
+    Ok(guarded)
 }
 
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
-    use super::{build_update_detail_lines, refresh_managed_update_state};
+    use super::{
+        CommandOutcome, LogDestination, build_update_detail_lines, count_check_errors,
+        default_log_filter, log_destination, log_writer, open_log_file, pre_update_backup_settings,
+        refresh_managed_update_state, tui_command_hint,
+    };
     use crate::update::{
-        LiveUpdateResult, LiveUpdateStatus, build_managed_update_record, build_update_checks,
-        determine_update_status,
+        CheckResult, LiveUpdateResult, LiveUpdateStatus, build_managed_update_record,
+        build_update_checks, determine_update_status,
     };
     use lemonup_core::{
         AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
     };
 
+    #[test]
+    fn default_log_filter_is_quiet_in_release_and_verbose_in_debug() {
+        assert_eq!(default_log_filter(false), "warn");
+        assert_eq!(
+            default_log_filter(true),
+            "info,lemonup_app=debug,lemonup_core=debug"
+        );
+        // Both defaults must parse as valid filter directives.
+        assert!(tracing_subscriber::EnvFilter::try_new(default_log_filter(false)).is_ok());
+        assert!(tracing_subscriber::EnvFilter::try_new(default_log_filter(true)).is_ok());
+    }
+
+    fn log_test_paths(root: &std::path::Path) -> lemonup_core::AppPaths {
+        lemonup_core::AppPaths {
+            profile: lemonup_core::DEFAULT_PROFILE.to_string(),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            log_dir: root.join("data").join("logs"),
+            config_file: root.join("config").join("config.toml"),
+            state_db_file: root.join("data").join("state.sqlite"),
+        }
+    }
+
+    #[test]
+    fn log_destination_is_a_file_for_tui_and_stderr_for_cli_commands() {
+        use crate::cli::Commands;
+
+        let temp = tempdir().expect("tempdir");
+        let paths = log_test_paths(temp.path());
+        let expected = LogDestination::File(paths.data_dir.join("logs").join("lemonup.log"));
+
+        assert_eq!(log_destination(&Commands::Tui, &paths), expected);
+        for command in [
+            Commands::Sync,
+            Commands::Check { addons: Vec::new() },
+            Commands::UpdateAll {
+                force: false,
+                dry_run: false,
+            },
+            Commands::ExportAddons { output: None },
+        ] {
+            assert_eq!(
+                log_destination(&command, &paths),
+                LogDestination::Stderr,
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tui_log_file_is_scoped_to_the_profile_data_dir() {
+        let temp = tempdir().expect("tempdir");
+        let mut paths = log_test_paths(temp.path());
+        paths.profile = "dev".to_string();
+        paths.data_dir = temp.path().join("data").join("profiles").join("dev");
+        paths.log_dir = paths.data_dir.join("logs");
+
+        assert_eq!(
+            super::tui_log_file(&paths),
+            temp.path()
+                .join("data")
+                .join("profiles")
+                .join("dev")
+                .join("logs")
+                .join("lemonup.log")
+        );
+    }
+
+    #[test]
+    fn open_log_file_creates_dirs_and_file_and_appends() {
+        use std::io::Write;
+
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("nested").join("logs").join("lemonup.log");
+
+        let mut file = open_log_file(&path).expect("creates log file");
+        writeln!(file, "first").expect("write");
+        drop(file);
+        let mut file = open_log_file(&path).expect("reopens log file");
+        writeln!(file, "second").expect("write");
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read log"),
+            "first\nsecond\n"
+        );
+    }
+
+    #[test]
+    fn unopenable_log_file_falls_back_to_a_silent_writer() {
+        use std::io::Write;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        let temp = tempdir().expect("tempdir");
+        // A regular file where the log directory should be makes the path unopenable.
+        let blocker = temp.path().join("logs");
+        std::fs::write(&blocker, "not a directory").expect("blocker");
+        let path = blocker.join("lemonup.log");
+        assert!(open_log_file(&path).is_none());
+
+        let writer = log_writer(&LogDestination::File(path));
+        let mut sink = writer.make_writer();
+        sink.write_all(b"dropped")
+            .expect("silent writer accepts writes");
+    }
+
+    #[test]
+    fn log_writer_writes_json_lines_to_the_file() {
+        use tracing_subscriber::fmt;
+
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("logs").join("lemonup.log");
+        let subscriber = fmt()
+            .with_target(false)
+            .with_writer(log_writer(&LogDestination::File(path.clone())))
+            .json()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("tui log line");
+        });
+
+        let contents = std::fs::read_to_string(&path).expect("read log");
+        assert!(
+            contents.contains("\"message\":\"tui log line\""),
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn tui_command_hint_puts_global_profile_option_before_subcommand() {
+        assert_eq!(
+            tui_command_hint(lemonup_core::DEFAULT_PROFILE),
+            "lemonup tui"
+        );
+        assert_eq!(
+            tui_command_hint("manual-smoke"),
+            "lemonup --profile manual-smoke tui"
+        );
+    }
+
     fn write_addon(root: &std::path::Path, folder: &str, toc_body: &str) {
         let addon_dir = root.join(folder);
         std::fs::create_dir_all(&addon_dir).expect("create addon dir");
         std::fs::write(addon_dir.join(format!("{folder}.toc")), toc_body).expect("write toc");
+    }
+
+    fn check_result(addon_name: &str, status: UpdateStatus) -> CheckResult {
+        CheckResult {
+            addon_name: addon_name.to_string(),
+            status,
+            remote_version: None,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn zero_errors_exits_zero_and_any_error_exits_one() {
+        assert_eq!(CommandOutcome::from_error_count(0), CommandOutcome::Success);
+        assert_eq!(CommandOutcome::from_error_count(0).exit_status(), 0);
+        assert_eq!(
+            CommandOutcome::from_error_count(1),
+            CommandOutcome::Failures(1)
+        );
+        assert_eq!(CommandOutcome::from_error_count(1).exit_status(), 1);
+        assert_eq!(CommandOutcome::from_error_count(7).exit_status(), 1);
+    }
+
+    #[test]
+    fn skipped_install_outcome_exits_nonzero() {
+        assert_eq!(CommandOutcome::Skipped.exit_status(), 1);
+        assert_ne!(CommandOutcome::Skipped, CommandOutcome::Success);
+        assert_eq!(CommandOutcome::Success.exit_status(), 0);
+    }
+
+    #[test]
+    fn skipped_update_and_sync_exit_nonzero_while_dry_run_success_stays_zero() {
+        // update/update-all/sync reuse `Skipped` for their skip paths; a completed run
+        // (including --dry-run) is `from_error_count(0)`, which stays 0.
+        assert_eq!(CommandOutcome::Skipped.exit_status(), 1);
+        assert_eq!(CommandOutcome::from_error_count(0).exit_status(), 0);
+    }
+
+    #[test]
+    fn pre_update_backup_settings_follow_config_and_default_when_missing() {
+        let data_dir = std::path::Path::new("data");
+        let forever = std::path::Path::new("WoW/_forever_/Interface/AddOns");
+
+        let config = lemonup_core::AppConfig {
+            backup_wtf: false,
+            backup_retention: 9,
+            ..lemonup_core::AppConfig::default()
+        };
+        let loaded = pre_update_backup_settings(
+            &lemonup_core::ConfigLoad::Loaded(config),
+            data_dir,
+            forever,
+        );
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.retention, 9);
+        assert_eq!(
+            loaded.backup_dir,
+            crate::backup::backup_root(data_dir).join("forever")
+        );
+
+        let missing = pre_update_backup_settings(
+            &lemonup_core::ConfigLoad::Missing(std::path::PathBuf::from("config.toml")),
+            data_dir,
+            forever,
+        );
+        assert!(missing.enabled);
+        assert_eq!(missing.retention, 5);
+    }
+
+    #[test]
+    fn check_exit_status_counts_only_error_status() {
+        let clean = [
+            check_result("A", UpdateStatus::UpToDate),
+            check_result("B", UpdateStatus::UpdateAvailable),
+            check_result("C", UpdateStatus::Unknown),
+        ];
+        assert_eq!(count_check_errors(&clean), 0);
+        assert_eq!(
+            CommandOutcome::from_error_count(count_check_errors(&clean)).exit_status(),
+            0
+        );
+
+        let failing = [
+            check_result("A", UpdateStatus::UpdateAvailable),
+            check_result("B", UpdateStatus::Error),
+        ];
+        assert_eq!(count_check_errors(&failing), 1);
+        assert_eq!(
+            CommandOutcome::from_error_count(count_check_errors(&failing)).exit_status(),
+            1
+        );
     }
 
     fn update_result(
@@ -1174,18 +1771,13 @@ mod tests {
                     SourceKind::Manual,
                 ),
                 update_result("Pawn", LiveUpdateStatus::SkippedManual, SourceKind::Manual),
-                update_result(
-                    "DBM-Core",
-                    LiveUpdateStatus::SkippedUnsupported,
-                    SourceKind::GitHub,
-                ),
             ],
         );
 
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "update detail: skipped manual=2, unmanaged=0, unsupported=1 | rerun `lemonup update <addon...>` for per-addon detail"
+            "update detail: skipped manual=2, no_api_key=0 | rerun `lemonup update <addon...>` for per-addon detail"
         );
     }
 
@@ -1223,6 +1815,49 @@ mod tests {
         assert!(lines[0].contains("update result: addon=Details"));
         assert!(lines[0].contains("status=updated"));
         assert!(lines[0].contains("message=WoWInterface may not support WoW Forever"));
+    }
+
+    #[test]
+    fn update_all_detail_lines_list_remote_older_and_count_missing_key_skips() {
+        let mut older = update_result(
+            "RareScanner",
+            LiveUpdateStatus::RemoteOlder,
+            SourceKind::WowInterface,
+        );
+        older.message = Some(
+            "remote version 9.2.5.1 is older than installed 12.1.5.3; use --force to install it anyway"
+                .to_string(),
+        );
+        let lines = build_update_detail_lines(
+            &[],
+            &[
+                older,
+                update_result("Pawn", LiveUpdateStatus::SkippedNoApiKey, SourceKind::Wago),
+            ],
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "update detail: skipped manual=0, no_api_key=1 | rerun `lemonup update <addon...>` for per-addon detail"
+        );
+        assert!(lines[1].contains("addon=RareScanner"));
+        assert!(lines[1].contains("status=remote_older"));
+    }
+
+    #[test]
+    fn remote_older_and_missing_key_skips_do_not_fail_the_command() {
+        let checks = vec![crate::update::CheckResult {
+            addon_name: "Postal".to_string(),
+            status: UpdateStatus::RemoteOlder,
+            remote_version: Some("v3.6.6".to_string()),
+            message: None,
+        }];
+        assert_eq!(count_check_errors(&checks), 0);
+        assert_eq!(
+            CommandOutcome::from_error_count(count_check_errors(&checks)).exit_status(),
+            0
+        );
     }
 
     #[test]
@@ -1278,7 +1913,7 @@ mod v1_migration_tests {
 
         let mut app = App::bootstrap(
             paths,
-            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, None),
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
         )
         .expect("bootstrap continues to onboarding");
         app.show_startup_notice(&notice.text, notice.is_error);
@@ -1314,5 +1949,422 @@ mod v1_migration_tests {
         assert!(notice.text.contains("v1 files left untouched"));
         assert!(paths.config_file.exists());
         assert!(run_v1_migration(&paths, Some(V1Location::from_dir(&v1_dir))).is_none());
+    }
+}
+
+#[cfg(test)]
+mod addon_dir_binding_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use lemonup_core::{
+        AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, SourceKind, StateDatabase,
+    };
+    use tempfile::tempdir;
+
+    use super::{
+        format_skipped_detail, format_sync_summary, guarded_dirs_of, leftover_staging_warnings,
+        run_import_addons, run_restore_backup, run_sync, run_update,
+    };
+    use crate::app::AppRuntime;
+    use crate::backup::{backup_root, create_wtf_backup, list_backups};
+
+    struct Sandbox {
+        _temp: tempfile::TempDir,
+        paths: AppPaths,
+        retail: PathBuf,
+        forever: PathBuf,
+    }
+
+    fn client(root: &Path, name: &str) -> PathBuf {
+        let addons = root.join(name).join("Interface").join("AddOns");
+        fs::create_dir_all(addons.join("SharedAddon")).expect("addon folder");
+        fs::write(
+            addons.join("SharedAddon").join("SharedAddon.toc"),
+            "## Title: SharedAddon\n## Version: 1.0\n",
+        )
+        .expect("toc");
+        fs::create_dir_all(root.join(name).join("WTF")).expect("wtf");
+        fs::write(root.join(name).join("WTF").join("Config.wtf"), name).expect("wtf file");
+        fs::write(root.join(name).join("Wow.exe"), "").expect("exe");
+        addons
+    }
+
+    /// Default profile configured for retail, tracking a GitHub addon in it.
+    fn sandbox() -> Sandbox {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("v2");
+        let paths = AppPaths {
+            profile: DEFAULT_PROFILE.to_string(),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            log_dir: root.join("data").join("logs"),
+            config_file: root.join("config").join("config.toml"),
+            state_db_file: root.join("data").join("state.sqlite"),
+        };
+        paths.ensure().expect("ensure paths");
+        let wow = temp.path().join("World of Warcraft");
+        fs::create_dir_all(wow.join("Data")).expect("data");
+        fs::write(wow.join(".build.info"), "").expect("build info");
+        let retail = client(&wow, "_retail_");
+        let forever = client(&wow, "_forever_");
+        fs::create_dir_all(retail.join("GitAddon")).expect("git addon");
+        fs::write(
+            retail.join("GitAddon").join("GitAddon.toc"),
+            "## Title: GitAddon\n## Version: 2.0\n",
+        )
+        .expect("toc");
+
+        let config = AppConfig {
+            addon_dir: Some(retail.clone()),
+            ..AppConfig::default()
+        };
+        ConfigStore::new(paths.config_file.clone())
+            .write_new_config(&config)
+            .expect("write config");
+        let database = StateDatabase::open(&paths.state_db_file).expect("open db");
+        let mut tracked = AddonRecord::new("GitAddon", "GitAddon", SourceKind::GitHub);
+        tracked.source_url = Some("https://github.com/example/GitAddon".to_string());
+        tracked.git_commit = Some("abc123".to_string());
+        database.upsert_addon(&tracked).expect("seed tracked addon");
+
+        Sandbox {
+            _temp: temp,
+            paths,
+            retail,
+            forever,
+        }
+    }
+
+    fn runtime(addon_dir: Option<&Path>) -> AppRuntime {
+        AppRuntime::new(
+            DEFAULT_PROFILE.to_string(),
+            addon_dir.map(Path::to_path_buf),
+            Vec::new(),
+        )
+    }
+
+    fn tracked_github(paths: &AppPaths) -> AddonRecord {
+        StateDatabase::open(&paths.state_db_file)
+            .expect("open db")
+            .get_addon_by_folder("GitAddon")
+            .expect("query")
+            .expect("GitAddon still tracked")
+    }
+
+    #[test]
+    fn mismatched_addon_dir_refuses_sync_and_keeps_tracking() {
+        let sandbox = sandbox();
+
+        let error = run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.forever)))
+            .expect_err("sync against forever must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("is bound to the AddOns folder"),
+            "{message}"
+        );
+        assert!(message.contains("--profile forever"), "{message}");
+
+        let addon = tracked_github(&sandbox.paths);
+        assert_eq!(addon.source, SourceKind::GitHub);
+        assert_eq!(addon.git_commit.as_deref(), Some("abc123"));
+        let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
+        assert_eq!(database.list_addons().expect("list").len(), 1);
+        assert_eq!(
+            database.bound_addon_dir().expect("binding"),
+            Some(sandbox.retail.clone()),
+            "a legacy database adopts the configured folder"
+        );
+    }
+
+    #[test]
+    fn matching_addon_dir_syncs() {
+        let sandbox = sandbox();
+        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
+        run_sync(sandbox.paths.clone(), runtime(None)).expect("sync configured retail");
+        let addon = tracked_github(&sandbox.paths);
+        assert_eq!(addon.source, SourceKind::GitHub);
+        let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
+        assert!(
+            database
+                .get_addon_by_folder("SharedAddon")
+                .expect("query")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_addon_dir_refuses_update_before_any_backup() {
+        let sandbox = sandbox();
+        let error = run_update(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.forever)),
+            Vec::new(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("update against forever must be refused");
+        assert!(error.to_string().contains("is bound to the AddOns folder"));
+        assert!(
+            !backup_root(&sandbox.paths.data_dir)
+                .join("forever")
+                .exists()
+        );
+        assert_eq!(tracked_github(&sandbox.paths).source, SourceKind::GitHub);
+    }
+
+    #[test]
+    fn mismatched_addon_dir_refuses_restore_and_leaves_wtf_alone() {
+        let sandbox = sandbox();
+        let root = backup_root(&sandbox.paths.data_dir);
+        create_wtf_backup(&sandbox.retail, &root.join("retail"), 5).expect("retail backup");
+        let forever_wtf = sandbox.forever.join("../../WTF/Config.wtf");
+
+        run_restore_backup(sandbox.paths.clone(), runtime(Some(&sandbox.forever)), None)
+            .expect_err("restore into forever must be refused");
+        assert_eq!(fs::read_to_string(&forever_wtf).expect("wtf"), "_forever_");
+    }
+
+    #[test]
+    fn restore_without_archive_picks_the_bound_clients_newest_backup() {
+        let sandbox = sandbox();
+        let root = backup_root(&sandbox.paths.data_dir);
+        create_wtf_backup(&sandbox.retail, &root.join("retail"), 5).expect("retail backup");
+        let retail_wtf = sandbox.retail.join("../../WTF/Config.wtf");
+        fs::write(&retail_wtf, "changed").expect("mutate");
+        // A newer Forever archive in the same store must not be picked for retail.
+        create_wtf_backup(&sandbox.forever, &root.join("forever"), 5).expect("forever backup");
+
+        run_restore_backup(sandbox.paths.clone(), runtime(None), None).expect("restore retail");
+        assert_eq!(fs::read_to_string(&retail_wtf).expect("wtf"), "_retail_");
+    }
+
+    #[test]
+    fn explicit_archive_from_another_client_is_refused() {
+        let sandbox = sandbox();
+        let root = backup_root(&sandbox.paths.data_dir);
+        let forever_backup =
+            create_wtf_backup(&sandbox.forever, &root.join("forever"), 5).expect("backup");
+
+        let error = run_restore_backup(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(forever_backup.backup.path),
+        )
+        .expect_err("forever archive into retail must be refused");
+        assert!(error.to_string().contains("'forever' client"), "{error}");
+        let retail_wtf = sandbox.retail.join("../../WTF/Config.wtf");
+        assert_eq!(fs::read_to_string(&retail_wtf).expect("wtf"), "_retail_");
+    }
+
+    #[test]
+    fn legacy_flat_backups_move_to_the_bound_client_and_stay_restorable() {
+        let sandbox = sandbox();
+        let root = backup_root(&sandbox.paths.data_dir);
+        // Written by an older build straight into the store root.
+        let legacy = create_wtf_backup(&sandbox.retail, &root, 5).expect("legacy backup");
+        let retail_wtf = sandbox.retail.join("../../WTF/Config.wtf");
+        fs::write(&retail_wtf, "changed").expect("mutate");
+
+        run_restore_backup(sandbox.paths.clone(), runtime(None), None).expect("restore");
+        assert_eq!(fs::read_to_string(&retail_wtf).expect("wtf"), "_retail_");
+        assert!(!legacy.backup.path.exists());
+        let moved = list_backups(&root.join("retail")).expect("list");
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].file_name, legacy.backup.file_name);
+    }
+
+    fn empty_import_file(sandbox: &Sandbox) -> PathBuf {
+        let path = sandbox.paths.data_dir.join("import.json");
+        lemonup_core::export_addons(&[], &path).expect("write import file");
+        path
+    }
+
+    #[tokio::test]
+    async fn import_dry_run_validates_the_path_first_and_never_binds() {
+        let sandbox = sandbox();
+        let input = empty_import_file(&sandbox);
+        let bound = || {
+            StateDatabase::open(&sandbox.paths.state_db_file)
+                .expect("open")
+                .bound_addon_dir()
+                .expect("binding")
+        };
+        assert_eq!(bound(), None);
+
+        // A path that is not an AddOns folder is refused and must not become the binding.
+        let nowhere = sandbox.paths.data_dir.join("nonexistent").join("x");
+        let error = run_import_addons(
+            sandbox.paths.clone(),
+            runtime(Some(&nowhere)),
+            Some(input.clone()),
+            true,
+        )
+        .await
+        .expect_err("invalid folder must be refused");
+        assert!(!error.to_string().contains("bound"), "{error}");
+        assert_eq!(bound(), None, "an unvalidated path was bound");
+
+        // A valid folder is accepted read-only: a dry run never adopts a binding.
+        run_import_addons(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.retail)),
+            Some(input.clone()),
+            true,
+        )
+        .await
+        .expect("dry run on a valid folder");
+        assert_eq!(bound(), None, "a dry run must not bind");
+
+        // The folder the profile is configured for is still protected during a dry run.
+        run_import_addons(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.forever)),
+            Some(input),
+            true,
+        )
+        .await
+        .expect_err("dry run against a different folder is refused");
+        assert_eq!(bound(), None);
+
+        // A following real sync on the valid folder binds it as usual.
+        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
+        assert_eq!(bound(), Some(sandbox.retail.clone()));
+    }
+
+    #[test]
+    fn non_default_profile_guard_includes_the_default_profiles_bound_folder() {
+        let sandbox = sandbox();
+        // Default profile pointed at retail with --addon-dir only: no addon_dir in its config.
+        fs::remove_file(&sandbox.paths.config_file).expect("remove config");
+        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("default sync");
+        let db_before = fs::read(&sandbox.paths.state_db_file).expect("db bytes");
+
+        let guarded = guarded_dirs_of(&sandbox.paths).expect("guard");
+        assert_eq!(guarded, vec![sandbox.retail.clone()]);
+        // Reading the guard leaves the default profile's database untouched.
+        assert_eq!(
+            fs::read(&sandbox.paths.state_db_file).expect("db bytes"),
+            db_before
+        );
+
+        let other_root = sandbox.paths.data_dir.parent().expect("root").join("other");
+        let other_paths = AppPaths {
+            profile: "other".to_string(),
+            config_dir: other_root.join("config"),
+            data_dir: other_root.join("data"),
+            cache_dir: other_root.join("cache"),
+            log_dir: other_root.join("data").join("logs"),
+            config_file: other_root.join("config").join("config.toml"),
+            state_db_file: other_root.join("data").join("state.sqlite"),
+        };
+        other_paths.ensure().expect("ensure other");
+        let error = run_sync(
+            other_paths.clone(),
+            AppRuntime::new("other".to_string(), Some(sandbox.retail.clone()), guarded),
+        )
+        .expect_err("other profile must not take the default profile's folder");
+        assert!(
+            error
+                .to_string()
+                .contains("refuses to target the default profile addon directory"),
+            "{error}"
+        );
+        assert_eq!(
+            StateDatabase::open(&other_paths.state_db_file)
+                .expect("open other")
+                .bound_addon_dir()
+                .expect("binding"),
+            None
+        );
+    }
+
+    #[test]
+    fn guard_reads_a_missing_default_profile_without_creating_it() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("fresh");
+        let paths = AppPaths {
+            profile: DEFAULT_PROFILE.to_string(),
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            log_dir: root.join("data").join("logs"),
+            config_file: root.join("config").join("config.toml"),
+            state_db_file: root.join("data").join("state.sqlite"),
+        };
+        assert_eq!(
+            guarded_dirs_of(&paths).expect("guard"),
+            Vec::<PathBuf>::new()
+        );
+        assert!(!root.exists(), "the default profile must not be created");
+    }
+
+    #[test]
+    fn sync_summary_appends_skipped_and_lists_unreadable_folders() {
+        let mut summary = lemonup_core::ScanSummary {
+            scanned_addons: 3,
+            upserted_addons: 2,
+            removed_addons: 1,
+            ..Default::default()
+        };
+        let dir = Path::new("/wow/AddOns");
+        assert_eq!(
+            format_sync_summary("default", dir, &summary),
+            "sync summary: profile=default, addon_dir=/wow/AddOns, scanned_addons=3, upserted_addons=2, removed_addons=1, skipped=0"
+        );
+        assert_eq!(format_skipped_detail(&summary), None);
+
+        summary.skipped_folders = vec!["Locked".to_string(), "Pawn".to_string()];
+        assert!(format_sync_summary("default", dir, &summary).ends_with(", skipped=2"));
+        assert_eq!(
+            format_skipped_detail(&summary).as_deref(),
+            Some("sync detail: skipped (unreadable): Locked, Pawn")
+        );
+    }
+
+    #[test]
+    fn leftover_staging_folders_get_one_warning_each() {
+        let summary = lemonup_core::ScanSummary {
+            leftover_staging: vec![
+                ".lemonup-staging-1-2-0".to_string(),
+                ".lemonup-staging-3-4-0".to_string(),
+            ],
+            ..Default::default()
+        };
+        let warnings = leftover_staging_warnings(Path::new("/wow/AddOns"), &summary);
+        assert_eq!(
+            warnings,
+            vec![
+                "warning: leftover update staging folder /wow/AddOns/.lemonup-staging-1-2-0 may contain previous addon versions; see Troubleshooting".to_string(),
+                "warning: leftover update staging folder /wow/AddOns/.lemonup-staging-3-4-0 may contain previous addon versions; see Troubleshooting".to_string(),
+            ]
+        );
+        assert!(leftover_staging_warnings(Path::new("/x"), &Default::default()).is_empty());
+    }
+
+    #[test]
+    fn sync_with_a_leftover_staging_folder_succeeds_and_does_not_track_it() {
+        let sandbox = sandbox();
+        let staging = sandbox.retail.join(".lemonup-staging-9-9-0").join("old");
+        fs::create_dir_all(staging.join("Old")).expect("staging");
+        fs::write(staging.join("Old").join("Old.toc"), "## Title: Old\n").expect("toc");
+
+        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync");
+        let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
+        assert!(
+            database
+                .get_addon_by_folder("Old")
+                .expect("query")
+                .is_none()
+        );
+        let report = lemonup_core::scan_addons_dir_report(
+            &sandbox.retail,
+            lemonup_core::GameFlavor::Retail,
+            &[],
+        )
+        .expect("scan");
+        assert_eq!(report.leftover_staging, vec![".lemonup-staging-9-9-0"]);
     }
 }

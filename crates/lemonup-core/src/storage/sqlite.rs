@@ -1,17 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use time::OffsetDateTime;
 
 use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, OwnershipSource, SourceKind};
-use crate::error::Result;
-use crate::scan::{GroupingGuard, ScanSummary, ScannedAddon};
+use crate::error::{LemonupError, Result};
+use crate::scan::{GroupingGuard, ScanReport, ScanSummary, ScannedAddon};
 
 pub struct StateDatabase {
     connection: Connection,
 }
+
+const BOUND_ADDON_DIR_KEY: &str = "bound_addon_dir";
+
+/// How long a connection waits for another process's write lock before failing, so a
+/// TUI session and a scheduled `lemonup sync` overlap instead of erroring with
+/// "database is locked".
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl StateDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -21,13 +29,92 @@ impl StateDatabase {
         }
 
         let connection = Connection::open(path)?;
+        // Before migrate(): switching to WAL needs a lock too.
+        connection.busy_timeout(BUSY_TIMEOUT)?;
         let database = Self { connection };
         database.migrate()?;
         Ok(database)
     }
 
+    /// Reads the bound AddOns folder from the database at `path` without creating or
+    /// modifying anything: a missing file (or one without binding metadata) is `None`.
+    pub fn read_bound_addon_dir(path: &Path) -> Result<Option<PathBuf>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        let value = connection.query_row(
+            "SELECT value FROM lemonup_meta WHERE key = ?1",
+            [BOUND_ADDON_DIR_KEY],
+            |row| row.get::<_, String>(0),
+        );
+        match value {
+            Ok(value) => Ok(Some(PathBuf::from(value))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            // A database from before binding existed has no metadata table yet.
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("no such table") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Milliseconds this connection waits on a locked database (test hook).
+    #[cfg(test)]
+    fn busy_timeout_millis(&self) -> i64 {
+        self.connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("read busy_timeout")
+    }
+
     pub fn list_addons(&self) -> Result<Vec<AddonRecord>> {
         Self::list_addons_from_connection(&self.connection)
+    }
+
+    /// The AddOns folder this state was built from, or `None` for a database created
+    /// before folder binding existed (callers adopt the profile's folder on first use).
+    pub fn bound_addon_dir(&self) -> Result<Option<PathBuf>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT value FROM lemonup_meta WHERE key = ?1")?;
+        let mut rows = statement.query([BOUND_ADDON_DIR_KEY])?;
+        let value = rows
+            .next()?
+            .map(|row| row.get::<_, String>(0))
+            .transpose()?;
+        Ok(value.map(PathBuf::from))
+    }
+
+    /// Records `addon_dir` as the folder this state belongs to.
+    pub fn bind_addon_dir(&self, addon_dir: &Path) -> Result<()> {
+        let value = addon_dir.to_str().ok_or_else(|| {
+            LemonupError::InvalidArgument(format!(
+                "AddOns path is not valid UTF-8: {}",
+                addon_dir.display()
+            ))
+        })?;
+        self.connection.execute(
+            "INSERT INTO lemonup_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![BOUND_ADDON_DIR_KEY, value],
+        )?;
+        Ok(())
+    }
+
+    /// Writes a consistent copy of the whole database (WAL included) to `path`, which must
+    /// not exist yet. Used to run read-only work that would otherwise write rows.
+    pub fn copy_to(&self, path: &Path) -> Result<()> {
+        let target = path.to_str().ok_or_else(|| {
+            LemonupError::InvalidArgument(format!(
+                "database copy path is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?;
+        self.connection.execute("VACUUM INTO ?1", [target])?;
+        Ok(())
     }
 
     pub fn get_addon_by_folder(&self, folder: &str) -> Result<Option<AddonRecord>> {
@@ -113,6 +200,26 @@ impl StateDatabase {
         &mut self,
         scanned_addons: &[ScannedAddon],
     ) -> Result<ScanSummary> {
+        self.reconcile_scanned_addons_skipping(scanned_addons, &[])
+    }
+
+    /// Reconciles a scan report, treating its skipped (unreadable) folders as present.
+    pub fn reconcile_scan(&mut self, report: &ScanReport) -> Result<ScanSummary> {
+        let mut summary =
+            self.reconcile_scanned_addons_skipping(&report.addons, &report.skipped_folders)?;
+        summary.leftover_staging = report.leftover_staging.clone();
+        Ok(summary)
+    }
+
+    /// `skipped_folders` are on disk but could not be read: any existing row for them is kept
+    /// exactly as it is (no field updates, no deletion, authoritative children left alone) and no
+    /// row is created for one that has none.
+    fn reconcile_scanned_addons_skipping(
+        &mut self,
+        scanned_addons: &[ScannedAddon],
+        skipped_folders: &[String],
+    ) -> Result<ScanSummary> {
+        let skipped = skipped_folders.iter().cloned().collect::<HashSet<_>>();
         let tx = self.connection.transaction()?;
         let existing_addons = Self::list_addons_from_connection(&tx)?;
         let existing_by_folder = existing_addons
@@ -126,6 +233,7 @@ impl StateDatabase {
         let live_scanned_folders = scanned_addons
             .iter()
             .map(|addon| addon.folder.clone())
+            .chain(skipped.iter().cloned())
             .collect::<HashSet<_>>();
         let active_authoritative_parents = existing_addons
             .iter()
@@ -147,6 +255,7 @@ impl StateDatabase {
                 std::iter::once(addon.folder.clone())
                     .chain(addon.owned_folders.iter().map(|owned| owned.name.clone()))
             })
+            .chain(skipped.iter().cloned())
             .collect::<HashSet<_>>();
         // A tracked non-manual row whose folder is still on disk is never deleted here: at worst
         // it is kept as its own top-level row.
@@ -196,6 +305,7 @@ impl StateDatabase {
             .into_iter()
             .filter(|addon| {
                 !visible_parent_folders.contains(&addon.folder)
+                    && !skipped.contains(&addon.folder)
                     && !represented_child_folders.contains(&addon.folder)
             })
             .map(|addon| addon.folder)
@@ -226,6 +336,8 @@ impl StateDatabase {
             scanned_addons: scanned_addons.len(),
             upserted_addons: visible_parent_folders.len(),
             removed_addons: removed_existing_rows,
+            skipped_folders: skipped_folders.to_vec(),
+            leftover_staging: Vec::new(),
         })
     }
 
@@ -269,6 +381,14 @@ impl StateDatabase {
     fn migrate(&self) -> Result<()> {
         self.connection
             .execute_batch("PRAGMA journal_mode = WAL;")?;
+        // Key/value metadata (the bound AddOns folder). Added without a version bump so
+        // older databases gain it in place and older builds simply ignore it.
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS lemonup_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );",
+        )?;
         let user_version = self
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
@@ -446,9 +566,7 @@ fn merge_scanned_addon(
 ) -> AddonRecord {
     let now = OffsetDateTime::now_utc();
     let kind_override = existing.is_some_and(|addon| addon.kind_override);
-    let merged_source = existing
-        .map(|addon| addon.source)
-        .unwrap_or(scanned_addon.source);
+    let merged_source = merge_scanned_source(scanned_addon, existing);
     let ownership_source = if preserve_existing_owned_folders {
         existing
             .expect("preserving owned folders requires existing addon")
@@ -500,23 +618,61 @@ fn merge_scanned_addon(
     }
 }
 
+/// A tracked GitHub row without a source URL cannot be updated (`update-all` would fail on it
+/// every run). When the scan finds a `.git` checkout there (a development clone that an older
+/// scan mislabelled as GitHub), the row is demoted to manual. Every other tracked row keeps its
+/// source.
+fn merge_scanned_source(
+    scanned_addon: &ScannedAddon,
+    existing: Option<&AddonRecord>,
+) -> SourceKind {
+    let Some(existing) = existing else {
+        return scanned_addon.source;
+    };
+    let missing_url = existing
+        .source_url
+        .as_deref()
+        .is_none_or(|url| url.trim().is_empty());
+    if existing.source == SourceKind::GitHub && missing_url && scanned_addon.git_commit.is_some() {
+        return SourceKind::Manual;
+    }
+    existing.source
+}
+
+/// Picks the version to store when a scan sees an already-known folder.
+///
+/// Provider-tracked rows (Wago, WoWInterface, Tukui) keep the version recorded at install/update
+/// time: that label is what the provider's remote version is compared against, while the TOC
+/// version often differs in shape (`Pawn 2.14.3` vs TOC `2.14.3`, `v3.4.1` vs `12.0.5`) or is
+/// missing. Overwriting it on every sync made such addons look permanently outdated or
+/// "remote older". The TOC version only fills in a row that has no recorded version.
+///
+/// Manual rows always take the TOC version. GitHub rows track by commit (`git_commit`, falling
+/// back to `version`), so they keep taking the scanned version, except for unexpanded packager
+/// placeholders such as `@project-version@`, which never replace a recorded one.
 fn merge_scanned_version(
     scanned_addon: &ScannedAddon,
     existing: Option<&AddonRecord>,
     source: SourceKind,
 ) -> Option<String> {
-    if source == SourceKind::GitHub
-        && scanned_addon
-            .version
-            .as_deref()
-            .is_some_and(is_placeholder_version)
-    {
-        return existing
-            .and_then(|addon| addon.version.clone())
-            .or_else(|| scanned_addon.version.clone());
-    }
+    let recorded = existing
+        .and_then(|addon| addon.version.clone())
+        .filter(|version| !version.trim().is_empty());
 
-    scanned_addon.version.clone()
+    match source {
+        SourceKind::Tukui | SourceKind::WowInterface | SourceKind::Wago => {
+            recorded.or_else(|| scanned_addon.version.clone())
+        }
+        SourceKind::GitHub
+            if scanned_addon
+                .version
+                .as_deref()
+                .is_some_and(is_placeholder_version) =>
+        {
+            recorded.or_else(|| scanned_addon.version.clone())
+        }
+        SourceKind::GitHub | SourceKind::Manual => scanned_addon.version.clone(),
+    }
 }
 
 fn is_placeholder_version(value: &str) -> bool {
@@ -702,6 +858,8 @@ fn serialize_addon_kind(value: AddonKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
     use time::OffsetDateTime;
 
@@ -710,6 +868,66 @@ mod tests {
 
     use super::StateDatabase;
     use crate::domain::{AddonKind, GameFlavor};
+
+    #[test]
+    fn open_sets_a_busy_timeout_so_concurrent_writers_wait() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let database = StateDatabase::open(&path).expect("open db");
+        assert_eq!(database.busy_timeout_millis(), 5_000);
+
+        // A second connection holds the write lock briefly; a bind issued meanwhile waits
+        // for it instead of failing with "database is locked".
+        let blocker = rusqlite::Connection::open(&path).expect("open blocker");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("take write lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            blocker.execute_batch("COMMIT;").expect("release lock");
+        });
+        database
+            .bind_addon_dir(temp.path())
+            .expect("bind waits for the lock");
+        release.join().expect("blocker thread");
+    }
+
+    #[test]
+    fn read_bound_addon_dir_never_creates_or_changes_the_database() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("data").join("state.sqlite");
+
+        // Missing database: None, and nothing created.
+        assert_eq!(
+            StateDatabase::read_bound_addon_dir(&path).expect("read"),
+            None
+        );
+        assert!(!path.exists());
+        assert!(!temp.path().join("data").exists());
+
+        // Existing database without a binding, then with one.
+        let database = StateDatabase::open(&path).expect("open db");
+        assert_eq!(
+            StateDatabase::read_bound_addon_dir(&path).expect("read"),
+            None
+        );
+        database.bind_addon_dir(temp.path()).expect("bind");
+        assert_eq!(
+            StateDatabase::read_bound_addon_dir(&path).expect("read"),
+            Some(temp.path().to_path_buf())
+        );
+
+        // A database from before binding existed has no metadata table at all.
+        let legacy = temp.path().join("legacy.sqlite");
+        rusqlite::Connection::open(&legacy)
+            .expect("legacy db")
+            .execute_batch("CREATE TABLE addons (id INTEGER);")
+            .expect("legacy schema");
+        assert_eq!(
+            StateDatabase::read_bound_addon_dir(&legacy).expect("read"),
+            None
+        );
+    }
 
     #[test]
     fn upserts_and_lists_addons() {
@@ -1604,5 +1822,276 @@ mod tests {
         assert_eq!(stored[0].folder, "Foo");
         assert_eq!(stored[0].owned_folders.len(), 1);
         assert_eq!(stored[0].owned_folders[0].name, "Foo_Options");
+    }
+    fn scanned_with(folder: &str, version: Option<&str>, git_commit: Option<&str>) -> ScannedAddon {
+        ScannedAddon {
+            name: folder.to_string(),
+            folder: folder.to_string(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: version.map(str::to_string),
+            git_commit: git_commit.map(str::to_string),
+            author: None,
+            interface: None,
+            source: SourceKind::Manual,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+        }
+    }
+
+    fn reconciled_version(
+        source: SourceKind,
+        recorded: Option<&str>,
+        scanned: Option<&str>,
+    ) -> Option<String> {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut existing = AddonRecord::new("Foo", "Foo", source);
+        existing.version = recorded.map(str::to_string);
+        existing.source_url = Some("https://example.invalid/foo".to_string());
+        database.upsert_addon(&existing).expect("seed row");
+
+        database
+            .reconcile_scanned_addons(&[scanned_with("Foo", scanned, None)])
+            .expect("reconcile");
+
+        database
+            .get_addon_by_folder("Foo")
+            .expect("get row")
+            .expect("row exists")
+            .version
+    }
+
+    #[test]
+    fn reconcile_keeps_provider_recorded_version_over_toc_version() {
+        for (source, recorded, toc) in [
+            (SourceKind::Wago, "Pawn 2.14.3", "2.14.3"),
+            (SourceKind::WowInterface, "v3.4.1", "12.0.5"),
+            (SourceKind::Tukui, "15.10", "15.11"),
+        ] {
+            assert_eq!(
+                reconciled_version(source, Some(recorded), Some(toc)).as_deref(),
+                Some(recorded),
+                "{source:?}"
+            );
+            // A TOC without a version must not blank the recorded one either.
+            assert_eq!(
+                reconciled_version(source, Some(recorded), None).as_deref(),
+                Some(recorded),
+                "{source:?} without toc version"
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_fills_missing_provider_version_from_toc() {
+        assert_eq!(
+            reconciled_version(SourceKind::Wago, None, Some("1.2.3")).as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            reconciled_version(SourceKind::Wago, Some("  "), Some("1.2.3")).as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn reconcile_manual_and_github_rows_still_follow_the_scanned_version() {
+        assert_eq!(
+            reconciled_version(SourceKind::Manual, Some("1.0"), Some("2.0")).as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(
+            reconciled_version(SourceKind::GitHub, Some("1.0"), Some("2.0")).as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(
+            reconciled_version(
+                SourceKind::GitHub,
+                Some("364f625"),
+                Some("@project-version@")
+            )
+            .as_deref(),
+            Some("364f625")
+        );
+    }
+
+    #[test]
+    fn reconcile_new_dev_clone_is_stored_as_manual_with_commit() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        database
+            .reconcile_scanned_addons(&[scanned_with("Dev", None, Some("0123456789abcdef"))])
+            .expect("reconcile");
+
+        let stored = database
+            .get_addon_by_folder("Dev")
+            .expect("get row")
+            .expect("row exists");
+        assert_eq!(stored.source, SourceKind::Manual);
+        assert_eq!(stored.git_commit.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn reconcile_keeps_tracked_github_source_and_demotes_urlless_dev_clone_rows() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut tracked = AddonRecord::new("Tracked", "Tracked", SourceKind::GitHub);
+        tracked.source_url = Some("https://github.com/owner/tracked".to_string());
+        database.upsert_addon(&tracked).expect("seed tracked");
+        // Left behind by an older scan that mislabelled a `.git` folder as GitHub.
+        let broken = AddonRecord::new("Broken", "Broken", SourceKind::GitHub);
+        database.upsert_addon(&broken).expect("seed broken");
+
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("Tracked", None, Some("abcdef0123456789")),
+                scanned_with("Broken", None, Some("fedcba9876543210")),
+            ])
+            .expect("reconcile");
+
+        let tracked = database
+            .get_addon_by_folder("Tracked")
+            .expect("get tracked")
+            .expect("tracked exists");
+        assert_eq!(tracked.source, SourceKind::GitHub);
+        assert_eq!(
+            tracked.source_url.as_deref(),
+            Some("https://github.com/owner/tracked")
+        );
+        let broken = database
+            .get_addon_by_folder("Broken")
+            .expect("get broken")
+            .expect("broken exists");
+        assert_eq!(broken.source, SourceKind::Manual);
+    }
+    /// Writes `folder` with a readable TOC, then locks it; returns false when the lock has no
+    /// effect (running as root), in which case the caller has nothing to prove.
+    #[cfg(unix)]
+    fn write_locked_addon(addons: &std::path::Path, folder: &str) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = addons.join(folder);
+        fs::create_dir_all(&dir).expect("create addon dir");
+        let toc = dir.join(format!("{folder}.toc"));
+        fs::write(&toc, format!("## Title: {folder}\n## Version: 9.9.9\n")).expect("write toc");
+        fs::set_permissions(&toc, fs::Permissions::from_mode(0o000)).expect("lock toc");
+        fs::read(&toc).is_err().then_some(toc)
+    }
+
+    #[cfg(unix)]
+    fn unlock(toc: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(toc, fs::Permissions::from_mode(0o644)).expect("unlock toc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_keeps_tracked_row_unchanged_when_its_toc_is_unreadable() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(&addons).expect("create addons");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut wago = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+        wago.version = Some("Pawn 2.14.3".to_string());
+        wago.remote_version = Some("Pawn 2.14.4".to_string());
+        wago.source_url = Some("https://addons.wago.io/addons/pawn".to_string());
+        wago.set_managed_owned_folders(vec![OwnedFolder {
+            name: "PawnChild".to_string(),
+        }]);
+        database.record_managed_addon(&wago).expect("seed wago");
+        let before = database
+            .get_addon_by_folder("Pawn")
+            .expect("get")
+            .expect("row exists");
+
+        let Some(toc) = write_locked_addon(&addons, "Pawn") else {
+            return;
+        };
+        write_addon_folders(&addons, &["Healthy"]);
+        let tracked = database.list_addons().expect("list");
+        let report = crate::scan::scan_addons_dir_report(&addons, GameFlavor::Retail, &tracked)
+            .expect("scan survives");
+        assert_eq!(report.skipped_folders, vec!["Pawn".to_string()]);
+        let summary = database.reconcile_scan(&report).expect("reconcile");
+        unlock(&toc);
+
+        let after = database
+            .get_addon_by_folder("Pawn")
+            .expect("get")
+            .expect("row survives");
+        assert_eq!(after, before);
+        assert_eq!(summary.removed_addons, 0);
+        // Readable folders still reconcile as usual.
+        assert!(
+            database
+                .get_addon_by_folder("Healthy")
+                .expect("get")
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_creates_no_row_for_a_new_unreadable_folder() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(&addons).expect("create addons");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let Some(toc) = write_locked_addon(&addons, "Locked") else {
+            return;
+        };
+        write_addon_folders(&addons, &["Healthy"]);
+        let report = crate::scan::scan_addons_dir_report(&addons, GameFlavor::Retail, &[])
+            .expect("scan survives");
+        database.reconcile_scan(&report).expect("reconcile");
+        unlock(&toc);
+
+        assert!(
+            database
+                .get_addon_by_folder("Locked")
+                .expect("get")
+                .is_none()
+        );
+        assert!(
+            database
+                .get_addon_by_folder("Healthy")
+                .expect("get")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reconcile_still_removes_rows_for_folders_that_are_neither_scanned_nor_skipped() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&AddonRecord::new("Gone", "Gone", SourceKind::Manual))
+            .expect("seed gone");
+        database
+            .upsert_addon(&AddonRecord::new("Kept", "Kept", SourceKind::Manual))
+            .expect("seed kept");
+
+        let report = crate::scan::ScanReport {
+            addons: Vec::new(),
+            skipped_folders: vec!["Kept".to_string()],
+            leftover_staging: vec![".lemonup-staging-1-2-0".to_string()],
+        };
+        let summary = database.reconcile_scan(&report).expect("reconcile");
+        assert_eq!(
+            summary.leftover_staging,
+            vec![".lemonup-staging-1-2-0".to_string()]
+        );
+
+        assert_eq!(summary.removed_addons, 1);
+        assert_eq!(summary.skipped_folders, vec!["Kept".to_string()]);
+        assert!(database.get_addon_by_folder("Gone").expect("get").is_none());
+        assert!(database.get_addon_by_folder("Kept").expect("get").is_some());
     }
 }

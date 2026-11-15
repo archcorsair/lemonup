@@ -265,6 +265,9 @@ pub struct InstallPlan {
 pub enum UpdateStatus {
     UpToDate,
     UpdateAvailable,
+    /// The remote version parses as strictly lower than the installed one (a stale provider
+    /// page, for example); it is not offered as an update unless forced.
+    RemoteOlder,
     Unknown,
     Error,
 }

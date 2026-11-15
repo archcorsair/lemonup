@@ -46,11 +46,30 @@ pub struct ScannedAddon {
     pub embedded_libs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of a scan that also reports what it could not read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanReport {
+    pub addons: Vec<ScannedAddon>,
+    /// Addon folders skipped because they could not be read (for example a locked TOC). They are
+    /// present on disk, so reconciliation must leave any tracked row for them untouched.
+    pub skipped_folders: Vec<String>,
+    /// `.lemonup-staging-*` folders found in the AddOns folder: leftovers of an update whose
+    /// cleanup failed. They are never scanned as addons but may hold the previous addon versions.
+    pub leftover_staging: Vec<String>,
+}
+
+/// Name prefix of the hidden per-update staging folder LemonUp creates inside the AddOns folder.
+pub const UPDATE_STAGING_PREFIX: &str = ".lemonup-staging-";
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScanSummary {
     pub scanned_addons: usize,
     pub upserted_addons: usize,
     pub removed_addons: usize,
+    /// Folders on disk that could not be read and were left as they were.
+    pub skipped_folders: Vec<String>,
+    /// Leftover update staging folders seen by the scan (see [`ScanReport::leftover_staging`]).
+    pub leftover_staging: Vec<String>,
 }
 
 /// Scans an AddOns directory with no knowledge of tracked rows.
@@ -72,6 +91,18 @@ pub fn scan_addons_dir_with_tracked(
     flavor: GameFlavor,
     tracked: &[AddonRecord],
 ) -> Result<Vec<ScannedAddon>> {
+    Ok(scan_addons_dir_report(addons_dir, flavor, tracked)?.addons)
+}
+
+/// Like [`scan_addons_dir_with_tracked`], but also reports the folders that were skipped because
+/// they could not be read. Scans that feed reconciliation of a live AddOns directory should use
+/// this with [`StateDatabase::reconcile_scan`](crate::StateDatabase::reconcile_scan), so a
+/// transiently locked folder never costs its tracked row.
+pub fn scan_addons_dir_report(
+    addons_dir: &Path,
+    flavor: GameFlavor,
+    tracked: &[AddonRecord],
+) -> Result<ScanReport> {
     if !addons_dir.exists() {
         return Err(LemonupError::InvalidArgument(format!(
             "addons directory does not exist: {}",
@@ -86,10 +117,23 @@ pub fn scan_addons_dir_with_tracked(
     }
 
     let mut scanned = Vec::new();
+    let mut skipped_folders = Vec::new();
+    let mut leftover_staging = Vec::new();
 
     for entry in fs::read_dir(addons_dir)? {
         let entry = entry?;
         let addon_path = entry.path();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(UPDATE_STAGING_PREFIX)
+        {
+            // Never an addon, but it can hold the previous versions of updated addons.
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                leftover_staging.push(entry.file_name().to_string_lossy().to_string());
+            }
+            continue;
+        }
         // Follow symlinks so linked development checkouts are scanned; a broken or looping link
         // is skipped rather than failing the whole scan. The scan only reads.
         let Ok(metadata) = fs::metadata(&addon_path) else {
@@ -100,43 +144,21 @@ pub fn scan_addons_dir_with_tracked(
         }
 
         let folder = entry.file_name().to_string_lossy().to_string();
-        let toc_files = list_root_toc_files(&addon_path)?
-            .into_iter()
-            .filter(|toc| toc_loadable_by_flavor(toc, &folder, flavor))
-            .collect::<Vec<_>>();
-        if toc_files.is_empty() {
-            continue;
+        // One unreadable addon folder must not fail the whole scan (and with it `sync` or a
+        // provider package scan): skip it and name it in the log.
+        match scan_addon_folder(&addon_path, &folder, flavor) {
+            Ok(Some(addon)) => scanned.push(addon),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    folder = %folder,
+                    path = %addon_path.display(),
+                    %error,
+                    "skipping addon folder that could not be read"
+                );
+                skipped_folders.push(folder);
+            }
         }
-
-        let selected_toc = select_toc_file(&folder, &toc_files, flavor)?;
-        let content = fs::read_to_string(addon_path.join(&selected_toc.selected))?;
-        let toc = parse_toc_content(&content, &folder);
-        let kind = detect_addon_kind(&addon_path, &toc);
-        let git_commit = read_git_commit(&addon_path);
-        let version = toc
-            .version
-            .clone()
-            .or_else(|| git_commit.as_ref().map(|commit| short_commit(commit)));
-
-        scanned.push(ScannedAddon {
-            name: toc.title,
-            folder,
-            owned_folders: Vec::new(),
-            kind,
-            flavor,
-            version,
-            git_commit: git_commit.clone(),
-            author: toc.author,
-            interface: toc.interface,
-            source: if git_commit.is_some() {
-                SourceKind::GitHub
-            } else {
-                SourceKind::Manual
-            },
-            required_deps: toc.required_deps,
-            optional_deps: toc.optional_deps,
-            embedded_libs: detect_embedded_libs(&addon_path)?,
-        });
     }
 
     let guard = GroupingGuard::from_tracked(tracked);
@@ -152,7 +174,69 @@ pub fn scan_addons_dir_with_tracked(
             })
     });
 
-    Ok(collapsed)
+    skipped_folders.sort();
+    leftover_staging.sort();
+    Ok(ScanReport {
+        addons: collapsed,
+        skipped_folders,
+        leftover_staging,
+    })
+}
+
+/// Scans one addon folder. `Ok(None)` means the folder has no TOC loadable by `flavor`.
+fn scan_addon_folder(
+    addon_path: &Path,
+    folder: &str,
+    flavor: GameFlavor,
+) -> Result<Option<ScannedAddon>> {
+    let toc_files = list_root_toc_files(addon_path)?
+        .into_iter()
+        .filter(|toc| toc_loadable_by_flavor(toc, folder, flavor))
+        .collect::<Vec<_>>();
+    if toc_files.is_empty() {
+        return Ok(None);
+    }
+
+    let selected_toc = select_toc_file(folder, &toc_files, flavor)?;
+    let content = read_toc_file(&addon_path.join(&selected_toc.selected))?;
+    let toc = parse_toc_content(&content, folder);
+    let kind = detect_addon_kind(addon_path, &toc);
+    let git_commit = read_git_commit(addon_path);
+    let version = toc
+        .version
+        .clone()
+        .or_else(|| git_commit.as_ref().map(|commit| short_commit(commit)));
+
+    Ok(Some(ScannedAddon {
+        name: toc.title,
+        folder: folder.to_string(),
+        owned_folders: Vec::new(),
+        kind,
+        flavor,
+        version,
+        git_commit,
+        author: toc.author,
+        interface: toc.interface,
+        // A folder with a `.git` directory is a development checkout, not a tracked GitHub
+        // install: tracked GitHub rows come from `install`/`update` and carry a source URL.
+        // The commit stays as informational metadata.
+        source: SourceKind::Manual,
+        required_deps: toc.required_deps,
+        optional_deps: toc.optional_deps,
+        embedded_libs: detect_embedded_libs(addon_path)?,
+    }))
+}
+
+/// Reads a TOC tolerantly. Real-world TOCs are not always valid UTF-8 (Latin-1 titles are
+/// common) and some carry a UTF-8 BOM that would otherwise hide the first line; invalid bytes
+/// decode lossily and the BOM is dropped. Only genuine I/O failures are errors.
+fn read_toc_file(path: &Path) -> Result<String> {
+    Ok(decode_toc_bytes(&fs::read(path)?))
+}
+
+fn decode_toc_bytes(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 pub fn select_toc_file(
@@ -218,6 +302,7 @@ pub fn select_toc_file(
 }
 
 pub fn parse_toc_content(content: &str, fallback_title: &str) -> TocMetadata {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let title = field_value(content, &["Title"])
         .map(strip_wow_color_codes)
         .filter(|value| !value.is_empty())
@@ -581,10 +666,47 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        GroupingGuard, ScannedAddon, TocSelectionConfidence, collapse_owned_folders,
-        parse_toc_content, scan_addons_dir, scan_addons_dir_with_tracked, select_toc_file,
+        GroupingGuard, ScannedAddon, TocSelectionConfidence, UPDATE_STAGING_PREFIX,
+        collapse_owned_folders, parse_toc_content, scan_addons_dir, scan_addons_dir_report,
+        scan_addons_dir_with_tracked, select_toc_file,
     };
     use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
+
+    #[test]
+    fn scan_reports_leftover_staging_folders_without_scanning_them_as_addons() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(addons.join("Foo")).expect("addon");
+        fs::write(addons.join("Foo").join("Foo.toc"), "## Title: Foo\n").expect("toc");
+        let staging = format!("{UPDATE_STAGING_PREFIX}123-456-0");
+        // Even a TOC inside the leftover must not make it an addon.
+        fs::create_dir_all(addons.join(&staging).join("old").join("Foo")).expect("staging");
+        fs::write(
+            addons
+                .join(&staging)
+                .join("old")
+                .join("Foo")
+                .join("Foo.toc"),
+            "## Title: Foo\n",
+        )
+        .expect("old toc");
+        fs::write(addons.join(&staging).join("Stray.toc"), "## Title: Stray\n").expect("toc");
+        // A plain file with the prefix is not a staging folder.
+        fs::write(addons.join(format!("{UPDATE_STAGING_PREFIX}file")), "x").expect("file");
+
+        let report = scan_addons_dir_report(&addons, GameFlavor::Retail, &[]).expect("scan");
+
+        assert_eq!(report.leftover_staging, vec![staging]);
+        assert_eq!(
+            report
+                .addons
+                .iter()
+                .map(|addon| addon.folder.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Foo"]
+        );
+        assert!(report.skipped_folders.is_empty());
+    }
 
     #[test]
     fn parses_toc_metadata_and_strips_color_codes() {
@@ -1085,5 +1207,101 @@ mod tests {
 
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].folder, "RealAddon");
+    }
+    fn write_toc_bytes(addons: &std::path::Path, folder: &str, bytes: &[u8]) {
+        let dir = addons.join(folder);
+        fs::create_dir_all(&dir).expect("create addon dir");
+        fs::write(dir.join(format!("{folder}.toc")), bytes).expect("write toc");
+    }
+
+    #[test]
+    fn scan_decodes_non_utf8_toc_lossily_instead_of_failing() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path();
+        write_addon(addons, "GoodAddon");
+        // Latin-1 `é` (0xE9) is not valid UTF-8.
+        write_toc_bytes(
+            addons,
+            "Latin",
+            b"## Title: Caf\xE9 Tools\n## Version: 1.2.3\n## Interface: 110002\n",
+        );
+
+        let scanned = scan_addons_dir(addons, GameFlavor::Retail).expect("scan survives");
+
+        assert_eq!(scanned.len(), 2);
+        let latin = scanned
+            .iter()
+            .find(|addon| addon.folder == "Latin")
+            .expect("latin addon scanned");
+        assert_eq!(latin.name, "Caf\u{fffd} Tools");
+        assert_eq!(latin.version.as_deref(), Some("1.2.3"));
+        assert_eq!(latin.interface.as_deref(), Some("110002"));
+    }
+
+    #[test]
+    fn scan_strips_utf8_bom_so_the_first_toc_line_parses() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path();
+        write_toc_bytes(
+            addons,
+            "Bom",
+            b"\xEF\xBB\xBF## Interface: 110002\n## Title: Bom Addon\n## Version: 2.0\n",
+        );
+
+        let scanned = scan_addons_dir(addons, GameFlavor::Retail).expect("scan addons");
+
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].interface.as_deref(), Some("110002"));
+        assert_eq!(scanned[0].name, "Bom Addon");
+
+        // parse_toc_content is BOM-safe for callers that already hold a string.
+        let parsed = parse_toc_content("\u{feff}## Interface: 110002\n", "Fallback");
+        assert_eq!(parsed.interface.as_deref(), Some("110002"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_only_the_folder_whose_toc_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path();
+        write_addon(addons, "GoodAddon");
+        write_addon(addons, "Locked");
+        let locked_toc = addons.join("Locked").join("Locked.toc");
+        fs::set_permissions(&locked_toc, fs::Permissions::from_mode(0o000)).expect("lock toc");
+        // Running as root ignores file modes; nothing to prove then.
+        if fs::read(&locked_toc).is_ok() {
+            return;
+        }
+
+        let scanned = scan_addons_dir(addons, GameFlavor::Retail).expect("scan survives");
+
+        fs::set_permissions(&locked_toc, fs::Permissions::from_mode(0o644)).expect("unlock toc");
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].folder, "GoodAddon");
+    }
+
+    #[test]
+    fn scanned_dev_clone_with_git_dir_is_manual_with_commit_metadata() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path();
+        write_addon(addons, "DevClone");
+        let git_dir = addons.join("DevClone").join(".git");
+        fs::create_dir_all(&git_dir).expect("create .git");
+        fs::write(
+            git_dir.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .expect("write HEAD");
+
+        let scanned = scan_addons_dir(addons, GameFlavor::Retail).expect("scan addons");
+
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].source, SourceKind::Manual);
+        assert_eq!(
+            scanned[0].git_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
     }
 }

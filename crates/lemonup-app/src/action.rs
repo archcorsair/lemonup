@@ -4,9 +4,9 @@ use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
-    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, FooterKeyPulse, HelpContext,
-    InspectOverlayState, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
-    WagoInstallConfirmation,
+    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
+    FooterKeyPulse, HelpContext, InspectOverlayState, InstallPaneState, PendingWagoInstallRequest,
+    SearchPaneState, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -43,6 +43,7 @@ pub enum AppAction {
     SetBackupPaneState(BackupPaneState),
     SetPendingWagoInstallConfirmation(Option<WagoInstallConfirmation>),
     SetWagoInstallInProgress(bool),
+    SetDirectInstallInProgress(bool),
     ToggleDashboardSelection,
     SelectAllDashboardParents,
     ClearDashboardSelection,
@@ -104,6 +105,11 @@ pub enum AppAction {
         api_key: String,
         request: PendingWagoInstallRequest,
         allow_replace: bool,
+    },
+    /// GitHub, WoWInterface or TukUI install from the install/search overlay.
+    StartDirectInstall {
+        addon_dir: PathBuf,
+        request: DirectInstallRequest,
     },
     ReplaceDashboardAddons(Vec<AddonRecord>),
     CompleteAddonScan {

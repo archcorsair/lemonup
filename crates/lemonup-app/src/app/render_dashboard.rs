@@ -413,8 +413,9 @@ pub(super) fn dashboard_item_sort_version_key(
     let priority = match dashboard_item_update_status(item) {
         UpdateStatus::UpdateAvailable => 0,
         UpdateStatus::UpToDate => 1,
-        UpdateStatus::Unknown => 2,
-        UpdateStatus::Error => 3,
+        UpdateStatus::RemoteOlder => 2,
+        UpdateStatus::Unknown => 3,
+        UpdateStatus::Error => 4,
     };
 
     (
@@ -452,21 +453,6 @@ pub(super) fn dashboard_item_version_line(
         return Line::from(spans);
     }
 
-    if !item.has_authoritative_owned_folders {
-        let mut spans = active_prefix.unwrap_or_default();
-        spans.extend([
-            Span::styled(installed, installed_style),
-            Span::raw(" "),
-            Span::styled(
-                "unmanaged",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        return Line::from(spans);
-    }
-
     match dashboard_item_update_status(item) {
         UpdateStatus::UpToDate => {
             let mut spans = active_prefix.unwrap_or_default();
@@ -492,6 +478,16 @@ pub(super) fn dashboard_item_version_line(
                 ),
                 Span::raw(" "),
                 Span::styled("📦", Style::default().fg(ui_theme.package_icon)),
+            ]);
+            Line::from(spans)
+        }
+        UpdateStatus::RemoteOlder => {
+            // Not an update: the provider's version is older than what is installed.
+            let mut spans = active_prefix.unwrap_or_default();
+            spans.extend([
+                Span::styled(installed, installed_style),
+                Span::raw(" "),
+                Span::styled("older remote", Style::default().fg(ui_theme.muted)),
             ]);
             Line::from(spans)
         }
@@ -594,14 +590,12 @@ pub(super) fn dashboard_item_status_text(item: &DashboardItem) -> String {
     if item.source == SourceKind::Manual {
         return "Manual".to_string();
     }
-    if !item.has_authoritative_owned_folders {
-        return "Unmanaged".to_string();
-    }
     match dashboard_item_update_status(item) {
         UpdateStatus::UpToDate => "Up to date".to_string(),
         UpdateStatus::UpdateAvailable => dashboard_item_remote_label(item)
             .map(|version| format!("Update: {version}"))
             .unwrap_or_else(|| "Update".to_string()),
+        UpdateStatus::RemoteOlder => "Remote older".to_string(),
         UpdateStatus::Unknown => "Unknown".to_string(),
         UpdateStatus::Error => "Error".to_string(),
     }

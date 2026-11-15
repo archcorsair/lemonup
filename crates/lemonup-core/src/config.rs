@@ -91,6 +91,12 @@ impl ConfigStore {
 
         let rendered = toml::to_string_pretty(config)?;
         fs::write(&self.path, rendered)?;
+        // The config can hold API keys; keep it private to the owner on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 
@@ -118,6 +124,23 @@ mod tests {
 
         let loaded = store.load().expect("load config");
         assert_eq!(loaded, ConfigLoad::Loaded(config));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_config_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "").expect("precreate");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let store = ConfigStore::new(path.clone());
+        store
+            .write_new_config(&AppConfig::new_unconfigured())
+            .expect("write config");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

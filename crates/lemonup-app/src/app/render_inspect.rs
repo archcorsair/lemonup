@@ -270,11 +270,9 @@ impl App {
             "Status: ",
             Style::default().fg(self.ui_theme.muted),
         )];
-        let is_update_available = matches!(
-            dashboard_item_update_status(item),
-            UpdateStatus::UpdateAvailable
-        ) && item.source != SourceKind::Manual
-            && item.has_authoritative_owned_folders;
+        let item_status = dashboard_item_update_status(item);
+        let is_update_available =
+            item_status == UpdateStatus::UpdateAvailable && item.source != SourceKind::Manual;
         let display_color = if is_update_available {
             self.inspect_pulse_color(status_color)
         } else {
@@ -301,6 +299,12 @@ impl App {
                 Span::raw(" "),
                 Span::styled("📦", Style::default().fg(self.ui_theme.package_icon)),
             ]);
+        } else if item_status == UpdateStatus::RemoteOlder && item.source != SourceKind::Manual {
+            let remote = dashboard_item_remote_label(item).unwrap_or_else(|| "?".to_string());
+            spans.push(Span::styled(
+                format!(" (remote {remote}; not offered as an update)"),
+                Style::default().fg(self.ui_theme.muted),
+            ));
         }
         Line::from(spans)
     }
@@ -321,13 +325,10 @@ impl App {
         if item.source == SourceKind::Manual {
             return ("Manual", Color::Magenta);
         }
-        if !item.has_authoritative_owned_folders {
-            return ("Unmanaged", Color::Magenta);
-        }
-
         match dashboard_item_update_status(item) {
             UpdateStatus::UpToDate => ("Up to date", self.ui_theme.success),
             UpdateStatus::UpdateAvailable => ("Update available", self.ui_theme.warning),
+            UpdateStatus::RemoteOlder => ("Remote older", self.ui_theme.muted),
             UpdateStatus::Unknown => ("Unknown", Color::Magenta),
             UpdateStatus::Error => ("Error", self.ui_theme.error),
         }

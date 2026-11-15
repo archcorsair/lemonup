@@ -3,6 +3,8 @@ use std::panic;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(not(windows))]
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,6 +28,7 @@ impl Tui {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        enable_bracketed_paste(&mut stdout);
         TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
@@ -44,6 +47,7 @@ impl Tui {
 
         self.terminal.show_cursor()?;
         disable_raw_mode()?;
+        disable_bracketed_paste(self.terminal.backend_mut());
         execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
@@ -76,6 +80,28 @@ fn restore_terminal() {
 
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
+    disable_bracketed_paste(&mut stdout);
     let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     let _ = stdout.flush();
 }
+
+/// Asks the terminal to wrap pasted text in markers so it arrives as one
+/// `Event::Paste` instead of a stream of key presses (which would trigger
+/// single-letter actions). Best effort: failure only means pastes arrive as
+/// key events. Skipped on Windows, where crossterm's console reader cannot
+/// parse the markers and would surface them as literal keystrokes.
+#[cfg(not(windows))]
+fn enable_bracketed_paste(writer: &mut impl Write) {
+    let _ = execute!(writer, EnableBracketedPaste);
+}
+
+#[cfg(windows)]
+fn enable_bracketed_paste(_writer: &mut impl Write) {}
+
+#[cfg(not(windows))]
+fn disable_bracketed_paste(writer: &mut impl Write) {
+    let _ = execute!(writer, DisableBracketedPaste);
+}
+
+#[cfg(windows)]
+fn disable_bracketed_paste(_writer: &mut impl Write) {}

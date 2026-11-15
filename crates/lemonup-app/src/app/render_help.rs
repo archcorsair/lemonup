@@ -76,7 +76,7 @@ impl App {
             ),
             HelpContext::InstallSearch => (
                 "Install shortcuts",
-                "Search Wago, edit the query, and install results.",
+                "Search Wago or install from a GitHub, WoWInterface, TukUI or Wago URL.",
             ),
             HelpContext::Config => (
                 "Config shortcuts",
@@ -156,9 +156,17 @@ impl App {
                 (
                     " Query ",
                     vec![
-                        self.help_entry("enter", "Search by name or install a Wago URL"),
+                        self.help_entry("enter", "Search Wago by name or install a pasted URL"),
+                        self.help_entry("elvui / tukui", "Install ElvUI or Tukui from TukUI"),
                         self.help_entry("/", "Edit the query again"),
                     ],
+                ),
+                (
+                    " Direct install ",
+                    vec![self.help_entry(
+                        "enter / esc",
+                        "Confirm or cancel a GitHub, WoWInterface or TukUI install",
+                    )],
                 ),
                 (
                     " Results ",
@@ -169,7 +177,7 @@ impl App {
                 ),
                 (
                     " Setup ",
-                    vec![self.help_entry(",", "Open Config for your Wago API key")],
+                    vec![self.help_entry(",", "Open Config for your Wago API key (Wago only)")],
                 ),
             ],
             HelpContext::Config => vec![

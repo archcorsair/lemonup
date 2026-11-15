@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TerminalEvent {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    /// Text delivered through bracketed paste.
+    Paste(String),
 }
 
 pub struct EventHandler {
@@ -47,6 +49,11 @@ impl EventHandler {
                         }
                         Ok(CrosstermEvent::Resize(width, height)) => {
                             if sender.send(TerminalEvent::Resize(width, height)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(CrosstermEvent::Paste(text)) => {
+                            if sender.send(TerminalEvent::Paste(text)).is_err() {
                                 break;
                             }
                         }

@@ -1,3 +1,4 @@
+pub mod binding;
 pub mod config;
 pub mod domain;
 pub mod error;
@@ -18,8 +19,9 @@ pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
 pub use paths::{AppPaths, DEFAULT_PROFILE, paths_match};
 pub use scan::{
-    ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
-    parse_toc_content, scan_addons_dir, scan_addons_dir_with_tracked, select_toc_file,
+    ScanReport, ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
+    UPDATE_STAGING_PREFIX, parse_toc_content, scan_addons_dir, scan_addons_dir_report,
+    scan_addons_dir_with_tracked, select_toc_file,
 };
 pub use storage::StateDatabase;
 pub use transfer::{

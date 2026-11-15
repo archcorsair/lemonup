@@ -14,6 +14,7 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
+use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://addons.wago.io";
 const EXTERNAL_PATH: &str = "/api/external";
@@ -86,6 +87,8 @@ pub(crate) struct WagoUpdateSummary {
     pub(crate) previous_version: Option<String>,
     pub(crate) remote_version: Option<String>,
     pub(crate) updated: bool,
+    /// Not updated because the remote version is older than the installed one.
+    pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
 }
 
@@ -401,12 +404,9 @@ pub(crate) async fn update_wago_addon(
     if tracked.source != SourceKind::Wago {
         return Err(format!("addon '{}' is not tracked as Wago", tracked.folder));
     }
-    if !tracked.has_authoritative_owned_folders() {
-        return Err(format!(
-            "tracked Wago addon '{}' does not have authoritative managed ownership",
-            tracked.folder
-        ));
-    }
+    // No ownership gate: an addon without authoritative ownership (for example migrated from
+    // v1) is updated like a fresh install, taking its folder set from the package; see
+    // `crate::update_targets::plan_update_replacements`.
 
     let target = tracked
         .source_url
@@ -424,7 +424,11 @@ pub(crate) async fn update_wago_addon(
     let resolved = resolve_wago_release(&client, &addon_id, api_key, flavor, None).await?;
     let remote_version = resolved.version.clone();
 
-    if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
+    let remote_older = !force
+        && crate::update::remote_is_older(tracked.version.as_deref(), remote_version.as_deref());
+    if remote_older
+        || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
+    {
         return Ok(WagoUpdateSummary {
             addon_id: resolved.addon.id.clone(),
             addon_name: resolved.addon.display_name.clone(),
@@ -439,6 +443,7 @@ pub(crate) async fn update_wago_addon(
             previous_version: tracked.version.clone(),
             remote_version,
             updated: false,
+            remote_older,
             dry_run,
         });
     }
@@ -467,7 +472,6 @@ fn install_downloaded_wago_addon(
     let temp_root = create_temp_work_dir("wago-install")?;
     let zip_path = temp_root.path().join("package.zip");
     let extract_root = temp_root.path().join("extract");
-    let backup_root = temp_root.path().join("replace-backup");
     (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
@@ -501,31 +505,28 @@ fn install_downloaded_wago_addon(
             });
         }
 
-        let mut replaced_existing = Vec::new();
-        if replace_existing {
-            fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
-            replaced_existing =
-                replace_existing_install_targets(addon_dir, &backup_root, &extracted.folders)?;
+        // With `replace_existing` the package folders already on disk are taken over: they are
+        // moved aside and restored if anything fails, exactly like an update.
+        let replaced: &[String] = if replace_existing {
+            &extracted.folders
         } else {
             preflight_install_targets(addon_dir, &extracted.folders)?;
-        }
-
-        let mut copied_folders = Vec::new();
-        for folder in &extracted.folders {
-            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
-            copied_folders.push(folder.clone());
-        }
+            &[]
+        };
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            replaced,
+        )?;
 
         let record =
             build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
 
         if let Err(error) = state_database.record_managed_addon(&record) {
-            for folder in copied_folders.iter().rev() {
-                let _ = fs::remove_dir_all(addon_dir.join(folder));
-            }
-            restore_replaced_install_targets(addon_dir, &backup_root, &replaced_existing);
-            return Err(error.to_string());
+            return Err(swap.abort(error.to_string()));
         }
+        swap.commit();
 
         Ok(WagoInstallSummary {
             addon_id: addon.id.clone(),
@@ -600,8 +601,6 @@ fn update_downloaded_wago_addon(
     let temp_root = create_temp_work_dir("wago-update")?;
     let zip_path = temp_root.path().join("package.zip");
     let extract_root = temp_root.path().join("extract");
-    let update_root = temp_root.path().join("backup");
-    fs::create_dir_all(&update_root).map_err(|error| error.to_string())?;
     let previous_version = tracked.version.clone();
     (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
@@ -634,11 +633,14 @@ fn update_downloaded_wago_addon(
                 )
             })?;
 
-        let managed_folders = std::iter::once(tracked.folder.clone())
-            .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-            .collect::<Vec<_>>();
-
-        preflight_update_targets(addon_dir, &extracted.folders, &managed_folders)?;
+        // Parent plus owned folders (authoritative ownership only) and any package folders
+        // taken over from manual rows; refuses folders of other tracked addons.
+        let managed_folders = crate::update_targets::plan_update_replacements(
+            state_database,
+            addon_dir,
+            tracked,
+            &extracted.folders,
+        )?;
 
         if dry_run {
             return Ok(WagoUpdateSummary {
@@ -650,35 +652,26 @@ fn update_downloaded_wago_addon(
                 previous_version,
                 remote_version: release_version(addon, stability),
                 updated: true,
+                remote_older: false,
                 dry_run: true,
             });
         }
 
-        let mut moved_existing = Vec::new();
-        for folder in &managed_folders {
-            let source = addon_dir.join(folder);
-            if !source.exists() {
-                continue;
-            }
-            let backup = update_root.join(folder);
-            copy_dir_recursively(&source, &backup)?;
-            fs::remove_dir_all(&source).map_err(|error| error.to_string())?;
-            moved_existing.push(folder.clone());
-        }
-
-        let mut copied_new = Vec::new();
-        for folder in &extracted.folders {
-            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
-            copied_new.push(folder.clone());
-        }
+        // Stage, move aside and place by same-volume rename; any failure restores the old
+        // folders before the error is returned.
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            &managed_folders,
+        )?;
 
         let record =
             build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
-
         if let Err(error) = state_database.record_managed_addon(&record) {
-            rollback_updated_folders(addon_dir, &update_root, &copied_new, &moved_existing);
-            return Err(error.to_string());
+            return Err(swap.abort(error.to_string()));
         }
+        swap.commit();
 
         Ok(WagoUpdateSummary {
             addon_id: addon.id.clone(),
@@ -689,6 +682,7 @@ fn update_downloaded_wago_addon(
             previous_version,
             remote_version: release_version(addon, stability),
             updated: true,
+            remote_older: false,
             dry_run: false,
         })
     })()
@@ -1047,61 +1041,6 @@ fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(),
     }
 }
 
-fn replace_existing_install_targets(
-    addon_dir: &Path,
-    backup_root: &Path,
-    folders: &[String],
-) -> Result<Vec<String>, String> {
-    let mut replaced = Vec::new();
-    for folder in folders {
-        let source = addon_dir.join(folder);
-        if !source.exists() {
-            continue;
-        }
-        let backup = backup_root.join(folder);
-        copy_dir_recursively(&source, &backup)?;
-        fs::remove_dir_all(&source).map_err(|error| error.to_string())?;
-        replaced.push(folder.clone());
-    }
-    Ok(replaced)
-}
-
-fn restore_replaced_install_targets(addon_dir: &Path, backup_root: &Path, folders: &[String]) {
-    for folder in folders {
-        let destination = addon_dir.join(folder);
-        if destination.exists() {
-            let _ = fs::remove_dir_all(&destination);
-        }
-        let backup = backup_root.join(folder);
-        if backup.exists() {
-            let _ = copy_dir_recursively(&backup, &destination);
-        }
-    }
-}
-
-fn preflight_update_targets(
-    addon_dir: &Path,
-    new_folders: &[String],
-    replaceable_folders: &[String],
-) -> Result<(), String> {
-    let replaceable = replaceable_folders
-        .iter()
-        .collect::<std::collections::HashSet<_>>();
-    let collisions = new_folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists() && !replaceable.contains(folder))
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "update refused because these addon folders are owned by something else on disk: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -1129,53 +1068,11 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
     Ok(())
 }
 
-fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
-            copy_dir_recursively(&from, &to)?;
-        } else {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::copy(&from, &to).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
 fn create_temp_work_dir(prefix: &str) -> Result<TempDir, String> {
     TempDirBuilder::new()
         .prefix(&format!("lemonup-{prefix}-"))
         .tempdir()
         .map_err(|error| error.to_string())
-}
-
-fn rollback_updated_folders(
-    addon_dir: &Path,
-    backup_root: &Path,
-    copied_new: &[String],
-    moved_existing: &[String],
-) {
-    for folder in copied_new.iter().rev() {
-        let _ = fs::remove_dir_all(addon_dir.join(folder));
-    }
-
-    for folder in moved_existing {
-        let backup = backup_root.join(folder);
-        if !backup.exists() {
-            continue;
-        }
-        let restored = addon_dir.join(folder);
-        let _ = copy_dir_recursively(&backup, &restored);
-    }
 }
 
 fn is_valid_wago_slug(value: &str) -> bool {
@@ -1191,9 +1088,21 @@ pub(crate) fn resolve_wago_api_key(config_state: &ConfigLoad) -> Option<String> 
         ConfigLoad::Missing(_) => None,
     };
 
-    from_config
-        .or_else(read_process_wago_api_key)
-        .or_else(load_repo_root_wago_api_key)
+    let key = from_config.or_else(read_process_wago_api_key);
+    // Developer convenience only: release binaries never read a `.env` baked in at build time.
+    #[cfg(debug_assertions)]
+    let key = key.or_else(load_repo_root_wago_api_key);
+    key
+}
+
+/// User-facing list of where a missing Wago API key can come from. Release builds do not read
+/// the repo-root `.env`, so they must not advertise it.
+pub(crate) fn wago_api_key_sources_hint() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env."
+    } else {
+        "Accepted sources: profile config, WAGO_API_KEY."
+    }
 }
 
 fn read_process_wago_api_key() -> Option<String> {
@@ -1203,6 +1112,7 @@ fn read_process_wago_api_key() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(debug_assertions)]
 fn load_repo_root_wago_api_key() -> Option<String> {
     let dotenv_path = repo_root_dotenv_path();
     if !dotenv_path.exists() {
@@ -1224,9 +1134,10 @@ fn load_repo_root_wago_api_key() -> Option<String> {
     None
 }
 
+/// `<workspace root>/.env`: the manifest dir is `<root>/crates/lemonup-app`.
+#[cfg(debug_assertions)]
 fn repo_root_dotenv_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
         .join("..")
         .join("..")
         .join(".env")
@@ -1236,6 +1147,8 @@ fn repo_root_dotenv_path() -> PathBuf {
 mod tests {
     use std::fs;
 
+    #[cfg(debug_assertions)]
+    use super::repo_root_dotenv_path;
     use super::{
         WagoAddonDetailsResponse, WagoAddonSummary, WagoAddonSummaryRaw, WagoRelease, WagoReleases,
         WagoSearchResult, WagoStability, addon_details_url, addon_search_url,
@@ -1625,6 +1538,94 @@ mod tests {
     }
 
     #[test]
+    fn update_downloaded_wago_addon_adopts_unowned_tracked_addon_and_manual_package_folders() {
+        // A tracked row migrated from v1 has no ownership; its package folder set decides what
+        // it owns after the update, and a package folder that was a manual row is taken over.
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addon_dir.join("AstralKeys")).expect("create parent folder");
+        fs::write(addon_dir.join("AstralKeys").join("stale.lua"), "old").expect("stale file");
+        fs::create_dir_all(addon_dir.join("AstralKeys_Extra")).expect("create extra folder");
+        fs::write(addon_dir.join("AstralKeys_Extra").join("stale.lua"), "old").expect("stale");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut tracked =
+            lemonup_core::AddonRecord::new("AstralKeys", "AstralKeys", SourceKind::Wago);
+        tracked.version = Some("4.10".to_string());
+        tracked.source_url = Some("https://addons.wago.io/addons/astralkeys".to_string());
+        assert!(!tracked.has_authoritative_owned_folders());
+        database.upsert_addon(&tracked).expect("seed tracked addon");
+        database
+            .upsert_addon(&lemonup_core::AddonRecord::new(
+                "AstralKeys_Extra",
+                "AstralKeys_Extra",
+                SourceKind::Manual,
+            ))
+            .expect("seed manual row");
+
+        let mut addon = sample_addon();
+        addon.id = "astralkeys".to_string();
+        addon.display_name = "AstralKeys".to_string();
+        addon.website_url = Some("https://addons.wago.io/addons/astralkeys".to_string());
+        addon.releases.stable.as_mut().expect("stable").label = Some("4.11".to_string());
+        let bytes = build_zip(&[
+            (
+                "AstralKeys/AstralKeys.toc",
+                "## Title: AstralKeys\n## Version: 4.11\n## Interface: 110205\n",
+            ),
+            (
+                "AstralKeys_Extra/AstralKeys_Extra.toc",
+                "## Title: AstralKeys Extra\n## Version: 4.11\n## Interface: 110205\n",
+            ),
+        ]);
+
+        let summary = update_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            false,
+        )
+        .expect("update addon");
+
+        assert!(summary.updated);
+        assert!(!addon_dir.join("AstralKeys").join("stale.lua").exists());
+        assert!(
+            !addon_dir
+                .join("AstralKeys_Extra")
+                .join("stale.lua")
+                .exists()
+        );
+        assert!(
+            addon_dir
+                .join("AstralKeys_Extra")
+                .join("AstralKeys_Extra.toc")
+                .exists()
+        );
+        let stored = database
+            .get_addon_by_folder("AstralKeys")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(stored.has_authoritative_owned_folders());
+        assert_eq!(stored.version.as_deref(), Some("4.11"));
+        assert_eq!(stored.owned_folders.len(), 1);
+        assert_eq!(stored.owned_folders[0].name, "AstralKeys_Extra");
+        assert!(
+            database
+                .get_addon_by_folder("AstralKeys_Extra")
+                .expect("get row")
+                .is_none(),
+            "the taken-over manual row is folded into the updated addon"
+        );
+    }
+
+    #[test]
     fn update_downloaded_wago_addon_dry_run_does_not_mutate_disk_or_state() {
         let temp = tempdir().expect("tempdir");
         let addon_dir = temp
@@ -1703,5 +1704,36 @@ mod tests {
             Some("#Details.20260327.14812.171"),
             Some("Details.20260327.14812.171")
         ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn repo_root_dotenv_path_points_at_workspace_root() {
+        let dotenv = repo_root_dotenv_path();
+        assert_eq!(
+            dotenv.file_name().and_then(|name| name.to_str()),
+            Some(".env")
+        );
+
+        let root = dotenv
+            .parent()
+            .expect("parent")
+            .canonicalize()
+            .expect("root exists");
+        let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("workspace manifest");
+        assert!(
+            manifest.contains("[workspace]"),
+            "{} is not the workspace root",
+            root.display()
+        );
+        assert!(root.join("crates").join("lemonup-app").is_dir());
+    }
+
+    #[test]
+    fn api_key_sources_hint_matches_build_profile() {
+        let hint = super::wago_api_key_sources_hint();
+        assert!(hint.contains("profile config"));
+        assert!(hint.contains("WAGO_API_KEY"));
+        assert_eq!(hint.contains(".env"), cfg!(debug_assertions));
     }
 }

@@ -53,3 +53,7 @@ Quick checklist:
 - confirm selection remains stable
 - confirm list/detail text stays readable
 - verify backup restore round-trips against the smoke profile when that flow changes
+
+## Screenshots
+
+Website screenshots come from `scripts/screenshots/generate.sh` (bash, needs `vhs`, `ttyd`, `python3`, `sqlite3` and ImageMagick). It builds the release binary, records every tape in `scripts/screenshots/tapes/` against an offline fixture in `/tmp/lemonup-demo`, and writes 2x PNGs to `../lemonup.org/docs/public/screens` (override with `--out`, reuse a binary with `--bin`). It never touches your real LemonUp config or WoW install. See `scripts/screenshots/README.md`.

@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
+use crate::update_targets::folder_swap::FolderSwap;
 
 const API_URL: &str = "https://api.tukui.org/v1/addons";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -36,6 +37,8 @@ pub(crate) struct TukuiUpdateSummary {
     pub(crate) previous_version: Option<String>,
     pub(crate) remote_version: Option<String>,
     pub(crate) updated: bool,
+    /// Not updated because the remote version is older than the installed one.
+    pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
 }
 
@@ -251,7 +254,11 @@ fn plan_tukui_update(
 ) -> Result<TukuiUpdatePlan, String> {
     let remote_version = Some(addon.version.clone());
 
-    if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
+    let remote_older = !force
+        && crate::update::remote_is_older(tracked.version.as_deref(), remote_version.as_deref());
+    if remote_older
+        || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
+    {
         return Ok(TukuiUpdatePlan::UpToDate(TukuiUpdateSummary {
             addon_slug: addon.slug.clone(),
             addon_name: addon.name.clone(),
@@ -260,6 +267,7 @@ fn plan_tukui_update(
             previous_version: tracked.version.clone(),
             remote_version,
             updated: false,
+            remote_older,
             dry_run,
         }));
     }
@@ -389,14 +397,13 @@ fn install_downloaded_tukui_addon(
         }
 
         preflight_install_targets(addon_dir, &layout.folders)?;
-        for folder in &layout.folders {
-            copy_dir_recursively(&layout.source_root.join(folder), &addon_dir.join(folder))?;
-        }
+        let swap = FolderSwap::apply(addon_dir, &layout.source_root, &layout.folders, &[])?;
 
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
-        state_database
-            .record_managed_addon(&record)
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = state_database.record_managed_addon(&record) {
+            return Err(swap.abort(error.to_string()));
+        }
+        swap.commit();
 
         Ok(TukuiInstallSummary {
             addon_slug: addon.slug.clone(),
@@ -423,8 +430,6 @@ fn update_downloaded_tukui_addon(
     let temp_root = create_temp_work_dir("tukui-update")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let backup_root = temp_root.join("backup");
-    fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
     let previous_version = tracked.version.clone();
 
     let outcome = (|| {
@@ -451,11 +456,14 @@ fn update_downloaded_tukui_addon(
                 )
             })?;
 
-        let managed_folders = std::iter::once(tracked.folder.clone())
-            .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-            .collect::<Vec<_>>();
-
-        preflight_update_targets(addon_dir, &layout.folders, &managed_folders)?;
+        // Parent plus owned folders (authoritative ownership only) and any package folders
+        // taken over from manual rows; refuses folders of other tracked addons.
+        let managed_folders = crate::update_targets::plan_update_replacements(
+            state_database,
+            addon_dir,
+            tracked,
+            &layout.folders,
+        )?;
 
         if dry_run {
             return Ok(TukuiUpdateSummary {
@@ -466,33 +474,25 @@ fn update_downloaded_tukui_addon(
                 previous_version,
                 remote_version: Some(addon.version.clone()),
                 updated: true,
+                remote_older: false,
                 dry_run: true,
             });
         }
 
-        let mut moved_existing = Vec::new();
-        for folder in &managed_folders {
-            let source = addon_dir.join(folder);
-            if !source.exists() {
-                continue;
-            }
-            let backup = backup_root.join(folder);
-            copy_dir_recursively(&source, &backup)?;
-            fs::remove_dir_all(&source).map_err(|error| error.to_string())?;
-            moved_existing.push(folder.clone());
-        }
-
-        let mut copied_new = Vec::new();
-        for folder in &layout.folders {
-            copy_dir_recursively(&layout.source_root.join(folder), &addon_dir.join(folder))?;
-            copied_new.push(folder.clone());
-        }
+        // Stage, move aside and place by same-volume rename; any failure restores the old
+        // folders before the error is returned.
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &layout.source_root,
+            &layout.folders,
+            &managed_folders,
+        )?;
 
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            rollback_updated_folders(addon_dir, &backup_root, &copied_new, &moved_existing);
-            return Err(error.to_string());
+            return Err(swap.abort(error.to_string()));
         }
+        swap.commit();
 
         Ok(TukuiUpdateSummary {
             addon_slug: addon.slug.clone(),
@@ -502,6 +502,7 @@ fn update_downloaded_tukui_addon(
             previous_version,
             remote_version: Some(addon.version.clone()),
             updated: true,
+            remote_older: false,
             dry_run: false,
         })
     })();
@@ -697,29 +698,6 @@ fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(),
     }
 }
 
-fn preflight_update_targets(
-    addon_dir: &Path,
-    new_folders: &[String],
-    replaceable_folders: &[String],
-) -> Result<(), String> {
-    let replaceable = replaceable_folders
-        .iter()
-        .collect::<std::collections::HashSet<_>>();
-    let collisions = new_folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists() && !replaceable.contains(folder))
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "update refused because these addon folders are owned by something else on disk: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -747,68 +725,18 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
     Ok(())
 }
 
-fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
-            copy_dir_recursively(&from, &to)?;
-        } else {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::copy(&from, &to).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
+/// A fresh, uniquely named work directory under the system temp dir; the caller removes it.
+///
+/// `tempfile` creates it atomically with a random suffix, so parallel operations (and tests)
+/// can never share one. A millisecond-timestamp name with an `exists()` check could hand the
+/// same directory to two callers in the same millisecond, and one would delete the other's
+/// extracted package.
 fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis();
-    let root = std::env::temp_dir();
-
-    for attempt in 0..100u16 {
-        let candidate = if attempt == 0 {
-            root.join(format!("lemonup-{prefix}-{timestamp}"))
-        } else {
-            root.join(format!("lemonup-{prefix}-{timestamp}-{attempt}"))
-        };
-        if !candidate.exists() {
-            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
-            return Ok(candidate);
-        }
-    }
-
-    Err("failed to create a unique temporary TukUI work directory".to_string())
-}
-
-fn rollback_updated_folders(
-    addon_dir: &Path,
-    backup_root: &Path,
-    copied_new: &[String],
-    moved_existing: &[String],
-) {
-    for folder in copied_new.iter().rev() {
-        let _ = fs::remove_dir_all(addon_dir.join(folder));
-    }
-
-    for folder in moved_existing {
-        let backup = backup_root.join(folder);
-        if !backup.exists() {
-            continue;
-        }
-        let restored = addon_dir.join(folder);
-        let _ = copy_dir_recursively(&backup, &restored);
-    }
+    tempfile::Builder::new()
+        .prefix(&format!("lemonup-{prefix}-"))
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -1137,6 +1065,87 @@ mod tests {
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("20.463"));
         assert_eq!(stored.source, SourceKind::Tukui);
+    }
+
+    #[test]
+    fn update_downloaded_tukui_addon_adopts_unowned_parent_and_manual_package_folders() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        for folder in ["ElvUI", "ElvUI_Libraries", "ElvUI_Options"] {
+            std::fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            std::fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale");
+        }
+        let mut tracked = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        tracked.version = Some("13.80".to_string());
+        tracked.source_url = Some("https://tukui.org/elvui".to_string());
+        database.upsert_addon(&tracked).expect("seed tracked addon");
+        for folder in ["ElvUI_Libraries", "ElvUI_Options"] {
+            database
+                .upsert_addon(&AddonRecord::new(folder, folder, SourceKind::Manual))
+                .expect("seed manual row");
+        }
+
+        let addon = super::TukuiAddon {
+            slug: "elvui".to_string(),
+            author: "Elv".to_string(),
+            name: "ElvUI".to_string(),
+            url: "https://api.tukui.org/v1/download/elvui/token".to_string(),
+            version: "13.81".to_string(),
+            web_url: "https://tukui.org/elvui".to_string(),
+            directories: canonical_install_folders("elvui"),
+            patch: Vec::new(),
+        };
+        let toc = "## Title: ElvUI\n## Version: 13.81\n## Interface: 110205\n";
+        let bytes = build_zip(&[
+            ("ElvUI/ElvUI.toc", toc),
+            ("ElvUI_Libraries/ElvUI_Libraries.toc", toc),
+            ("ElvUI_Options/ElvUI_Options.toc", toc),
+        ]);
+
+        let summary = update_downloaded_tukui_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            false,
+        )
+        .expect("update addon");
+
+        assert!(summary.updated);
+        for folder in ["ElvUI", "ElvUI_Libraries", "ElvUI_Options"] {
+            assert!(!addon_dir.join(folder).join("stale.lua").exists());
+        }
+        let rows = database.list_addons().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].has_authoritative_owned_folders());
+        assert_eq!(rows[0].owned_folders.len(), 2);
+    }
+
+    #[test]
+    fn tukui_update_holds_back_an_older_remote_unless_forced() {
+        let retail = lemonup_core::GameFlavor::Retail;
+        let mut addon = forever_addon_with_patch(&["11.0.5"]);
+        addon.version = "13.10".to_string();
+        let mut tracked = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        tracked.version = Some("v13.80".to_string());
+
+        match plan_tukui_update(&tracked, &addon, retail, false, false).expect("plan") {
+            TukuiUpdatePlan::UpToDate(summary) => {
+                assert!(!summary.updated);
+                assert!(summary.remote_older);
+            }
+            TukuiUpdatePlan::Download => panic!("an older remote must not be downloaded"),
+        }
+        assert!(matches!(
+            plan_tukui_update(&tracked, &addon, retail, true, false),
+            Ok(TukuiUpdatePlan::Download)
+        ));
     }
 
     #[test]

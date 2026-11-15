@@ -51,7 +51,7 @@ Implemented and validated:
 Use this ladder by default:
 
 1. `cargo fmt --all`
-2. `cargo clippy -p lemonup-app -- -D warnings`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace`
 4. seeded manual smoke from `docs/manual-testing.md`
 
@@ -71,7 +71,7 @@ If `cargo` is not on PATH or rustup has no default toolchain, use:
 $cargo = (Join-Path $env:USERPROFILE '.cargo/bin/cargo.exe')
 $toolchain = Get-ChildItem (Join-Path $env:USERPROFILE '.rustup/toolchains') -Directory | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty Name
 & $cargo "+$toolchain" fmt --all
-& $cargo "+$toolchain" clippy -p lemonup-app -- -D warnings
+& $cargo "+$toolchain" clippy --workspace --all-targets -- -D warnings
 & $cargo "+$toolchain" test --workspace
 ```
 

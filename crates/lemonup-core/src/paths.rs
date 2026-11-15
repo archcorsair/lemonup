@@ -55,6 +55,25 @@ pub fn paths_match(left: &Path, right: &Path) -> bool {
     normalize_for_compare(left) == normalize_for_compare(right)
 }
 
+/// Whether two AddOns paths name the same folder on disk: symlinks and `..` are resolved
+/// when the folder exists, and the comparison ignores case on Windows and macOS, whose
+/// default file systems are case-insensitive.
+pub fn same_addons_folder(left: &Path, right: &Path) -> bool {
+    comparable_folder(left) == comparable_folder(right)
+}
+
+fn comparable_folder(path: &Path) -> String {
+    let resolved = fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let rendered = normalize_for_compare(&resolved);
+    if cfg!(any(windows, target_os = "macos")) {
+        rendered.to_lowercase()
+    } else {
+        rendered
+    }
+}
+
 fn validate_profile_name(profile: &str) -> Result<()> {
     if profile.is_empty() {
         return Err(LemonupError::InvalidArgument(
@@ -100,7 +119,10 @@ fn normalize_for_compare(path: &Path) -> String {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{AppPaths, DEFAULT_PROFILE, paths_match, scoped_dir, validate_profile_name};
+    use super::{
+        AppPaths, DEFAULT_PROFILE, paths_match, same_addons_folder, scoped_dir,
+        validate_profile_name,
+    };
 
     #[test]
     fn default_profile_uses_base_directories() {
@@ -156,6 +178,52 @@ mod tests {
         assert!(!paths_match(
             Path::new("/tmp/LemonUp/Interface/AddOns"),
             Path::new("/tmp/lemonup/Interface/AddOns")
+        ));
+    }
+
+    #[test]
+    fn same_addons_folder_resolves_symlinks_and_dot_segments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&real).expect("create addons");
+        let dotted = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("..")
+            .join("Interface")
+            .join("AddOns");
+        assert!(same_addons_folder(&real, &dotted));
+        assert!(!same_addons_folder(
+            &real,
+            &temp
+                .path()
+                .join("_forever_")
+                .join("Interface")
+                .join("AddOns")
+        ));
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("wow-link");
+            std::os::unix::fs::symlink(temp.path().join("_retail_"), &link).expect("symlink");
+            assert!(same_addons_folder(
+                &real,
+                &link.join("Interface").join("AddOns")
+            ));
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn same_addons_folder_ignores_case_on_case_insensitive_platforms() {
+        assert!(same_addons_folder(
+            Path::new("/Missing/World of Warcraft/_retail_/Interface/AddOns"),
+            Path::new("/missing/world of warcraft/_RETAIL_/interface/addons")
         ));
     }
 }

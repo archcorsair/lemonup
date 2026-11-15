@@ -3,11 +3,13 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
-use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
+use time::{Duration, OffsetDateTime, PrimitiveDateTime};
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
+
+use lemonup_core::paths::same_addons_folder;
 
 use crate::archive::safe_entry_relative_path;
 
@@ -43,8 +45,74 @@ pub struct BackupDeleteOutcome {
     pub backups: Vec<BackupEntry>,
 }
 
+/// Root of a profile's WTF backup store. Archives live one level down, in a folder per
+/// game client (see [`client_backup_dir`]); archives directly in the root predate that
+/// split and are moved by [`adopt_legacy_backups`].
 pub fn backup_root(data_dir: &Path) -> PathBuf {
     data_dir.join("backups").join("wtf")
+}
+
+/// Name of the archive entry that records which client a backup was taken from.
+const CLIENT_MARKER_ENTRY: &str = "lemonup-backup.txt";
+
+/// Stable key for the game client that owns `addon_dir`: its client folder name without
+/// the surrounding underscores (`_retail_` is `retail`, `_forever_` is `forever`). Keyed
+/// by client rather than by full path so backups survive moving the install.
+pub fn client_backup_key(addon_dir: &Path) -> String {
+    let client = addon_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .map(|name| {
+            name.to_string_lossy()
+                .trim_matches('_')
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    let key = client
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == '-' || value == '_' {
+                value
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if key.is_empty() {
+        "client".to_string()
+    } else {
+        key
+    }
+}
+
+/// Folder holding the WTF backups of the client that owns `addon_dir`. Listing, pruning
+/// and the pre-update throttle all work inside this folder, so clients never share them.
+pub fn client_backup_dir(root: &Path, addon_dir: &Path) -> PathBuf {
+    root.join(client_backup_key(addon_dir))
+}
+
+/// Moves archives left directly in `root` by builds without per-client folders into the
+/// folder of `addon_dir`'s client. Callers pass the profile's bound AddOns folder: those
+/// archives were taken from the folder the profile managed, which is the bound one.
+/// Returns the archives moved; a name already present in the client folder is left alone.
+pub fn adopt_legacy_backups(root: &Path, addon_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let legacy = list_backups(root)?;
+    if legacy.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client_dir = client_backup_dir(root, addon_dir);
+    fs::create_dir_all(&client_dir).map_err(|error| error.to_string())?;
+    let mut moved = Vec::new();
+    for entry in legacy {
+        let target = client_dir.join(&entry.file_name);
+        if target.exists() {
+            continue;
+        }
+        fs::rename(&entry.path, &target).map_err(|error| error.to_string())?;
+        moved.push(target);
+    }
+    Ok(moved)
 }
 
 pub fn derive_wtf_dir(addon_dir: &Path) -> Result<PathBuf, String> {
@@ -86,7 +154,8 @@ pub fn create_wtf_backup(
     let wtf_dir = derive_wtf_dir(addon_dir)?;
     fs::create_dir_all(backup_dir).map_err(|error| error.to_string())?;
 
-    let (file_name, archive_path) = write_wtf_archive(&wtf_dir, backup_dir)?;
+    let (file_name, archive_path) =
+        write_wtf_archive(&wtf_dir, backup_dir, &client_backup_key(addon_dir))?;
 
     let pruned_files = prune_backups(backup_dir, usize::from(retention))?;
     let backups = list_backups(backup_dir)?;
@@ -103,12 +172,116 @@ pub fn create_wtf_backup(
     })
 }
 
+/// A pre-update WTF backup is skipped when the newest existing backup is younger than this.
+pub const PRE_UPDATE_BACKUP_MIN_AGE_MINUTES: i64 = 60;
+
+/// Settings for the automatic WTF backup taken before an update run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreUpdateBackupSettings {
+    pub enabled: bool,
+    pub retention: u16,
+    pub backup_dir: PathBuf,
+}
+
+/// Result of the automatic pre-update backup. Never fatal: callers surface it and carry on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreUpdateBackup {
+    Disabled,
+    Created { path: PathBuf },
+    Skipped { minutes_ago: i64 },
+    Warning(String),
+}
+
+impl PreUpdateBackup {
+    /// One-line CLI output; `None` when the setting is off.
+    pub fn cli_line(&self) -> Option<String> {
+        match self {
+            Self::Disabled => None,
+            Self::Created { path } => Some(format!("wtf backup: created {}", path.display())),
+            Self::Skipped { minutes_ago } => Some(format!(
+                "wtf backup: skipped (last backup {minutes_ago} min ago)"
+            )),
+            Self::Warning(error) => Some(format!("wtf backup warning: {error}")),
+        }
+    }
+
+    /// Short note for the TUI status line; only worth showing when something happened.
+    pub fn status_note(&self) -> Option<String> {
+        match self {
+            Self::Created { .. } => Some("WTF backed up".to_string()),
+            Self::Warning(error) => Some(format!("WTF backup failed: {error}")),
+            Self::Disabled | Self::Skipped { .. } => None,
+        }
+    }
+}
+
+/// Backs up WTF before an update run when `backup_wtf` is on, unless the newest existing
+/// backup is less than 60 minutes old at `now`. A failure becomes a warning, never an abort.
+pub fn run_pre_update_backup(
+    settings: &PreUpdateBackupSettings,
+    addon_dir: &Path,
+    now: OffsetDateTime,
+) -> PreUpdateBackup {
+    if !settings.enabled {
+        return PreUpdateBackup::Disabled;
+    }
+
+    // An unreadable backup folder is not a reason to skip: attempt the backup and let
+    // `create_wtf_backup` report any real problem.
+    let existing = list_backups(&settings.backup_dir).unwrap_or_default();
+    if let Some(minutes_ago) = recent_backup_minutes(&existing, now) {
+        return PreUpdateBackup::Skipped { minutes_ago };
+    }
+
+    match create_wtf_backup(addon_dir, &settings.backup_dir, settings.retention) {
+        Ok(outcome) => PreUpdateBackup::Created {
+            path: outcome.backup.path,
+        },
+        Err(error) => PreUpdateBackup::Warning(error),
+    }
+}
+
+/// Whole minutes since the newest backup when it is younger than the throttle window.
+fn recent_backup_minutes(backups: &[BackupEntry], now: OffsetDateTime) -> Option<i64> {
+    let newest = backups
+        .iter()
+        .filter_map(|entry| backup_created_at(&entry.file_name))
+        .max()?;
+    let age = now - newest;
+    // A backup stamped in the future (clock change) does not throttle.
+    if age < Duration::ZERO || age >= Duration::minutes(PRE_UPDATE_BACKUP_MIN_AGE_MINUTES) {
+        return None;
+    }
+    Some(age.whole_minutes())
+}
+
+fn backup_created_at(file_name: &str) -> Option<OffsetDateTime> {
+    let timestamp = file_name.strip_prefix("WTF-")?.strip_suffix(".zip")?;
+    PrimitiveDateTime::parse(timestamp, BACKUP_TIMESTAMP_FORMAT)
+        .ok()
+        .map(PrimitiveDateTime::assume_utc)
+}
+
+/// Restores `archive_path` over the WTF folder of `addon_dir`'s client. `backup_dir` is
+/// that client's own backup folder ([`client_backup_dir`]); an archive taken from another
+/// client (its recorded client, or its folder in the same store) is refused.
 pub fn restore_wtf_backup(
     addon_dir: &Path,
+    backup_dir: &Path,
     archive_path: &Path,
 ) -> Result<BackupRestoreOutcome, String> {
     let wtf_dir = derive_wtf_dir(addon_dir)?;
     let backup = backup_entry_from_path(archive_path)?;
+    let client = client_backup_key(addon_dir);
+    if let Some(owner) = archive_client(&backup.path, backup_dir)?
+        && owner != client
+    {
+        return Err(format!(
+            "backup {} was taken from the '{owner}' client | refusing to restore it into the '{client}' WTF folder {}",
+            backup.path.display(),
+            wtf_dir.display()
+        ));
+    }
     let temp = tempdir().map_err(|error| error.to_string())?;
     let extracted_root = temp.path().join("extracted");
     fs::create_dir_all(&extracted_root).map_err(|error| error.to_string())?;
@@ -155,6 +328,39 @@ pub fn delete_backup(
         deleted: backup,
         backups,
     })
+}
+
+/// The client an archive belongs to: the client recorded inside it, else the per-client
+/// folder it sits in when that folder is a sibling of `backup_dir` in the same store.
+/// `None` for an older archive outside the store (or in the legacy flat root).
+fn archive_client(archive_path: &Path, backup_dir: &Path) -> Result<Option<String>, String> {
+    let file = File::open(archive_path).map_err(|error| error.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    if let Ok(mut marker) = zip.by_name(CLIENT_MARKER_ENTRY) {
+        let mut contents = String::new();
+        marker
+            .read_to_string(&mut contents)
+            .map_err(|error| error.to_string())?;
+        if let Some(client) = contents
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("client="))
+        {
+            return Ok(Some(client.trim().to_string()));
+        }
+    }
+
+    let Some(parent) = archive_path.parent() else {
+        return Ok(None);
+    };
+    let (Some(store), Some(own_store)) = (parent.parent(), backup_dir.parent()) else {
+        return Ok(None);
+    };
+    if same_addons_folder(parent, backup_dir) || !same_addons_folder(store, own_store) {
+        return Ok(None);
+    }
+    Ok(parent
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned()))
 }
 
 fn backup_entry_from_path(path: &Path) -> Result<BackupEntry, String> {
@@ -234,7 +440,11 @@ fn create_unique_archive_file(backup_dir: &Path) -> Result<(String, PathBuf, Fil
     ))
 }
 
-fn write_wtf_archive(wtf_dir: &Path, backup_dir: &Path) -> Result<(String, PathBuf), String> {
+fn write_wtf_archive(
+    wtf_dir: &Path,
+    backup_dir: &Path,
+    client: &str,
+) -> Result<(String, PathBuf), String> {
     let (file_name, archive_path, file) = create_unique_archive_file(backup_dir)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default()
@@ -242,6 +452,11 @@ fn write_wtf_archive(wtf_dir: &Path, backup_dir: &Path) -> Result<(String, PathB
         .unix_permissions(0o755);
 
     add_directory_to_zip(&mut zip, wtf_dir, "WTF", options)?;
+    // Outside the WTF root, so restores (including older builds) never copy it into WTF.
+    zip.start_file(CLIENT_MARKER_ENTRY, options)
+        .map_err(|error| error.to_string())?;
+    zip.write_all(format!("client={client}\n").as_bytes())
+        .map_err(|error| error.to_string())?;
     zip.finish().map_err(|error| error.to_string())?;
     Ok((file_name, archive_path))
 }
@@ -346,11 +561,15 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
+    use time::macros::datetime;
+    use time::{Duration, OffsetDateTime};
     use zip::ZipArchive;
 
     use super::{
-        backup_root, create_unique_archive_file, create_wtf_backup, delete_backup, derive_wtf_dir,
-        list_backups, restore_wtf_backup,
+        BACKUP_TIMESTAMP_FORMAT, PreUpdateBackup, PreUpdateBackupSettings, adopt_legacy_backups,
+        backup_root, client_backup_dir, client_backup_key, create_unique_archive_file,
+        create_wtf_backup, delete_backup, derive_wtf_dir, list_backups, restore_wtf_backup,
+        run_pre_update_backup,
     };
 
     #[test]
@@ -494,7 +713,7 @@ mod tests {
         fs::write(wtf_dir.join("Config.wtf"), "SET current \"2\"\n").expect("mutate current");
         fs::write(wtf_dir.join("Layout-local.txt"), "transient\n").expect("write transient");
 
-        restore_wtf_backup(&addon_dir, &outcome.backup.path).expect("restore");
+        restore_wtf_backup(&addon_dir, &backup_dir, &outcome.backup.path).expect("restore");
 
         let config = fs::read_to_string(wtf_dir.join("Config.wtf")).expect("restored config");
         assert!(config.contains("SET current \"1\""));
@@ -566,5 +785,283 @@ mod tests {
             zip.finish().expect("finish zip");
         }
         assert!(super::extract_wtf_archive(&evil_path, &workspace.path().join("out2")).is_err());
+    }
+
+    fn wtf_layout(root: &Path) -> PathBuf {
+        let addons = root.join("_retail_").join("Interface").join("AddOns");
+        fs::create_dir_all(&addons).expect("addons dir");
+        let wtf = root.join("_retail_").join("WTF");
+        fs::create_dir_all(&wtf).expect("wtf dir");
+        fs::write(wtf.join("Config.wtf"), "SET x 1").expect("wtf file");
+        addons
+    }
+
+    fn settings(enabled: bool, backup_dir: &Path) -> PreUpdateBackupSettings {
+        PreUpdateBackupSettings {
+            enabled,
+            retention: 5,
+            backup_dir: backup_dir.to_path_buf(),
+        }
+    }
+
+    fn seed_backup(backup_dir: &Path, at: OffsetDateTime) {
+        fs::create_dir_all(backup_dir).expect("backup dir");
+        let stamp = at.format(BACKUP_TIMESTAMP_FORMAT).expect("format");
+        fs::write(backup_dir.join(format!("WTF-{stamp}.zip")), b"seed").expect("seed backup");
+    }
+
+    const NOW: OffsetDateTime = datetime!(2026-03-01 12:00:00 UTC);
+
+    #[test]
+    fn pre_update_backup_disabled_does_nothing() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+
+        let result = run_pre_update_backup(&settings(false, &backup_dir), &addons, NOW);
+
+        assert_eq!(result, PreUpdateBackup::Disabled);
+        assert_eq!(result.cli_line(), None);
+        assert!(!backup_dir.exists());
+    }
+
+    #[test]
+    fn pre_update_backup_creates_when_none_exists() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        let PreUpdateBackup::Created { path } = &result else {
+            panic!("expected created, got {result:?}");
+        };
+        assert!(path.is_file());
+        assert!(
+            result
+                .cli_line()
+                .expect("line")
+                .starts_with("wtf backup: created ")
+        );
+        assert_eq!(result.status_note().as_deref(), Some("WTF backed up"));
+    }
+
+    #[test]
+    fn pre_update_backup_throttles_just_under_sixty_minutes() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+        seed_backup(
+            &backup_dir,
+            NOW - Duration::minutes(59) - Duration::seconds(59),
+        );
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        assert_eq!(result, PreUpdateBackup::Skipped { minutes_ago: 59 });
+        assert_eq!(
+            result.cli_line().as_deref(),
+            Some("wtf backup: skipped (last backup 59 min ago)")
+        );
+        assert_eq!(result.status_note(), None);
+        assert_eq!(list_backups(&backup_dir).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn pre_update_backup_runs_at_exactly_sixty_minutes() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+        seed_backup(&backup_dir, NOW - Duration::minutes(60));
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        assert!(matches!(result, PreUpdateBackup::Created { .. }));
+        assert_eq!(list_backups(&backup_dir).expect("list").len(), 2);
+    }
+
+    #[test]
+    fn pre_update_backup_throttle_uses_newest_backup() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+        seed_backup(&backup_dir, NOW - Duration::hours(5));
+        seed_backup(&backup_dir, NOW - Duration::minutes(12));
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        assert_eq!(result, PreUpdateBackup::Skipped { minutes_ago: 12 });
+    }
+
+    #[test]
+    fn pre_update_backup_failure_is_a_warning_not_an_error() {
+        let temp = tempdir().expect("tempdir");
+        // No WTF folder next to the client dir.
+        let addons = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addons).expect("addons dir");
+        let backup_dir = temp.path().join("backups");
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        let PreUpdateBackup::Warning(message) = &result else {
+            panic!("expected warning, got {result:?}");
+        };
+        assert!(message.contains("WTF folder missing"));
+        assert!(
+            result
+                .cli_line()
+                .expect("line")
+                .starts_with("wtf backup warning: ")
+        );
+        assert!(
+            result
+                .status_note()
+                .expect("note")
+                .starts_with("WTF backup failed")
+        );
+    }
+
+    #[test]
+    fn pre_update_backup_future_stamped_backup_does_not_throttle() {
+        let temp = tempdir().expect("tempdir");
+        let addons = wtf_layout(temp.path());
+        let backup_dir = temp.path().join("backups");
+        seed_backup(&backup_dir, NOW + Duration::minutes(30));
+
+        let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
+
+        assert!(matches!(result, PreUpdateBackup::Created { .. }));
+    }
+
+    fn client_layout(root: &Path, client: &str) -> PathBuf {
+        let addons = root.join(client).join("Interface").join("AddOns");
+        fs::create_dir_all(&addons).expect("addons dir");
+        let wtf = root.join(client).join("WTF");
+        fs::create_dir_all(&wtf).expect("wtf dir");
+        fs::write(wtf.join("Config.wtf"), client).expect("wtf file");
+        addons
+    }
+
+    #[test]
+    fn client_backup_key_comes_from_the_client_folder() {
+        assert_eq!(
+            client_backup_key(Path::new("D:/WoW/_retail_/Interface/AddOns")),
+            "retail"
+        );
+        assert_eq!(
+            client_backup_key(Path::new("D:/WoW/_forever_/Interface/AddOns")),
+            "forever"
+        );
+        assert_eq!(
+            client_backup_key(Path::new("D:/WoW/_Classic Era_/Interface/AddOns")),
+            "classic-era"
+        );
+    }
+
+    #[test]
+    fn clients_list_and_prune_their_own_backups() {
+        let temp = tempdir().expect("tempdir");
+        let retail = client_layout(temp.path(), "_retail_");
+        let forever = client_layout(temp.path(), "_forever_");
+        let root = temp.path().join("backups");
+        let retail_dir = client_backup_dir(&root, &retail);
+        let forever_dir = client_backup_dir(&root, &forever);
+        assert_eq!(retail_dir, root.join("retail"));
+
+        create_wtf_backup(&forever, &forever_dir, 1).expect("forever backup");
+        create_wtf_backup(&retail, &retail_dir, 1).expect("retail backup");
+        let second = create_wtf_backup(&retail, &retail_dir, 1).expect("retail backup 2");
+
+        assert_eq!(second.pruned_files.len(), 1, "retention prunes only retail");
+        assert_eq!(list_backups(&retail_dir).expect("list").len(), 1);
+        assert_eq!(list_backups(&forever_dir).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn pre_update_throttle_is_per_client() {
+        let temp = tempdir().expect("tempdir");
+        let retail = client_layout(temp.path(), "_retail_");
+        let forever = client_layout(temp.path(), "_forever_");
+        let root = temp.path().join("backups");
+        seed_backup(
+            &client_backup_dir(&root, &retail),
+            NOW - Duration::minutes(3),
+        );
+
+        let retail_run = run_pre_update_backup(
+            &settings(true, &client_backup_dir(&root, &retail)),
+            &retail,
+            NOW,
+        );
+        assert_eq!(retail_run, PreUpdateBackup::Skipped { minutes_ago: 3 });
+
+        let forever_run = run_pre_update_backup(
+            &settings(true, &client_backup_dir(&root, &forever)),
+            &forever,
+            NOW,
+        );
+        assert!(
+            matches!(forever_run, PreUpdateBackup::Created { .. }),
+            "{forever_run:?}"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_another_clients_archive() {
+        let temp = tempdir().expect("tempdir");
+        let retail = client_layout(temp.path(), "_retail_");
+        let forever = client_layout(temp.path(), "_forever_");
+        let root = temp.path().join("backups");
+        let retail_dir = client_backup_dir(&root, &retail);
+        let retail_backup = create_wtf_backup(&retail, &retail_dir, 5).expect("retail backup");
+
+        // Refused by the client recorded inside the archive, wherever it is.
+        let copied = temp.path().join("elsewhere.zip");
+        fs::copy(&retail_backup.backup.path, &copied).expect("copy");
+        let error = restore_wtf_backup(&forever, &client_backup_dir(&root, &forever), &copied)
+            .expect_err("retail archive into forever");
+        assert!(error.contains("'retail' client"), "{error}");
+
+        // Refused by its folder in the store when it carries no client record (older build).
+        let unmarked_dir = root.join("retail");
+        let unmarked = unmarked_dir.join("WTF-20250101T000000000Z.zip");
+        {
+            let file = fs::File::create(&unmarked).expect("create");
+            let mut zip = zip::ZipWriter::new(file);
+            zip.add_directory("WTF/", zip::write::SimpleFileOptions::default())
+                .expect("dir");
+            zip.finish().expect("finish");
+        }
+        let error = restore_wtf_backup(&forever, &client_backup_dir(&root, &forever), &unmarked)
+            .expect_err("unmarked retail archive into forever");
+        assert!(error.contains("'retail' client"), "{error}");
+
+        let forever_wtf = temp.path().join("_forever_").join("WTF").join("Config.wtf");
+        assert_eq!(fs::read_to_string(forever_wtf).expect("wtf"), "_forever_");
+        restore_wtf_backup(&retail, &retail_dir, &retail_backup.backup.path)
+            .expect("own archive restores");
+    }
+
+    #[test]
+    fn legacy_flat_backups_are_adopted_by_the_given_client() {
+        let temp = tempdir().expect("tempdir");
+        let retail = client_layout(temp.path(), "_retail_");
+        let root = temp.path().join("backups");
+        seed_backup(&root, NOW);
+        seed_backup(&root, NOW - Duration::hours(2));
+
+        let moved = adopt_legacy_backups(&root, &retail).expect("adopt");
+        assert_eq!(moved.len(), 2);
+        assert!(list_backups(&root).expect("root").is_empty());
+        assert_eq!(list_backups(&root.join("retail")).expect("retail").len(), 2);
+        assert!(
+            adopt_legacy_backups(&root, &retail)
+                .expect("again")
+                .is_empty()
+        );
     }
 }

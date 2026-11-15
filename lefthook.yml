@@ -3,6 +3,6 @@ pre-commit:
     fmt:
       run: cargo fmt --all --check
     clippy:
-      run: cargo clippy -p lemonup-app -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
     test:
-      run: cargo test -p lemonup-app
+      run: cargo test --workspace

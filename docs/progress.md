@@ -12,9 +12,10 @@ Current progress ledger for the Rust LemonUp workspace.
 - Production AddOns path: do not use for manual testing
 - Legacy v1 app: retired and removed from the runnable tree
 - Activity: last product work landed 2026-04-09; the project was on hold until 2026-11
-- Releases: no Rust release has been published yet. The latest GitHub release (`v0.1.16`,
-  2026-01-10) and the Scoop/Homebrew manifests still ship the retired v1 Bun binary, and the
-  workspace version in `Cargo.toml` is `0.1.0`, below that tag
+- Releases: 2.0.0 is prepared (workspace version set to `2.0.0` in `Cargo.toml`, `lemonup
+  --version` prints `lemonup 2.0.0`) but not yet tagged or published. The latest GitHub release
+  (`v0.1.16`, 2026-01-10) and the Scoop/Homebrew manifests still ship the retired v1 Bun binary
+  until the 2.0.0 release goes out
 
 ## Completed Through 2026-04-09
 
@@ -70,7 +71,7 @@ Current progress ledger for the Rust LemonUp workspace.
 Default validation remains:
 
 1. `cargo fmt --all`
-2. `cargo clippy -p lemonup-app -- -D warnings`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace`
 4. seeded sandbox verification via `docs/manual-testing.md`
 

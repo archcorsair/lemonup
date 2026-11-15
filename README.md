@@ -64,6 +64,16 @@ lemonup update-all --dry-run
 
 Download the latest binaries from [Releases](https://github.com/archcorsair/lemonup/releases).
 
+## Troubleshooting
+
+**Leftover `.lemonup-staging-*` folder in AddOns.** An update replaces addon folders through a
+hidden `.lemonup-staging-*` folder inside your AddOns folder and deletes it when the update is
+done. If something (an antivirus, a locked file) keeps it from being deleted, the update still
+succeeded, but the folder stays behind and holds the previous versions of the addons it updated.
+`lemonup sync` and the TUI warn when they see one. The game ignores it. To recover, copy any
+addon folder you want back out of its `old` subfolder, then delete the whole
+`.lemonup-staging-*` folder once nothing else is using it.
+
 ## Documentation
 
 For installation, configuration, usage guides, and detailed docs, visit:
@@ -78,7 +88,7 @@ Validation:
 
 ```powershell
 cargo fmt --all
-cargo clippy -p lemonup-app -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
