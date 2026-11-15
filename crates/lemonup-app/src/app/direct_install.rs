@@ -9,7 +9,7 @@ use std::path::Path;
 
 use lemonup_core::StateDatabase;
 
-use super::{AddonScanOutcome, App, AppAction, DetailMode, sync_dashboard_state};
+use super::{AddonScanOutcome, App, AppAction, DetailMode, StatusKind, sync_dashboard_state};
 use crate::github::{install_github_addon, parse_github_target};
 use crate::tukui::{install_tukui_addon, parse_tukui_target};
 use crate::wago::parse_wago_target;
@@ -165,12 +165,14 @@ impl App {
     ) -> Vec<AppAction> {
         if self.dashboard.pending_delete_folders().is_some() {
             return vec![AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Note,
                 DetailMode::Search,
                 "confirm or cancel the pending delete before installing addons",
             ))];
         }
         if self.effective_addon_dir.is_none() {
             return vec![AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Problem,
                 DetailMode::Search,
                 "addon directory is not configured",
             ))];
@@ -178,7 +180,11 @@ impl App {
         let status = direct_install_prompt(&request);
         vec![
             AppAction::SetSearchPaneState(self.search_pane.request_direct_install(request)),
-            AppAction::SetStatus(self.dashboard_status_for(DetailMode::Search, &status)),
+            AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Note,
+                DetailMode::Search,
+                &status,
+            )),
         ]
     }
 }

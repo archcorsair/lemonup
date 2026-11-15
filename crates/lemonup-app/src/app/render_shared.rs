@@ -474,7 +474,7 @@ impl App {
 
         Line::from(vec![Span::styled(
             truncate_text(&self.footer_status_text(), 120),
-            Style::default().fg(self.ui_theme.info),
+            Style::default().fg(self.status_kind_color(self.status_line.kind)),
         )])
     }
 
@@ -518,27 +518,16 @@ impl App {
             .map(|toast| (toast.text.clone(), toast.kind))
     }
 
-    pub(super) fn dashboard_toast_from_status(&self, status: &str) -> Option<DashboardToast> {
+    pub(super) fn dashboard_toast_from_status(
+        &self,
+        status: &StatusMessage,
+    ) -> Option<DashboardToast> {
         if self.shell_mode != ShellMode::Dashboard || self.shell_ui.overlay.active.is_some() {
             return None;
         }
 
         let summary = self.sanitized_status_text(status)?;
-        let kind = if summary.contains("failed")
-            || summary.contains("error")
-            || summary.contains("delete")
-        {
-            DashboardEventKind::Error
-        } else if summary.starts_with("Updated")
-            || summary.starts_with("Saved")
-            || summary.starts_with("Restored")
-            || summary.starts_with("Installed")
-            || summary.starts_with("Backup complete")
-        {
-            DashboardEventKind::Success
-        } else {
-            DashboardEventKind::Info
-        };
+        let kind = toast_kind_for_status(status.kind);
         let duration = match kind {
             DashboardEventKind::Info => StdDuration::from_millis(2500),
             DashboardEventKind::Success => StdDuration::from_millis(3000),
@@ -564,8 +553,15 @@ impl App {
         self.sanitized_status_text(&self.status_line)
     }
 
-    pub(super) fn sanitized_status_text(&self, status: &str) -> Option<String> {
+    /// The message part of a status, without the surface label and profile
+    /// that every status carries. `None` when the kind is not shown.
+    pub(super) fn sanitized_status_text(&self, status: &StatusMessage) -> Option<String> {
+        if !status.kind.is_shown() {
+            return None;
+        }
+
         let mut parts: Vec<String> = status
+            .text
             .split('|')
             .map(str::trim)
             .filter(|part| !part.is_empty())
@@ -582,28 +578,16 @@ impl App {
         }
 
         let summary = parts.join(" · ");
-        self.humanized_footer_status(&summary)
+        (!summary.is_empty()).then_some(summary)
     }
 
-    pub(super) fn humanized_footer_status(&self, summary: &str) -> Option<String> {
-        if summary.is_empty()
-            || summary.starts_with("terminal resized")
-            || summary.starts_with("selected ")
-            || summary.contains("selection moved")
-            || summary.contains("overlay closed")
-            || summary.contains("inspect overlay open")
-            || summary.contains("tree state updated")
-            || summary.contains("dashboard ready")
-            || summary.contains("location finder")
-            || summary.contains("theme updated")
-            || summary.contains("setting updated")
-            || summary.contains("settings selection moved")
-            || summary.contains("config field selection moved")
-            || summary.contains("result selection moved")
-        {
-            None
-        } else {
-            Some(summary.to_string())
+    /// Footer colour for a status message, from its kind alone.
+    pub(super) fn status_kind_color(&self, kind: StatusKind) -> Color {
+        match kind {
+            StatusKind::Done => self.ui_theme.success,
+            StatusKind::Problem => self.ui_theme.error,
+            StatusKind::Working => self.ui_theme.warning,
+            StatusKind::Note | StatusKind::Quiet => self.ui_theme.info,
         }
     }
 
@@ -1406,5 +1390,14 @@ pub(super) fn format_download_count(count: u64) -> String {
         THOUSAND..=999_999 => format_compact_count(count, THOUSAND, "K"),
         MILLION..=999_999_999 => format_compact_count(count, MILLION, "M"),
         _ => format_compact_count(count, BILLION, "B"),
+    }
+}
+
+/// Toast style for a status message, from its kind alone.
+pub(super) fn toast_kind_for_status(kind: StatusKind) -> DashboardEventKind {
+    match kind {
+        StatusKind::Done => DashboardEventKind::Success,
+        StatusKind::Problem => DashboardEventKind::Error,
+        StatusKind::Note | StatusKind::Working | StatusKind::Quiet => DashboardEventKind::Info,
     }
 }

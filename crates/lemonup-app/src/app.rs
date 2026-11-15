@@ -64,6 +64,7 @@ mod render_help;
 mod render_inspect;
 mod render_install_search;
 mod render_shared;
+mod status;
 
 pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
@@ -82,6 +83,7 @@ use self::render_shared::{
     format_download_count, summarize_owned_folders, truncate_middle_text, truncate_text,
     visible_search_result_window,
 };
+pub(crate) use self::status::{StatusKind, StatusMessage};
 
 const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
@@ -165,6 +167,12 @@ impl InspectSection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InspectScrollView {
+    max_offset: u16,
+    height: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InspectOverlayState {
     open_sections: HashSet<InspectSection>,
@@ -183,14 +191,35 @@ impl InspectOverlayState {
         self.open_sections.contains(&section)
     }
 
-    fn scroll_up(mut self) -> Self {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    /// Scrolls by `delta` lines. `max` is the last offset the Details body can
+    /// show, once it has been drawn; before that only the top is enforced.
+    fn scroll_by(mut self, delta: i32, max: Option<u16>) -> Self {
+        let current = i32::from(self.clamp_offset(max));
+        let upper = max.map_or(i32::from(u16::MAX), i32::from);
+        self.scroll_offset = (current + delta).clamp(0, upper) as u16;
         self
     }
 
-    fn scroll_down(mut self) -> Self {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+    fn scroll_up(self, max: Option<u16>) -> Self {
+        self.scroll_by(-1, max)
+    }
+
+    fn scroll_down(self, max: Option<u16>) -> Self {
+        self.scroll_by(1, max)
+    }
+
+    fn scroll_to_top(mut self) -> Self {
+        self.scroll_offset = 0;
         self
+    }
+
+    fn scroll_to_bottom(mut self, max: Option<u16>) -> Self {
+        self.scroll_offset = max.unwrap_or(self.scroll_offset);
+        self
+    }
+
+    fn clamp_offset(&self, max: Option<u16>) -> u16 {
+        max.map_or(self.scroll_offset, |max| self.scroll_offset.min(max))
     }
 }
 
@@ -339,6 +368,9 @@ pub enum DetailMode {
     Overview,
     Install,
     Search,
+    /// The old Update screen. No key opens it any more; its render code goes
+    /// with the overlay rebuild.
+    #[cfg_attr(not(test), allow(dead_code))]
     Update,
     Config,
     Backup,
@@ -391,6 +423,27 @@ enum PasteTarget {
     DashboardFilter,
 }
 
+/// Ctrl+C, which quits from anywhere.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// A Ctrl or Alt chord on a character key, which no screen acts on. On Windows
+/// AltGr arrives as Ctrl+Alt and types ordinary characters such as `@` or `\`,
+/// so a Ctrl+Alt chord only counts when the character is an ASCII letter or digit.
+fn is_modified_char_chord(key: KeyEvent) -> bool {
+    let KeyCode::Char(character) = key.code else {
+        return false;
+    };
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match (control, alt) {
+        (false, false) => false,
+        (true, true) => character.is_ascii_alphanumeric(),
+        _ => true,
+    }
+}
+
 /// Pasted text goes into single-line fields: drop newlines and other control
 /// characters (a trailing newline from the clipboard must not submit or
 /// corrupt a path or API key).
@@ -416,12 +469,20 @@ enum AppMessage {
     DashboardCloseOverlay,
     InspectScrollUp,
     InspectScrollDown,
+    InspectScrollPageUp,
+    InspectScrollPageDown,
+    InspectScrollTop,
+    InspectScrollBottom,
     InspectToggleSection(InspectSection),
     InspectToggleSelected,
     InspectRequestDelete,
     InspectRunCheck,
     InspectRunUpdate,
     DashboardSelectionNext,
+    DashboardSelectionPageDown,
+    DashboardSelectionPageUp,
+    DashboardSelectionFirst,
+    DashboardSelectionLast,
     DashboardSelectionPrevious,
     DashboardPointerSelect {
         column: u16,
@@ -433,7 +494,6 @@ enum AppMessage {
     DashboardUndoDelete,
     DashboardRunCheckSelected,
     DashboardRunUpdateSelected,
-    DashboardSelectRefreshableUpdates,
     DashboardToggleSort(DashboardSortColumn),
     DashboardToggleSelected,
     DashboardSelectAll,
@@ -1302,6 +1362,21 @@ impl DashboardState {
         })
     }
 
+    /// Moves the cursor by `delta` rows, stopping at either end of the list.
+    fn offset_selection(&self, delta: isize) -> Option<usize> {
+        let last = self.rows.len().checked_sub(1)?;
+        let current = self.list_state.selected().unwrap_or(0).min(last);
+        Some(current.saturating_add_signed(delta).min(last))
+    }
+
+    fn first_selection(&self) -> Option<usize> {
+        (!self.rows.is_empty()).then_some(0)
+    }
+
+    fn last_selection(&self) -> Option<usize> {
+        self.rows.len().checked_sub(1)
+    }
+
     fn previous_selection(&self) -> Option<usize> {
         if self.rows.is_empty() {
             return None;
@@ -1556,17 +1631,6 @@ impl DashboardState {
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.folder.cmp(&right.folder));
         items
-    }
-
-    fn refreshable_parent_folders(&self) -> Vec<String> {
-        let mut folders = self
-            .items
-            .iter()
-            .filter(|item| is_refreshable_dashboard_item(item))
-            .map(|item| item.folder.clone())
-            .collect::<Vec<_>>();
-        folders.sort();
-        folders
     }
 
     fn actionable_parent_targets(&self) -> Result<Vec<String>, &'static str> {
@@ -2204,7 +2268,7 @@ enum ScanState {
 pub struct App {
     shell_mode: ShellMode,
     quit_requested: bool,
-    status_line: String,
+    status_line: StatusMessage,
     ui_theme: UiTheme,
     shell_ui: ShellUiState,
     config_present: bool,
@@ -2233,6 +2297,8 @@ pub struct App {
     undo_delete: Option<DashboardUndoDeleteState>,
     undo_delete_in_progress: bool,
     last_dashboard_list_area: Option<Rect>,
+    /// Size of the Inspect details body as last drawn, so paging can stop at the end.
+    inspect_scroll_view: std::cell::Cell<Option<InspectScrollView>>,
     onboarding: OnboardingState,
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
     task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
@@ -2354,7 +2420,7 @@ impl App {
         let mut app = Self {
             shell_mode,
             quit_requested: false,
-            status_line: String::new(),
+            status_line: StatusMessage::cleared(),
             ui_theme: UiTheme::from_mode(loaded_config.theme),
             shell_ui: ShellUiState::default(),
             config_present,
@@ -2388,6 +2454,7 @@ impl App {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
+            inspect_scroll_view: std::cell::Cell::new(None),
             onboarding,
             task_events_tx,
             task_events_rx,
@@ -2404,7 +2471,14 @@ impl App {
     /// Shows a startup notice: a dashboard toast, or a line on the onboarding
     /// screen (onboarding replaces the status line on its first tick).
     pub fn show_startup_notice(&mut self, text: &str, is_error: bool) {
-        self.status_line = self.with_base_status(text);
+        self.status_line = self.with_base_status(
+            if is_error {
+                StatusKind::Problem
+            } else {
+                StatusKind::Done
+            },
+            text,
+        );
         if self.shell_mode == ShellMode::Dashboard {
             self.shell_ui.dashboard_toast = Some(DashboardToast {
                 text: truncate_text(&text.replace(" | ", " · "), 160),
@@ -2479,28 +2553,73 @@ impl App {
         false
     }
 
-    fn initial_status_line(&self) -> String {
+    fn initial_status_line(&self) -> StatusMessage {
         match self.shell_mode {
             ShellMode::Dashboard => {
                 if self.runtime.addon_dir_override.is_some() {
-                    self.dashboard_status_for(DetailMode::Overview, "using addon-dir override")
+                    self.dashboard_status_for(
+                        StatusKind::Note,
+                        DetailMode::Overview,
+                        "using addon-dir override",
+                    )
                 } else if matches!(self.scan_state, ScanState::Pending) {
                     self.dashboard_status_for(
+                        StatusKind::Quiet,
                         DetailMode::Overview,
                         "dashboard ready | initial scan pending",
                     )
                 } else {
-                    self.dashboard_status_for(DetailMode::Overview, "dashboard ready")
+                    self.dashboard_status_for(
+                        StatusKind::Quiet,
+                        DetailMode::Overview,
+                        "dashboard ready",
+                    )
                 }
             }
             ShellMode::Onboarding => match &self.onboarding.phase {
-                OnboardingPhase::Error(message) => {
-                    self.with_base_status(&format!("location finder blocked: {message}"))
-                }
+                OnboardingPhase::Error(message) => self.with_base_status(
+                    StatusKind::Problem,
+                    &format!("location finder blocked: {message}"),
+                ),
                 OnboardingPhase::Ready => self.location_finder_status(),
-                _ => self.with_base_status("location finder"),
+                _ => self.with_base_status(StatusKind::Quiet, "location finder"),
             },
         }
+    }
+
+    /// Rows the addon list shows at once, for PgUp and PgDn. Before the list
+    /// has been drawn this falls back to a fixed page.
+    fn dashboard_page_size(&self) -> usize {
+        const FALLBACK_PAGE: usize = 10;
+        let Some(area) = self.last_dashboard_list_area else {
+            return FALLBACK_PAGE;
+        };
+        // Two borders and the column header, plus the filter bar when shown.
+        let chrome = 3 + u16::from(self.dashboard.filter_bar_visible());
+        usize::from(area.height.saturating_sub(chrome)).max(1)
+    }
+
+    fn dashboard_move_actions(&self, selection: Option<usize>) -> Vec<AppAction> {
+        vec![
+            AppAction::SetDashboardSelection(selection),
+            AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Quiet,
+                self.dashboard.detail_mode,
+                "selection moved",
+            )),
+        ]
+    }
+
+    fn inspect_scroll_max(&self) -> Option<u16> {
+        self.inspect_scroll_view.get().map(|view| view.max_offset)
+    }
+
+    /// Lines the Details body shows at once, for PgUp and PgDn.
+    fn inspect_page_size(&self) -> i32 {
+        const FALLBACK_PAGE: i32 = 10;
+        self.inspect_scroll_view
+            .get()
+            .map_or(FALLBACK_PAGE, |view| i32::from(view.height.max(1)))
     }
 
     fn dashboard_selection_for_pointer(&self, column: u16, row: u16) -> Option<usize> {
@@ -2577,6 +2696,10 @@ impl App {
     }
 
     fn footer_hint_for_key(&self, key: KeyEvent) -> Option<FooterHintId> {
+        if is_ctrl_c(key) || is_modified_char_chord(key) {
+            return None;
+        }
+
         if self.shell_mode == ShellMode::Onboarding {
             if self.onboarding.is_editing {
                 return match key.code {
@@ -2801,6 +2924,15 @@ impl App {
             return vec![];
         }
 
+        // Ctrl+C quits from every screen and state, text boxes included.
+        if is_ctrl_c(key) {
+            return vec![AppMessage::QuitRequested];
+        }
+        // Any other Ctrl or Alt chord never falls through to the plain letter.
+        if is_modified_char_chord(key) {
+            return vec![];
+        }
+
         match self.shell_mode {
             ShellMode::Onboarding => self.onboarding_messages_for_key(key),
             ShellMode::Dashboard => self.dashboard_messages_for_key(key),
@@ -2836,18 +2968,20 @@ impl App {
     fn dashboard_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
         if self.dashboard.pending_delete_folders().is_some() {
             return match key.code {
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char('y') => vec![AppMessage::DashboardConfirmDelete],
-                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::DashboardCancelPendingDelete],
+                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::DashboardCancelPendingDelete]
+                }
                 _ => vec![],
             };
         }
 
         if self.pending_wago_install_confirmation.is_some() {
             return match key.code {
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Char('y') => vec![AppMessage::WagoConfirmInstall],
-                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::WagoCancelInstall],
+                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::WagoCancelInstall]
+                }
                 _ => vec![],
             };
         }
@@ -2855,9 +2989,12 @@ impl App {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::InspectScrollDown],
                 KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::InspectScrollUp],
+                KeyCode::PageDown => vec![AppMessage::InspectScrollPageDown],
+                KeyCode::PageUp => vec![AppMessage::InspectScrollPageUp],
+                KeyCode::Home => vec![AppMessage::InspectScrollTop],
+                KeyCode::End => vec![AppMessage::InspectScrollBottom],
                 KeyCode::Char('c') => vec![AppMessage::InspectRunCheck],
                 KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
@@ -2875,15 +3012,16 @@ impl App {
                 KeyCode::Char('t') => {
                     vec![AppMessage::InspectToggleSection(InspectSection::AddonInfo)]
                 }
-                KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 _ => vec![],
             };
         }
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
             return match key.code {
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                KeyCode::Char('?') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::DashboardCloseOverlay]
+                }
                 _ => vec![],
             };
         }
@@ -2904,14 +3042,7 @@ impl App {
         if self.shell_ui.overlay.active.is_some() {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
-                    vec![AppMessage::DashboardRunUpdateSelected]
-                }
-                KeyCode::Char('v') if self.dashboard.detail_mode == DetailMode::Update => {
-                    vec![AppMessage::DashboardSelectRefreshableUpdates]
-                }
-                KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 _ => vec![],
             };
         }
@@ -2923,13 +3054,7 @@ impl App {
                 KeyCode::Backspace => vec![AppMessage::DashboardFilterBackspace],
                 KeyCode::Down => vec![AppMessage::DashboardSelectionNext],
                 KeyCode::Up => vec![AppMessage::DashboardSelectionPrevious],
-                KeyCode::Char(character)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    vec![AppMessage::DashboardFilterInputChar(character)]
-                }
+                KeyCode::Char(character) => vec![AppMessage::DashboardFilterInputChar(character)],
                 _ => vec![],
             };
         }
@@ -2939,6 +3064,10 @@ impl App {
             KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
             KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::DashboardSelectionNext],
             KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::DashboardSelectionPrevious],
+            KeyCode::PageDown => vec![AppMessage::DashboardSelectionPageDown],
+            KeyCode::PageUp => vec![AppMessage::DashboardSelectionPageUp],
+            KeyCode::Home => vec![AppMessage::DashboardSelectionFirst],
+            KeyCode::End => vec![AppMessage::DashboardSelectionLast],
             KeyCode::Char('x') => vec![AppMessage::DashboardRequestDelete],
             KeyCode::Char('z') => vec![AppMessage::DashboardUndoDelete],
             KeyCode::Char(' ') => vec![AppMessage::DashboardToggleSelected],
@@ -2961,7 +3090,6 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => vec![AppMessage::DashboardCollapseExpanded],
             KeyCode::Char(']') => vec![AppMessage::DashboardExpandAllRelationships],
             KeyCode::Char('[') => vec![AppMessage::DashboardCollapseAllRelationships],
-            KeyCode::Char('o') => vec![AppMessage::SetDetailMode(DetailMode::Overview)],
             KeyCode::Char('i') => {
                 vec![AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst)]
             }
@@ -2976,12 +3104,6 @@ impl App {
             }
             KeyCode::Char('4') => {
                 vec![AppMessage::DashboardToggleSort(DashboardSortColumn::Source)]
-            }
-            KeyCode::Char('r') if self.dashboard.detail_mode == DetailMode::Update => {
-                vec![AppMessage::DashboardRunUpdateSelected]
-            }
-            KeyCode::Char('v') if self.dashboard.detail_mode == DetailMode::Update => {
-                vec![AppMessage::DashboardSelectRefreshableUpdates]
             }
             KeyCode::Char('u') => vec![AppMessage::DashboardRunUpdateSelected],
             KeyCode::Char('c') => vec![AppMessage::DashboardRunCheckSelected],
@@ -3075,7 +3197,7 @@ impl App {
         if self.search_pane.pending_direct_install().is_some() {
             return Some(match key.code {
                 KeyCode::Enter => vec![AppMessage::SearchConfirmDirectInstall],
-                KeyCode::Esc => vec![AppMessage::SearchCancelDirectInstall],
+                KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::SearchCancelDirectInstall],
                 _ => vec![],
             });
         }
@@ -3186,15 +3308,19 @@ impl App {
 
         if self.backup_pane.pending_restore.is_some() {
             return Some(match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => vec![AppMessage::BackupConfirmRestore],
-                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::BackupCancelRestore],
+                KeyCode::Char('y') => vec![AppMessage::BackupConfirmRestore],
+                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::BackupCancelRestore]
+                }
                 _ => vec![],
             });
         }
         if self.backup_pane.pending_delete.is_some() {
             return Some(match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => vec![AppMessage::BackupConfirmDelete],
-                KeyCode::Char('n') | KeyCode::Esc => vec![AppMessage::BackupCancelRestore],
+                KeyCode::Char('y') => vec![AppMessage::BackupConfirmDelete],
+                KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
+                    vec![AppMessage::BackupCancelRestore]
+                }
                 _ => vec![],
             });
         }
@@ -3310,9 +3436,10 @@ impl App {
                 {
                     actions.extend([
                         AppAction::SetOnboardingState(self.onboarding.begin_quick_check()),
-                        AppAction::SetStatus(
-                            self.with_base_status("checking common install locations"),
-                        ),
+                        AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Working,
+                            "checking common install locations",
+                        )),
                         AppAction::StartOnboardingQuickCheck,
                     ]);
                     actions
@@ -3329,6 +3456,7 @@ impl App {
                     actions.extend([
                         AppAction::SetDashboardAutoCheckInProgress(true),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
                             DetailMode::Overview,
                             "background check running",
                         )),
@@ -3345,30 +3473,52 @@ impl App {
             }
             AppMessage::QuitRequested => vec![AppAction::Quit],
             AppMessage::Paste(text) => self.paste_actions(&text),
-            AppMessage::TerminalResized { width, height } => vec![AppAction::SetStatus(
-                self.with_base_status(&format!("terminal resized to {width}x{height}")),
-            )],
+            AppMessage::TerminalResized { width, height } => {
+                vec![AppAction::SetStatus(self.with_base_status(
+                    StatusKind::Quiet,
+                    &format!("terminal resized to {width}x{height}"),
+                ))]
+            }
             AppMessage::DashboardSelectionNext => {
                 let selection = self.dashboard.next_selection();
                 vec![
                     AppAction::SetDashboardSelection(selection),
-                    AppAction::SetStatus(
-                        self.dashboard_status_for(self.dashboard.detail_mode, "selection moved"),
-                    ),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Quiet,
+                        self.dashboard.detail_mode,
+                        "selection moved",
+                    )),
                 ]
+            }
+            AppMessage::DashboardSelectionPageDown => {
+                let page = self.dashboard_page_size();
+                self.dashboard_move_actions(self.dashboard.offset_selection(page as isize))
+            }
+            AppMessage::DashboardSelectionPageUp => {
+                let page = self.dashboard_page_size();
+                self.dashboard_move_actions(self.dashboard.offset_selection(-(page as isize)))
+            }
+            AppMessage::DashboardSelectionFirst => {
+                self.dashboard_move_actions(self.dashboard.first_selection())
+            }
+            AppMessage::DashboardSelectionLast => {
+                self.dashboard_move_actions(self.dashboard.last_selection())
             }
             AppMessage::DashboardSelectionPrevious => {
                 let selection = self.dashboard.previous_selection();
                 vec![
                     AppAction::SetDashboardSelection(selection),
-                    AppAction::SetStatus(
-                        self.dashboard_status_for(self.dashboard.detail_mode, "selection moved"),
-                    ),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Quiet,
+                        self.dashboard.detail_mode,
+                        "selection moved",
+                    )),
                 ]
             }
             AppMessage::DashboardToggleSort(column) => vec![
                 AppAction::ToggleDashboardSort(column),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Overview,
                     &format!(
                         "Sorted by {} {}",
@@ -3380,6 +3530,7 @@ impl App {
             AppMessage::DashboardOpenInspect => {
                 if self.dashboard.selected_row().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Overview,
                         "select an addon row before opening inspect",
                     ))]
@@ -3387,30 +3538,30 @@ impl App {
                     vec![
                         AppAction::SetInspectOverlay(true),
                         AppAction::SetInspectOverlayState(InspectOverlayState::default()),
-                        AppAction::SetStatus(String::new()),
+                        AppAction::SetStatus(StatusMessage::cleared()),
                     ]
                 }
             }
             AppMessage::DashboardOpenHelp => vec![
                 AppAction::SetHelpContext(self.current_help_context()),
                 AppAction::SetHelpOverlay(true),
-                AppAction::SetStatus(String::new()),
+                AppAction::SetStatus(StatusMessage::cleared()),
             ],
             AppMessage::DashboardCloseOverlay => {
                 if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
                     vec![
                         AppAction::SetInspectOverlay(false),
                         AppAction::SetInspectOverlayState(InspectOverlayState::default()),
-                        AppAction::SetStatus(String::new()),
+                        AppAction::SetStatus(StatusMessage::cleared()),
                     ]
                 } else if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
                     vec![
                         AppAction::SetHelpOverlay(false),
-                        AppAction::SetStatus(String::new()),
+                        AppAction::SetStatus(StatusMessage::cleared()),
                     ]
                 } else {
                     vec![
-                        AppAction::SetStatus(String::new()),
+                        AppAction::SetStatus(StatusMessage::cleared()),
                         AppAction::SetDetailMode(DetailMode::Overview),
                     ]
                 }
@@ -3419,10 +3570,32 @@ impl App {
                 self.inspect_overlay.clone().toggle(section),
             )],
             AppMessage::InspectScrollUp => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay.clone().scroll_up(),
+                self.inspect_overlay
+                    .clone()
+                    .scroll_up(self.inspect_scroll_max()),
             )],
             AppMessage::InspectScrollDown => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay.clone().scroll_down(),
+                self.inspect_overlay
+                    .clone()
+                    .scroll_down(self.inspect_scroll_max()),
+            )],
+            AppMessage::InspectScrollPageUp => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay
+                    .clone()
+                    .scroll_by(-self.inspect_page_size(), self.inspect_scroll_max()),
+            )],
+            AppMessage::InspectScrollPageDown => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay
+                    .clone()
+                    .scroll_by(self.inspect_page_size(), self.inspect_scroll_max()),
+            )],
+            AppMessage::InspectScrollTop => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay.clone().scroll_to_top(),
+            )],
+            AppMessage::InspectScrollBottom => vec![AppAction::SetInspectOverlayState(
+                self.inspect_overlay
+                    .clone()
+                    .scroll_to_bottom(self.inspect_scroll_max()),
             )],
             AppMessage::InspectToggleSelected => match self.inspect_resolved_target() {
                 Some(target) => {
@@ -3439,11 +3612,13 @@ impl App {
                         AppAction::SetSelectedDashboardParents(folders),
                         AppAction::SetStatus(if was_selected {
                             self.dashboard_status_for(
+                                StatusKind::Note,
                                 DetailMode::Overview,
                                 &format!("cleared {}", target.item.name),
                             )
                         } else {
                             self.dashboard_status_for(
+                                StatusKind::Quiet,
                                 DetailMode::Overview,
                                 &format!("selected {}", target.item.name),
                             )
@@ -3456,6 +3631,7 @@ impl App {
                 Some(target) => vec![
                     AppAction::SetPendingDelete(Some(vec![target.item.folder.clone()])),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Overview,
                         &format!(
                             "delete {}? press y to confirm, n to cancel",
@@ -3464,6 +3640,7 @@ impl App {
                     )),
                 ],
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Overview,
                     "inspect has no addon target",
                 ))],
@@ -3476,11 +3653,13 @@ impl App {
                         check_interval_secs: self.config_pane.draft.check_interval_secs,
                     },
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Working,
                         DetailMode::Overview,
                         &format!("checking {} for updates", target.item.name),
                     )),
                 ],
                 None => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Overview,
                     "inspect has no addon target",
                 ))],
@@ -3488,11 +3667,13 @@ impl App {
             AppMessage::InspectRunUpdate => {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Overview,
                         "selected addon update already running",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Overview,
                         "confirm or cancel the pending delete before applying updates",
                     ))]
@@ -3502,15 +3683,18 @@ impl App {
                         self.inspect_resolved_target(),
                     ) {
                         (_, None) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             DetailMode::Overview,
                             "inspect has no addon target",
                         ))],
                         (None, Some(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Overview,
                             "addon directory is not configured",
                         ))],
                         (Some(_), Some(target)) if !is_refreshable_dashboard_item(target.item) => {
                             vec![AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Note,
                                 DetailMode::Overview,
                                 &format!("{} is not updateable", target.item.name),
                             ))]
@@ -3524,6 +3708,7 @@ impl App {
                                 check_interval_secs: self.config_pane.draft.check_interval_secs,
                             },
                             AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
                                 DetailMode::Overview,
                                 &format!("updating {}", target.item.name),
                             )),
@@ -3537,6 +3722,7 @@ impl App {
                         vec![
                             AppAction::SetDashboardSelection(Some(selection)),
                             AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Quiet,
                                 self.dashboard.detail_mode,
                                 "selection moved",
                             )),
@@ -3547,24 +3733,36 @@ impl App {
                 }
             }
             AppMessage::DashboardRequestDelete => {
-                let selected = self.dashboard.selected_parent_folders();
-                if selected.is_empty() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                let selected_count = self.dashboard.selected_parent_count();
+                match self.dashboard.actionable_parent_targets() {
+                    Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
-                        "select one or more parent addons before deleting",
-                    ))]
-                } else {
-                    vec![
-                        AppAction::SetPendingDelete(Some(selected.clone())),
-                        AppAction::SetStatus(self.dashboard_status_for(
-                            self.dashboard.detail_mode,
-                            &format!(
+                        &format!("{message} before deleting"),
+                    ))],
+                    Ok(folders) => {
+                        let question = if selected_count == 0 {
+                            let name = self
+                                .dashboard
+                                .selected_row()
+                                .map_or_else(|| folders[0].clone(), |row| row.name.clone());
+                            format!("delete {name}? press y to confirm, n to cancel")
+                        } else {
+                            format!(
                                 "delete {} selected addon{}? press y to confirm, n to cancel",
-                                selected.len(),
-                                plural_suffix(selected.len())
-                            ),
-                        )),
-                    ]
+                                folders.len(),
+                                plural_suffix(folders.len())
+                            )
+                        };
+                        vec![
+                            AppAction::SetPendingDelete(Some(folders)),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Note,
+                                self.dashboard.detail_mode,
+                                &question,
+                            )),
+                        ]
+                    }
                 }
             }
             AppMessage::DashboardConfirmDelete => match (
@@ -3579,29 +3777,36 @@ impl App {
                         trash_dir: self.trash_dir.clone(),
                         folders,
                     },
-                    AppAction::SetStatus(
-                        self.dashboard_status_for(self.dashboard.detail_mode, "delete running"),
-                    ),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Working,
+                        self.dashboard.detail_mode,
+                        "delete running",
+                    )),
                 ],
                 _ => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     self.dashboard.detail_mode,
                     "no pending delete to confirm",
                 ))],
             },
             AppMessage::DashboardCancelPendingDelete => vec![
                 AppAction::SetPendingDelete(None),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "delete cancelled"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    self.dashboard.detail_mode,
+                    "delete cancelled",
+                )),
             ],
             AppMessage::DashboardUndoDelete => {
                 if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "confirm or cancel the pending delete before undoing the last delete",
                     ))]
                 } else if self.undo_delete_in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "undo delete already running",
                     ))]
@@ -3610,6 +3815,7 @@ impl App {
                         AppAction::SetDashboardUndoInProgress(true),
                         AppAction::StartDashboardUndoDelete { undo: undo.clone() },
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
                             self.dashboard.detail_mode,
                             &format!(
                                 "restoring last delete: {} parent addon{}, {} folder{}",
@@ -3622,6 +3828,7 @@ impl App {
                     ]
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "no delete undo is available",
                     ))]
@@ -3630,6 +3837,7 @@ impl App {
             AppMessage::DashboardRunCheckSelected => {
                 match self.dashboard.actionable_parent_targets() {
                     Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         &format!("{message} before checking for updates"),
                     ))],
@@ -3642,6 +3850,7 @@ impl App {
                                 check_interval_secs: self.config_pane.draft.check_interval_secs,
                             },
                             AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
                                 self.dashboard.detail_mode,
                                 &format!(
                                     "checking {} addon{} for updates",
@@ -3656,11 +3865,13 @@ impl App {
             AppMessage::DashboardRunUpdateSelected => {
                 if self.dashboard.update_in_progress() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "selected addon update already running",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "confirm or cancel the pending delete before applying selected updates",
                     ))]
@@ -3670,10 +3881,12 @@ impl App {
                         self.dashboard.actionable_parent_targets(),
                     ) {
                         (_, Err(message)) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             self.dashboard.detail_mode,
                             &format!("{message} before applying updates"),
                         ))],
                         (None, Ok(_)) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             self.dashboard.detail_mode,
                             "addon directory is not configured",
                         ))],
@@ -3688,6 +3901,7 @@ impl App {
                                     check_interval_secs: self.config_pane.draft.check_interval_secs,
                                 },
                                 AppAction::SetStatus(self.dashboard_status_for(
+                                    StatusKind::Working,
                                     self.dashboard.detail_mode,
                                     &format!(
                                         "updating {} addon{}",
@@ -3700,39 +3914,18 @@ impl App {
                     }
                 }
             }
-            AppMessage::DashboardSelectRefreshableUpdates => {
-                let refreshable = self.dashboard.refreshable_parent_folders();
-                if refreshable.is_empty() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        self.dashboard.detail_mode,
-                        "no updateable tracked parent addons are available in the current list",
-                    ))]
-                } else {
-                    let count = refreshable.len();
-                    vec![
-                        AppAction::SetSelectedDashboardParents(refreshable),
-                        AppAction::SetStatus(self.dashboard_status_for(
-                            self.dashboard.detail_mode,
-                            &format!(
-                                "selected {} updateable tracked addon{}",
-                                count,
-                                plural_suffix(count)
-                            ),
-                        )),
-                    ]
-                }
-            }
-            AppMessage::DashboardToggleSelected => vec![
+            AppMessage::DashboardToggleSelected => {
+                vec![
                 AppAction::ToggleDashboardSelection,
                 AppAction::SetStatus(match self.dashboard.selected_row() {
                     Some(DashboardRow {
                         kind: DashboardRowKind::OwnedChild { .. },
                         ..
-                    }) => self.dashboard_status_for(
+                    }) => self.dashboard_status_for(StatusKind::Note,
                         self.dashboard.detail_mode,
                         "owned child rows inherit parent actions | select the parent row instead",
                     ),
-                    _ => self.dashboard_status_for(
+                    _ => self.dashboard_status_for(StatusKind::Quiet,
                         self.dashboard.detail_mode,
                         &format!(
                             "selected {} addon{}",
@@ -3741,10 +3934,12 @@ impl App {
                         ),
                     ),
                 }),
-            ],
+            ]
+            }
             AppMessage::DashboardSelectAll => vec![
                 AppAction::SelectAllDashboardParents,
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Quiet,
                     self.dashboard.detail_mode,
                     &format!(
                         "selected all {} addon{}",
@@ -3783,19 +3978,24 @@ impl App {
             }],
             AppMessage::DashboardClearSelection => vec![
                 AppAction::ClearDashboardSelection,
-                AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "selection cleared"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    self.dashboard.detail_mode,
+                    "selection cleared",
+                )),
             ],
             AppMessage::DashboardToggleExpanded => vec![
                 AppAction::ToggleDashboardExpanded,
-                AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Quiet,
+                    self.dashboard.detail_mode,
+                    "tree state updated",
+                )),
             ],
             AppMessage::DashboardExpandAllRelationships => vec![
                 AppAction::ExpandAllDashboardRelationships,
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     self.dashboard.detail_mode,
                     "expanded all relationship rows",
                 )),
@@ -3803,19 +4003,23 @@ impl App {
             AppMessage::DashboardCollapseAllRelationships => vec![
                 AppAction::CollapseAllDashboardRelationships,
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     self.dashboard.detail_mode,
                     "collapsed all relationship rows",
                 )),
             ],
             AppMessage::DashboardCollapseExpanded => vec![
                 AppAction::CollapseDashboardExpanded,
-                AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Quiet,
+                    self.dashboard.detail_mode,
+                    "tree state updated",
+                )),
             ],
             AppMessage::SetDetailMode(detail_mode) => vec![
                 AppAction::SetDetailMode(detail_mode),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     detail_mode,
                     &format!("{} selected", detail_mode_label(detail_mode)),
                 )),
@@ -3823,6 +4027,7 @@ impl App {
             AppMessage::InstallBeginEditing => vec![
                 AppAction::SetInstallPaneState(self.install_pane.begin_editing()),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Install,
                     "editing Wago target | enter install | esc stop editing",
                 )),
@@ -3830,6 +4035,7 @@ impl App {
             AppMessage::InstallStopEditing => vec![
                 AppAction::SetInstallPaneState(self.install_pane.stop_editing()),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Install,
                     "Wago direct install ready | e edit target | enter install",
                 )),
@@ -3842,26 +4048,32 @@ impl App {
             )],
             AppMessage::InstallSubmit => {
                 if let Some(busy) = self.install_busy_status() {
-                    vec![AppAction::SetStatus(
-                        self.dashboard_status_for(DetailMode::Install, busy),
-                    )]
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
+                        DetailMode::Install,
+                        busy,
+                    ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Install,
                         "confirm or cancel the pending delete before installing addons",
                     ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Install,
                         "Wago install unavailable: no API key configured",
                     ))]
                 } else if self.install_pane.input.trim().is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Install,
                         "enter a Wago slug or addon URL before installing",
                     ))]
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Install,
                         "addon directory is not configured",
                     ))]
@@ -3879,6 +4091,7 @@ impl App {
                             allow_replace: false,
                         },
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
                             DetailMode::Install,
                             "checking Wago package and preparing install",
                         )),
@@ -3888,6 +4101,7 @@ impl App {
             AppMessage::SearchBeginEditing => vec![
                 AppAction::SetSearchPaneState(self.search_pane.begin_editing()),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Search,
                     "editing install input | enter search or install | esc stop editing",
                 )),
@@ -3896,15 +4110,18 @@ impl App {
                 AppAction::SetSearchPaneState(self.search_pane.open_with_mode(mode)),
                 AppAction::SetDetailMode(DetailMode::Search),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Search,
                     "install addons | type a name or paste an addon URL and press enter",
                 )),
             ],
             AppMessage::SearchStopEditing => vec![
                 AppAction::SetSearchPaneState(self.search_pane.stop_editing()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Search, "install/search ready"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Search,
+                    "install/search ready",
+                )),
             ],
             AppMessage::SearchInputChar(character) => vec![AppAction::SetSearchPaneState(
                 self.search_pane.insert_char(character),
@@ -3916,13 +4133,16 @@ impl App {
                 let intent = classify_search_input(&self.search_pane.query);
                 if self.search_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "Wago search already running",
                     ))]
                 } else if let Some(busy) = self.install_busy_status() {
-                    vec![AppAction::SetStatus(
-                        self.dashboard_status_for(DetailMode::Search, busy),
-                    )]
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
+                        DetailMode::Search,
+                        busy,
+                    ))]
                 } else if let SearchInputIntent::InvalidUrl(message) = intent {
                     vec![
                         AppAction::SetSearchPaneState(self.search_pane.fail_install(
@@ -3931,6 +4151,7 @@ impl App {
                             message.clone(),
                         )),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Search,
                             &format!("cannot install from URL: {message}"),
                         )),
@@ -3939,22 +4160,26 @@ impl App {
                     self.request_direct_install_actions(request)
                 } else if intent == SearchInputIntent::Empty {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "enter an addon name or URL before submitting",
                     ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Search,
                         "Wago search unavailable: no API key configured",
                     ))]
                 } else if self.dashboard.pending_delete_folders().is_some() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "confirm or cancel the pending delete before installing addons",
                     ))]
                 } else if let Some(target) = self.search_direct_install_target() {
                     if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Search,
                             "addon directory is not configured",
                         ))]
@@ -3978,6 +4203,7 @@ impl App {
                                 allow_replace: false,
                             },
                             AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
                                 DetailMode::Search,
                                 &format!(
                                     "checking Wago addon '{}' for install",
@@ -3995,6 +4221,7 @@ impl App {
                             api_key: self.wago_api_key.clone().expect("checked above"),
                         },
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
                             DetailMode::Search,
                             &format!("searching Wago for '{query}'"),
                         )),
@@ -4004,45 +4231,55 @@ impl App {
             AppMessage::SearchResultNext => {
                 if self.search_pane.results.is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "no Wago search results to select",
                     ))]
                 } else {
                     vec![
                         AppAction::SetSearchPaneState(self.search_pane.select_next()),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Search, "result selection moved"),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Quiet,
+                            DetailMode::Search,
+                            "result selection moved",
+                        )),
                     ]
                 }
             }
             AppMessage::SearchResultPrevious => {
                 if self.search_pane.results.is_empty() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "no Wago search results to select",
                     ))]
                 } else {
                     vec![
                         AppAction::SetSearchPaneState(self.search_pane.select_previous()),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Search, "result selection moved"),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Quiet,
+                            DetailMode::Search,
+                            "result selection moved",
+                        )),
                     ]
                 }
             }
             AppMessage::SearchInstallSelected => {
                 if let Some(busy) = self.install_busy_status() {
-                    vec![AppAction::SetStatus(
-                        self.dashboard_status_for(DetailMode::Search, busy),
-                    )]
+                    vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
+                        DetailMode::Search,
+                        busy,
+                    ))]
                 } else if self.wago_api_key.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Search,
                         "Wago install unavailable: no API key configured",
                     ))]
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Search,
                         "addon directory is not configured",
                     ))]
@@ -4061,12 +4298,14 @@ impl App {
                             allow_replace: false,
                         },
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
                             DetailMode::Search,
                             &format!("checking Wago result '{}' for install", result.display_name),
                         )),
                     ]
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "select a Wago search result before installing",
                     ))]
@@ -4075,11 +4314,14 @@ impl App {
             AppMessage::SearchConfirmDirectInstall => {
                 if let Some(request) = self.search_pane.pending_direct_install().cloned() {
                     if let Some(busy) = self.install_busy_status() {
-                        vec![AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Search, busy),
-                        )]
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
+                            DetailMode::Search,
+                            busy,
+                        ))]
                     } else if self.dashboard.pending_delete_folders().is_some() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             DetailMode::Search,
                             "confirm or cancel the pending delete before installing addons",
                         ))]
@@ -4090,6 +4332,7 @@ impl App {
                             ),
                             AppAction::SetDirectInstallInProgress(true),
                             AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
                                 DetailMode::Search,
                                 &format!(
                                     "installing {} from {}",
@@ -4101,12 +4344,14 @@ impl App {
                         ]
                     } else {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Search,
                             "addon directory is not configured",
                         ))]
                     }
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "no direct install confirmation is pending",
                     ))]
@@ -4114,18 +4359,23 @@ impl App {
             }
             AppMessage::SearchCancelDirectInstall => vec![
                 AppAction::SetSearchPaneState(self.search_pane.cancel_direct_install()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Search, "install cancelled"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Search,
+                    "install cancelled",
+                )),
             ],
             AppMessage::WagoConfirmInstall => {
                 if let Some(confirmation) = self.pending_wago_install_confirmation.clone() {
                     if let Some(busy) = self.install_busy_status() {
-                        vec![AppAction::SetStatus(
-                            self.dashboard_status_for(self.dashboard.detail_mode, busy),
-                        )]
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
+                            self.dashboard.detail_mode,
+                            busy,
+                        ))]
                     } else if self.wago_api_key.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             self.dashboard.detail_mode,
                             "Wago install unavailable: no API key configured",
                         ))]
@@ -4155,18 +4405,22 @@ impl App {
                             "replacing existing addon folders from confirmed Wago install"
                                 .to_string()
                         };
-                        actions.push(AppAction::SetStatus(
-                            self.dashboard_status_for(self.dashboard.detail_mode, &status_message),
-                        ));
+                        actions.push(AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
+                            self.dashboard.detail_mode,
+                            &status_message,
+                        )));
                         actions
                     } else {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             self.dashboard.detail_mode,
                             "addon directory is not configured",
                         ))]
                     }
                 } else {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "no Wago install confirmation is pending",
                     ))]
@@ -4175,9 +4429,11 @@ impl App {
             AppMessage::WagoCancelInstall => vec![
                 AppAction::SetPendingWagoInstallConfirmation(None),
                 AppAction::SetSearchPaneState(self.search_pane.clear_install_state()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(self.dashboard.detail_mode, "Wago install cancelled"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    self.dashboard.detail_mode,
+                    "Wago install cancelled",
+                )),
             ],
             AppMessage::ConfigSelectionNext => vec![AppAction::SetConfigPaneState(
                 self.config_pane.select_next(),
@@ -4207,10 +4463,15 @@ impl App {
                     Ok(actions) => actions,
                     Err(error) => vec![
                         AppAction::SetConfigPaneState(self.config_pane.cancel_edit()),
-                        AppAction::SetStatus(self.dashboard_status_for(DetailMode::Config, &error)),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Config,
+                            &error,
+                        )),
                     ],
                 },
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Problem,
                     DetailMode::Config,
                     &format!("config edit failed: {error}"),
                 ))],
@@ -4230,9 +4491,11 @@ impl App {
                     let next = self.config_pane.toggle_selected();
                     match self.persist_config_pane(next, field) {
                         Ok(actions) => actions,
-                        Err(error) => vec![AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Config, &error),
-                        )],
+                        Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Config,
+                            &error,
+                        ))],
                     }
                 }
             }
@@ -4241,16 +4504,20 @@ impl App {
                 let next = self.config_pane.adjust_selected(delta);
                 match self.persist_config_pane(next, field) {
                     Ok(actions) => actions,
-                    Err(error) => vec![AppAction::SetStatus(
-                        self.dashboard_status_for(DetailMode::Config, &error),
-                    )],
+                    Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
+                        DetailMode::Config,
+                        &error,
+                    ))],
                 }
             }
             AppMessage::ConfigRunOnboarding => vec![
                 AppAction::ReenterOnboarding,
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Config, "re-entering onboarding"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Config,
+                    "re-entering onboarding",
+                )),
             ],
             AppMessage::ConfigExportAddons => match default_transfer_path() {
                 Ok(output_path) => {
@@ -4259,6 +4526,7 @@ impl App {
                         .and_then(|addons| export_addons(&addons, &output_path))
                     {
                         Ok(exported) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
                             DetailMode::Config,
                             &format!(
                                 "exported {} addon{} to {}",
@@ -4268,12 +4536,14 @@ impl App {
                             ),
                         ))],
                         Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Config,
                             &format!("addon export failed: {error}"),
                         ))],
                     }
                 }
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Problem,
                     DetailMode::Config,
                     &format!("addon export failed: {error}"),
                 ))],
@@ -4282,17 +4552,17 @@ impl App {
                 Ok(input_path) => {
                     if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Config,
                             "configure an addon directory before importing",
                         ))]
                     } else {
                         vec![
-                            AppAction::SetStatus(
-                                self.dashboard_status_for(
-                                    DetailMode::Config,
-                                    "importing addon list",
-                                ),
-                            ),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
+                                DetailMode::Config,
+                                "importing addon list",
+                            )),
                             AppAction::StartTransferImport {
                                 addon_dir: self.effective_addon_dir.clone().expect("checked above"),
                                 input_path,
@@ -4302,6 +4572,7 @@ impl App {
                     }
                 }
                 Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Problem,
                     DetailMode::Config,
                     &format!("addon import failed: {error}"),
                 ))],
@@ -4309,6 +4580,7 @@ impl App {
             AppMessage::BackupRunNow => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "WTF backup already running",
                     ))]
@@ -4317,6 +4589,7 @@ impl App {
                     if elapsed < BACKUP_SPAM_GUARD_WINDOW {
                         let remaining = (BACKUP_SPAM_GUARD_WINDOW - elapsed).whole_seconds().max(1);
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             DetailMode::Backup,
                             &format!(
                                 "backup created recently; wait {} more second{}",
@@ -4326,6 +4599,7 @@ impl App {
                         ))]
                     } else if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Backup,
                             "addon directory is not configured",
                         ))]
@@ -4337,16 +4611,16 @@ impl App {
                                 backup_dir: self.backup_dir.clone(),
                                 retention: self.config_pane.draft.backup_retention,
                             },
-                            AppAction::SetStatus(
-                                self.dashboard_status_for(
-                                    DetailMode::Backup,
-                                    "creating WTF backup",
-                                ),
-                            ),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
+                                DetailMode::Backup,
+                                "creating WTF backup",
+                            )),
                         ]
                     }
                 } else if self.effective_addon_dir.is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Backup,
                         "addon directory is not configured",
                     ))]
@@ -4358,9 +4632,11 @@ impl App {
                             backup_dir: self.backup_dir.clone(),
                             retention: self.config_pane.draft.backup_retention,
                         },
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Backup, "creating WTF backup"),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
+                            DetailMode::Backup,
+                            "creating WTF backup",
+                        )),
                     ]
                 }
             }
@@ -4373,11 +4649,13 @@ impl App {
             AppMessage::BackupRequestRestore => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "backup work already running",
                     ))]
                 } else if self.backup_pane.selected_backup().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "select a backup before restoring",
                     ))]
@@ -4385,6 +4663,7 @@ impl App {
                     vec![
                         AppAction::SetBackupPaneState(self.backup_pane.request_restore()),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             DetailMode::Backup,
                             "restore will replace the current WTF folder | y confirm | n cancel",
                         )),
@@ -4394,11 +4673,13 @@ impl App {
             AppMessage::BackupRequestDelete => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "backup work already running",
                     ))]
                 } else if self.backup_pane.selected_backup().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "select a backup before deleting",
                     ))]
@@ -4406,6 +4687,7 @@ impl App {
                     vec![
                         AppAction::SetBackupPaneState(self.backup_pane.request_delete()),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
                             DetailMode::Backup,
                             "delete selected backup? | y confirm | n cancel",
                         )),
@@ -4415,12 +4697,14 @@ impl App {
             AppMessage::BackupConfirmRestore => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "backup work already running",
                     ))]
                 } else if let Some(backup) = self.backup_pane.pending_restore.clone() {
                     if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             DetailMode::Backup,
                             "addon directory is not configured",
                         ))]
@@ -4431,12 +4715,11 @@ impl App {
                                 addon_dir: self.effective_addon_dir.clone().expect("checked above"),
                                 backup_path: backup.path,
                             },
-                            AppAction::SetStatus(
-                                self.dashboard_status_for(
-                                    DetailMode::Backup,
-                                    "restoring WTF backup",
-                                ),
-                            ),
+                            AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Working,
+                                DetailMode::Backup,
+                                "restoring WTF backup",
+                            )),
                         ]
                     }
                 } else {
@@ -4446,6 +4729,7 @@ impl App {
             AppMessage::BackupConfirmDelete => {
                 if self.backup_pane.in_progress {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Backup,
                         "backup work already running",
                     ))]
@@ -4456,9 +4740,11 @@ impl App {
                             backup_root: self.backup_dir.clone(),
                             backup_path: backup.path,
                         },
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Backup, "deleting backup"),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
+                            DetailMode::Backup,
+                            "deleting backup",
+                        )),
                     ]
                 } else {
                     vec![]
@@ -4466,27 +4752,35 @@ impl App {
             }
             AppMessage::BackupCancelRestore => vec![
                 AppAction::SetBackupPaneState(self.backup_pane.cancel_restore().cancel_delete()),
-                AppAction::SetStatus(
-                    self.dashboard_status_for(DetailMode::Backup, "backup action cancelled"),
-                ),
+                AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Note,
+                    DetailMode::Backup,
+                    "backup action cancelled",
+                )),
             ],
             AppMessage::OnboardingNextStep => match self.onboarding.step {
                 OnboardingStep::Theme => vec![
                     AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(
-                        self.with_base_status("step 2/5 | choose or validate an AddOns path"),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        StatusKind::Note,
+                        "step 2/5 | choose or validate an AddOns path",
+                    )),
                 ],
-                OnboardingStep::Directory => vec![AppAction::SetStatus(
-                    self.with_base_status("validate or confirm a directory before continuing"),
-                )],
+                OnboardingStep::Directory => vec![AppAction::SetStatus(self.with_base_status(
+                    StatusKind::Note,
+                    "validate or confirm a directory before continuing",
+                ))],
                 OnboardingStep::Wago => vec![
                     AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(self.with_base_status("step 4/5 | adjust core settings")),
+                    AppAction::SetStatus(
+                        self.with_base_status(StatusKind::Note, "step 4/5 | adjust core settings"),
+                    ),
                 ],
                 OnboardingStep::Settings => vec![
                     AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(self.with_base_status("step 5/5 | review setup")),
+                    AppAction::SetStatus(
+                        self.with_base_status(StatusKind::Note, "step 5/5 | review setup"),
+                    ),
                 ],
                 OnboardingStep::Review => {
                     vec![AppAction::SaveOnboardingConfig(
@@ -4500,32 +4794,38 @@ impl App {
                 } else {
                     vec![
                         AppAction::SetOnboardingState(self.onboarding.previous_step()),
-                        AppAction::SetStatus(self.with_base_status(&format!(
-                            "step {}/5",
-                            self.onboarding.step.previous().index() + 1
-                        ))),
+                        AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Note,
+                            &format!("step {}/5", self.onboarding.step.previous().index() + 1),
+                        )),
                     ]
                 }
             }
             AppMessage::OnboardingToggleTheme => vec![
                 AppAction::SetOnboardingState(self.onboarding.toggle_theme()),
-                AppAction::SetStatus(self.with_base_status("theme updated | enter next")),
+                AppAction::SetStatus(
+                    self.with_base_status(StatusKind::Quiet, "theme updated | enter next"),
+                ),
             ],
             AppMessage::OnboardingSettingsNext => vec![
                 AppAction::SetOnboardingState(self.onboarding.next_settings_field()),
-                AppAction::SetStatus(self.with_base_status("settings selection moved")),
+                AppAction::SetStatus(
+                    self.with_base_status(StatusKind::Quiet, "settings selection moved"),
+                ),
             ],
             AppMessage::OnboardingSettingsPrevious => vec![
                 AppAction::SetOnboardingState(self.onboarding.previous_settings_field()),
-                AppAction::SetStatus(self.with_base_status("settings selection moved")),
+                AppAction::SetStatus(
+                    self.with_base_status(StatusKind::Quiet, "settings selection moved"),
+                ),
             ],
             AppMessage::OnboardingSettingIncrease => vec![
                 AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(1)),
-                AppAction::SetStatus(self.with_base_status("setting updated")),
+                AppAction::SetStatus(self.with_base_status(StatusKind::Quiet, "setting updated")),
             ],
             AppMessage::OnboardingSettingDecrease => vec![
                 AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(-1)),
-                AppAction::SetStatus(self.with_base_status("setting updated")),
+                AppAction::SetStatus(self.with_base_status(StatusKind::Quiet, "setting updated")),
             ],
             AppMessage::OnboardingBeginEditing => {
                 let next_state = match self.onboarding.step {
@@ -4540,17 +4840,18 @@ impl App {
                 };
                 vec![
                     AppAction::SetOnboardingState(next_state),
-                    AppAction::SetStatus(self.with_base_status(status)),
+                    AppAction::SetStatus(self.with_base_status(StatusKind::Note, status)),
                 ]
             }
             AppMessage::OnboardingStopEditing => vec![
                 AppAction::SetOnboardingState(self.onboarding.stop_editing()),
                 AppAction::SetStatus(match self.onboarding.step {
                     OnboardingStep::Directory => self.location_finder_status(),
-                    OnboardingStep::Wago => {
-                        self.with_base_status("wago step ready | e edit key | enter next")
-                    }
-                    _ => self.with_base_status("editing stopped"),
+                    OnboardingStep::Wago => self.with_base_status(
+                        StatusKind::Note,
+                        "wago step ready | e edit key | enter next",
+                    ),
+                    _ => self.with_base_status(StatusKind::Note, "editing stopped"),
                 }),
             ],
             AppMessage::OnboardingInputChar(character) => vec![AppAction::SetOnboardingState(
@@ -4566,11 +4867,10 @@ impl App {
                         AppAction::SetOnboardingState(self.onboarding.error(
                             "this profile cannot target the default profile AddOns directory",
                         )),
-                        AppAction::SetStatus(
-                            self.with_base_status(
-                                "blocked default target | choose another location",
-                            ),
-                        ),
+                        AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Problem,
+                            "blocked default target | choose another location",
+                        )),
                     ];
                 }
 
@@ -4584,9 +4884,10 @@ impl App {
                     }
                     Err(error) => vec![
                         AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                        AppAction::SetStatus(
-                            self.with_base_status(&format!("validation failed: {error}")),
-                        ),
+                        AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Problem,
+                            &format!("validation failed: {error}"),
+                        )),
                     ],
                 }
             }
@@ -4597,6 +4898,7 @@ impl App {
                         AppAction::CancelOnboardingScan,
                         AppAction::SetOnboardingState(self.onboarding.cancelled()),
                         AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Note,
                             "scan stopped | j/k pick a folder | enter scan | e edit path",
                         )),
                     ]
@@ -4627,15 +4929,17 @@ impl App {
                     AppAction::SetOnboardingState(
                         self.onboarding.apply_directory_to_draft().next_step(),
                     ),
-                    AppAction::SetStatus(
-                        self.with_base_status("directory confirmed | step 3/5 Wago setup"),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        StatusKind::Done,
+                        "directory confirmed | step 3/5 Wago setup",
+                    )),
                 ],
                 FoundAction::EnterDifferentPath => vec![
                     AppAction::SetOnboardingState(self.onboarding.begin_directory_editing()),
-                    AppAction::SetStatus(
-                        self.with_base_status("editing path | enter validate | esc stop editing"),
-                    ),
+                    AppAction::SetStatus(self.with_base_status(
+                        StatusKind::Note,
+                        "editing path | enter validate | esc stop editing",
+                    )),
                 ],
             },
             AppMessage::BackgroundTask(event) => match event {
@@ -4673,15 +4977,17 @@ impl App {
                         self.onboarding.input.trim()
                     ))),
                     AppAction::SetStatus(self.with_base_status(
+                        StatusKind::Note,
                         "no install found | j/k pick a folder | enter scan | e edit path",
                     )),
                 ],
                 AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Err(error))) => {
                     vec![
                         AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                        AppAction::SetStatus(
-                            self.with_base_status(&format!("deep scan failed: {error}")),
-                        ),
+                        AppAction::SetStatus(self.with_base_status(
+                            StatusKind::Problem,
+                            &format!("deep scan failed: {error}"),
+                        )),
                     ]
                 }
                 AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
@@ -4705,6 +5011,7 @@ impl App {
                         summary: outcome.sync.summary,
                     },
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
                         self.dashboard.detail_mode,
                         &format!(
                             "deleted {} addon{}, moved {} folder{} to trash{}, sync complete",
@@ -4723,6 +5030,7 @@ impl App {
                 AppTaskEvent::DashboardDeleteFinished(Err(error)) => vec![
                     AppAction::SetPendingDelete(None),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         self.dashboard.detail_mode,
                         &format!("delete failed: {error}"),
                     )),
@@ -4737,6 +5045,7 @@ impl App {
                         summary: outcome.sync.summary,
                     },
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
                         self.dashboard.detail_mode,
                         &format!(
                             "undo complete: restored {} parent addon{} and {} folder{}",
@@ -4750,6 +5059,7 @@ impl App {
                 AppTaskEvent::DashboardUndoFinished(Err(error)) => vec![
                     AppAction::SetDashboardUndoInProgress(false),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         self.dashboard.detail_mode,
                         &format!("undo delete failed: {error}"),
                     )),
@@ -4757,6 +5067,7 @@ impl App {
                 AppTaskEvent::DashboardJobProgress(progress) => vec![
                     AppAction::SetDashboardJobUi(Some(progress.clone())),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Working,
                         self.dashboard.detail_mode,
                         &format!(
                             "{} {} of {} | {}",
@@ -4772,6 +5083,11 @@ impl App {
                     AppAction::SetDashboardAutoCheckInProgress(false),
                     AppAction::SetDashboardJobUi(None),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        if outcome.errors > 0 {
+                            StatusKind::Problem
+                        } else {
+                            StatusKind::Done
+                        },
                         self.dashboard.detail_mode,
                         &(if self.auto_check_in_progress {
                             format!(
@@ -4799,6 +5115,7 @@ impl App {
                     AppAction::SetDashboardAutoCheckInProgress(false),
                     AppAction::SetDashboardJobUi(None),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         self.dashboard.detail_mode,
                         &if self.auto_check_in_progress {
                             format!("background check failed: {error}")
@@ -4821,15 +5138,22 @@ impl App {
                         AppAction::SetDashboardUpdateSummary(Some(
                             dashboard_update_run_summary_from_live(outcome.summary),
                         )),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(self.dashboard.detail_mode, &status_message),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            if outcome.summary.errors > 0 {
+                                StatusKind::Problem
+                            } else {
+                                StatusKind::Done
+                            },
+                            self.dashboard.detail_mode,
+                            &status_message,
+                        )),
                     ]
                 }
                 AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
                     AppAction::SetDashboardUpdateInProgress(false),
                     AppAction::SetDashboardJobUi(None),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         self.dashboard.detail_mode,
                         &format!("selected addon update failed: {error}"),
                     )),
@@ -4853,14 +5177,17 @@ impl App {
                                 .with_last_completed_backup_at(Some(OffsetDateTime::now_utc()))
                                 .set_in_progress(false),
                         ),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Backup, &message),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
+                            DetailMode::Backup,
+                            &message,
+                        )),
                     ]
                 }
                 AppTaskEvent::BackupFinished(Err(error)) => vec![
                     AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(false)),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Backup,
                         &format!("WTF backup failed: {error}"),
                     )),
@@ -4868,6 +5195,7 @@ impl App {
                 AppTaskEvent::BackupRestoreFinished(Ok(outcome)) => vec![
                     AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(false)),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
                         DetailMode::Backup,
                         &format!("restored WTF from {}", outcome.backup.label),
                     )),
@@ -4875,6 +5203,7 @@ impl App {
                 AppTaskEvent::BackupRestoreFinished(Err(error)) => vec![
                     AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(false)),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Backup,
                         &format!("WTF restore failed: {error}"),
                     )),
@@ -4886,6 +5215,7 @@ impl App {
                             .set_in_progress(false),
                     ),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
                         DetailMode::Backup,
                         &format!("deleted backup {}", outcome.deleted.label),
                     )),
@@ -4893,6 +5223,7 @@ impl App {
                 AppTaskEvent::BackupDeleteFinished(Err(error)) => vec![
                     AppAction::SetBackupPaneState(self.backup_pane.set_in_progress(false)),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Backup,
                         &format!("backup delete failed: {error}"),
                     )),
@@ -4907,13 +5238,20 @@ impl App {
                             path: outcome.sync.path,
                             summary: outcome.sync.summary,
                         },
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(DetailMode::Config, &status),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            if outcome.install_summary.errors.is_empty() {
+                                StatusKind::Done
+                            } else {
+                                StatusKind::Problem
+                            },
+                            DetailMode::Config,
+                            &status,
+                        )),
                     ]
                 }
                 AppTaskEvent::TransferImportFinished(Err(error)) => {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Config,
                         &format!("addon import failed: {error}"),
                     ))]
@@ -4924,6 +5262,7 @@ impl App {
                             .finish_search(outcome.query.clone(), outcome.results.clone()),
                     ),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
                         DetailMode::Search,
                         &format!(
                             "Wago search complete: {} result{}",
@@ -4935,6 +5274,7 @@ impl App {
                 AppTaskEvent::WagoSearchFinished(Err(error)) => vec![
                     AppAction::SetSearchPaneState(self.search_pane.fail_search()),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Search,
                         &format!("Wago search failed: {error}"),
                     )),
@@ -4961,12 +5301,11 @@ impl App {
                                 inspection,
                             },
                         )),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(
-                                self.dashboard.detail_mode,
-                                confirmation_status,
-                            ),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
+                            self.dashboard.detail_mode,
+                            confirmation_status,
+                        )),
                     ]
                 }
                 AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::Installed(
@@ -4985,6 +5324,7 @@ impl App {
                         AppAction::SetPendingWagoInstallConfirmation(None),
                         AppAction::SetWagoInstallInProgress(false),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
                             self.dashboard.detail_mode,
                             &format!(
                                 "installed Wago addon '{}' into {} | sync complete",
@@ -5003,6 +5343,7 @@ impl App {
                         )),
                         AppAction::SetWagoInstallInProgress(false),
                         AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
                             self.dashboard.detail_mode,
                             &format!("Wago install failed: {error}"),
                         )),
@@ -5032,9 +5373,11 @@ impl App {
                             summary: outcome.sync.summary,
                         },
                         AppAction::SetDirectInstallInProgress(false),
-                        AppAction::SetStatus(
-                            self.dashboard_status_for(self.dashboard.detail_mode, &status),
-                        ),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
+                            self.dashboard.detail_mode,
+                            &status,
+                        )),
                     ]
                 }
                 AppTaskEvent::DirectInstallFinished {
@@ -5048,6 +5391,7 @@ impl App {
                     )),
                     AppAction::SetDirectInstallInProgress(false),
                     AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Problem,
                         self.dashboard.detail_mode,
                         &format!("{} install failed: {error}", request.provider.label()),
                     )),
@@ -5183,6 +5527,7 @@ impl App {
             AppAction::ToggleDashboardSelection => {
                 if self.dashboard.toggle_selected_parent() {
                     self.status_line = self.dashboard_status_for(
+                        StatusKind::Quiet,
                         self.dashboard.detail_mode,
                         &format!(
                             "selected {} addon{}",
@@ -5195,6 +5540,7 @@ impl App {
             AppAction::SelectAllDashboardParents => {
                 if self.dashboard.select_all_parents() {
                     self.status_line = self.dashboard_status_for(
+                        StatusKind::Quiet,
                         self.dashboard.detail_mode,
                         &format!(
                             "selected all {} addon{}",
@@ -5206,19 +5552,26 @@ impl App {
             }
             AppAction::ClearDashboardSelection => {
                 if self.dashboard.clear_selected_parents() {
-                    self.status_line =
-                        self.dashboard_status_for(self.dashboard.detail_mode, "selection cleared");
+                    self.status_line = self.dashboard_status_for(
+                        StatusKind::Note,
+                        self.dashboard.detail_mode,
+                        "selection cleared",
+                    );
                 }
             }
             AppAction::ToggleDashboardExpanded => {
                 if self.dashboard.toggle_selected_expanded() {
-                    self.status_line =
-                        self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
+                    self.status_line = self.dashboard_status_for(
+                        StatusKind::Quiet,
+                        self.dashboard.detail_mode,
+                        "tree state updated",
+                    );
                 }
             }
             AppAction::ExpandAllDashboardRelationships => {
                 if self.dashboard.expand_all_relationships() {
                     self.status_line = self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "expanded all relationship rows",
                     );
@@ -5227,6 +5580,7 @@ impl App {
             AppAction::CollapseAllDashboardRelationships => {
                 if self.dashboard.collapse_all_relationships() {
                     self.status_line = self.dashboard_status_for(
+                        StatusKind::Note,
                         self.dashboard.detail_mode,
                         "collapsed all relationship rows",
                     );
@@ -5234,8 +5588,11 @@ impl App {
             }
             AppAction::CollapseDashboardExpanded => {
                 if self.dashboard.collapse_selected_expanded() {
-                    self.status_line =
-                        self.dashboard_status_for(self.dashboard.detail_mode, "tree state updated");
+                    self.status_line = self.dashboard_status_for(
+                        StatusKind::Quiet,
+                        self.dashboard.detail_mode,
+                        "tree state updated",
+                    );
                 }
             }
             AppAction::SetDetailMode(detail_mode) => {
@@ -5331,8 +5688,10 @@ impl App {
                     self.onboarding = self
                         .onboarding
                         .error("wizard cannot finish without a valid AddOns directory");
-                    self.status_line =
-                        self.with_base_status("finish blocked | select a valid AddOns directory");
+                    self.status_line = self.with_base_status(
+                        StatusKind::Problem,
+                        "finish blocked | select a valid AddOns directory",
+                    );
                     self.shell_mode = ShellMode::Onboarding;
                     return;
                 };
@@ -5341,6 +5700,7 @@ impl App {
                         .onboarding
                         .error("this profile cannot target the default profile AddOns directory");
                     self.status_line = self.with_base_status(
+                        StatusKind::Problem,
                         "refused to save default target into non-default profile",
                     );
                     self.shell_mode = ShellMode::Onboarding;
@@ -5360,10 +5720,10 @@ impl App {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         self.onboarding = self.onboarding.error(error.to_string());
-                        self.status_line = self.with_base_status(&format!(
-                            "failed to bind profile to {}: {error}",
-                            path.display()
-                        ));
+                        self.status_line = self.with_base_status(
+                            StatusKind::Problem,
+                            &format!("failed to bind profile to {}: {error}", path.display()),
+                        );
                         self.shell_mode = ShellMode::Onboarding;
                         return;
                     }
@@ -5406,6 +5766,7 @@ impl App {
                         } else {
                             self.scan_state = ScanState::Pending;
                             self.status_line = self.dashboard_status_for(
+                                StatusKind::Done,
                                 self.dashboard.detail_mode,
                                 &format!(
                                     "saved onboarding config {} | scan queued",
@@ -5416,14 +5777,17 @@ impl App {
                     }
                     Err(error) => {
                         self.onboarding = self.onboarding.error(error.to_string());
-                        self.status_line =
-                            self.with_base_status(&format!("failed to save config: {error}"));
+                        self.status_line = self.with_base_status(
+                            StatusKind::Problem,
+                            &format!("failed to save config: {error}"),
+                        );
                     }
                 }
             }
             AppAction::StartAddonScan(path) => {
                 self.scan_state = ScanState::Running(path.clone());
                 self.status_line = self.dashboard_status_for(
+                    StatusKind::Working,
                     self.dashboard.detail_mode,
                     &format!("scanning {} and syncing state", path.display()),
                 );
@@ -5685,6 +6049,7 @@ impl App {
                     summary: summary.clone(),
                 };
                 self.status_line = self.dashboard_status_for(
+                    StatusKind::Done,
                     self.dashboard.detail_mode,
                     &format!(
                         "scan complete | {} addons synced, {} removed",
@@ -5702,6 +6067,7 @@ impl App {
             AppAction::FailAddonScan(error) => {
                 self.scan_state = ScanState::Failed(error.clone());
                 self.status_line = self.dashboard_status_for(
+                    StatusKind::Problem,
                     self.dashboard.detail_mode,
                     &format!("scan failed: {error}"),
                 );
@@ -6878,25 +7244,31 @@ impl App {
         }
     }
 
-    fn with_base_status(&self, message: &str) -> String {
-        format!("{message} | {}", self.base_status_line())
+    fn with_base_status(&self, kind: StatusKind, message: &str) -> StatusMessage {
+        StatusMessage::new(kind, format!("{message} | {}", self.base_status_line()))
     }
 
-    fn dashboard_status_for(&self, detail_mode: DetailMode, message: &str) -> String {
-        self.with_base_status(&format!("{} | {message}", detail_mode_label(detail_mode)))
+    fn dashboard_status_for(
+        &self,
+        kind: StatusKind,
+        detail_mode: DetailMode,
+        message: &str,
+    ) -> StatusMessage {
+        self.with_base_status(
+            kind,
+            &format!("{} | {message}", detail_mode_label(detail_mode)),
+        )
     }
 
     fn active_detail_status_message(&self, detail_mode: DetailMode) -> Option<String> {
-        if self.status_line.is_empty() {
+        if self.status_line.is_empty() || !self.status_line.kind.is_shown() {
             return None;
         }
 
         let prefix = format!("{} | ", detail_mode_label(detail_mode));
         let suffix = format!(" | {}", self.base_status_line());
-        let without_suffix = self
-            .status_line
-            .strip_suffix(&suffix)
-            .unwrap_or(&self.status_line);
+        let text = self.status_line.text.as_str();
+        let without_suffix = text.strip_suffix(&suffix).unwrap_or(text);
         without_suffix
             .strip_prefix(&prefix)
             .map(str::trim)
@@ -6910,13 +7282,18 @@ impl App {
         let root = PathBuf::from(self.onboarding.input.trim());
         vec![
             AppAction::SetOnboardingState(self.onboarding.start_deep_scan()),
-            AppAction::SetStatus(self.with_base_status("scanning for WoW installs | esc stop")),
+            AppAction::SetStatus(
+                self.with_base_status(StatusKind::Working, "scanning for WoW installs | esc stop"),
+            ),
             AppAction::StartOnboardingDeepScan(root),
         ]
     }
 
-    fn location_finder_status(&self) -> String {
-        self.with_base_status("location finder | enter scan | e edit path")
+    fn location_finder_status(&self) -> StatusMessage {
+        self.with_base_status(
+            StatusKind::Quiet,
+            "location finder | enter scan | e edit path",
+        )
     }
 
     /// The game client the AddOns folder belongs to, for the header.
@@ -7105,15 +7482,21 @@ impl App {
         state
     }
 
-    fn found_status_for_input(&self) -> String {
+    fn found_status_for_input(&self) -> StatusMessage {
         self.found_status_for_path(Path::new(self.onboarding.input.trim()))
     }
 
-    fn found_status_for_path(&self, path: &Path) -> String {
+    fn found_status_for_path(&self, path: &Path) -> StatusMessage {
         if self.is_guarded_path(path) {
-            self.with_base_status("found default profile target | choose another location")
+            self.with_base_status(
+                StatusKind::Note,
+                "found default profile target | choose another location",
+            )
         } else {
-            self.with_base_status("found WoW installation | choose an action, then press enter")
+            self.with_base_status(
+                StatusKind::Done,
+                "found WoW installation | choose an action, then press enter",
+            )
         }
     }
 
@@ -7224,6 +7607,7 @@ impl App {
                 AppAction::SetPersistedConfig(next.draft.clone()),
                 AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
                 AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Done,
                     DetailMode::Config,
                     &self.config_field_saved_message(field, &next.draft),
                 )),
@@ -8190,6 +8574,7 @@ mod tests {
     use time::{Duration, OffsetDateTime};
     use tokio::sync::mpsc;
 
+    use super::render_shared::toast_kind_for_status;
     use super::{
         AddonScanOutcome, App, AppMessage, AppRuntime, AppTaskEvent, BackupPaneState,
         ConfigEditState, ConfigField, ConfigPaneState, DashboardChildConnector,
@@ -8203,6 +8588,7 @@ mod tests {
         dashboard_item_version_label, dashboard_item_version_line, format_download_count,
         summarize_owned_folders, truncate_middle_text, visible_search_result_window,
     };
+    use super::{InspectScrollView, StatusKind, StatusMessage};
     use crate::action::AppAction;
     use crate::backup::{BackupEntry, BackupRunOutcome, backup_root};
     use crate::drift::{DriftReport, OwnedChildDrift};
@@ -8253,7 +8639,10 @@ mod tests {
         App {
             shell_mode,
             quit_requested: false,
-            status_line: format!("profile {} | q quit", DEFAULT_PROFILE),
+            status_line: StatusMessage::new(
+                StatusKind::Quiet,
+                format!("profile {} | q quit", DEFAULT_PROFILE),
+            ),
             ui_theme: UiTheme::from_mode(config.theme),
             shell_ui: ShellUiState::default(),
             config_present: true,
@@ -8283,6 +8672,7 @@ mod tests {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
+            inspect_scroll_view: std::cell::Cell::new(None),
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
@@ -8452,9 +8842,11 @@ mod tests {
             actions,
             vec![
                 AppAction::SetDashboardSelection(Some(2)),
-                AppAction::SetStatus(
-                    app.dashboard_status_for(app.dashboard.detail_mode, "selection moved",)
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Quiet,
+                    app.dashboard.detail_mode,
+                    "selection moved",
+                )),
             ]
         );
     }
@@ -8532,16 +8924,6 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('z'))),
             vec![AppMessage::DashboardUndoDelete]
         );
-        let mut update_mode = app_for_tests(ShellMode::Dashboard);
-        update_mode.dashboard.detail_mode = DetailMode::Update;
-        assert_eq!(
-            update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('r'))),
-            vec![AppMessage::DashboardRunUpdateSelected]
-        );
-        assert_eq!(
-            update_mode.messages_for_key(KeyEvent::from(KeyCode::Char('v'))),
-            vec![AppMessage::DashboardSelectRefreshableUpdates]
-        );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char(']'))),
             vec![AppMessage::DashboardExpandAllRelationships]
@@ -8550,6 +8932,21 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('['))),
             vec![AppMessage::DashboardCollapseAllRelationships]
         );
+        // The old mode switches are gone, including in the retired Update mode.
+        let mut update_mode = app_for_tests(ShellMode::Dashboard);
+        update_mode.dashboard.detail_mode = DetailMode::Update;
+        for retired in ['o', 'r', 'v'] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char(retired))),
+                vec![],
+                "{retired}"
+            );
+            assert_eq!(
+                update_mode.messages_for_key(KeyEvent::from(KeyCode::Char(retired))),
+                vec![],
+                "{retired} in Update mode"
+            );
+        }
     }
 
     #[test]
@@ -8566,7 +8963,10 @@ mod tests {
     #[test]
     fn footer_status_text_hides_redundant_resize_noise() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.status_line = "terminal resized to 132x45 | profile manual-smoke".to_string();
+        app.status_line = StatusMessage::new(
+            StatusKind::Quiet,
+            "terminal resized to 132x45 | profile manual-smoke",
+        );
 
         assert_eq!(app.footer_status_text(), "");
     }
@@ -8582,27 +8982,32 @@ mod tests {
     #[test]
     fn dashboard_event_line_uses_humanized_status_summary() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.apply(AppAction::SetStatus(
-            "scan complete | 6 addons synced, 0 removed".to_string(),
-        ));
+        app.apply(AppAction::SetStatus(StatusMessage::new(
+            StatusKind::Done,
+            "scan complete | 6 addons synced, 0 removed",
+        )));
 
         let (text, kind) = app.dashboard_event_message().expect("event line");
 
         assert_eq!(text, "scan complete · 6 addons synced, 0 removed");
-        assert_eq!(kind, super::DashboardEventKind::Info);
+        assert_eq!(kind, super::DashboardEventKind::Success);
     }
 
     #[test]
     fn dashboard_toast_persists_across_non_toast_status_updates() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.apply(AppAction::SetStatus(
-            app.dashboard_status_for(DetailMode::Overview, "Updated BigWigs"),
-        ));
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Done,
+            DetailMode::Overview,
+            "Updated BigWigs",
+        )));
         let initial = app.dashboard_event_message().expect("toast");
 
-        app.apply(AppAction::SetStatus(
-            app.dashboard_status_for(DetailMode::Overview, "selection moved"),
-        ));
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Quiet,
+            DetailMode::Overview,
+            "selection moved",
+        )));
 
         assert_eq!(app.dashboard_event_message(), Some(initial));
     }
@@ -8649,9 +9054,11 @@ mod tests {
     #[test]
     fn dashboard_toast_expires_after_duration() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.apply(AppAction::SetStatus(
-            app.dashboard_status_for(DetailMode::Overview, "Updated BigWigs"),
-        ));
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Done,
+            DetailMode::Overview,
+            "Updated BigWigs",
+        )));
         assert!(app.dashboard_event_message().is_some());
 
         if let Some(toast) = app.shell_ui.dashboard_toast.as_mut() {
@@ -8710,7 +9117,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_overlay_closes_on_escape_and_does_not_trap_quit() {
+    fn inspect_overlay_closes_on_escape_and_q() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
 
@@ -8720,7 +9127,7 @@ mod tests {
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
-            vec![AppMessage::QuitRequested]
+            vec![AppMessage::DashboardCloseOverlay]
         );
     }
 
@@ -8732,6 +9139,393 @@ mod tests {
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('c'))),
             vec![AppMessage::InspectRunCheck]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            vec![AppMessage::QuitRequested]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            vec![]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::DashboardCloseOverlay]
+        );
+    }
+
+    fn ctrl(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    fn alt(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+    }
+
+    fn pending_wago_confirmation() -> WagoInstallConfirmation {
+        WagoInstallConfirmation {
+            request: PendingWagoInstallRequest {
+                target: "VBNBxKx5".to_string(),
+                source: WagoInstallSource::SearchResult,
+            },
+            inspection: WagoInstallInspection {
+                addon_id: "VBNBxKx5".to_string(),
+                addon_name: "WeakAuras".to_string(),
+                parent_folder: "WeakAuras".to_string(),
+                installed_folders: vec!["WeakAuras".to_string()],
+                stability: crate::wago::WagoStability::Stable,
+                version: Some("5.21.1".to_string()),
+                existing_folders: vec!["WeakAuras".to_string()],
+                tracked_parent: Some("WeakAuras".to_string()),
+            },
+        }
+    }
+
+    fn sample_backup() -> BackupEntry {
+        BackupEntry {
+            file_name: "WTF-20260405T120000.000Z.zip".to_string(),
+            path: PathBuf::from("C:\\Temp\\WTF-20260405T120000.000Z.zip"),
+            label: "2026-04-05 12:00:00.000Z".to_string(),
+            size_bytes: 128,
+        }
+    }
+
+    fn open_overlay(app: &mut App, mode: DetailMode, overlay: OverlayKind) {
+        app.dashboard.detail_mode = mode;
+        app.shell_ui.overlay.active = Some(overlay);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_every_screen_and_state() {
+        let quit = vec![AppMessage::QuitRequested];
+
+        let app = app_for_tests(ShellMode::Dashboard);
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "addon list");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Help);
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "help overlay");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "config overlay");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Search, OverlayKind::Search);
+        app.search_pane = app.search_pane.begin_editing();
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "install text box");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        app.config_pane.edit = Some(ConfigEditState {
+            field: ConfigField::WagoApiKey,
+            value: String::new(),
+        });
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "config text box");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetDashboardFilter {
+            query: "sec".to_string(),
+            editing: true,
+        });
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "filter box");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "delete question");
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Backup, OverlayKind::Backup);
+        app.backup_pane.pending_restore = Some(sample_backup());
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "restore question");
+
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Theme;
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "setup");
+
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding.is_editing = true;
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "setup text box");
+    }
+
+    #[test]
+    fn ctrl_and_alt_letters_do_nothing_on_the_list() {
+        let app = app_for_tests(ShellMode::Dashboard);
+
+        for key in [
+            ctrl('x'),
+            ctrl('u'),
+            alt('x'),
+            alt('u'),
+            alt('q'),
+            ctrl('q'),
+        ] {
+            assert_eq!(app.messages_for_key(key), vec![], "{key:?}");
+            assert_eq!(app.footer_hint_for_key(key), None, "{key:?}");
+        }
+        assert_eq!(
+            app.messages_for_key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn ctrl_u_does_not_type_in_the_install_box() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Search, OverlayKind::Search);
+        app.search_pane = app.search_pane.begin_editing();
+
+        assert_eq!(app.messages_for_key(ctrl('u')), vec![]);
+        assert_eq!(app.messages_for_key(alt('u')), vec![]);
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('u'))),
+            vec![AppMessage::SearchInputChar('u')]
+        );
+        // AltGr arrives as Ctrl+Alt on Windows and still types its character.
+        assert_eq!(
+            app.messages_for_key(KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            vec![AppMessage::SearchInputChar('@')]
+        );
+
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Directory;
+        app.onboarding.is_editing = true;
+        assert_eq!(app.messages_for_key(ctrl('u')), vec![]);
+    }
+
+    #[test]
+    fn q_closes_each_overlay_instead_of_quitting() {
+        let close = vec![AppMessage::DashboardCloseOverlay];
+        let q = KeyEvent::from(KeyCode::Char('q'));
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Help);
+        assert_eq!(app.messages_for_key(q), close, "help");
+
+        for (mode, overlay) in [
+            (DetailMode::Search, OverlayKind::Search),
+            (DetailMode::Install, OverlayKind::Install),
+            (DetailMode::Config, OverlayKind::Config),
+            (DetailMode::Backup, OverlayKind::Backup),
+        ] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_overlay(&mut app, mode, overlay);
+            app.search_pane.is_editing = false;
+            app.install_pane.is_editing = false;
+            assert_eq!(app.messages_for_key(q), close, "{mode:?}");
+        }
+
+        // Questions: q answers no.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+        assert_eq!(
+            app.messages_for_key(q),
+            vec![AppMessage::DashboardCancelPendingDelete]
+        );
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.pending_wago_install_confirmation = Some(pending_wago_confirmation());
+        assert_eq!(app.messages_for_key(q), vec![AppMessage::WagoCancelInstall]);
+
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Backup, OverlayKind::Backup);
+        app.backup_pane.pending_delete = Some(sample_backup());
+        assert_eq!(
+            app.messages_for_key(q),
+            vec![AppMessage::BackupCancelRestore]
+        );
+
+        // In a text box q is a letter.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        app.config_pane.edit = Some(ConfigEditState {
+            field: ConfigField::WagoApiKey,
+            value: String::new(),
+        });
+        assert_eq!(
+            app.messages_for_key(q),
+            vec![AppMessage::ConfigInputChar('q')]
+        );
+
+        // Only the bare list quits.
+        let app = app_for_tests(ShellMode::Dashboard);
+        assert_eq!(app.messages_for_key(q), vec![AppMessage::QuitRequested]);
+    }
+
+    #[test]
+    fn dashboard_page_keys_move_by_the_visible_list_height() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::PageDown)),
+            vec![AppMessage::DashboardSelectionPageDown]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::PageUp)),
+            vec![AppMessage::DashboardSelectionPageUp]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Home)),
+            vec![AppMessage::DashboardSelectionFirst]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::End)),
+            vec![AppMessage::DashboardSelectionLast]
+        );
+
+        let last = app.dashboard.rows.len() - 1;
+        assert!(last >= 2, "fixture needs at least three rows");
+        let selection_of = |actions: Vec<AppAction>| match actions.first() {
+            Some(AppAction::SetDashboardSelection(selection)) => *selection,
+            other => panic!("expected a selection, got {other:?}"),
+        };
+
+        app.dashboard.list_state.select(Some(0));
+        assert_eq!(
+            selection_of(app.update(AppMessage::DashboardSelectionLast)),
+            Some(last)
+        );
+        app.dashboard.list_state.select(Some(last));
+        assert_eq!(
+            selection_of(app.update(AppMessage::DashboardSelectionFirst)),
+            Some(0)
+        );
+
+        // Ten rows tall: two borders and the header leave a page of 7 rows,
+        // more than the fixture has, so paging stops at either end.
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 40, 10));
+        assert_eq!(app.dashboard_page_size(), 7);
+        app.dashboard.list_state.select(Some(0));
+        assert_eq!(
+            selection_of(app.update(AppMessage::DashboardSelectionPageDown)),
+            Some(last)
+        );
+        assert_eq!(
+            selection_of(app.update(AppMessage::DashboardSelectionPageUp)),
+            Some(0)
+        );
+
+        // A one-row page moves one row at a time.
+        app.last_dashboard_list_area = Some(Rect::new(0, 0, 40, 4));
+        assert_eq!(app.dashboard_page_size(), 1);
+        assert_eq!(
+            selection_of(app.update(AppMessage::DashboardSelectionPageDown)),
+            Some(1)
+        );
+        let actions = app.update(AppMessage::DashboardSelectionPageDown);
+        assert!(matches!(
+            actions.last(),
+            Some(AppAction::SetStatus(StatusMessage {
+                kind: StatusKind::Quiet,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn inspect_page_keys_scroll_within_the_details_body() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::PageDown)),
+            vec![AppMessage::InspectScrollPageDown]
+        );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::End)),
+            vec![AppMessage::InspectScrollBottom]
+        );
+
+        app.inspect_scroll_view.set(Some(InspectScrollView {
+            max_offset: 12,
+            height: 5,
+        }));
+        let scroll = |app: &App, message: AppMessage| match app.update(message).as_slice() {
+            [AppAction::SetInspectOverlayState(state)] => state.scroll_offset,
+            other => panic!("expected inspect state, got {other:?}"),
+        };
+
+        assert_eq!(scroll(&app, AppMessage::InspectScrollPageDown), 5);
+        assert_eq!(scroll(&app, AppMessage::InspectScrollBottom), 12);
+        app.inspect_overlay.scroll_offset = 12;
+        assert_eq!(scroll(&app, AppMessage::InspectScrollDown), 12);
+        assert_eq!(scroll(&app, AppMessage::InspectScrollPageUp), 7);
+        assert_eq!(scroll(&app, AppMessage::InspectScrollTop), 0);
+    }
+
+    #[test]
+    fn status_kind_sets_footer_colour_and_toast_style() {
+        let app = app_for_tests(ShellMode::Dashboard);
+        let theme = &app.ui_theme;
+        assert_eq!(app.status_kind_color(StatusKind::Done), theme.success);
+        assert_eq!(app.status_kind_color(StatusKind::Problem), theme.error);
+        assert_eq!(app.status_kind_color(StatusKind::Note), theme.info);
+        assert_eq!(app.status_kind_color(StatusKind::Working), theme.warning);
+        assert_eq!(
+            toast_kind_for_status(StatusKind::Done),
+            super::DashboardEventKind::Success
+        );
+        assert_eq!(
+            toast_kind_for_status(StatusKind::Problem),
+            super::DashboardEventKind::Error
+        );
+        assert_eq!(
+            toast_kind_for_status(StatusKind::Note),
+            super::DashboardEventKind::Info
+        );
+        assert_eq!(
+            toast_kind_for_status(StatusKind::Working),
+            super::DashboardEventKind::Info
+        );
+    }
+
+    #[test]
+    fn delete_cancelled_is_a_note_not_a_problem() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+
+        for action in app.update(AppMessage::DashboardCancelPendingDelete) {
+            app.apply(action);
+        }
+
+        assert_eq!(app.status_line.kind, StatusKind::Note);
+        assert_eq!(app.footer_status_text(), "delete cancelled");
+        let line = app.footer_primary_status_line();
+        assert_eq!(line.spans[0].style.fg, Some(app.ui_theme.info));
+        let (text, kind) = app.dashboard_event_message().expect("toast");
+        assert_eq!(text, "delete cancelled");
+        assert_eq!(kind, super::DashboardEventKind::Info);
+    }
+
+    #[test]
+    fn quiet_status_is_never_shown_whatever_its_text() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Quiet,
+            DetailMode::Overview,
+            "delete failed: this text would once have been red",
+        )));
+
+        assert_eq!(app.footer_status_text(), "");
+        assert!(app.dashboard_event_message().is_none());
+
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Problem,
+            DetailMode::Overview,
+            "selection moved",
+        )));
+        assert_eq!(app.footer_status_text(), "selection moved");
+        assert_eq!(
+            app.dashboard_event_message().map(|(_, kind)| kind),
+            Some(super::DashboardEventKind::Error)
         );
     }
 
@@ -8888,9 +9682,11 @@ mod tests {
                     query: "WeakAuras".to_string(),
                     api_key: "test-wago-key".to_string(),
                 },
-                AppAction::SetStatus(
-                    app.dashboard_status_for(DetailMode::Search, "searching Wago for 'WeakAuras'")
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Search,
+                    "searching Wago for 'WeakAuras'"
+                )),
             ]
         );
     }
@@ -8926,6 +9722,7 @@ mod tests {
                     allow_replace: false,
                 },
                 AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
                     DetailMode::Search,
                     "checking Wago addon 'https://addons.wago.io/addons/VBNBxKx5' for install",
                 )),
@@ -8949,9 +9746,11 @@ mod tests {
                     query: "details".to_string(),
                     api_key: "test-wago-key".to_string(),
                 },
-                AppAction::SetStatus(
-                    app.dashboard_status_for(DetailMode::Search, "searching Wago for 'details'")
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Search,
+                    "searching Wago for 'details'"
+                )),
             ]
         );
     }
@@ -9073,6 +9872,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Problem,
                 DetailMode::Search,
                 "Wago search unavailable: no API key configured",
             ))]
@@ -9127,6 +9927,7 @@ mod tests {
                     allow_replace: false,
                 },
                 AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
                     DetailMode::Search,
                     "checking Wago result 'WeakAuras' for install",
                 )),
@@ -9161,6 +9962,7 @@ mod tests {
                     allow_replace: false,
                 },
                 AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
                     DetailMode::Install,
                     "checking Wago package and preparing install",
                 )),
@@ -9434,8 +10236,8 @@ mod tests {
         assert_eq!(actions.len(), 1);
         match &actions[0] {
             AppAction::SetStatus(status) => {
-                assert!(status.contains("backup created recently"));
-                assert!(status.contains("wait"));
+                assert!(status.text.contains("backup created recently"));
+                assert!(status.text.contains("wait"));
             }
             other => panic!("expected throttled backup status, got {other:?}"),
         }
@@ -9526,9 +10328,11 @@ mod tests {
         assert!(matches!(actions[0], AppAction::SetSearchPaneState(_)));
         assert_eq!(
             actions[1],
-            AppAction::SetStatus(
-                app.dashboard_status_for(DetailMode::Search, "Wago search complete: 1 result")
-            )
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Wago search complete: 1 result"
+            ))
         );
     }
 
@@ -9727,6 +10531,15 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
             vec![AppMessage::DashboardCancelPendingDelete]
         );
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::DashboardCancelPendingDelete]
+        );
+        assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+        assert_eq!(
+            app.messages_for_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+            vec![]
+        );
     }
 
     #[test]
@@ -9738,9 +10551,11 @@ mod tests {
             forward,
             vec![
                 AppAction::SetDashboardSelection(Some(1)),
-                AppAction::SetStatus(
-                    app.dashboard_status_for(app.dashboard.detail_mode, "selection moved")
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Quiet,
+                    app.dashboard.detail_mode,
+                    "selection moved"
+                )),
             ]
         );
 
@@ -9751,9 +10566,11 @@ mod tests {
             backward,
             vec![
                 AppAction::SetDashboardSelection(Some(2)),
-                AppAction::SetStatus(
-                    wrapped.dashboard_status_for(wrapped.dashboard.detail_mode, "selection moved")
-                ),
+                AppAction::SetStatus(wrapped.dashboard_status_for(
+                    StatusKind::Quiet,
+                    wrapped.dashboard.detail_mode,
+                    "selection moved"
+                )),
             ]
         );
     }
@@ -9905,16 +10722,40 @@ mod tests {
     }
 
     #[test]
-    fn requesting_delete_without_selection_sets_status_only() {
-        let app = app_for_tests(ShellMode::Dashboard);
+    fn requesting_delete_without_selection_targets_the_current_addon() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(Some(0));
+        let current = app.dashboard.selected_row().cloned().expect("current row");
+        assert_eq!(app.dashboard.selected_parent_count(), 0);
+
+        let actions = app.update(AppMessage::DashboardRequestDelete);
+
+        assert_eq!(
+            actions,
+            vec![
+                AppAction::SetPendingDelete(Some(vec![current.folder.clone()])),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Note,
+                    app.dashboard.detail_mode,
+                    &format!("delete {}? press y to confirm, n to cancel", current.name),
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn requesting_delete_with_no_rows_sets_status_only() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.list_state.select(None);
 
         let actions = app.update(AppMessage::DashboardRequestDelete);
 
         assert_eq!(
             actions,
             vec![AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Note,
                 app.dashboard.detail_mode,
-                "select one or more parent addons before deleting",
+                "focus a parent row or select one or more parent addons first before deleting",
             ))]
         );
     }
@@ -9932,6 +10773,7 @@ mod tests {
             vec![
                 AppAction::SetPendingDelete(Some(vec!["Second".to_string()])),
                 AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Note,
                     app.dashboard.detail_mode,
                     "delete 1 selected addon? press y to confirm, n to cancel",
                 )),
@@ -9962,57 +10804,9 @@ mod tests {
 
         assert_eq!(
             actions,
-            vec![AppAction::SetStatus(app.dashboard_status_for(
+            vec![AppAction::SetStatus(app.dashboard_status_for(StatusKind::Note,
                 DetailMode::Overview,
                 "focus a parent row or select one or more parent addons first before applying updates",
-            ))]
-        );
-    }
-
-    #[test]
-    fn selecting_refreshable_updates_targets_tracked_parents_whatever_their_ownership() {
-        let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Update;
-
-        let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
-
-        // "Third" is a tracked Wago row without authoritative ownership (as migrated from v1):
-        // it is updateable, and the provider takes its folder set from the package.
-        assert_eq!(
-            actions,
-            vec![
-                AppAction::SetSelectedDashboardParents(vec![
-                    "Second".to_string(),
-                    "Third".to_string()
-                ]),
-                AppAction::SetStatus(app.dashboard_status_for(
-                    DetailMode::Update,
-                    "selected 2 updateable tracked addons",
-                )),
-            ]
-        );
-    }
-
-    #[test]
-    fn selecting_refreshable_updates_reports_when_none_are_available() {
-        let mut app = app_for_tests(ShellMode::Dashboard);
-        app.dashboard.detail_mode = DetailMode::Update;
-        // A tracked row whose remote version is older than the installed one is held back.
-        let mut stale = AddonRecord::new("Postal", "Postal", SourceKind::WowInterface);
-        stale.version = Some("v4.3.5".to_string());
-        stale.remote_version = Some("v3.6.6".to_string());
-        app.apply(AppAction::ReplaceDashboardAddons(vec![
-            AddonRecord::new("First", "First", SourceKind::Manual),
-            stale,
-        ]));
-
-        let actions = app.update(AppMessage::DashboardSelectRefreshableUpdates);
-
-        assert_eq!(
-            actions,
-            vec![AppAction::SetStatus(app.dashboard_status_for(
-                DetailMode::Update,
-                "no updateable tracked parent addons are available in the current list",
             ))]
         );
     }
@@ -10041,9 +10835,11 @@ mod tests {
                     wago_api_key: Some("test-wago-key".to_string()),
                     check_interval_secs: app.config_pane.draft.check_interval_secs,
                 },
-                AppAction::SetStatus(
-                    app.dashboard_status_for(DetailMode::Overview, "updating 1 addon",)
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Overview,
+                    "updating 1 addon",
+                )),
             ]
         );
     }
@@ -10064,9 +10860,11 @@ mod tests {
                     wago_api_key: Some("test-wago-key".to_string()),
                     check_interval_secs: app.config_pane.draft.check_interval_secs,
                 },
-                AppAction::SetStatus(
-                    app.dashboard_status_for(DetailMode::Overview, "checking 1 addon for updates",)
-                ),
+                AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Working,
+                    DetailMode::Overview,
+                    "checking 1 addon for updates",
+                )),
             ]
         );
     }
@@ -10352,9 +11150,11 @@ mod tests {
 
         assert_eq!(
             actions[6],
-            AppAction::SetStatus(
-                app.dashboard_status_for(DetailMode::Update, "No changes · 1 manual skipped",)
-            )
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Update,
+                "No changes · 1 manual skipped",
+            ))
         );
     }
 
@@ -10602,7 +11402,9 @@ mod tests {
             vec![
                 AppAction::AdvanceMotionTick,
                 AppAction::SetOnboardingState(app.onboarding.begin_quick_check()),
-                AppAction::SetStatus(app.with_base_status("checking common install locations")),
+                AppAction::SetStatus(
+                    app.with_base_status(StatusKind::Working, "checking common install locations")
+                ),
                 AppAction::StartOnboardingQuickCheck,
             ]
         );
@@ -10623,7 +11425,12 @@ mod tests {
             actions,
             vec![
                 AppAction::SetOnboardingState(app.onboarding.start_deep_scan()),
-                AppAction::SetStatus(app.with_base_status("scanning for WoW installs | esc stop")),
+                AppAction::SetStatus(
+                    app.with_base_status(
+                        StatusKind::Working,
+                        "scanning for WoW installs | esc stop"
+                    )
+                ),
                 AppAction::StartOnboardingDeepScan(PathBuf::from("/home/player")),
             ]
         );
@@ -10687,9 +11494,10 @@ mod tests {
                 AppAction::SetOnboardingState(
                     app.onboarding.apply_directory_to_draft().next_step()
                 ),
-                AppAction::SetStatus(
-                    app.with_base_status("directory confirmed | step 3/5 Wago setup")
-                )
+                AppAction::SetStatus(app.with_base_status(
+                    StatusKind::Done,
+                    "directory confirmed | step 3/5 Wago setup"
+                ))
             ]
         );
     }
@@ -10805,7 +11613,11 @@ mod tests {
 
         assert_eq!(app.shell_mode, ShellMode::Onboarding);
         assert!(matches!(app.onboarding.phase, OnboardingPhase::Error(_)));
-        assert!(app.status_line.contains("refused to save default target"));
+        assert!(
+            app.status_line
+                .text
+                .contains("refused to save default target")
+        );
     }
 
     #[test]
@@ -11070,9 +11882,11 @@ mod tests {
     #[test]
     fn active_detail_status_message_extracts_config_message() {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        app.apply(AppAction::SetStatus(
-            app.dashboard_status_for(DetailMode::Config, "exported 3 addons"),
-        ));
+        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+            StatusKind::Done,
+            DetailMode::Config,
+            "exported 3 addons",
+        )));
 
         assert_eq!(
             app.active_detail_status_message(DetailMode::Config),
@@ -11096,10 +11910,15 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
             vec![AppMessage::BackupConfirmRestore]
         );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
-            vec![AppMessage::BackupCancelRestore]
-        );
+        for cancel in [KeyCode::Char('n'), KeyCode::Char('q'), KeyCode::Esc] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(cancel)),
+                vec![AppMessage::BackupCancelRestore],
+                "{cancel:?}"
+            );
+        }
+        // enter never confirms a backup restore.
+        assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
     }
 
     #[test]
@@ -11117,10 +11936,15 @@ mod tests {
             app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
             vec![AppMessage::BackupConfirmDelete]
         );
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
-            vec![AppMessage::BackupCancelRestore]
-        );
+        for cancel in [KeyCode::Char('n'), KeyCode::Char('q'), KeyCode::Esc] {
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(cancel)),
+                vec![AppMessage::BackupCancelRestore],
+                "{cancel:?}"
+            );
+        }
+        // enter never confirms a backup delete.
+        assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
     }
 
     #[test]
@@ -11155,7 +11979,7 @@ mod tests {
 
         assert_eq!(app.dashboard.items.len(), 1);
         assert_eq!(app.dashboard.items[0].name, "Details");
-        assert!(app.status_line.contains("scan complete"));
+        assert!(app.status_line.text.contains("scan complete"));
         assert!(matches!(app.scan_state, ScanState::Succeeded { .. }));
     }
 
@@ -11844,6 +12668,7 @@ mod tests {
                         app.search_pane.request_direct_install(expected.clone())
                     ),
                     AppAction::SetStatus(app.dashboard_status_for(
+                        StatusKind::Note,
                         DetailMode::Search,
                         "Install from GitHub: WeakAuras/WeakAuras2? enter confirm, esc cancel",
                     )),
@@ -11880,6 +12705,7 @@ mod tests {
             assert_eq!(
                 app.update(AppMessage::SearchSubmit),
                 vec![AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Note,
                     DetailMode::Search,
                     "an addon install is already running",
                 ))]
@@ -11950,6 +12776,7 @@ mod tests {
                 assert_eq!(
                     app.update(AppMessage::SearchSubmit),
                     vec![AppAction::SetStatus(app.dashboard_status_for(
+                        StatusKind::Problem,
                         DetailMode::Search,
                         "Wago search unavailable: no API key configured",
                     ))],
@@ -12016,10 +12843,12 @@ mod tests {
             );
             assert!(
                 app.status_line
+                    .text
                     .contains("installed WoWInterface addon 'ElvUI WindTools'")
             );
             assert!(
                 app.status_line
+                    .text
                     .contains("warning: WoWInterface does not tag WoW Forever builds")
             );
 
@@ -12043,7 +12872,7 @@ mod tests {
                     message: refusal,
                 }
             );
-            assert!(app.status_line.contains("TukUI install failed"));
+            assert!(app.status_line.text.contains("TukUI install failed"));
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
         }
 

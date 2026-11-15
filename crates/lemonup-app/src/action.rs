@@ -6,7 +6,7 @@ use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
     FooterKeyPulse, HelpContext, InspectOverlayState, InstallPaneState, PendingWagoInstallRequest,
-    SearchPaneState, WagoInstallConfirmation,
+    SearchPaneState, StatusMessage, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -20,7 +20,7 @@ pub enum AppAction {
     SetInspectOverlayState(InspectOverlayState),
     SetHelpOverlay(bool),
     SetHelpContext(HelpContext),
-    SetStatus(String),
+    SetStatus(StatusMessage),
     SetDashboardSelection(Option<usize>),
     ToggleDashboardSort(DashboardSortColumn),
     SetDashboardFilter {

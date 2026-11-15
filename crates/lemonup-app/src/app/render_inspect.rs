@@ -82,6 +82,10 @@ impl App {
         let max_scroll = detail_lines
             .len()
             .saturating_sub(details_inner.height as usize) as u16;
+        self.inspect_scroll_view.set(Some(InspectScrollView {
+            max_offset: max_scroll,
+            height: details_inner.height,
+        }));
         let scroll_offset = self.inspect_overlay.scroll_offset.min(max_scroll);
         let can_scroll_up = scroll_offset > 0;
         let can_scroll_down = scroll_offset < max_scroll;
