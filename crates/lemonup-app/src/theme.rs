@@ -62,7 +62,10 @@ pub(crate) struct ColorRoles {
     pub(crate) background: Color,
     pub(crate) cursor_row: Color,
     pub(crate) selected_row: Color,
+    /// Background of a sheet (an overlay such as Help or Settings).
     pub(crate) sheet: Color,
+    /// The outline of a sheet.
+    pub(crate) border: Color,
 }
 
 impl ColorRoles {
@@ -80,6 +83,7 @@ impl ColorRoles {
             cursor_row: Color::Rgb(0x32, 0x38, 0x56),
             selected_row: Color::Rgb(0x2c, 0x31, 0x48),
             sheet: Color::Rgb(0x29, 0x2e, 0x45),
+            border: Color::Rgb(0x5d, 0x66, 0x94),
         }
     }
 
@@ -97,6 +101,7 @@ impl ColorRoles {
             cursor_row: Color::Rgb(0xcf, 0xd4, 0xe3),
             selected_row: Color::Rgb(0xd8, 0xdb, 0xe6),
             sheet: Color::Rgb(0xee, 0xef, 0xf4),
+            border: Color::Rgb(0x7f, 0x88, 0xad),
         }
     }
 }
@@ -184,18 +189,6 @@ impl UiTheme {
         match mode {
             ThemeMode::Dark => Self::storm(),
             ThemeMode::Light => Self::day(),
-        }
-    }
-
-    pub(crate) fn uses_light_surfaces(self) -> bool {
-        matches!(self.app_bg, Color::Rgb(r, g, b) if r > 200 && g > 200 && b > 200)
-    }
-
-    pub(crate) fn modal_title_color(self) -> Color {
-        if self.uses_light_surfaces() {
-            self.panel_title
-        } else {
-            self.highlight
         }
     }
 }

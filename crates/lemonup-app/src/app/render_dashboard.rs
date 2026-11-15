@@ -1,3 +1,4 @@
+use super::keymap::fit_key_line;
 use super::*;
 use crate::theme::ColorRoles;
 
@@ -59,15 +60,14 @@ impl DashboardFrameLayout {
         }
     }
 
-    /// Where overlays draw: everything between the header and the bottom rule.
-    pub(super) fn overlay_area(&self) -> Rect {
-        let top = self.filter.y;
-        let bottom = self.bottom_rule.y;
+    /// Where sheets draw: everything above the status line and the key line.
+    pub(super) fn sheet_region(&self) -> Rect {
+        let top = self.header.y;
         Rect::new(
-            self.filter.x,
+            self.header.x,
             top,
-            self.filter.width,
-            bottom.saturating_sub(top),
+            self.header.width,
+            self.status.y.saturating_sub(top),
         )
     }
 }
@@ -440,58 +440,6 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.chars().count()).sum()
 }
 
-/// One entry on the key line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct KeyHint {
-    /// The pulse target; `None` for a plain label such as "2 selected:".
-    pub(super) id: Option<FooterHintId>,
-    pub(super) key: &'static str,
-    pub(super) label: String,
-    /// The main action, drawn in lemon.
-    pub(super) primary: bool,
-}
-
-impl KeyHint {
-    fn key(id: FooterHintId, key: &'static str, label: impl Into<String>) -> Self {
-        Self {
-            id: Some(id),
-            key,
-            label: label.into(),
-            primary: false,
-        }
-    }
-
-    fn primary(id: FooterHintId, key: &'static str, label: impl Into<String>) -> Self {
-        Self {
-            primary: true,
-            ..Self::key(id, key, label)
-        }
-    }
-
-    fn text(label: impl Into<String>) -> Self {
-        Self {
-            id: None,
-            key: "",
-            label: label.into(),
-            primary: false,
-        }
-    }
-
-    fn width(&self) -> usize {
-        if self.key.is_empty() {
-            self.label.chars().count()
-        } else {
-            self.key.chars().count() + 1 + self.label.chars().count()
-        }
-    }
-}
-
-impl From<FooterCommandHint> for KeyHint {
-    fn from(hint: FooterCommandHint) -> Self {
-        Self::key(hint.id, hint.key, hint.label)
-    }
-}
-
 impl App {
     /// The dashboard frame: two header rows, the filter row, the column
     /// header and a rule, the list, then a rule, the status line and the
@@ -524,8 +472,8 @@ impl App {
         )));
         frame.render_widget(rule.clone(), layout.top_rule);
         self.render_dashboard_list(frame, layout.list, columns);
-        self.render_overlay_host(frame, layout.overlay_area());
         frame.render_widget(rule, layout.bottom_rule);
+        self.render_overlay_host(frame, layout.sheet_region(), layout.header.height);
         frame.render_widget(
             Paragraph::new(self.dashboard_status_line(area.width)),
             layout.status,
@@ -1167,146 +1115,11 @@ impl App {
         Some(spans)
     }
 
-    /// The keys for exactly what is on screen.
-    pub(super) fn dashboard_key_hints(&self, width: u16) -> Vec<KeyHint> {
-        use FooterHintId as Id;
-        let wide = width >= WIDE_FRAME_MIN_WIDTH;
-        if self.shell_ui.overlay.active.is_some()
-            || self.dashboard.pending_delete_folders().is_some()
-            || self.pending_wago_install_confirmation.is_some()
-        {
-            return self
-                .footer_command_hints()
-                .into_iter()
-                .map(KeyHint::from)
-                .collect();
-        }
-        if self.dashboard.filter_editing() {
-            let mut hints = vec![KeyHint::text("type to filter")];
-            if self.dashboard.rows.is_empty() {
-                hints.push(KeyHint::key(Id::Clear, "esc", "clear filter"));
-                return hints;
-            }
-            hints.extend([
-                KeyHint::key(Id::Nav, "↑/↓", "move"),
-                KeyHint::key(Id::Save, "enter", if wide { "keep filter" } else { "keep" }),
-                KeyHint::key(
-                    Id::Clear,
-                    "esc",
-                    if wide { "clear filter" } else { "clear" },
-                ),
-            ]);
-            return hints;
-        }
-        if self
-            .dashboard
-            .job_ui()
-            .is_some_and(|job| job.kind == DashboardJobKind::Update)
-        {
-            return vec![
-                KeyHint::text("LemonUp is updating. You can keep browsing."),
-                KeyHint::key(Id::Inspect, "enter", "details"),
-                KeyHint::key(Id::Filter, "/", "filter"),
-                KeyHint::key(Id::Help, "?", "help"),
-                KeyHint::key(Id::Quit, "q", "quit"),
-            ];
-        }
-        let selected = self.dashboard.selected_parent_count();
-        if selected > 0 {
-            // `a` clears a selection rather than selecting all, and `esc`
-            // clears a filter before the selection, so the hints say so.
-            let esc = if self.dashboard.has_filter() {
-                KeyHint::key(Id::Clear, "esc", "clear filter")
-            } else {
-                KeyHint::key(Id::Clear, "esc", "clear selection")
-            };
-            return vec![
-                KeyHint::text(format!("{selected} selected:")),
-                KeyHint::key(Id::Update, "u", "update"),
-                KeyHint::key(Id::Check, "c", "check"),
-                KeyHint::key(Id::Delete, "x", "delete"),
-                KeyHint::key(
-                    Id::Select,
-                    "space",
-                    if self
-                        .dashboard
-                        .selected_row()
-                        .is_some_and(|row| self.dashboard.is_parent_selected(&row.folder))
-                    {
-                        "deselect"
-                    } else {
-                        "select"
-                    },
-                ),
-                esc,
-                KeyHint::key(Id::Help, "?", "help"),
-            ];
-        }
-        let updates = self.dashboard.update_ready_folders().len();
-        let checked = self
-            .dashboard
-            .items
-            .iter()
-            .any(|item| item.last_checked_at.is_some());
-        let check_all = if checked { "check again" } else { "check all" };
-        match (updates > 0, wide) {
-            (true, true) => vec![
-                KeyHint::primary(Id::UpdateAll, "U", format!("update all ({updates})")),
-                KeyHint::key(Id::Update, "u", "update"),
-                KeyHint::key(Id::Check, "c", "check"),
-                KeyHint::key(Id::Inspect, "enter", "details"),
-                KeyHint::key(Id::Select, "space", "select"),
-                KeyHint::key(Id::Filter, "/", "filter"),
-                KeyHint::key(Id::Install, "i", "install"),
-                KeyHint::key(Id::Help, "?", "help"),
-                KeyHint::key(Id::CheckAll, "C", "check all"),
-            ],
-            (true, false) => vec![
-                KeyHint::primary(Id::UpdateAll, "U", format!("update all ({updates})")),
-                KeyHint::key(Id::Update, "u", "update"),
-                KeyHint::key(Id::Inspect, "enter", "details"),
-                KeyHint::key(Id::Install, "i", "install"),
-                KeyHint::key(Id::Filter, "/", "filter"),
-                KeyHint::key(Id::Help, "?", "help"),
-                KeyHint::key(Id::CheckAll, "C", "check all"),
-            ],
-            (false, true) => vec![
-                KeyHint::key(Id::CheckAll, "C", check_all),
-                KeyHint::key(Id::Inspect, "enter", "details"),
-                KeyHint::key(Id::Select, "space", "select"),
-                KeyHint::key(Id::Filter, "/", "filter"),
-                KeyHint::key(Id::Install, "i", "install"),
-                KeyHint::key(Id::Backup, "b", "backups"),
-                KeyHint::key(Id::Config, ",", "settings"),
-                KeyHint::key(Id::Help, "?", "help"),
-            ],
-            (false, false) => vec![
-                KeyHint::key(Id::CheckAll, "C", check_all),
-                KeyHint::key(Id::Inspect, "enter", "details"),
-                KeyHint::key(Id::Install, "i", "install"),
-                KeyHint::key(Id::Filter, "/", "filter"),
-                KeyHint::key(Id::Help, "?", "help"),
-            ],
-        }
-    }
-
     /// The key line, dropping hints from the end rather than wrapping.
     pub(super) fn dashboard_key_line(&self, width: u16) -> Line<'static> {
         let roles = self.ui_theme.roles;
-        let separator = if width >= WIDE_FRAME_MIN_WIDTH {
-            "   "
-        } else {
-            "  "
-        };
-        let mut hints = self.dashboard_key_hints(width);
-        let fits = |hints: &[KeyHint]| {
-            1 + hints.iter().map(KeyHint::width).sum::<usize>()
-                + separator.len() * hints.len().saturating_sub(1)
-                <= usize::from(width)
-        };
-        while hints.len() > 1 && !fits(&hints) {
-            hints.pop();
-        }
+        let (hints, separator) =
+            fit_key_line(self.key_table(width), width, width >= WIDE_FRAME_MIN_WIDTH);
         let mut spans = vec![Span::raw(" ")];
         for (index, hint) in hints.iter().enumerate() {
             if index > 0 {

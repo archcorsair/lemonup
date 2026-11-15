@@ -1,125 +1,38 @@
 use super::render_dashboard::{dashboard_item_remote_label, dashboard_item_update_status};
+use super::sheet::SheetBody;
 use super::*;
 impl App {
-    pub(super) fn render_inspect_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
-        let content_area = area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
+    /// Details of one addon: the summary first, then the sections that
+    /// `r` `d` `t` open. The whole body scrolls, so nothing is dropped.
+    pub(super) fn inspect_sheet_body(&self, _width: u16) -> SheetBody<'static> {
+        let mut body = SheetBody::new();
         let Some(target) = self.inspect_resolved_target() else {
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        "No addon selected",
-                        Style::default()
-                            .fg(self.ui_theme.panel_title)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Select a row, then press Enter to inspect.",
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
-                ])
-                .wrap(Wrap { trim: false }),
-                content_area,
-            );
-            return;
+            body.text(vec![
+                Line::from(Span::styled(
+                    "No addon selected",
+                    Style::default()
+                        .fg(self.ui_theme.panel_title)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Select a row, then press Enter to inspect.",
+                    Style::default().fg(self.ui_theme.muted),
+                )),
+            ]);
+            return body;
         };
 
         let hero_lines = self.inspect_hero_lines(target);
-        let summary_lines = self.inspect_summary_lines(target);
-        let detail_lines = self.inspect_detail_lines(target);
-        let hero_height = if hero_lines.is_empty() {
-            0
-        } else {
-            hero_lines.len() as u16
-        };
-        let summary_height = (summary_lines.len() as u16).saturating_add(1).max(4);
-
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(hero_height),
-                Constraint::Length(summary_height),
-                Constraint::Length(1),
-                Constraint::Min((detail_lines.len() as u16).clamp(4, 8)),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-
-        if hero_height > 0 {
-            let hero = Paragraph::new(hero_lines).wrap(Wrap { trim: false });
-            frame.render_widget(hero, sections[0]);
+        if !hero_lines.is_empty() {
+            body.text(hero_lines);
         }
-
-        let summary_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Summary ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let summary_inner = summary_block.inner(sections[1]);
-        frame.render_widget(summary_block, sections[1]);
-        frame.render_widget(
-            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
-            summary_inner,
-        );
-
-        frame.render_widget(Paragraph::new(""), sections[2]);
-
-        let details_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Details ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let details_inner = details_block.inner(sections[3]);
-        frame.render_widget(details_block, sections[3]);
-        let max_scroll = detail_lines
-            .len()
-            .saturating_sub(details_inner.height as usize) as u16;
-        self.inspect_scroll_view.set(Some(InspectScrollView {
-            max_offset: max_scroll,
-            height: details_inner.height,
-        }));
-        let scroll_offset = self.inspect_overlay.scroll_offset.min(max_scroll);
-        let can_scroll_up = scroll_offset > 0;
-        let can_scroll_down = scroll_offset < max_scroll;
-        frame.render_widget(
-            Paragraph::new(detail_lines)
-                .scroll((scroll_offset, 0))
-                .wrap(Wrap { trim: false }),
-            details_inner,
-        );
-
-        let overflow_hint = match (can_scroll_up, can_scroll_down) {
-            (true, true) => Some("↑/↓ more"),
-            (true, false) => Some("↑ more"),
-            (false, true) => Some("↓ more"),
-            (false, false) => None,
-        };
-
-        if let Some(hint) = overflow_hint {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    hint,
-                    Style::default()
-                        .fg(self.ui_theme.muted)
-                        .add_modifier(Modifier::BOLD),
-                ))),
-                sections[4],
-            );
-        } else {
-            frame.render_widget(Paragraph::new(""), sections[4]);
-        }
-        frame.render_widget(
-            Paragraph::new(self.inspect_action_line(target)).alignment(Alignment::Center),
-            sections[5],
-        );
+        body.heading(" Summary ")
+            .text(self.inspect_summary_lines(target))
+            .gap(1)
+            .heading(" Details ")
+            .text(self.inspect_detail_lines(target));
+        body
     }
 
     pub(super) fn inspect_hero_lines(
@@ -181,72 +94,6 @@ impl App {
                 Style::default().fg(self.ui_theme.installed_text),
             ),
         ])
-    }
-
-    pub(super) fn inspect_action_line(&self, target: InspectResolvedTarget<'_>) -> Line<'static> {
-        let is_selected = self.dashboard.is_parent_selected(&target.item.folder);
-        let select_label = if is_selected { "deselect" } else { "select" };
-        let chips = [
-            InspectActionChip {
-                key: "space",
-                label: select_label,
-                enabled: true,
-            },
-            InspectActionChip {
-                key: "c",
-                label: "check",
-                enabled: true,
-            },
-            InspectActionChip {
-                key: "u",
-                label: "update",
-                enabled: is_refreshable_dashboard_item(target.item),
-            },
-            InspectActionChip {
-                key: "x",
-                label: "delete",
-                enabled: true,
-            },
-        ];
-
-        let mut spans = Vec::new();
-        for (index, chip) in chips.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("   "));
-            }
-            let key_bg = if chip.key == "space" && is_selected {
-                self.ui_theme.key_bg_selected
-            } else if chip.enabled {
-                self.ui_theme.key_bg
-            } else {
-                self.ui_theme.key_bg_disabled
-            };
-            let key_fg = if chip.key == "space" && is_selected {
-                self.ui_theme.key_fg_selected
-            } else if chip.enabled {
-                self.ui_theme.panel_title
-            } else {
-                self.ui_theme.muted
-            };
-            spans.push(Span::styled(
-                format!(" {} ", chip.key),
-                Style::default()
-                    .fg(key_fg)
-                    .bg(key_bg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                chip.label,
-                Style::default().fg(if chip.enabled {
-                    self.ui_theme.panel_title
-                } else {
-                    self.ui_theme.muted
-                }),
-            ));
-        }
-
-        Line::from(spans)
     }
 
     pub(super) fn inspect_detail_lines(

@@ -1,3 +1,7 @@
+use ratatui::buffer::Buffer;
+use ratatui::widgets::Widget;
+
+use super::sheet::{SheetBody, render_stateful, text_height};
 use super::*;
 
 const SEARCH_EMPTY_HINT_SOURCES: &str =
@@ -5,43 +9,46 @@ const SEARCH_EMPTY_HINT_SOURCES: &str =
 const SEARCH_EMPTY_HINT_TUKUI: &str = "Type elvui or tukui for TukUI.";
 
 impl App {
-    pub(super) fn render_search_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
-        let content_area = area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        let summary_lines = self.search_summary_lines();
-        let summary_height = summary_lines.len() as u16;
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(summary_height),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Min(8),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
+    /// The summary, the install box (always drawn), then the empty state or
+    /// the results and the selected result. The results get the rows the
+    /// rest leaves.
+    pub(super) fn search_sheet_body(&self, width: u16, max_height: u16) -> SheetBody<'_> {
+        let summary = self.search_summary_lines();
+        let summary_height = text_height(&summary, width);
+        let mut body = SheetBody::new();
+        body.text(summary)
+            .widget(3, |area, buffer| self.render_search_input(area, buffer))
+            .gap(1);
+        if self.search_pane.results.is_empty() {
+            body.centered_text(self.search_empty_state_lines());
+            return body;
+        }
 
-        frame.render_widget(
-            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
-            sections[0],
-        );
-
-        self.render_search_input(frame, sections[1]);
-
-        frame.render_widget(Paragraph::new(""), sections[2]);
-
-        self.render_search_compose_first_body(frame, sections[3]);
-        frame.render_widget(Paragraph::new(""), sections[4]);
-        frame.render_widget(
-            Paragraph::new(self.search_action_line()).alignment(Alignment::Center),
-            sections[5],
-        );
+        let preview = self.search_selected_preview_lines();
+        // Summary, box, gap, two headings and the preview.
+        let fixed = summary_height
+            .saturating_add(6)
+            .saturating_add(text_height(&preview, width));
+        let needed = u16::try_from(self.search_pane.results.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1);
+        let room = max_height.saturating_sub(fixed);
+        let results_height = if needed <= room {
+            needed
+        } else {
+            room.max(needed.min(4))
+        };
+        body.heading(" Results ")
+            .widget(results_height, |area, buffer| {
+                self.render_search_results_list(area, buffer)
+            })
+            .focus_last()
+            .heading(" Selected ")
+            .text(preview);
+        body
     }
 
-    pub(super) fn render_search_input(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(super) fn render_search_input(&self, area: Rect, buffer: &mut Buffer) {
         let active = self.search_pane.is_editing || self.search_pane.in_progress;
         let block = Block::default()
             .borders(Borders::ALL)
@@ -89,10 +96,10 @@ impl App {
             ));
         }
 
-        let query = Paragraph::new(Line::from(spans))
+        Paragraph::new(Line::from(spans))
             .block(block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(query, area);
+            .wrap(Wrap { trim: false })
+            .render(area, buffer);
     }
 
     pub(super) fn search_summary_lines(&self) -> Vec<Line<'static>> {
@@ -279,169 +286,7 @@ impl App {
         }
     }
 
-    pub(super) fn search_action_line(&self) -> Line<'static> {
-        let intent = classify_search_input(&self.search_pane.query);
-        let submit_label = match intent {
-            SearchInputIntent::Direct(_) | SearchInputIntent::WagoUrl(_) => "install",
-            _ => "search",
-        };
-        let submit_enabled = self.wago_api_key.is_some() || !intent.needs_wago_key();
-        let chips: Vec<SearchActionChip> = if self.search_pane.pending_direct_install().is_some() {
-            vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: "confirm",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "esc",
-                    label: "cancel",
-                    enabled: true,
-                },
-            ]
-        } else if self.pending_wago_install_confirmation.is_some() {
-            vec![
-                SearchActionChip {
-                    key: "y",
-                    label: "reinstall",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "n",
-                    label: "cancel",
-                    enabled: true,
-                },
-            ]
-        } else if self.search_pane.is_editing || self.search_pane.in_progress {
-            let mut chips = vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: submit_label,
-                    enabled: !self.search_pane.in_progress,
-                },
-                SearchActionChip {
-                    key: "esc",
-                    label: "stop editing",
-                    enabled: self.search_pane.is_editing,
-                },
-            ];
-            if self.wago_api_key.is_none() && !self.search_pane.in_progress {
-                chips.push(SearchActionChip {
-                    key: ",",
-                    label: "config",
-                    enabled: true,
-                });
-            }
-            chips
-        } else if self.search_pane.results.is_empty() {
-            vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: submit_label,
-                    enabled: submit_enabled,
-                },
-                SearchActionChip {
-                    key: "/",
-                    label: "edit input",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: ",",
-                    label: "config",
-                    enabled: self.wago_api_key.is_none(),
-                },
-            ]
-        } else {
-            vec![
-                SearchActionChip {
-                    key: "↑/↓",
-                    label: "move",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "enter",
-                    label: "install",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "/",
-                    label: "edit query",
-                    enabled: true,
-                },
-            ]
-        };
-
-        let mut spans = Vec::new();
-        for (index, chip) in chips.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("   "));
-            }
-            let key_bg = if chip.enabled {
-                self.ui_theme.key_bg
-            } else {
-                self.ui_theme.key_bg_disabled
-            };
-            let key_fg = if chip.enabled {
-                self.ui_theme.panel_title
-            } else {
-                self.ui_theme.muted
-            };
-            spans.push(Span::styled(
-                format!(" {} ", chip.key),
-                Style::default()
-                    .fg(key_fg)
-                    .bg(key_bg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                chip.label,
-                if chip.enabled {
-                    Style::default().fg(self.ui_theme.highlight)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                },
-            ));
-        }
-
-        Line::from(spans)
-    }
-
-    pub(super) fn render_search_compose_first_body(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.search_pane.results.is_empty() {
-            self.render_search_empty_state(frame, area);
-            return;
-        }
-
-        let [results, preview] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(5)])
-            .areas(area);
-
-        let results_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Results ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let results_inner = results_block.inner(results);
-        frame.render_widget(results_block, results);
-        self.render_search_results_list(frame, results_inner);
-
-        let preview_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Selected ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let preview_inner = preview_block.inner(preview);
-        frame.render_widget(preview_block, preview);
-        self.render_search_selected_preview(frame, preview_inner);
-    }
-
-    pub(super) fn render_search_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(super) fn search_empty_state_lines(&self) -> Vec<Line<'static>> {
         let mut message = if let Some(state) = self.active_search_install_state() {
             match state {
                 SearchInstallState::Checking { addon_name, .. } => vec![
@@ -621,13 +466,10 @@ impl App {
             )));
         }
 
-        let paragraph = Paragraph::new(message)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
+        message
     }
 
-    pub(super) fn render_search_results_list(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(super) fn render_search_results_list(&self, area: Rect, buffer: &mut Buffer) {
         let result_count = self.search_pane.results.len();
         let mut show_above = false;
         let mut show_below = false;
@@ -662,7 +504,7 @@ impl App {
             .split(area);
         let mut area_index = 0;
         if show_above {
-            frame.render_widget(
+            Widget::render(
                 Paragraph::new(Line::from(vec![
                     Span::styled("↑ ", Style::default().fg(self.ui_theme.muted)),
                     Span::styled(
@@ -675,6 +517,7 @@ impl App {
                     ),
                 ])),
                 areas[area_index],
+                buffer,
             );
             area_index += 1;
         }
@@ -769,11 +612,11 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         );
         let mut state = TableState::default().with_selected(selected_row);
-        frame.render_stateful_widget(table, table_area, &mut state);
+        render_stateful(table, table_area, buffer, &mut state);
 
         if show_below {
             let remaining_below = result_count.saturating_sub(window_end);
-            frame.render_widget(
+            Widget::render(
                 Paragraph::new(Line::from(vec![
                     Span::styled("↓ ", Style::default().fg(self.ui_theme.muted)),
                     Span::styled(
@@ -786,12 +629,13 @@ impl App {
                     ),
                 ])),
                 areas[area_index],
+                buffer,
             );
         }
     }
 
-    pub(super) fn render_search_selected_preview(&self, frame: &mut Frame<'_>, area: Rect) {
-        let lines = if let Some(result) = self.search_pane.selected_result() {
+    pub(super) fn search_selected_preview_lines(&self) -> Vec<Line<'static>> {
+        if let Some(result) = self.search_pane.selected_result() {
             let author = result
                 .owner
                 .as_deref()
@@ -903,10 +747,7 @@ impl App {
                     Style::default().fg(self.ui_theme.muted),
                 )),
             ]
-        };
-
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
+        }
     }
 
     pub(super) fn search_result_name_line(

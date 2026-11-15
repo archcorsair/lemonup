@@ -18,6 +18,8 @@ pub enum AppAction {
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),
     SetInspectOverlayState(InspectOverlayState),
+    /// Scrolls the open sheet to this body row.
+    SetSheetOffset(u16),
     SetHelpOverlay(bool),
     SetHelpContext(HelpContext),
     SetStatus(StatusMessage),

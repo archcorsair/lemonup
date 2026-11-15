@@ -57,6 +57,7 @@ use crate::wago::{
 use time::{Duration, OffsetDateTime};
 
 mod direct_install;
+mod keymap;
 mod render_backup;
 mod render_config;
 mod render_dashboard;
@@ -64,12 +65,14 @@ mod render_help;
 mod render_inspect;
 mod render_install_search;
 mod render_shared;
+mod sheet;
 mod status;
 
 pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
     DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
 };
+use self::keymap::KeyHint;
 #[cfg(test)]
 use self::render_dashboard::{child_row_detail_prefix, child_row_prefix};
 use self::render_dashboard::{
@@ -81,6 +84,7 @@ use self::render_shared::{
     format_download_count, summarize_owned_folders, truncate_middle_text, truncate_text,
     visible_search_result_window,
 };
+pub(crate) use self::sheet::{SheetMove, SheetScroll};
 pub(crate) use self::status::{StatusKind, StatusMessage, StatusOffer};
 
 const LOGO_FULL: [&str; 2] = [
@@ -147,16 +151,9 @@ impl InspectSection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InspectScrollView {
-    max_offset: u16,
-    height: u16,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InspectOverlayState {
     open_sections: HashSet<InspectSection>,
-    scroll_offset: u16,
 }
 
 impl InspectOverlayState {
@@ -170,57 +167,12 @@ impl InspectOverlayState {
     fn is_open(&self, section: InspectSection) -> bool {
         self.open_sections.contains(&section)
     }
-
-    /// Scrolls by `delta` lines. `max` is the last offset the Details body can
-    /// show, once it has been drawn; before that only the top is enforced.
-    fn scroll_by(mut self, delta: i32, max: Option<u16>) -> Self {
-        let current = i32::from(self.clamp_offset(max));
-        let upper = max.map_or(i32::from(u16::MAX), i32::from);
-        self.scroll_offset = (current + delta).clamp(0, upper) as u16;
-        self
-    }
-
-    fn scroll_up(self, max: Option<u16>) -> Self {
-        self.scroll_by(-1, max)
-    }
-
-    fn scroll_down(self, max: Option<u16>) -> Self {
-        self.scroll_by(1, max)
-    }
-
-    fn scroll_to_top(mut self) -> Self {
-        self.scroll_offset = 0;
-        self
-    }
-
-    fn scroll_to_bottom(mut self, max: Option<u16>) -> Self {
-        self.scroll_offset = max.unwrap_or(self.scroll_offset);
-        self
-    }
-
-    fn clamp_offset(&self, max: Option<u16>) -> u16 {
-        max.map_or(self.scroll_offset, |max| self.scroll_offset.min(max))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InspectResolvedTarget<'a> {
     item: &'a DashboardItem,
     opened_from_child: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InspectActionChip {
-    key: &'static str,
-    label: &'static str,
-    enabled: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SearchActionChip {
-    key: &'static str,
-    label: &'static str,
-    enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,14 +248,10 @@ enum FooterHintId {
     Inspect,
     Select,
     Clear,
-    Sort,
-    Tree,
     Check,
     Update,
     Delete,
-    Undo,
     Install,
-    Search,
     Filter,
     Config,
     Backup,
@@ -328,14 +276,7 @@ enum FooterHintId {
     UpdateAll,
     CheckAll,
     Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FooterCommandHint {
-    id: FooterHintId,
-    key: &'static str,
-    label: &'static str,
-    tier: FooterHintTier,
+    Scroll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,12 +396,8 @@ enum AppMessage {
     DashboardOpenInspect,
     DashboardOpenHelp,
     DashboardCloseOverlay,
-    InspectScrollUp,
-    InspectScrollDown,
-    InspectScrollPageUp,
-    InspectScrollPageDown,
-    InspectScrollTop,
-    InspectScrollBottom,
+    /// Scrolls the open sheet's body.
+    SheetScroll(SheetMove),
     InspectToggleSection(InspectSection),
     InspectToggleSelected,
     InspectRequestDelete,
@@ -2389,8 +2326,8 @@ pub struct App {
     undo_delete: Option<DashboardUndoDeleteState>,
     undo_delete_in_progress: bool,
     last_dashboard_list_area: Option<Rect>,
-    /// Size of the Inspect details body as last drawn, so paging can stop at the end.
-    inspect_scroll_view: std::cell::Cell<Option<InspectScrollView>>,
+    /// The open sheet as last drawn, so keys can scroll it.
+    sheet_scroll: std::cell::Cell<SheetScroll>,
     onboarding: OnboardingState,
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
     task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
@@ -2546,7 +2483,7 @@ impl App {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
-            inspect_scroll_view: std::cell::Cell::new(None),
+            sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding,
             task_events_tx,
             task_events_rx,
@@ -2794,18 +2731,6 @@ impl App {
         ]
     }
 
-    fn inspect_scroll_max(&self) -> Option<u16> {
-        self.inspect_scroll_view.get().map(|view| view.max_offset)
-    }
-
-    /// Lines the Details body shows at once, for PgUp and PgDn.
-    fn inspect_page_size(&self) -> i32 {
-        const FALLBACK_PAGE: i32 = 10;
-        self.inspect_scroll_view
-            .get()
-            .map_or(FALLBACK_PAGE, |view| i32::from(view.height.max(1)))
-    }
-
     fn dashboard_selection_for_pointer(&self, column: u16, row: u16) -> Option<usize> {
         // The list area holds rows only, with no border or header inside it.
         let area = self.last_dashboard_list_area?;
@@ -2915,232 +2840,6 @@ impl App {
         })
     }
 
-    fn footer_hint_for_key(&self, key: KeyEvent) -> Option<FooterHintId> {
-        if is_ctrl_c(key) || is_modified_char_chord(key) {
-            return None;
-        }
-
-        if self.shell_mode == ShellMode::Onboarding {
-            if self.onboarding.is_editing {
-                return match key.code {
-                    KeyCode::Enter => Some(FooterHintId::Save),
-                    KeyCode::Esc => Some(FooterHintId::Cancel),
-                    KeyCode::Backspace => Some(FooterHintId::Back),
-                    _ => None,
-                };
-            }
-
-            return match self.onboarding.step {
-                OnboardingStep::Theme => match key.code {
-                    KeyCode::Left | KeyCode::Right => Some(FooterHintId::ThemeToggle),
-                    KeyCode::Enter => Some(FooterHintId::Next),
-                    KeyCode::Esc => Some(FooterHintId::Cancel),
-                    _ => None,
-                },
-                OnboardingStep::Directory => match self.onboarding.phase {
-                    OnboardingPhase::Found(_) => match key.code {
-                        KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
-                            Some(FooterHintId::Nav)
-                        }
-                        KeyCode::Enter => Some(FooterHintId::Next),
-                        KeyCode::Esc => Some(FooterHintId::Back),
-                        _ => None,
-                    },
-                    OnboardingPhase::DeepScanning(_) => match key.code {
-                        KeyCode::Esc => Some(FooterHintId::Cancel),
-                        _ => None,
-                    },
-                    _ => match key.code {
-                        KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
-                            Some(FooterHintId::Nav)
-                        }
-                        KeyCode::Enter | KeyCode::Char('d') => Some(FooterHintId::Validate),
-                        KeyCode::Char('e') => Some(FooterHintId::Edit),
-                        KeyCode::Esc => Some(FooterHintId::Back),
-                        _ => None,
-                    },
-                },
-                OnboardingStep::Wago => match key.code {
-                    KeyCode::Char('e') => Some(FooterHintId::Edit),
-                    KeyCode::Enter => Some(FooterHintId::Next),
-                    KeyCode::Esc => Some(FooterHintId::Back),
-                    _ => None,
-                },
-                OnboardingStep::Settings => match key.code {
-                    KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
-                        Some(FooterHintId::SettingsNav)
-                    }
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
-                        Some(FooterHintId::Change)
-                    }
-                    KeyCode::Enter => Some(FooterHintId::Next),
-                    KeyCode::Esc => Some(FooterHintId::Back),
-                    _ => None,
-                },
-                OnboardingStep::Review => match key.code {
-                    KeyCode::Enter => Some(FooterHintId::Next),
-                    KeyCode::Esc => Some(FooterHintId::Back),
-                    _ => None,
-                },
-            };
-        }
-
-        if self.dashboard.pending_delete_folders().is_some()
-            || self.pending_wago_install_confirmation.is_some()
-        {
-            return match key.code {
-                KeyCode::Char('y') => Some(FooterHintId::Confirm),
-                KeyCode::Char('n') | KeyCode::Esc => Some(FooterHintId::Cancel),
-                _ => None,
-            };
-        }
-
-        if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
-            return match key.code {
-                KeyCode::Char('c') => Some(FooterHintId::Check),
-                KeyCode::Char('u') => Some(FooterHintId::Update),
-                KeyCode::Char('x') => Some(FooterHintId::Delete),
-                KeyCode::Char(' ') => Some(FooterHintId::Select),
-                KeyCode::Char('r') => Some(FooterHintId::Relations),
-                KeyCode::Char('d') => Some(FooterHintId::Dependencies),
-                KeyCode::Char('t') => Some(FooterHintId::Technical),
-                _ => None,
-            };
-        }
-
-        if self.shell_ui.overlay.active == Some(OverlayKind::Help) {
-            return match key.code {
-                KeyCode::Char('?') | KeyCode::Esc => Some(FooterHintId::Close),
-                _ => None,
-            };
-        }
-
-        if self.shell_ui.overlay.active.is_some() {
-            return match self.dashboard.detail_mode {
-                DetailMode::Install => {
-                    if self.install_pane.is_editing {
-                        match key.code {
-                            KeyCode::Enter => Some(FooterHintId::Save),
-                            KeyCode::Esc => Some(FooterHintId::Cancel),
-                            _ => None,
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('e') => Some(FooterHintId::Edit),
-                            KeyCode::Enter => Some(FooterHintId::Run),
-                            KeyCode::Esc => Some(FooterHintId::Close),
-                            _ => None,
-                        }
-                    }
-                }
-                DetailMode::Search => {
-                    if self.search_pane.pending_direct_install().is_some() {
-                        match key.code {
-                            KeyCode::Enter => Some(FooterHintId::Confirm),
-                            KeyCode::Esc => Some(FooterHintId::Cancel),
-                            _ => None,
-                        }
-                    } else if self.search_pane.is_editing {
-                        match key.code {
-                            KeyCode::Enter => Some(FooterHintId::Save),
-                            KeyCode::Esc => Some(FooterHintId::Cancel),
-                            KeyCode::Backspace => Some(FooterHintId::Back),
-                            _ => None,
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('e') | KeyCode::Char('/') => Some(FooterHintId::Edit),
-                            KeyCode::Down
-                            | KeyCode::Up
-                            | KeyCode::Char('j')
-                            | KeyCode::Char('k') => Some(FooterHintId::Results),
-                            KeyCode::Enter => Some(FooterHintId::Install),
-                            KeyCode::Esc => Some(FooterHintId::Close),
-                            _ => None,
-                        }
-                    }
-                }
-                DetailMode::Update => match key.code {
-                    KeyCode::Char('u') | KeyCode::Char('r') => Some(FooterHintId::Update),
-                    KeyCode::Char('c') | KeyCode::Char('v') => Some(FooterHintId::Check),
-                    KeyCode::Esc => Some(FooterHintId::Close),
-                    _ => None,
-                },
-                DetailMode::Config => {
-                    if self.config_pane.edit.is_some() {
-                        match key.code {
-                            KeyCode::Enter => Some(FooterHintId::Save),
-                            KeyCode::Esc => Some(FooterHintId::Cancel),
-                            KeyCode::Backspace => Some(FooterHintId::Back),
-                            _ => None,
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Down
-                            | KeyCode::Up
-                            | KeyCode::Char('j')
-                            | KeyCode::Char('k') => Some(FooterHintId::Fields),
-                            KeyCode::Enter => Some(FooterHintId::Toggle),
-                            KeyCode::Char('r') => Some(FooterHintId::Run),
-                            KeyCode::Esc => Some(FooterHintId::Close),
-                            _ => None,
-                        }
-                    }
-                }
-                DetailMode::Backup => match key.code {
-                    KeyCode::Char('r') | KeyCode::Enter => Some(FooterHintId::Run),
-                    KeyCode::Esc => Some(FooterHintId::Close),
-                    _ => None,
-                },
-                DetailMode::Overview => match key.code {
-                    KeyCode::Esc => Some(FooterHintId::Close),
-                    _ => None,
-                },
-            };
-        }
-
-        if self.dashboard.filter_editing() {
-            return match key.code {
-                KeyCode::Down | KeyCode::Up => Some(FooterHintId::Nav),
-                KeyCode::Enter => Some(FooterHintId::Save),
-                KeyCode::Esc => Some(FooterHintId::Clear),
-                KeyCode::Backspace => Some(FooterHintId::Back),
-                _ => None,
-            };
-        }
-
-        match key.code {
-            KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
-                Some(FooterHintId::Nav)
-            }
-            KeyCode::Enter => Some(FooterHintId::Inspect),
-            KeyCode::Char('?') => Some(FooterHintId::Help),
-            KeyCode::Char(' ') | KeyCode::Char('a') => Some(FooterHintId::Select),
-            KeyCode::Esc => Some(FooterHintId::Clear),
-            KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4') => {
-                Some(FooterHintId::Sort)
-            }
-            KeyCode::Right
-            | KeyCode::Left
-            | KeyCode::Char('l')
-            | KeyCode::Char('h')
-            | KeyCode::Char(']')
-            | KeyCode::Char('[') => Some(FooterHintId::Tree),
-            KeyCode::Char('c') => Some(FooterHintId::Check),
-            KeyCode::Char('u') => Some(FooterHintId::Update),
-            KeyCode::Char('C') => Some(FooterHintId::CheckAll),
-            KeyCode::Char('U') => Some(FooterHintId::UpdateAll),
-            KeyCode::Char('x') => Some(FooterHintId::Delete),
-            KeyCode::Char('z') => Some(FooterHintId::Undo),
-            KeyCode::Char('i') => Some(FooterHintId::Install),
-            KeyCode::Char('s') => Some(FooterHintId::Search),
-            KeyCode::Char('/') => Some(FooterHintId::Filter),
-            KeyCode::Char(',') => Some(FooterHintId::Config),
-            KeyCode::Char('b') => Some(FooterHintId::Backup),
-            _ => None,
-        }
-    }
-
     fn messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
         if key.kind != KeyEventKind::Press {
             return vec![];
@@ -3211,12 +2910,11 @@ impl App {
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
-                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::InspectScrollDown],
-                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::InspectScrollUp],
-                KeyCode::PageDown => vec![AppMessage::InspectScrollPageDown],
-                KeyCode::PageUp => vec![AppMessage::InspectScrollPageUp],
-                KeyCode::Home => vec![AppMessage::InspectScrollTop],
-                KeyCode::End => vec![AppMessage::InspectScrollBottom],
+                code if sheet_move_for_key(code, true).is_some() => {
+                    vec![AppMessage::SheetScroll(
+                        sheet_move_for_key(code, true).expect("checked scroll key"),
+                    )]
+                }
                 KeyCode::Char('c') => vec![AppMessage::InspectRunCheck],
                 KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
@@ -3244,8 +2942,19 @@ impl App {
                 KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => {
                     vec![AppMessage::DashboardCloseOverlay]
                 }
-                _ => vec![],
+                code => sheet_move_for_key(code, true)
+                    .map(AppMessage::SheetScroll)
+                    .into_iter()
+                    .collect(),
             };
+        }
+
+        // PgUp, PgDn, Home and End scroll any sheet, even where the arrows
+        // move a cursor or a text box has focus.
+        if self.shell_ui.overlay.active.is_some()
+            && let Some(movement) = sheet_move_for_key(key.code, false)
+        {
+            return vec![AppMessage::SheetScroll(movement)];
         }
 
         if let Some(messages) = self.search_messages_for_key(key) {
@@ -3265,7 +2974,11 @@ impl App {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
                 KeyCode::Char('q') | KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
-                _ => vec![],
+                // Where the arrows do not move a cursor, they scroll.
+                code => sheet_move_for_key(code, true)
+                    .map(AppMessage::SheetScroll)
+                    .into_iter()
+                    .collect(),
             };
         }
 
@@ -3791,33 +3504,10 @@ impl App {
             AppMessage::InspectToggleSection(section) => vec![AppAction::SetInspectOverlayState(
                 self.inspect_overlay.clone().toggle(section),
             )],
-            AppMessage::InspectScrollUp => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay
-                    .clone()
-                    .scroll_up(self.inspect_scroll_max()),
-            )],
-            AppMessage::InspectScrollDown => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay
-                    .clone()
-                    .scroll_down(self.inspect_scroll_max()),
-            )],
-            AppMessage::InspectScrollPageUp => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay
-                    .clone()
-                    .scroll_by(-self.inspect_page_size(), self.inspect_scroll_max()),
-            )],
-            AppMessage::InspectScrollPageDown => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay
-                    .clone()
-                    .scroll_by(self.inspect_page_size(), self.inspect_scroll_max()),
-            )],
-            AppMessage::InspectScrollTop => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay.clone().scroll_to_top(),
-            )],
-            AppMessage::InspectScrollBottom => vec![AppAction::SetInspectOverlayState(
-                self.inspect_overlay
-                    .clone()
-                    .scroll_to_bottom(self.inspect_scroll_max()),
+            AppMessage::SheetScroll(movement) => vec![AppAction::SetSheetOffset(
+                self.sheet_scroll
+                    .get()
+                    .moved(movement, self.shell_ui.overlay.active),
             )],
             AppMessage::InspectToggleSelected => match self.inspect_resolved_target() {
                 Some(target) => {
@@ -5610,6 +5300,11 @@ impl App {
             AppAction::SetInspectOverlayState(state) => {
                 self.inspect_overlay = state;
             }
+            AppAction::SetSheetOffset(offset) => {
+                let mut scroll = self.sheet_scroll.get();
+                scroll.offset = offset;
+                self.sheet_scroll.set(scroll);
+            }
             AppAction::SetHelpOverlay(active) => {
                 if active {
                     self.shell_ui.overlay.active = Some(OverlayKind::Help);
@@ -6275,7 +5970,7 @@ impl App {
         let shell = self.shell_frame(frame.area());
         self.render_onboarding_header(frame, shell.header);
         self.render_onboarding(frame, shell.body);
-        self.render_overlay_host(frame, shell.body);
+        self.render_overlay_host(frame, shell.body, 0);
         self.render_footer(frame, shell.footer);
     }
 
@@ -6297,11 +5992,11 @@ impl App {
         }
     }
 
-    fn footer_hint_styles(&self, id: FooterHintId) -> (Style, Style) {
+    fn footer_hint_styles(&self, id: Option<FooterHintId>) -> (Style, Style) {
         if self
             .shell_ui
             .footer_pulse
-            .is_some_and(|pulse| pulse.hint == id)
+            .is_some_and(|pulse| Some(pulse.hint) == id)
         {
             return (
                 Style::default()
@@ -8668,6 +8363,20 @@ fn adjust_u16(current: u16, delta: i16, step: u16, minimum: u16) -> u16 {
     }
 }
 
+/// The sheet scroll a key asks for. `arrows` includes the arrow keys and
+/// `j` `k`, for sheets where they do not move a cursor.
+fn sheet_move_for_key(code: KeyCode, arrows: bool) -> Option<SheetMove> {
+    match code {
+        KeyCode::PageUp => Some(SheetMove::PageUp),
+        KeyCode::PageDown => Some(SheetMove::PageDown),
+        KeyCode::Home => Some(SheetMove::Top),
+        KeyCode::End => Some(SheetMove::Bottom),
+        KeyCode::Up | KeyCode::Char('k') if arrows => Some(SheetMove::LineUp),
+        KeyCode::Down | KeyCode::Char('j') if arrows => Some(SheetMove::LineDown),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -8700,7 +8409,7 @@ mod tests {
         visible_search_result_window,
     };
     use super::{
-        DashboardItem, DashboardUndoDeleteState, InspectScrollView, StatusKind, StatusMessage,
+        DashboardItem, DashboardUndoDeleteState, SheetMove, SheetScroll, StatusKind, StatusMessage,
         StatusOffer,
     };
     use crate::action::AppAction;
@@ -8788,7 +8497,7 @@ mod tests {
             undo_delete: None,
             undo_delete_in_progress: false,
             last_dashboard_list_area: None,
-            inspect_scroll_view: std::cell::Cell::new(None),
+            sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
@@ -9239,7 +8948,7 @@ mod tests {
             );
             // The pulsed key is one the key line shows.
             assert!(
-                app.dashboard_key_hints(120)
+                app.key_table(120)
                     .iter()
                     .any(|shown| shown.id == Some(hint)),
                 "{hint:?} is not on the key line"
@@ -9594,28 +9303,50 @@ mod tests {
         app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::PageDown)),
-            vec![AppMessage::InspectScrollPageDown]
+            vec![AppMessage::SheetScroll(SheetMove::PageDown)]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::End)),
-            vec![AppMessage::InspectScrollBottom]
+            vec![AppMessage::SheetScroll(SheetMove::Bottom)]
         );
 
-        app.inspect_scroll_view.set(Some(InspectScrollView {
+        app.sheet_scroll.set(SheetScroll {
+            kind: Some(OverlayKind::Inspect),
+            offset: 0,
+            focus: None,
             max_offset: 12,
-            height: 5,
-        }));
-        let scroll = |app: &App, message: AppMessage| match app.update(message).as_slice() {
-            [AppAction::SetInspectOverlayState(state)] => state.scroll_offset,
-            other => panic!("expected inspect state, got {other:?}"),
+            viewport: 5,
+        });
+        let scroll = |app: &mut App, message: AppMessage| {
+            let actions = app.update(message);
+            let offset = match actions.as_slice() {
+                [AppAction::SetSheetOffset(offset)] => *offset,
+                other => panic!("expected a sheet offset, got {other:?}"),
+            };
+            for action in actions {
+                app.apply(action);
+            }
+            offset
         };
 
-        assert_eq!(scroll(&app, AppMessage::InspectScrollPageDown), 5);
-        assert_eq!(scroll(&app, AppMessage::InspectScrollBottom), 12);
-        app.inspect_overlay.scroll_offset = 12;
-        assert_eq!(scroll(&app, AppMessage::InspectScrollDown), 12);
-        assert_eq!(scroll(&app, AppMessage::InspectScrollPageUp), 7);
-        assert_eq!(scroll(&app, AppMessage::InspectScrollTop), 0);
+        // A page is the body height less the two arrow lines.
+        assert_eq!(
+            scroll(&mut app, AppMessage::SheetScroll(SheetMove::PageDown)),
+            3
+        );
+        assert_eq!(
+            scroll(&mut app, AppMessage::SheetScroll(SheetMove::Bottom)),
+            12
+        );
+        assert_eq!(
+            scroll(&mut app, AppMessage::SheetScroll(SheetMove::LineDown)),
+            12
+        );
+        assert_eq!(
+            scroll(&mut app, AppMessage::SheetScroll(SheetMove::PageUp)),
+            9
+        );
+        assert_eq!(scroll(&mut app, AppMessage::SheetScroll(SheetMove::Top)), 0);
     }
 
     #[test]
@@ -9678,11 +9409,11 @@ mod tests {
 
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('j'))),
-            vec![AppMessage::InspectScrollDown]
+            vec![AppMessage::SheetScroll(SheetMove::LineDown)]
         );
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('k'))),
-            vec![AppMessage::InspectScrollUp]
+            vec![AppMessage::SheetScroll(SheetMove::LineUp)]
         );
     }
 
@@ -11855,10 +11586,9 @@ mod tests {
             app.messages_for_key(shift('C')),
             vec![AppMessage::DashboardRunCheckAll]
         );
-        assert_eq!(
-            app.footer_hint_for_key(shift('U')),
-            Some(FooterHintId::UpdateAll)
-        );
+        // The pulse follows the key table: with nothing to update the key
+        // line has no U, so there is nothing to pulse.
+        assert_eq!(app.footer_hint_for_key(shift('U')), None);
         assert_eq!(
             app.footer_hint_for_key(shift('C')),
             Some(FooterHintId::CheckAll)
@@ -12133,9 +11863,7 @@ mod tests {
         let text = rows.join("\n");
         assert!(rows[0].contains("█"), "{text}");
         assert!(rows[29].contains("esc close"), "{text}");
-        // Help still clips its summary in short windows until it moves onto
-        // the sheet component, so check the version line in a tall one.
-        let text = render_rows(&mut app, 160, 50).join("\n");
+        // Help is a sheet now: nothing is clipped at 120 x 30.
         assert!(
             text.contains(&format!("LemonUp {}", env!("CARGO_PKG_VERSION"))),
             "{text}"
@@ -13066,7 +12794,7 @@ mod tests {
             Some(FooterHintId::Filter)
         );
         assert!(
-            app.dashboard_key_hints(120)
+            app.key_table(120)
                 .iter()
                 .any(|hint| hint.id == Some(FooterHintId::Filter) && hint.key == "/")
         );
@@ -13376,6 +13104,754 @@ mod tests {
         let second_name = app.dashboard.rows[1].name.clone();
         assert!(rows[6].contains(&second_name), "{}", rows.join("\n"));
         assert_eq!(app.dashboard_selection_for_pointer(10, 6), Some(1));
+    }
+
+    mod sheets {
+        use super::*;
+        use crate::app::keymap::{KeyHint, help_sections};
+        use crate::app::sheet::{SheetFrame, offset_for_focus, wrap_lines};
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+
+        /// The sizes the design was checked at: the smallest supported, the
+        /// Windows Terminal default, and the website screenshots.
+        const SIZES: [(u16, u16); 3] = [(80, 24), (120, 30), (138, 36)];
+
+        fn apply_all(app: &mut App, message: AppMessage) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+
+        fn wago_results(count: usize) -> Vec<WagoSearchResult> {
+            (0..count)
+                .map(|index| WagoSearchResult {
+                    id: format!("slug{index}"),
+                    display_name: format!("Result Addon {index}"),
+                    summary: Some(format!("Summary for result {index}")),
+                    owner: Some("Owner".to_string()),
+                    authors: vec!["Owner".to_string()],
+                    website_url: None,
+                    download_count: Some(1_000 + index as u64),
+                    version: Some("1.0.0".to_string()),
+                })
+                .collect()
+        }
+
+        fn backups(count: usize) -> Vec<BackupEntry> {
+            (0..count)
+                .map(|index| BackupEntry {
+                    file_name: format!("WTF-2026040{index}T120000.000Z.zip"),
+                    path: PathBuf::from(format!("/sandbox/WTF-{index}.zip")),
+                    label: format!("2026-04-0{index} 12:00:00.000Z"),
+                    size_bytes: 2048,
+                })
+                .collect()
+        }
+
+        fn open_inspect(app: &mut App) {
+            app.apply(AppAction::SetInspectOverlay(true));
+            // Every section open: the longest Details can get.
+            for section in [
+                InspectSection::IncludedAddons,
+                InspectSection::Dependencies,
+                InspectSection::AddonInfo,
+            ] {
+                apply_all(app, AppMessage::InspectToggleSection(section));
+            }
+        }
+
+        fn open_install_empty(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.search_pane.is_editing = false;
+            app.wago_api_key = None;
+        }
+
+        fn open_install_results(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.search_pane.is_editing = false;
+            app.search_pane.results = wago_results(30);
+            app.search_pane.selected_result = Some(0);
+            app.search_pane.last_query = Some("result".to_string());
+        }
+
+        fn open_config(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Config));
+        }
+
+        fn open_backups(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.backup_pane.backups = backups(9);
+        }
+
+        fn open_backups_empty(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            app.backup_pane.backups = Vec::new();
+        }
+
+        fn open_help(app: &mut App) {
+            app.apply(AppAction::SetHelpContext(HelpContext::Overview));
+            app.apply(AppAction::SetHelpOverlay(true));
+        }
+
+        struct Case {
+            name: &'static str,
+            open: fn(&mut App),
+            /// Text the sheet must show, on screen or after scrolling.
+            labels: Vec<String>,
+            /// Keys the key line must offer, as "key label".
+            keys: &'static [&'static str],
+        }
+
+        fn cases() -> Vec<Case> {
+            let strings = |items: &[&str]| items.iter().map(|item| item.to_string()).collect();
+            let version = format!("LemonUp {}", env!("CARGO_PKG_VERSION"));
+            let mut config_labels: Vec<String> = ConfigField::ALL
+                .iter()
+                .map(|field| field.label().to_string())
+                .collect();
+            config_labels.extend(strings(&[
+                "Credentials",
+                "Updates",
+                "Backups",
+                "Display",
+                "Selected:",
+                "Changes save instantly",
+            ]));
+            let mut help_labels: Vec<String> = help_sections(HelpContext::Overview)
+                .iter()
+                .flat_map(|section| {
+                    std::iter::once(section.title.trim().to_string())
+                        .chain(section.rows.iter().map(|(_, text)| text.to_string()))
+                })
+                .collect();
+            help_labels.extend(["Context: Overview shortcuts".to_string(), version.clone()]);
+            vec![
+                Case {
+                    name: "inspect",
+                    open: open_inspect,
+                    labels: strings(&[
+                        "Summary",
+                        "Source:",
+                        "Status:",
+                        "Version:",
+                        "Folder:",
+                        "Details",
+                        "Included addons",
+                        "Dependencies",
+                        "Addon info",
+                        "Optional: Optional",
+                    ]),
+                    keys: &["space select", "c check", "x delete"],
+                },
+                Case {
+                    name: "install empty",
+                    open: open_install_empty,
+                    labels: strings(&[
+                        "Use: Search Wago by addon name",
+                        "Type an addon name or paste an addon URL",
+                        "Start with an addon name or URL",
+                        "Type elvui or tukui for TukUI.",
+                        "press , to open Config",
+                    ]),
+                    keys: &["/ query", ", config"],
+                },
+                Case {
+                    name: "install with results",
+                    open: open_install_results,
+                    labels: strings(&[
+                        "Use: Search Wago by addon name",
+                        "Results",
+                        "Name",
+                        "Result Addon 0",
+                        "more results below",
+                        "Author: Owner",
+                        "Slug: slug0",
+                        "Summary: Summary for result 0",
+                    ]),
+                    keys: &["↑/↓ results", "enter install", "/ query"],
+                },
+                Case {
+                    name: "config",
+                    open: open_config,
+                    labels: config_labels,
+                    keys: &["↑/↓ fields", "enter edit", "r onboarding"],
+                },
+                Case {
+                    name: "backups",
+                    open: open_backups,
+                    labels: strings(&[
+                        "Status: 9 backups ready",
+                        "Store:",
+                        "Recent backups",
+                        "2026-04-00 12:00:00.000Z",
+                        "Selected",
+                        "Archive: WTF-20260400T120000.000Z.zip",
+                        "Size: 2.0 KiB",
+                    ]),
+                    keys: &["↑/↓ backups", "enter/r restore", "n backup", "x delete"],
+                },
+                Case {
+                    name: "backups empty",
+                    open: open_backups_empty,
+                    labels: strings(&[
+                        "Status: No backups created yet",
+                        "No backups created yet.",
+                        "Create a backup with n, then restore it here later.",
+                    ]),
+                    keys: &["n backup", "esc close"],
+                },
+                Case {
+                    name: "help",
+                    open: open_help,
+                    labels: help_labels,
+                    keys: &["? close", "esc close"],
+                },
+            ]
+        }
+
+        /// Draws the sheet, then pages its body down to the end, keeping
+        /// every screen on the way.
+        fn screens_while_scrolling(app: &mut App, width: u16, height: u16) -> Vec<Vec<String>> {
+            let mut screens = vec![render_rows(app, width, height)];
+            for _ in 0..40 {
+                let scroll = app.sheet_scroll.get();
+                if scroll.offset >= scroll.max_offset {
+                    break;
+                }
+                apply_all(app, AppMessage::SheetScroll(SheetMove::PageDown));
+                screens.push(render_rows(app, width, height));
+            }
+            screens
+        }
+
+        fn has_more_below(screen: &[String]) -> bool {
+            screen
+                .iter()
+                .any(|row| row.contains("↓ ") && row.contains(" more"))
+        }
+
+        #[test]
+        fn every_sheet_shows_all_its_content_at_every_size() {
+            for (width, height) in SIZES {
+                for case in cases() {
+                    let mut app = app_for_tests(ShellMode::Dashboard);
+                    (case.open)(&mut app);
+                    let screens = screens_while_scrolling(&mut app, width, height);
+                    let first = screens[0].join("\n");
+                    let all = screens
+                        .iter()
+                        .map(|screen| screen.join("\n"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let context = format!("{} at {width}x{height}:\n{first}", case.name);
+
+                    for label in &case.labels {
+                        assert!(all.contains(label.as_str()), "{label:?} missing, {context}");
+                        if !first.contains(label.as_str()) {
+                            assert!(
+                                has_more_below(&screens[0]),
+                                "{label:?} is below the fold with no ↓ more, {context}"
+                            );
+                        }
+                    }
+                    for (index, screen) in screens.iter().enumerate() {
+                        let key_line = screen.last().expect("key line");
+                        assert!(!key_line.trim().is_empty(), "blank key line, {context}");
+                        if index + 1 < screens.len() {
+                            assert!(has_more_below(screen), "no ↓ more, {context}");
+                        }
+                    }
+                    let key_line = screens[0].last().expect("key line");
+                    for key in case.keys {
+                        assert!(
+                            key_line.contains(key),
+                            "{key:?} not on the key line, {context}"
+                        );
+                    }
+                    // The title row always says how to close the sheet.
+                    assert!(first.contains("esc close"), "{context}");
+                }
+            }
+        }
+
+        #[test]
+        fn sheets_float_over_a_dimmed_list_at_100x30_and_up_and_fill_the_body_below() {
+            for (width, height, full) in [
+                (80, 24, true),
+                (99, 40, true),
+                (140, 29, true),
+                (100, 30, false),
+                (120, 30, false),
+                (138, 36, false),
+            ] {
+                let window = Rect::new(0, 0, width, height);
+                let region = Rect::new(0, 0, width, height - 2);
+                let frame = SheetFrame::new(window, region, 2, 108);
+                assert_eq!(frame.full, full, "{width}x{height}");
+                let placed = frame.place(500);
+                // Never taller than the space above the status and key lines.
+                assert!(placed.outer.bottom() <= height - 2, "{width}x{height}");
+                assert!(placed.outer.right() <= width, "{width}x{height}");
+                if full {
+                    assert_eq!(placed.outer.width, width);
+                    assert_eq!(placed.outer.y, 0);
+                } else {
+                    assert_eq!(placed.outer.width, 108.min(width));
+                }
+            }
+
+            // Content shorter than the window: the sheet is as tall as it.
+            let window = Rect::new(0, 0, 138, 36);
+            let frame = SheetFrame::new(window, Rect::new(0, 0, 138, 34), 2, 84);
+            let placed = frame.place(10);
+            assert_eq!(placed.body.height, 10);
+            assert_eq!(placed.outer.height, 14);
+            assert_eq!(placed.outer.width, 84);
+
+            // A narrow window clamps a wide sheet.
+            let window = Rect::new(0, 0, 104, 40);
+            let frame = SheetFrame::new(window, Rect::new(0, 0, 104, 38), 2, 108);
+            assert_eq!(frame.place(5).outer.width, 104);
+
+            // The list behind a floating sheet is dimmed; the key line is not.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups_empty(&mut app);
+            use ratatui::{Terminal, backend::TestBackend};
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer();
+            let header_cell = buffer[(1, 0)].clone();
+            assert_ne!(header_cell.fg, app.ui_theme.roles.lemon);
+            let key_line_key = buffer[(1, 29)].clone();
+            assert_eq!(key_line_key.fg, app.ui_theme.roles.blue);
+        }
+
+        #[test]
+        fn sheet_text_wraps_at_words_and_measures_what_it_draws() {
+            let line = Line::from(vec![
+                Span::styled("Store: ", Style::default().fg(Color::Red)),
+                Span::raw("one two three four"),
+            ]);
+            let rows: Vec<String> = wrap_lines(&[line], 12).iter().map(line_text).collect();
+            assert_eq!(rows, vec!["Store: one", "two three", "four"]);
+            // A word wider than the row is broken, never lost.
+            let rows: Vec<String> = wrap_lines(&[Line::from("abcdefghij")], 4)
+                .iter()
+                .map(line_text)
+                .collect();
+            assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
+            // Blank lines keep their row; wide characters count as two.
+            assert_eq!(wrap_lines(&[Line::from("")], 10).len(), 1);
+            assert_eq!(wrap_lines(&[Line::from("📦📦📦")], 4).len(), 2);
+        }
+
+        #[test]
+        fn floating_sheets_centre_below_the_header_and_grow_over_it_only_when_needed() {
+            let window = Rect::new(0, 0, 120, 30);
+            // Everything above the status line and the key line.
+            let region = Rect::new(0, 0, 120, 28);
+            let frame = SheetFrame::new(window, region, 2, 100);
+            // Short: centred in rows 2 to 27, clear of the header.
+            let placed = frame.place(10);
+            assert_eq!((placed.outer.y, placed.outer.height), (8, 14));
+            // Exactly the room below the header: still clear of it.
+            let placed = frame.place(22);
+            assert_eq!((placed.outer.y, placed.outer.bottom()), (2, 28));
+            // Taller: grows upward over the header, one row at a time.
+            let placed = frame.place(23);
+            assert_eq!((placed.outer.y, placed.outer.bottom()), (1, 28));
+            // Taller still: the whole region, then the body scrolls.
+            let placed = frame.place(500);
+            assert_eq!((placed.outer.y, placed.outer.bottom()), (0, 28));
+            assert_eq!(placed.body.height, 24);
+
+            // Drawn: the header and the status and key lines stay visible.
+            for (width, height) in [(120, 30), (138, 36)] {
+                for open in [
+                    open_config as fn(&mut App),
+                    open_backups_empty,
+                    open_inspect,
+                ] {
+                    let mut app = app_for_tests(ShellMode::Dashboard);
+                    open(&mut app);
+                    let rows = render_rows(&mut app, width, height);
+                    let text = rows.join("\n");
+                    assert!(rows[0].contains("█   █▀▀"), "{text}");
+                    assert!(rows[1].contains("3 addons"), "{text}");
+                    let key_line = &rows[usize::from(height) - 1];
+                    assert!(key_line.contains("? help"), "{text}");
+                    assert!(!key_line.contains('│'), "{text}");
+                    assert!(!rows[usize::from(height) - 2].contains('│'), "{text}");
+                }
+            }
+            // A full screen sheet (below 100 x 30) still covers the header.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_config(&mut app);
+            let rows = render_rows(&mut app, 80, 24);
+            assert!(rows[0].starts_with(" Config"), "{}", rows.join("\n"));
+        }
+
+        fn key_line_at(app: &mut App, width: u16) -> String {
+            render_rows(app, width, 24);
+            let line = line_text(&app.dashboard_key_line(width));
+            assert!(line.chars().count() <= usize::from(width), "{line}");
+            line
+        }
+
+        /// Entries in `line`, split on the two space separator.
+        fn entries(line: &str) -> Vec<String> {
+            line.trim()
+                .split("  ")
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+
+        #[test]
+        fn the_key_line_fits_80_columns_by_tightening_then_dropping_by_priority() {
+            // Settings on a setting that steps: too long for 80 columns.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_config(&mut app);
+            press_key(&mut app, KeyCode::Down);
+            let line = key_line_at(&mut app, 80);
+            assert_eq!(
+                entries(&line),
+                [
+                    "↑/↓ fields",
+                    "enter edit",
+                    "←/→ change",
+                    "r setup",
+                    "i import",
+                    "esc close",
+                    "? help"
+                ],
+                "{line}"
+            );
+            // Tighter still: the rest goes from the end; enter, esc and ? stay.
+            let line = key_line_at(&mut app, 50);
+            assert_eq!(
+                entries(&line),
+                ["↑/↓ fields", "enter edit", "esc close", "? help"],
+                "{line}"
+            );
+            let line = key_line_at(&mut app, 30);
+            assert_eq!(
+                entries(&line),
+                ["enter edit", "esc close", "? help"],
+                "{line}"
+            );
+
+            // Backups fits at 80; at 60 it loses x delete first.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups(&mut app);
+            let line = key_line_at(&mut app, 80);
+            assert_eq!(
+                entries(&line),
+                [
+                    "↑/↓ backups",
+                    "enter/r restore",
+                    "n backup",
+                    "x delete",
+                    "esc close",
+                    "? help"
+                ],
+                "{line}"
+            );
+            let line = key_line_at(&mut app, 60);
+            assert_eq!(
+                entries(&line),
+                [
+                    "↑/↓ backups",
+                    "enter/r restore",
+                    "n backup",
+                    "esc close",
+                    "? help"
+                ],
+                "{line}"
+            );
+
+            // Questions: y and n never drop.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.dashboard
+                .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+            let line = key_line_at(&mut app, 80);
+            assert_eq!(entries(&line), ["y confirm", "n/esc cancel"], "{line}");
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups(&mut app);
+            app.backup_pane.pending_restore = Some(backups(1).remove(0));
+            let line = key_line_at(&mut app, 80);
+            assert_eq!(entries(&line), ["y restore", "n cancel"], "{line}");
+            let line = key_line_at(&mut app, 22);
+            assert_eq!(entries(&line), ["y restore", "n cancel"], "{line}");
+        }
+
+        #[test]
+        fn sheet_scroll_clamps_and_keeps_the_cursor_in_view() {
+            // Everything fits: never scrolls.
+            assert_eq!(offset_for_focus(4, (2, 3), 10, 10), 0);
+            // Below the window: scroll just enough, leaving room for "↓ more".
+            assert_eq!(offset_for_focus(0, (20, 21), 40, 10), 12);
+            // The last row needs no "↓ more" line.
+            assert_eq!(offset_for_focus(0, (39, 40), 40, 10), 30);
+            // Above the window: the row above it carries "↑ more".
+            assert_eq!(offset_for_focus(20, (5, 6), 40, 10), 4);
+            assert_eq!(offset_for_focus(20, (0, 1), 40, 10), 0);
+            // Already visible: stays put.
+            assert_eq!(offset_for_focus(5, (8, 9), 40, 10), 5);
+
+            let scroll = SheetScroll {
+                kind: Some(OverlayKind::Help),
+                offset: 3,
+                focus: None,
+                max_offset: 6,
+                viewport: 10,
+            };
+            let kind = Some(OverlayKind::Help);
+            assert_eq!(scroll.moved(SheetMove::LineUp, kind), 2);
+            assert_eq!(scroll.moved(SheetMove::PageDown, kind), 6);
+            assert_eq!(scroll.moved(SheetMove::PageUp, kind), 0);
+            assert_eq!(scroll.moved(SheetMove::Bottom, kind), 6);
+            assert_eq!(scroll.moved(SheetMove::Top, kind), 0);
+            // A sheet not drawn yet starts from the top.
+            assert_eq!(
+                scroll.moved(SheetMove::LineDown, Some(OverlayKind::Config)),
+                1
+            );
+        }
+
+        #[test]
+        fn help_scrolls_with_arrows_and_page_keys() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_help(&mut app);
+            for (code, movement) in [
+                (KeyCode::Down, SheetMove::LineDown),
+                (KeyCode::Char('j'), SheetMove::LineDown),
+                (KeyCode::Up, SheetMove::LineUp),
+                (KeyCode::PageDown, SheetMove::PageDown),
+                (KeyCode::PageUp, SheetMove::PageUp),
+                (KeyCode::Home, SheetMove::Top),
+                (KeyCode::End, SheetMove::Bottom),
+            ] {
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(code)),
+                    vec![AppMessage::SheetScroll(movement)],
+                    "{code:?}"
+                );
+            }
+
+            // 80 x 20 is too short for all of Help.
+            let rows = render_rows(&mut app, 80, 20);
+            let text = rows.join("\n");
+            assert!(has_more_below(&rows), "{text}");
+            assert!(
+                rows.last().expect("key line").contains("↑/↓ scroll"),
+                "{text}"
+            );
+            press_key(&mut app, KeyCode::End);
+            let rows = render_rows(&mut app, 80, 20);
+            let text = rows.join("\n");
+            assert!(text.contains("↑ "), "{text}");
+            assert!(text.contains("Sort the table"), "{text}");
+            assert!(!has_more_below(&rows), "{text}");
+
+            // Reopened, Help starts at the top again.
+            apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+            render_rows(&mut app, 80, 24);
+            open_help(&mut app);
+            let rows = render_rows(&mut app, 80, 24).join("\n");
+            assert!(rows.contains("Context: Overview shortcuts"), "{rows}");
+        }
+
+        #[test]
+        fn page_keys_scroll_every_sheet_and_arrows_still_move_cursors() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_config(&mut app);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::PageDown)),
+                vec![AppMessage::SheetScroll(SheetMove::PageDown)]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+                vec![AppMessage::ConfigSelectionNext]
+            );
+
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups(&mut app);
+            app.backup_pane.pending_restore = Some(backups(1).remove(0));
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Home)),
+                vec![AppMessage::SheetScroll(SheetMove::Top)]
+            );
+
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_empty(&mut app);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+                vec![AppMessage::SheetScroll(SheetMove::LineDown)]
+            );
+            open_install_results(&mut app);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+                vec![AppMessage::SearchResultNext]
+            );
+        }
+
+        #[test]
+        fn config_keeps_the_cursor_in_view_at_80x24() {
+            for (width, height) in [(80, 24), (80, 18), (120, 20)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                for (index, field) in ConfigField::ALL.iter().enumerate() {
+                    let rows = render_rows(&mut app, width, height);
+                    let text = rows.join("\n");
+                    let row = rows
+                        .iter()
+                        .find(|row| row.contains(field.label()) && row.contains('›'))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{index} {:?} not in view at {width}x{height}:\n{text}",
+                                field
+                            )
+                        });
+                    assert!(!row.contains("more"), "{text}");
+                    press_key(&mut app, KeyCode::Down);
+                }
+                // And back up to the top.
+                for _ in 0..ConfigField::ALL.len() {
+                    press_key(&mut app, KeyCode::Up);
+                    render_rows(&mut app, width, height);
+                }
+                let rows = render_rows(&mut app, width, height).join("\n");
+                assert!(rows.contains("› Wago"), "{rows}");
+            }
+        }
+
+        #[test]
+        fn backups_always_show_the_selected_and_confirm_cards() {
+            for (width, height) in SIZES {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_backups(&mut app);
+                app.backup_pane.selected_backup = 8;
+                let text = render_rows(&mut app, width, height).join("\n");
+                assert!(text.contains("› 2026-04-08"), "{text}");
+                assert!(text.contains("Archive: WTF-20260408"), "{text}");
+
+                app.backup_pane.pending_delete = Some(backups(9).remove(8));
+                let text = render_rows(&mut app, width, height).join("\n");
+                assert!(text.contains("Press y to delete or n to cancel."), "{text}");
+                assert!(text.contains("y delete"), "{text}");
+            }
+        }
+
+        fn key_line_states() -> Vec<(&'static str, App)> {
+            let mut states = Vec::new();
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            states.push(("list", app_for_tests(ShellMode::Dashboard)));
+            open_inspect(&mut app);
+            states.push(("inspect", app));
+            for (name, open) in [
+                ("install", open_install_empty as fn(&mut App)),
+                ("results", open_install_results),
+                ("config", open_config),
+                ("backups", open_backups),
+                ("backups empty", open_backups_empty),
+                ("help", open_help),
+            ] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open(&mut app);
+                states.push((name, app));
+            }
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_config(&mut app);
+            app.config_pane.edit = Some(ConfigEditState {
+                field: ConfigField::WagoApiKey,
+                value: String::new(),
+            });
+            states.push(("config editing", app));
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups(&mut app);
+            app.backup_pane.pending_restore = Some(backups(1).remove(0));
+            states.push(("restore question", app));
+            states
+        }
+
+        #[test]
+        fn the_key_table_drives_the_key_line() {
+            for (name, mut app) in key_line_states() {
+                render_rows(&mut app, 160, 40);
+                let table = app.key_table(160);
+                assert!(!table.is_empty(), "{name}");
+                let expected = std::iter::once(" ".to_string())
+                    .chain(table.iter().enumerate().map(|(index, hint)| {
+                        let separator = if index > 0 { "   " } else { "" };
+                        if hint.key.is_empty() {
+                            format!("{separator}{}", hint.label)
+                        } else {
+                            format!("{separator}{} {}", hint.key, hint.label)
+                        }
+                    }))
+                    .collect::<String>();
+                assert_eq!(line_text(&app.dashboard_key_line(160)), expected, "{name}");
+            }
+        }
+
+        #[test]
+        fn the_key_line_only_offers_keys_that_work() {
+            for (name, mut app) in key_line_states() {
+                render_rows(&mut app, 120, 30);
+                for hint in app.key_table(120) {
+                    let Some(code) = hint.codes.first() else {
+                        continue;
+                    };
+                    assert!(
+                        !app.messages_for_key(KeyEvent::from(*code)).is_empty(),
+                        "{name}: {} {} does nothing",
+                        hint.key,
+                        hint.label
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn the_key_table_drives_the_pulse() {
+            for (name, mut app) in key_line_states() {
+                render_rows(&mut app, 120, 30);
+                let table: Vec<KeyHint> = app.key_table(120);
+                for hint in &table {
+                    for code in hint.codes {
+                        let pulsed = app
+                            .footer_hint_for_key(KeyEvent::from(*code))
+                            .unwrap_or_else(|| panic!("{name}: {code:?} pulses nothing"));
+                        assert!(
+                            table.iter().any(|shown| shown.id == Some(pulsed)),
+                            "{name}: {code:?} pulses {pulsed:?}, which is not on the line"
+                        );
+                    }
+                }
+            }
+
+            // In Backups, enter pulses "enter/r restore", not "n backup".
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_backups(&mut app);
+            assert_eq!(
+                app.footer_hint_for_key(KeyEvent::from(KeyCode::Enter)),
+                Some(FooterHintId::Confirm)
+            );
+            app.shell_ui.footer_pulse = Some(FooterKeyPulse {
+                hint: FooterHintId::Confirm,
+                expires_at_tick: app.shell_ui.motion.tick_count + 2,
+            });
+            let line = app.dashboard_key_line(120);
+            let pulsed = line
+                .spans
+                .iter()
+                .find(|span| span.content == "enter/r")
+                .expect("enter/r key");
+            assert_eq!(pulsed.style.bg, Some(app.ui_theme.roles.lemon));
+        }
     }
 
     mod direct_install_overlay {
@@ -13718,8 +14194,10 @@ mod tests {
                 "{rows}"
             );
             assert!(!rows.contains("enter confirm, esc cancel"), "{rows}");
-            assert!(rows.contains("enter  confirm"), "{rows}");
-            assert!(rows.contains("esc  cancel"), "{rows}");
+            // The keys are on the frame's key line, not inside the sheet.
+            let key_line = rows.lines().last().expect("key line");
+            assert!(key_line.contains("enter install"), "{rows}");
+            assert!(key_line.contains("esc cancel"), "{rows}");
         }
 
         #[test]
