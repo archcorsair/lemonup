@@ -63,6 +63,8 @@ pub enum AppAction {
     CollapseDashboardExpanded,
     SetDetailMode(DetailMode),
     ReenterOnboarding,
+    /// Closes setup opened again from Settings, back to the list.
+    LeaveOnboarding,
     SetOnboardingState(OnboardingState),
     StartOnboardingQuickCheck,
     StartOnboardingDeepScan(PathBuf),

@@ -19,7 +19,6 @@ const UP_DOWN: KeyCodes = &[
     KeyCode::Char('k'),
 ];
 const ARROWS: KeyCodes = &[KeyCode::Up, KeyCode::Down];
-const LEFT_RIGHT: KeyCodes = &[KeyCode::Left, KeyCode::Right];
 const TEXT_MOVE: KeyCodes = &[KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End];
 const CHANGE: KeyCodes = &[
     KeyCode::Left,
@@ -65,8 +64,6 @@ pub(super) struct KeyHint {
     pub(super) primary: bool,
     /// The key presses that run it.
     pub(super) codes: KeyCodes,
-    /// Setup's two row footer puts secondary keys on the second row.
-    pub(super) tier: FooterHintTier,
     /// A shorter label for a key line that is tight on room.
     pub(super) short: Option<&'static str>,
     /// The screen's primary action: the last entry to drop.
@@ -88,7 +85,6 @@ impl KeyHint {
             label: label.into(),
             primary: false,
             codes,
-            tier: FooterHintTier::Primary,
             short: None,
             main: false,
             kept: false,
@@ -114,7 +110,6 @@ impl KeyHint {
             label: label.into(),
             primary: false,
             codes: &[],
-            tier: FooterHintTier::Primary,
             short: None,
             main: false,
             kept: false,
@@ -148,11 +143,6 @@ impl KeyHint {
         } else {
             3
         }
-    }
-
-    fn secondary(mut self) -> Self {
-        self.tier = FooterHintTier::Secondary;
-        self
     }
 
     pub(super) fn width(&self) -> usize {
@@ -686,11 +676,11 @@ impl App {
     /// The keys that work right now, most useful first. The key line shows
     /// them; a key press pulses the entry that answers to it.
     pub(super) fn key_table(&self, width: u16) -> Vec<KeyHint> {
-        if self.shell_mode == ShellMode::Onboarding {
-            return self.onboarding_key_table();
-        }
         if self.active_question().is_some() {
             return self.question_key_table();
+        }
+        if self.shell_mode == ShellMode::Onboarding {
+            return self.onboarding_key_table();
         }
         match self.shell_ui.overlay.active {
             Some(OverlayKind::Inspect) => self.inspect_key_table(width),
@@ -749,66 +739,57 @@ impl App {
     /// codes: a plain `u` is a letter in the box and must not pulse it.
     fn text_box_hints(&self) -> [KeyHint; 2] {
         [
-            KeyHint::key(FooterHintId::Cursor, "←/→", "cursor", TEXT_MOVE).secondary(),
-            KeyHint::key(FooterHintId::ClearText, "ctrl+u", "clear text", &[]).secondary(),
+            KeyHint::key(FooterHintId::Cursor, "←/→", "cursor", TEXT_MOVE),
+            KeyHint::key(FooterHintId::ClearText, "ctrl+u", "clear text", &[]),
         ]
     }
 
     fn close_hint(&self) -> KeyHint {
-        KeyHint::key(FooterHintId::Close, "esc", "close", CLOSE).secondary()
+        KeyHint::key(FooterHintId::Close, "esc", "close", CLOSE)
     }
 
+    /// Setup's keys, as the mockups name them. A text box takes typing, so
+    /// its line has no letters.
     fn onboarding_key_table(&self) -> Vec<KeyHint> {
         use FooterHintId as Id;
-        if self.onboarding.is_editing {
-            let mut hints = vec![
-                KeyHint::key(Id::Save, "enter", "apply", ENTER).main(),
-                KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
-                KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary(),
-            ];
-            hints.extend(self.text_box_hints());
-            return hints;
-        }
+        let choose = || KeyHint::key(Id::Nav, "↑/↓", "choose", UP_DOWN);
         match self.onboarding.step {
-            OnboardingStep::Theme => vec![
-                KeyHint::key(Id::ThemeToggle, "←/→", "theme", LEFT_RIGHT),
-                KeyHint::key(Id::Next, "enter", "next", ENTER),
-                KeyHint::key(Id::Cancel, "esc", "exit", ESC).secondary(),
-            ],
-            OnboardingStep::Directory => match self.onboarding.phase {
-                OnboardingPhase::Found(_) => vec![
-                    KeyHint::key(Id::Nav, "j/k", "choice", UP_DOWN),
-                    KeyHint::key(Id::Next, "enter", "next", ENTER),
-                    KeyHint::key(Id::Back, "esc", "back", ESC).secondary(),
-                ],
-                OnboardingPhase::DeepScanning(_) => {
-                    vec![KeyHint::key(Id::Cancel, "esc", "stop scan", ESC)]
-                }
-                _ => vec![
-                    KeyHint::key(Id::Nav, "j/k", "choice", UP_DOWN),
+            OnboardingStep::FindGame => match &self.onboarding.phase {
+                phase if phase.is_searching() => vec![
                     KeyHint::key(
-                        Id::Validate,
-                        "enter",
-                        "search",
-                        &[KeyCode::Enter, KeyCode::Char('d')],
-                    ),
-                    KeyHint::key(Id::Edit, "e", "type path", &[KeyCode::Char('e')]),
-                    KeyHint::key(Id::Back, "esc", "back", ESC).secondary(),
+                        Id::Cancel,
+                        "esc",
+                        "stop looking and choose the folder myself",
+                        ESC,
+                    )
+                    .short("stop looking")
+                    .main(),
                 ],
+                OnboardingPhase::Typing(_) => vec![
+                    KeyHint::key(Id::Validate, "enter", "check this folder", ENTER)
+                        .short("check")
+                        .main(),
+                    KeyHint::key(Id::Back, "esc", "back", ESC),
+                ],
+                _ => {
+                    let mut hints = vec![choose()];
+                    if !self.setup_choice_is_blocked() {
+                        hints.push(KeyHint::key(Id::Next, "enter", "continue", ENTER).main());
+                    }
+                    hints.push(KeyHint::key(Id::Cancel, "esc", "quit setup", ESC));
+                    hints
+                }
             },
             OnboardingStep::Wago => vec![
-                KeyHint::key(Id::Edit, "e", "edit key", &[KeyCode::Char('e')]),
-                KeyHint::key(Id::Next, "enter", "next", ENTER),
-                KeyHint::key(Id::Back, "esc", "back", ESC).secondary(),
+                KeyHint::key(Id::Next, "enter", "continue", ENTER).main(),
+                KeyHint::key(Id::Back, "esc", "back", ESC),
             ],
-            OnboardingStep::Settings => vec![
-                KeyHint::key(Id::SettingsNav, "j/k", "settings", UP_DOWN),
+            OnboardingStep::Preferences => vec![
+                choose(),
                 KeyHint::key(Id::Change, "←/→", "change", CHANGE),
-                KeyHint::key(Id::Next, "enter", "next", ENTER),
-                KeyHint::key(Id::Back, "esc", "back", ESC).secondary(),
-            ],
-            OnboardingStep::Review => vec![
-                KeyHint::key(Id::Next, "enter", "finish", ENTER),
+                KeyHint::key(Id::Next, "enter", "finish and show my addons", ENTER)
+                    .short("finish")
+                    .main(),
                 KeyHint::key(Id::Back, "esc", "back", ESC),
             ],
         }
@@ -892,15 +873,12 @@ impl App {
     fn help_key_table(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         hints.extend(self.sheet_scroll_hint(true));
-        hints.push(
-            KeyHint::key(
-                FooterHintId::Close,
-                "esc or ?",
-                "close",
-                &[KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')],
-            )
-            .secondary(),
-        );
+        hints.push(KeyHint::key(
+            FooterHintId::Close,
+            "esc or ?",
+            "close",
+            &[KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')],
+        ));
         hints
     }
 
@@ -948,7 +926,7 @@ impl App {
                     let mut hints = vec![
                         KeyHint::key(Id::Save, "enter", "save", ENTER).main(),
                         KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
-                        KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE).secondary(),
+                        KeyHint::key(Id::Back, "backspace", "delete", BACKSPACE),
                     ];
                     hints.extend(self.text_box_hints());
                     return hints;
@@ -990,14 +968,16 @@ impl App {
                 if !busy {
                     hints.push(
                         KeyHint::key(Id::Run, "b", "back up now", &[KeyCode::Char('b')])
-                            .short("back up")
-                            .secondary(),
+                            .short("back up"),
                     );
                 }
                 if selected && !busy {
-                    hints.push(
-                        KeyHint::key(Id::Delete, "x", "delete", &[KeyCode::Char('x')]).secondary(),
-                    );
+                    hints.push(KeyHint::key(
+                        Id::Delete,
+                        "x",
+                        "delete",
+                        &[KeyCode::Char('x')],
+                    ));
                 }
                 hints.push(self.close_hint());
                 hints.extend(self.sheet_scroll_hint(false));
@@ -1013,7 +993,7 @@ impl App {
     fn search_key_table(&self) -> Vec<KeyHint> {
         use FooterHintId as Id;
         let pane = &self.search_pane;
-        let close = |label: &'static str| KeyHint::key(Id::Close, "esc", label, ESC).secondary();
+        let close = |label: &'static str| KeyHint::key(Id::Close, "esc", label, ESC);
         if pane.pending_direct_install().is_some() {
             return vec![
                 KeyHint::key(Id::Confirm, "enter", "install", ENTER)

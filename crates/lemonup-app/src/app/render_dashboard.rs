@@ -586,6 +586,24 @@ impl App {
         );
     }
 
+    /// "LEMONUP" in the brand gradient, the logo below 110 columns.
+    pub(super) fn short_logo_spans(&self) -> Vec<Span<'static>> {
+        let anchors = [
+            self.ui_theme.brand_hot,
+            self.ui_theme.brand_warm,
+            self.ui_theme.brand_gold,
+        ];
+        let part = |text: &'static str, t: f32| {
+            Span::styled(
+                text,
+                Style::default()
+                    .fg(interpolate_palette(&anchors, t))
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        vec![part("LEM", 0.2), part("ON", 0.5), part("UP", 0.8)]
+    }
+
     /// Header row 1 (logo, client, folder) and row 2 (the answer line).
     pub(super) fn dashboard_header_lines(
         &self,
@@ -607,29 +625,10 @@ impl App {
             second.push(Span::raw("    "));
             (first, second)
         } else {
-            let anchors = [
-                self.ui_theme.brand_hot,
-                self.ui_theme.brand_warm,
-                self.ui_theme.brand_gold,
-            ];
-            let part = |text: &'static str, t: f32| {
-                Span::styled(
-                    text,
-                    Style::default()
-                        .fg(interpolate_palette(&anchors, t))
-                        .add_modifier(Modifier::BOLD),
-                )
-            };
-            (
-                vec![
-                    Span::raw(" "),
-                    part("LEM", 0.2),
-                    part("ON", 0.5),
-                    part("UP", 0.8),
-                    Span::raw("  "),
-                ],
-                vec![Span::raw(" ")],
-            )
+            let mut first = vec![Span::raw(" ")];
+            first.extend(self.short_logo_spans());
+            first.push(Span::raw("  "));
+            (first, vec![Span::raw(" ")])
         };
         first.push(client);
         let mut profile = Vec::new();

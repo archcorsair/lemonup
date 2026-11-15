@@ -21,9 +21,9 @@ use lemonup_core::binding::{BindingCheck, check_addon_dir_binding, rebind_addon_
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
-    analyze_import, default_transfer_path, detect_known_addons_paths, export_addons,
-    parse_import_file, paths_match, scan_addons_dir_report, search_for_wow_installs,
-    validate_addons_path,
+    addon_count, analyze_import, default_transfer_path, detect_known_addons_paths, export_addons,
+    parse_import_file, paths_match, resolve_install_addons_paths, scan_addons_dir_report,
+    search_for_wow_installs, validate_addons_path,
 };
 use tokio::sync::mpsc;
 
@@ -37,8 +37,8 @@ use crate::backup::{
 use crate::drift::{DriftReport, compute_drift_report};
 use crate::event::{EventHandler, TerminalEvent};
 use crate::onboarding::{
-    FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
-    OnboardingTaskEvent,
+    FoundInstall, NotFoundChoice, OnboardingPhase, OnboardingState, OnboardingStep,
+    OnboardingTaskEvent, not_found_choices,
 };
 use crate::shimmer::{ShimmerConfig, shimmer_text_spans};
 use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
@@ -67,6 +67,7 @@ mod render_dashboard;
 mod render_help;
 mod render_inspect;
 mod render_install_search;
+mod render_setup;
 mod render_shared;
 mod sheet;
 mod status;
@@ -76,7 +77,6 @@ pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
     DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
 };
-use self::keymap::KeyHint;
 #[cfg(test)]
 use self::render_dashboard::{child_row_detail_prefix, child_row_prefix};
 use self::render_dashboard::{
@@ -198,12 +198,6 @@ struct StatusFlash {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FooterHintTier {
-    Primary,
-    Secondary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FooterHintId {
     Help,
     Nav,
@@ -223,8 +217,6 @@ enum FooterHintId {
     Edit,
     Run,
     Toggle,
-    SettingsNav,
-    ThemeToggle,
     Next,
     Back,
     Validate,
@@ -243,13 +235,6 @@ enum FooterHintId {
     ClearText,
     /// `f` on a "Not linked" addon.
     FindOnline,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ShellFrame {
-    header: Rect,
-    body: Rect,
-    footer: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,25 +453,28 @@ enum AppMessage {
     BackupConfirmRestore,
     BackupConfirmDelete,
     BackupCancelRestore,
+    /// ↓ and ↑ on step 1's list.
+    OnboardingChoiceNext,
+    OnboardingChoicePrevious,
+    /// Enter on step 1's list.
+    OnboardingChoose,
+    /// Enter in the game folder box.
+    OnboardingCheckFolder,
+    /// Esc in the game folder box.
+    OnboardingStopTyping,
+    /// Esc while LemonUp looks for the game.
+    OnboardingStopSearch,
+    /// Esc on step 1: "Quit setup?".
+    OnboardingAskQuit,
+    OnboardingQuitConfirmed,
+    OnboardingQuitCancelled,
     OnboardingNextStep,
     OnboardingPreviousStep,
-    OnboardingToggleTheme,
-    OnboardingSettingsNext,
-    OnboardingSettingsPrevious,
-    OnboardingSettingIncrease,
-    OnboardingSettingDecrease,
-    OnboardingBeginEditing,
-    OnboardingStopEditing,
+    OnboardingPreferenceNext,
+    OnboardingPreferencePrevious,
+    OnboardingPreferenceChange(i16),
     OnboardingInputChar(char),
     OnboardingBackspace,
-    OnboardingValidateInput,
-    OnboardingDeepScan,
-    OnboardingCancel,
-    OnboardingSuggestionNext,
-    OnboardingSuggestionPrevious,
-    OnboardingFoundActionNext,
-    OnboardingFoundActionPrevious,
-    OnboardingFoundConfirm,
     BackgroundTask(AppTaskEvent),
 }
 
@@ -579,13 +567,6 @@ impl DashboardJobKind {
         match self {
             Self::Check => "Checking",
             Self::Update => "Updating",
-        }
-    }
-
-    fn accent(self, theme: UiTheme) -> Color {
-        match self {
-            Self::Check => theme.info,
-            Self::Update => theme.warning,
         }
     }
 }
@@ -2630,15 +2611,11 @@ impl App {
             .map(|path| client_backup_dir(&backup_store, path))
             .unwrap_or_else(|| backup_store.clone());
 
-        let onboarding = runtime
-            .addon_dir_override
-            .as_ref()
-            .map(|path| {
-                let mut config = loaded_config.clone();
-                config.addon_dir = Some(path.clone());
-                OnboardingState::from_config_with_input(config, path.display().to_string())
-            })
-            .unwrap_or_else(|| OnboardingState::from_config(loaded_config.clone()));
+        let mut onboarding_config = loaded_config.clone();
+        if let Some(path) = runtime.addon_dir_override.as_ref() {
+            onboarding_config.addon_dir = Some(path.clone());
+        }
+        let onboarding = OnboardingState::from_config(onboarding_config);
 
         let shell_mode = match effective_addon_dir.as_ref() {
             Some(path) if validate_addons_path(path).is_ok() && !runtime.is_guarded_path(path) => {
@@ -2785,14 +2762,7 @@ impl App {
             return true;
         }
 
-        if self.shell_mode == ShellMode::Onboarding
-            && matches!(
-                self.onboarding.phase,
-                OnboardingPhase::Bootstrapping
-                    | OnboardingPhase::QuickChecking
-                    | OnboardingPhase::DeepScanning(_)
-            )
-        {
+        if self.shell_mode == ShellMode::Onboarding && self.onboarding.phase.is_searching() {
             return true;
         }
 
@@ -2822,14 +2792,9 @@ impl App {
                     )
                 }
             }
-            ShellMode::Onboarding => match &self.onboarding.phase {
-                OnboardingPhase::Error(message) => self.with_base_status(
-                    StatusKind::Problem,
-                    &format!("location finder blocked: {message}"),
-                ),
-                OnboardingPhase::Ready => self.location_finder_status(),
-                _ => self.with_base_status(StatusKind::Quiet, "location finder"),
-            },
+            // Setup shows no status text: the stepper and the page say
+            // where you are.
+            ShellMode::Onboarding => self.with_base_status(StatusKind::Quiet, "setup"),
         }
     }
 
@@ -3286,7 +3251,8 @@ impl App {
     /// order so pasted text lands exactly where typed characters would.
     fn focused_text_box(&self) -> Option<TextBox> {
         if self.shell_mode == ShellMode::Onboarding {
-            return self.onboarding.is_editing.then_some(TextBox::Onboarding);
+            return (self.onboarding.text_box_focused() && !self.onboarding.quit_question)
+                .then_some(TextBox::Onboarding);
         }
 
         // Docked Details is not a sheet: the filter beside it keeps focus.
@@ -3539,15 +3505,19 @@ impl App {
         }
     }
 
+    /// Setup's keys. Text boxes take typing straight away, so there `q`
+    /// is a letter; elsewhere it quits.
     fn onboarding_messages_for_key(&self, key: KeyEvent) -> Vec<AppMessage> {
-        if self.onboarding.is_editing {
+        if let Some(messages) = self.question_messages_for_key(key) {
+            return messages;
+        }
+        if self.onboarding.text_box_focused() {
+            let typing = self.onboarding.step == OnboardingStep::FindGame;
             return match key.code {
-                KeyCode::Enter => match self.onboarding.step {
-                    OnboardingStep::Directory => vec![AppMessage::OnboardingValidateInput],
-                    OnboardingStep::Wago => vec![AppMessage::OnboardingStopEditing],
-                    _ => vec![],
-                },
-                KeyCode::Esc => vec![AppMessage::OnboardingStopEditing],
+                KeyCode::Enter if typing => vec![AppMessage::OnboardingCheckFolder],
+                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
+                KeyCode::Esc if typing => vec![AppMessage::OnboardingStopTyping],
+                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
                 KeyCode::Backspace => vec![AppMessage::OnboardingBackspace],
                 KeyCode::Char(character) => vec![AppMessage::OnboardingInputChar(character)],
                 _ => vec![],
@@ -3555,80 +3525,50 @@ impl App {
         }
 
         match self.onboarding.step {
-            OnboardingStep::Theme => match key.code {
-                KeyCode::Left | KeyCode::Right => vec![AppMessage::OnboardingToggleTheme],
-                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
-                KeyCode::Esc => vec![AppMessage::OnboardingCancel],
+            OnboardingStep::FindGame if self.onboarding.phase.is_searching() => match key.code {
+                KeyCode::Esc => vec![AppMessage::OnboardingStopSearch],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 _ => vec![],
             },
-            OnboardingStep::Directory => match &self.onboarding.phase {
-                OnboardingPhase::Bootstrapping | OnboardingPhase::QuickChecking => match key.code {
-                    KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                    KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                    _ => vec![],
-                },
-                OnboardingPhase::DeepScanning(_) => match key.code {
-                    KeyCode::Esc => vec![AppMessage::OnboardingCancel],
-                    KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                    _ => vec![],
-                },
-                OnboardingPhase::Found(_) => match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        vec![AppMessage::OnboardingFoundActionNext]
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        vec![AppMessage::OnboardingFoundActionPrevious]
-                    }
-                    KeyCode::Enter => vec![AppMessage::OnboardingFoundConfirm],
-                    KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                    KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                    _ => vec![],
-                },
-                OnboardingPhase::Ready | OnboardingPhase::Error(_) | OnboardingPhase::Cancelled => {
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            vec![AppMessage::OnboardingSuggestionNext]
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            vec![AppMessage::OnboardingSuggestionPrevious]
-                        }
-                        KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
-                        KeyCode::Enter | KeyCode::Char('d') => vec![AppMessage::OnboardingDeepScan],
-                        KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                        KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                        _ => vec![],
-                    }
+            OnboardingStep::FindGame => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingChoiceNext],
+                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::OnboardingChoicePrevious],
+                KeyCode::Enter if self.setup_choice_is_blocked() => vec![],
+                KeyCode::Enter => vec![AppMessage::OnboardingChoose],
+                KeyCode::Esc => vec![AppMessage::OnboardingAskQuit],
+                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
+                _ => vec![],
+            },
+            // The key box always has focus.
+            OnboardingStep::Wago => vec![],
+            OnboardingStep::Preferences => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingPreferenceNext],
+                KeyCode::Up | KeyCode::Char('k') => {
+                    vec![AppMessage::OnboardingPreferencePrevious]
                 }
-            },
-            OnboardingStep::Wago => match key.code {
-                KeyCode::Char('e') => vec![AppMessage::OnboardingBeginEditing],
-                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
-                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                _ => vec![],
-            },
-            OnboardingStep::Settings => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => vec![AppMessage::OnboardingSettingsNext],
-                KeyCode::Up | KeyCode::Char('k') => vec![AppMessage::OnboardingSettingsPrevious],
                 KeyCode::Left | KeyCode::Char('h') => {
-                    vec![AppMessage::OnboardingSettingDecrease]
+                    vec![AppMessage::OnboardingPreferenceChange(-1)]
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    vec![AppMessage::OnboardingSettingIncrease]
+                    vec![AppMessage::OnboardingPreferenceChange(1)]
                 }
                 KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
                 KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                KeyCode::Char('q') => vec![AppMessage::QuitRequested],
-                _ => vec![],
-            },
-            OnboardingStep::Review => match key.code {
-                KeyCode::Esc => vec![AppMessage::OnboardingPreviousStep],
-                KeyCode::Enter => vec![AppMessage::OnboardingNextStep],
                 KeyCode::Char('q') => vec![AppMessage::QuitRequested],
                 _ => vec![],
             },
         }
+    }
+
+    /// The chosen install is this profile's main AddOns folder, which it
+    /// must not use: enter does nothing there and the key line says so.
+    fn setup_choice_is_blocked(&self) -> bool {
+        matches!(
+            &self.onboarding.phase,
+            OnboardingPhase::Found(found) if found
+                .selected_install()
+                .is_some_and(|install| self.is_guarded_path(&install.addons_dir))
+        )
     }
 
     fn update(&self, message: AppMessage) -> Vec<AppAction> {
@@ -4788,238 +4728,95 @@ impl App {
                     "backup question closed",
                 )),
             ],
+            AppMessage::OnboardingChoiceNext => vec![AppAction::SetOnboardingState(
+                self.onboarding.move_choice(true),
+            )],
+            AppMessage::OnboardingChoicePrevious => vec![AppAction::SetOnboardingState(
+                self.onboarding.move_choice(false),
+            )],
+            AppMessage::OnboardingChoose => match &self.onboarding.phase {
+                OnboardingPhase::Found(found) => match found.selected_install() {
+                    Some(install) if self.is_guarded_path(&install.addons_dir) => vec![],
+                    Some(install) => vec![AppAction::SetOnboardingState(
+                        self.onboarding.choose_install(&install.addons_dir),
+                    )],
+                    None => vec![AppAction::SetOnboardingState(
+                        self.onboarding.begin_typing(),
+                    )],
+                },
+                OnboardingPhase::NotFound(not_found) => match not_found.selected_choice() {
+                    Some(NotFoundChoice::TypeFolder) => vec![AppAction::SetOnboardingState(
+                        self.onboarding.begin_typing(),
+                    )],
+                    Some(NotFoundChoice::Search(root)) => {
+                        self.onboarding_scan_actions(root.clone())
+                    }
+                    None => vec![],
+                },
+                _ => vec![],
+            },
+            AppMessage::OnboardingCheckFolder => self.onboarding_check_folder_actions(),
+            AppMessage::OnboardingStopTyping => {
+                vec![AppAction::SetOnboardingState(self.onboarding.stop_typing())]
+            }
+            AppMessage::OnboardingStopSearch => {
+                let mut actions = Vec::new();
+                if matches!(self.onboarding.phase, OnboardingPhase::DeepScanning(_)) {
+                    actions.push(AppAction::CancelOnboardingScan);
+                }
+                actions.push(AppAction::SetOnboardingState(self.onboarding.not_found(
+                    "You stopped the search before LemonUp found the game.",
+                    not_found_choices(),
+                )));
+                actions
+            }
+            AppMessage::OnboardingAskQuit => vec![AppAction::SetOnboardingState(
+                self.onboarding.set_quit_question(true),
+            )],
+            AppMessage::OnboardingQuitCancelled => vec![AppAction::SetOnboardingState(
+                self.onboarding.set_quit_question(false),
+            )],
+            AppMessage::OnboardingQuitConfirmed => {
+                if self.setup_is_rerun() {
+                    vec![AppAction::LeaveOnboarding]
+                } else {
+                    vec![AppAction::Quit]
+                }
+            }
             AppMessage::OnboardingNextStep => match self.onboarding.step {
-                OnboardingStep::Theme => vec![
-                    AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(self.with_base_status(
-                        StatusKind::Note,
-                        "step 2/5 | choose or check an AddOns folder",
-                    )),
-                ],
-                OnboardingStep::Directory => vec![AppAction::SetStatus(self.with_base_status(
-                    StatusKind::Note,
-                    "Check or choose a folder before continuing",
-                ))],
-                OnboardingStep::Wago => vec![
-                    AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(
-                        self.with_base_status(StatusKind::Note, "step 4/5 | adjust core settings"),
-                    ),
-                ],
-                OnboardingStep::Settings => vec![
-                    AppAction::SetOnboardingState(self.onboarding.next_step()),
-                    AppAction::SetStatus(
-                        self.with_base_status(StatusKind::Note, "step 5/5 | review setup"),
-                    ),
-                ],
-                OnboardingStep::Review => {
+                OnboardingStep::FindGame => vec![],
+                OnboardingStep::Wago => {
+                    vec![AppAction::SetOnboardingState(self.onboarding.next_step())]
+                }
+                OnboardingStep::Preferences => {
                     vec![AppAction::SaveOnboardingConfig(
-                        self.onboarding.apply_directory_to_draft().draft,
+                        self.onboarding.draft.clone(),
                     )]
                 }
             },
-            AppMessage::OnboardingPreviousStep => {
-                if self.onboarding.step == OnboardingStep::Theme {
-                    vec![AppAction::Quit]
-                } else {
-                    vec![
-                        AppAction::SetOnboardingState(self.onboarding.previous_step()),
-                        AppAction::SetStatus(self.with_base_status(
-                            StatusKind::Note,
-                            &format!("step {}/5", self.onboarding.step.previous().index() + 1),
-                        )),
-                    ]
-                }
-            }
-            AppMessage::OnboardingToggleTheme => vec![
-                AppAction::SetOnboardingState(self.onboarding.toggle_theme()),
-                AppAction::SetStatus(
-                    self.with_base_status(StatusKind::Quiet, "theme updated | enter next"),
-                ),
-            ],
-            AppMessage::OnboardingSettingsNext => vec![
-                AppAction::SetOnboardingState(self.onboarding.next_settings_field()),
-                AppAction::SetStatus(
-                    self.with_base_status(StatusKind::Quiet, "settings selection moved"),
-                ),
-            ],
-            AppMessage::OnboardingSettingsPrevious => vec![
-                AppAction::SetOnboardingState(self.onboarding.previous_settings_field()),
-                AppAction::SetStatus(
-                    self.with_base_status(StatusKind::Quiet, "settings selection moved"),
-                ),
-            ],
-            AppMessage::OnboardingSettingIncrease => vec![
-                AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(1)),
-                AppAction::SetStatus(self.with_base_status(StatusKind::Quiet, "setting updated")),
-            ],
-            AppMessage::OnboardingSettingDecrease => vec![
-                AppAction::SetOnboardingState(self.onboarding.adjust_settings_field(-1)),
-                AppAction::SetStatus(self.with_base_status(StatusKind::Quiet, "setting updated")),
-            ],
-            AppMessage::OnboardingBeginEditing => {
-                let next_state = match self.onboarding.step {
-                    OnboardingStep::Directory => self.onboarding.begin_directory_editing(),
-                    OnboardingStep::Wago => self.onboarding.begin_wago_editing(),
-                    _ => self.onboarding.clone(),
-                };
-                let status = match self.onboarding.step {
-                    OnboardingStep::Directory => "editing folder | enter check | esc stop editing",
-                    OnboardingStep::Wago => "editing Wago API key | enter apply | esc cancel",
-                    _ => "editing",
-                };
-                vec![
-                    AppAction::SetOnboardingState(next_state),
-                    AppAction::SetStatus(self.with_base_status(StatusKind::Note, status)),
-                ]
-            }
-            AppMessage::OnboardingStopEditing => vec![
-                AppAction::SetOnboardingState(self.onboarding.stop_editing()),
-                AppAction::SetStatus(match self.onboarding.step {
-                    OnboardingStep::Directory => self.location_finder_status(),
-                    OnboardingStep::Wago => self.with_base_status(
-                        StatusKind::Note,
-                        "Wago.io step | e edit key | enter next",
-                    ),
-                    _ => self.with_base_status(StatusKind::Note, "editing stopped"),
-                }),
-            ],
+            AppMessage::OnboardingPreviousStep => match self.onboarding.step {
+                OnboardingStep::FindGame => vec![],
+                _ => vec![AppAction::SetOnboardingState(
+                    self.onboarding.previous_step(),
+                )],
+            },
+            AppMessage::OnboardingPreferenceNext => vec![AppAction::SetOnboardingState(
+                self.onboarding.move_preference(true),
+            )],
+            AppMessage::OnboardingPreferencePrevious => vec![AppAction::SetOnboardingState(
+                self.onboarding.move_preference(false),
+            )],
+            AppMessage::OnboardingPreferenceChange(delta) => vec![AppAction::SetOnboardingState(
+                self.onboarding.change_preference(delta),
+            )],
             AppMessage::OnboardingInputChar(character) => vec![AppAction::SetOnboardingState(
                 self.onboarding.insert_char(character),
             )],
             AppMessage::OnboardingBackspace => {
                 vec![AppAction::SetOnboardingState(self.onboarding.backspace())]
             }
-            AppMessage::OnboardingValidateInput => {
-                let current_path = PathBuf::from(self.onboarding.input.trim());
-                if self.is_guarded_path(&current_path) {
-                    return vec![
-                        AppAction::SetOnboardingState(
-                            self.onboarding
-                                .error("this profile can't use the main AddOns folder"),
-                        ),
-                        AppAction::SetStatus(self.with_base_status(
-                            StatusKind::Problem,
-                            "main AddOns folder blocked | choose another folder",
-                        )),
-                    ];
-                }
-
-                match validate_addons_path(&current_path) {
-                    Ok(()) => {
-                        let next_state = self.onboarding_found_state(vec![current_path.clone()]);
-                        vec![
-                            AppAction::SetOnboardingState(next_state),
-                            AppAction::SetStatus(self.found_status_for_path(&current_path)),
-                        ]
-                    }
-                    Err(error) => vec![
-                        AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                        AppAction::SetStatus(self.with_base_status(
-                            StatusKind::Problem,
-                            &format!("That folder doesn't work: {error}"),
-                        )),
-                    ],
-                }
-            }
-            AppMessage::OnboardingDeepScan => self.onboarding_scan_actions(),
-            AppMessage::OnboardingCancel => {
-                if matches!(self.onboarding.phase, OnboardingPhase::DeepScanning(_)) {
-                    vec![
-                        AppAction::CancelOnboardingScan,
-                        AppAction::SetOnboardingState(self.onboarding.cancelled()),
-                        AppAction::SetStatus(self.with_base_status(
-                            StatusKind::Note,
-                            "scan stopped | j/k pick a folder | enter scan | e edit path",
-                        )),
-                    ]
-                } else {
-                    vec![AppAction::SetOnboardingState(
-                        self.onboarding.stop_editing(),
-                    )]
-                }
-            }
-            AppMessage::OnboardingSuggestionNext => vec![
-                AppAction::SetOnboardingState(self.onboarding.next_suggestion()),
-                AppAction::SetStatus(self.location_finder_status()),
-            ],
-            AppMessage::OnboardingSuggestionPrevious => vec![
-                AppAction::SetOnboardingState(self.onboarding.previous_suggestion()),
-                AppAction::SetStatus(self.location_finder_status()),
-            ],
-            AppMessage::OnboardingFoundActionNext => vec![
-                AppAction::SetOnboardingState(self.onboarding.next_found_action()),
-                AppAction::SetStatus(self.found_status_for_input()),
-            ],
-            AppMessage::OnboardingFoundActionPrevious => vec![
-                AppAction::SetOnboardingState(self.onboarding.previous_found_action()),
-                AppAction::SetStatus(self.found_status_for_input()),
-            ],
-            AppMessage::OnboardingFoundConfirm => match self.onboarding.selected_found_action() {
-                FoundAction::UseThisPath => vec![
-                    AppAction::SetOnboardingState(
-                        self.onboarding.apply_directory_to_draft().next_step(),
-                    ),
-                    AppAction::SetStatus(
-                        self.with_base_status(StatusKind::Done, "folder chosen | step 3/5 Wago.io"),
-                    ),
-                ],
-                FoundAction::EnterDifferentPath => vec![
-                    AppAction::SetOnboardingState(self.onboarding.begin_directory_editing()),
-                    AppAction::SetStatus(self.with_base_status(
-                        StatusKind::Note,
-                        "editing folder | enter check | esc stop editing",
-                    )),
-                ],
-            },
             AppMessage::BackgroundTask(event) => match event {
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(paths))
-                    if !paths.is_empty() =>
-                {
-                    let state = self.onboarding_found_state(paths);
-                    let status = self.found_status_for_path(Path::new(state.input.trim()));
-                    vec![
-                        AppAction::SetOnboardingState(state),
-                        AppAction::SetStatus(status),
-                    ]
-                }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::QuickCheckFinished(_)) => {
-                    self.onboarding_scan_actions()
-                }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanProgress(progress)) => {
-                    vec![AppAction::SetOnboardingState(
-                        self.onboarding.set_scan_progress(progress),
-                    )]
-                }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(paths)))
-                    if !paths.is_empty() =>
-                {
-                    let state = self.onboarding_found_state(paths);
-                    let status = self.found_status_for_path(Path::new(state.input.trim()));
-                    vec![
-                        AppAction::SetOnboardingState(state),
-                        AppAction::SetStatus(status),
-                    ]
-                }
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Ok(_))) => vec![
-                    AppAction::SetOnboardingState(self.onboarding.error(format!(
-                        "Couldn't find World of Warcraft under {}",
-                        self.onboarding.input.trim()
-                    ))),
-                    AppAction::SetStatus(self.with_base_status(
-                        StatusKind::Note,
-                        "no install found | j/k pick a folder | enter scan | e edit path",
-                    )),
-                ],
-                AppTaskEvent::Onboarding(OnboardingTaskEvent::DeepScanFinished(Err(error))) => {
-                    vec![
-                        AppAction::SetOnboardingState(self.onboarding.error(error.clone())),
-                        AppAction::SetStatus(self.with_base_status(
-                            StatusKind::Problem,
-                            &format!("The search failed: {error}"),
-                        )),
-                    ]
-                }
+                AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
                 AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
                     AppAction::SetDashboardDriftReport(Some(outcome.drift_report)),
@@ -5658,14 +5455,27 @@ impl App {
                 self.install_pane = self.install_pane.stop_editing();
                 self.config_pane.edit = None;
                 let mut config = self.config_pane.draft.clone();
-                if let Some(path) = &self.effective_addon_dir {
-                    config.addon_dir = Some(path.clone());
-                    self.onboarding =
-                        OnboardingState::from_config_with_input(config, path.display().to_string())
-                            .ready();
-                } else {
-                    self.onboarding = OnboardingState::from_config(config).ready();
+                config.addon_dir = self.effective_addon_dir.clone();
+                self.onboarding = OnboardingState::from_config(config);
+                // The game versions of the install in use, the current one
+                // chosen. Without one, setup looks for the game again.
+                if let Some(current) = self.effective_addon_dir.clone() {
+                    let game = current.ancestors().nth(3).unwrap_or(&current);
+                    let paths = resolve_install_addons_paths(game);
+                    if let Some(index) = paths.iter().position(|path| paths_match(path, &current)) {
+                        let mut state = self.onboarding_found_state(paths);
+                        if let OnboardingPhase::Found(found) = &mut state.phase {
+                            found.selected = index;
+                        }
+                        self.onboarding = state;
+                    }
                 }
+            }
+            AppAction::LeaveOnboarding => {
+                // Back to the list as it was: nothing from setup is kept.
+                self.onboarding = self.onboarding.set_quit_question(false);
+                self.ui_theme = UiTheme::from_mode(self.config_pane.draft.theme);
+                self.shell_mode = ShellMode::Dashboard;
             }
             AppAction::SetOnboardingState(state) => {
                 self.ui_theme = UiTheme::from_mode(state.draft.theme);
@@ -5688,11 +5498,15 @@ impl App {
                 self.active_onboarding_cancel = Some(cancel.clone());
                 tokio::spawn(async move {
                     let progress_sender = sender.clone();
+                    let stopped = cancel.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         search_for_wow_installs(
                             &root,
                             || cancel.load(Ordering::SeqCst),
                             |progress| {
+                                if cancel.load(Ordering::SeqCst) {
+                                    return;
+                                }
                                 let _ = progress_sender.send(AppTaskEvent::Onboarding(
                                     OnboardingTaskEvent::DeepScanProgress(
                                         crate::onboarding::ScanProgressState {
@@ -5710,9 +5524,13 @@ impl App {
                     .await
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
 
-                    let _ = sender.send(AppTaskEvent::Onboarding(
-                        OnboardingTaskEvent::DeepScanFinished(result),
-                    ));
+                    // A stopped search says nothing more: a newer one may
+                    // be running by now.
+                    if !stopped.load(Ordering::SeqCst) {
+                        let _ = sender.send(AppTaskEvent::Onboarding(
+                            OnboardingTaskEvent::DeepScanFinished(result),
+                        ));
+                    }
                 });
             }
             AppAction::CancelOnboardingScan => {
@@ -5725,7 +5543,7 @@ impl App {
                 let Some(path) = config.addon_dir.clone() else {
                     self.onboarding = self
                         .onboarding
-                        .error("wizard cannot finish without a valid AddOns directory");
+                        .with_problem("Choose the game folder on step 1 first.");
                     self.status_line = self.with_base_status(
                         StatusKind::Problem,
                         "finish blocked | choose an AddOns folder that exists",
@@ -5736,7 +5554,7 @@ impl App {
                 if self.is_guarded_path(&path) {
                     self.onboarding = self
                         .onboarding
-                        .error("this profile can't use the main AddOns folder");
+                        .with_problem("This profile can't use your main AddOns folder.");
                     self.status_line = self.with_base_status(
                         StatusKind::Problem,
                         "refused to save the main AddOns folder into a non-default profile",
@@ -5757,7 +5575,9 @@ impl App {
                 }) {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        self.onboarding = self.onboarding.error(error.to_string());
+                        self.onboarding = self
+                            .onboarding
+                            .with_problem(format!("LemonUp couldn't save your setup: {error}"));
                         self.status_line = self.with_base_status(
                             StatusKind::Problem,
                             &format!("failed to bind profile to {}: {error}", path.display()),
@@ -5815,7 +5635,9 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        self.onboarding = self.onboarding.error(error.to_string());
+                        self.onboarding = self
+                            .onboarding
+                            .with_problem(format!("LemonUp couldn't save your setup: {error}"));
                         self.status_line = self.with_base_status(
                             StatusKind::Problem,
                             &format!("failed to save config: {error}"),
@@ -6128,604 +5950,7 @@ impl App {
             self.draw_dashboard_frame(frame);
             return;
         }
-        frame.render_widget(
-            Block::default().style(Style::default().bg(self.ui_theme.app_bg)),
-            frame.area(),
-        );
-        let shell = self.shell_frame(frame.area());
-        self.render_onboarding_header(frame, shell.header);
-        self.render_onboarding(frame, shell.body);
-        self.render_overlay_host(frame, shell.body, 0);
-        self.render_footer(frame, shell.footer);
-    }
-
-    /// The setup frame: a boxed header, the body and a boxed footer. The
-    /// dashboard draws its own frame (`draw_dashboard_frame`).
-    fn shell_frame(&self, area: Rect) -> ShellFrame {
-        let [header, body, footer] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(4),
-                Constraint::Min(12),
-                Constraint::Length(4),
-            ])
-            .areas(area);
-        ShellFrame {
-            header,
-            body,
-            footer,
-        }
-    }
-
-    fn footer_hint_styles(&self, id: Option<FooterHintId>) -> (Style, Style) {
-        if self
-            .shell_ui
-            .footer_pulse
-            .is_some_and(|pulse| Some(pulse.hint) == id)
-        {
-            return (
-                Style::default()
-                    .fg(self.ui_theme.overlay_bg)
-                    .bg(self.ui_theme.brand_gold)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
-
-        (
-            Style::default()
-                .fg(self.ui_theme.panel_title)
-                .bg(self.ui_theme.key_bg)
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(self.ui_theme.panel_title),
-        )
-    }
-
-    fn dashboard_job_footer_line(&self) -> Option<Line<'static>> {
-        let job = self.dashboard.job_ui()?;
-        let accent = job.kind.accent(self.ui_theme);
-        let label = format!(
-            "{} {}",
-            self.shell_ui.motion.spinner_frame(),
-            job.kind.label()
-        );
-        let mut spans = Vec::new();
-        spans.extend(shimmer_text_spans(
-            &label,
-            accent,
-            self.ui_theme.shimmer_glow,
-            ShimmerConfig::action(),
-        ));
-        spans.extend([
-            Span::styled(
-                format!("  {}/{}", job.current_index, job.total),
-                Style::default().fg(self.ui_theme.info),
-            ),
-            Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                truncate_text(&job.current_addon, 48),
-                Style::default().fg(accent),
-            ),
-        ]);
-        Some(Line::from(spans))
-    }
-
-    fn render_onboarding_header(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.border));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let [left, right] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .areas(inner);
-
-        let left_widget = Paragraph::new(Line::from(vec![
-            Span::styled("🍋 ", Style::default().fg(self.ui_theme.brand_gold)),
-            Span::styled(
-                "LemonUp Setup",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        frame.render_widget(left_widget, left);
-
-        let right_widget = Paragraph::new(Line::from(Span::styled(
-            format!(
-                "Step {} of {}",
-                self.onboarding.step.index() + 1,
-                OnboardingStep::ALL.len()
-            ),
-            Style::default()
-                .fg(self.ui_theme.highlight)
-                .add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Right);
-        frame.render_widget(right_widget, right);
-    }
-
-    fn render_onboarding(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.border));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let [stepper_area, content_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(12)])
-            .areas(inner);
-
-        let stepper = Paragraph::new(self.onboarding_stepper_lines()).wrap(Wrap { trim: false });
-        frame.render_widget(stepper, stepper_area);
-
-        let content = Paragraph::new(self.onboarding_content_lines(content_area.width))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(content, content_area);
-    }
-
-    fn onboarding_stepper_lines(&self) -> Vec<Line<'static>> {
-        let label_width = 16usize;
-        let segment_width = 6usize;
-        let marker_width = 4usize;
-        let progress_spans = OnboardingStep::ALL
-            .iter()
-            .enumerate()
-            .flat_map(|(index, step)| {
-                let step_index = step.index();
-                let is_completed = step_index < self.onboarding.step.index();
-                let is_current = *step == self.onboarding.step;
-                let marker = if is_completed {
-                    "✓"
-                } else if is_current {
-                    "●"
-                } else {
-                    "○"
-                };
-                let marker_style = if is_completed {
-                    Style::default()
-                        .fg(self.ui_theme.success)
-                        .add_modifier(Modifier::BOLD)
-                } else if is_current {
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                };
-                let left_connector_style = if index == 0 {
-                    Style::default().fg(self.ui_theme.muted)
-                } else if index - 1 < self.onboarding.step.index() {
-                    Style::default().fg(self.ui_theme.success)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                };
-                let right_connector_style = if index >= OnboardingStep::ALL.len() - 1 {
-                    Style::default().fg(self.ui_theme.muted)
-                } else if index < self.onboarding.step.index() {
-                    Style::default().fg(self.ui_theme.success)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                };
-
-                let leading = if index == 0 {
-                    " ".repeat(segment_width)
-                } else {
-                    "━".repeat(segment_width)
-                };
-                let trailing = if index == OnboardingStep::ALL.len() - 1 {
-                    " ".repeat(segment_width)
-                } else {
-                    "━".repeat(segment_width)
-                };
-
-                vec![
-                    Span::styled(leading, left_connector_style),
-                    Span::styled(
-                        format!("{:^width$}", marker, width = marker_width),
-                        marker_style,
-                    ),
-                    Span::styled(trailing, right_connector_style),
-                ]
-            })
-            .collect::<Vec<_>>();
-
-        let labels = OnboardingStep::ALL
-            .iter()
-            .map(|step| {
-                let style = if step.index() < self.onboarding.step.index() {
-                    Style::default().fg(self.ui_theme.success)
-                } else if *step == self.onboarding.step {
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                };
-                Span::styled(
-                    format!("{:^width$}", step.label(), width = label_width),
-                    style,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        vec![Line::from(progress_spans), Line::from(labels)]
-    }
-
-    fn onboarding_content_lines(&self, width: u16) -> Vec<Line<'static>> {
-        match self.onboarding.step {
-            OnboardingStep::Theme => self.onboarding_theme_lines(),
-            OnboardingStep::Directory => self.onboarding_directory_lines(width),
-            OnboardingStep::Wago => self.onboarding_wago_lines(),
-            OnboardingStep::Settings => self.onboarding_settings_lines(),
-            OnboardingStep::Review => self.onboarding_review_lines(),
-        }
-    }
-
-    fn onboarding_theme_lines(&self) -> Vec<Line<'static>> {
-        let label = match self.onboarding.draft.theme {
-            ThemeMode::Dark => "Dark",
-            ThemeMode::Light => "Light",
-        };
-        vec![
-            Line::from(Span::styled(
-                "Choose your theme:",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("◀ ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    format!("[ {label} ]"),
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" ▶", Style::default().fg(self.ui_theme.muted)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Use ←/→ to toggle. Enter continues.",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-        ]
-    }
-
-    fn onboarding_directory_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Where is your WoW AddOns folder?",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-        ];
-        if let Some((notice, is_error)) = self.startup_notice.as_ref() {
-            let color = if *is_error {
-                self.ui_theme.warning
-            } else {
-                self.ui_theme.success
-            };
-            lines.push(Line::from(Span::styled(
-                notice.replace(" | ", " · "),
-                Style::default().fg(color),
-            )));
-            lines.push(Line::from(""));
-        }
-
-        match &self.onboarding.phase {
-            OnboardingPhase::Bootstrapping => {
-                lines.push(Line::from("Preparing location finder..."));
-            }
-            OnboardingPhase::QuickChecking => {
-                lines.push(Line::from("Checking common install locations..."));
-            }
-            OnboardingPhase::Ready => {
-                if let Some(warning) = self.profile_warning() {
-                    lines.push(Line::from(Span::styled(
-                        warning,
-                        Style::default().fg(self.ui_theme.warning),
-                    )));
-                    lines.push(Line::from(""));
-                }
-                self.push_onboarding_folder_choices(&mut lines);
-            }
-            OnboardingPhase::DeepScanning(progress) => {
-                lines.push(Line::from(Span::styled(
-                    format!("Searching… {} folders checked", progress.dirs_scanned),
-                    Style::default().fg(self.ui_theme.warning),
-                )));
-                lines.push(Line::from(progress.current_path.clone()));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Esc stops the scan so you can pick a folder yourself.",
-                    Style::default().fg(self.ui_theme.muted),
-                )));
-            }
-            OnboardingPhase::Found(found) => {
-                let labels = if let [path] = found.paths.as_slice() {
-                    lines.push(Line::from(vec![
-                        Span::styled("✓ Detected: ", Style::default().fg(self.ui_theme.success)),
-                        Span::styled(path.clone(), Style::default().fg(self.ui_theme.info)),
-                    ]));
-                    vec!["Use this path".to_string()]
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        format!("✓ Detected {} installs:", found.paths.len()),
-                        Style::default().fg(self.ui_theme.success),
-                    )));
-                    found
-                        .paths
-                        .iter()
-                        .map(|path| {
-                            let client = match GameFlavor::detect_from_path(Path::new(path)) {
-                                Some(GameFlavor::Forever) => "WoW Forever",
-                                _ => "Retail",
-                            };
-                            format!("Use {client}: {path}")
-                        })
-                        .collect()
-                };
-                lines.push(Line::from(""));
-                let labels = labels
-                    .into_iter()
-                    .chain(std::iter::once("Enter different path".to_string()))
-                    .collect::<Vec<_>>();
-                for (index, label) in labels.iter().enumerate() {
-                    let selected = found.selected_action == index;
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            Style::default().fg(self.ui_theme.highlight),
-                        ),
-                        Span::styled(
-                            label.clone(),
-                            if selected {
-                                Style::default()
-                                    .fg(self.ui_theme.highlight)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(self.ui_theme.info)
-                            },
-                        ),
-                    ]));
-                }
-                if found.paths.len() > 1 {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        "LemonUp looks after one game version at a time. Use --profile <name> for the other one.",
-                        Style::default().fg(self.ui_theme.muted),
-                    )));
-                }
-            }
-            OnboardingPhase::Error(message) => {
-                lines.push(Line::from(Span::styled(
-                    format!("✗ {message}"),
-                    Style::default().fg(self.ui_theme.warning),
-                )));
-                lines.push(Line::from(""));
-                self.push_onboarding_folder_choices(&mut lines);
-            }
-            OnboardingPhase::Cancelled => {
-                lines.push(Line::from(Span::styled(
-                    "Scan stopped.",
-                    Style::default().fg(self.ui_theme.warning),
-                )));
-                lines.push(Line::from(""));
-                self.push_onboarding_folder_choices(&mut lines);
-            }
-        }
-
-        if self.onboarding.is_editing {
-            // The shared text box, starting from the path as it is: the
-            // cursor is at the end and the text before it can be edited.
-            let label = "Editing: ";
-            let style = Style::default().fg(self.ui_theme.highlight);
-            let mut text_box = self.onboarding.text_box.clone();
-            if text_box.value() != self.onboarding.input {
-                text_box = TextInput::new(self.onboarding.input.clone());
-            }
-            let room = usize::from(width).saturating_sub(label.len());
-            let mut spans = vec![Span::styled(label, style)];
-            spans.extend(text_box.spans(room, style, style.add_modifier(Modifier::BOLD), true));
-            lines.push(Line::from(""));
-            lines.push(Line::from(spans));
-        }
-
-        lines
-    }
-
-    /// Folders to scan from (home first), shown when no install was found automatically.
-    fn push_onboarding_folder_choices(&self, lines: &mut Vec<Line<'static>>) {
-        lines.push(Line::from(
-            "Pick a folder to search, or type the AddOns path:",
-        ));
-        lines.push(Line::from(""));
-        for (index, suggestion) in self.onboarding.suggestions.iter().enumerate() {
-            let selected = self.onboarding.selected_suggestion == Some(index);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if selected { "› " } else { "  " },
-                    Style::default().fg(self.ui_theme.highlight),
-                ),
-                Span::styled(
-                    suggestion.clone(),
-                    if selected {
-                        Style::default().fg(self.ui_theme.highlight)
-                    } else {
-                        Style::default().fg(self.ui_theme.info)
-                    },
-                ),
-            ]));
-        }
-        if self.onboarding.selected_suggestion.is_none() && !self.onboarding.is_editing {
-            lines.push(Line::from(vec![
-                Span::styled("› ", Style::default().fg(self.ui_theme.highlight)),
-                Span::styled(
-                    self.onboarding.input.clone(),
-                    Style::default().fg(self.ui_theme.highlight),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Enter searches the selected folder. e types a path.",
-            Style::default().fg(self.ui_theme.muted),
-        )));
-    }
-
-    fn onboarding_wago_lines(&self) -> Vec<Line<'static>> {
-        let value = self.onboarding.wago_api_key_value();
-        vec![
-            Line::from(Span::styled(
-                "Wago.io key (you can skip this)",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Wago.io is one of the sites LemonUp gets addons from. Searching it, and updating addons that came from it, needs your own Wago.io key. Wago gives one to its Patreon supporters:",
-                Style::default().fg(self.ui_theme.panel_title),
-            )),
-            Line::from(Span::styled(
-                "addons.wago.io/patreon",
-                Style::default().fg(self.ui_theme.info),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Addons from GitHub, WoWInterface and TukUI work without a key. You can add or change it later in Settings.",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                if value.is_empty() {
-                    "No Wago.io key saved yet."
-                } else {
-                    "Wago.io key entered."
-                },
-                Style::default().fg(self.ui_theme.info),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Key: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    if value.is_empty() {
-                        "<empty>".to_string()
-                    } else {
-                        format!("set ({} chars)", value.len())
-                    },
-                    Style::default().fg(self.ui_theme.highlight),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                if self.onboarding.is_editing {
-                    "Editing active. Type the key, Enter applies, Esc cancels."
-                } else {
-                    "Press e to edit, or Enter to continue without a key."
-                },
-                Style::default().fg(self.ui_theme.muted),
-            )),
-        ]
-    }
-
-    fn onboarding_settings_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Choose your core settings:",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-        ];
-
-        for field in OnboardingSettingsField::ALL {
-            let selected = field == self.onboarding.settings_selection;
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if selected { "› " } else { "  " },
-                    Style::default().fg(self.ui_theme.highlight),
-                ),
-                Span::styled(
-                    format!("{:<18}", field.label()),
-                    if selected {
-                        Style::default()
-                            .fg(self.ui_theme.highlight)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(self.ui_theme.info)
-                    },
-                ),
-                Span::styled(
-                    self.onboarding_setting_value(field),
-                    Style::default().fg(self.ui_theme.panel_title),
-                ),
-            ]));
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Use ↑/↓ to choose a setting. ←/→ changes the value. Enter continues.",
-            Style::default().fg(self.ui_theme.muted),
-        )));
-        lines
-    }
-
-    fn onboarding_review_lines(&self) -> Vec<Line<'static>> {
-        vec![
-            Line::from(Span::styled(
-                "Review your setup:",
-                Style::default()
-                    .fg(self.ui_theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(format!(
-                "Theme: {}",
-                match self.onboarding.draft.theme {
-                    ThemeMode::Dark => "dark",
-                    ThemeMode::Light => "light",
-                }
-            )),
-            Line::from(format!("AddOns folder: {}", self.onboarding.input)),
-            Line::from(format!(
-                "Wago.io key: {}",
-                if self.onboarding.wago_api_key_value().is_empty() {
-                    "not configured".to_string()
-                } else {
-                    format!(
-                        "saved ({} characters)",
-                        self.onboarding.wago_api_key_value().len()
-                    )
-                }
-            )),
-            Line::from(format!(
-                "Back up my game settings before updates: {}",
-                on_off(self.onboarding.draft.backup_wtf)
-            )),
-            Line::from(format!(
-                "Backups to keep: {}",
-                self.onboarding.draft.backup_retention
-            )),
-            Line::from(format!(
-                "Show library folders: {}",
-                on_off(self.onboarding.draft.show_libs)
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Enter saves the config and starts the first scan. Esc goes back.",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-        ]
+        self.draw_setup_frame(frame);
     }
 
     fn task_overlay_lines(&self) -> Vec<Line<'static>> {
@@ -7144,24 +6369,115 @@ impl App {
             .map(ToOwned::to_owned)
     }
 
-    /// Starts a scan from the current onboarding path. The scan accepts an AddOns folder
-    /// directly, so this both checks a typed path and searches a folder such as home.
-    fn onboarding_scan_actions(&self) -> Vec<AppAction> {
-        let root = PathBuf::from(self.onboarding.input.trim());
+    /// Starts looking for the game in `root` and its folders.
+    fn onboarding_scan_actions(&self, root: PathBuf) -> Vec<AppAction> {
         vec![
-            AppAction::SetOnboardingState(self.onboarding.start_deep_scan()),
-            AppAction::SetStatus(
-                self.with_base_status(StatusKind::Working, "scanning for WoW installs | esc stop"),
-            ),
+            AppAction::SetOnboardingState(self.onboarding.start_deep_scan(root.clone())),
             AppAction::StartOnboardingDeepScan(root),
         ]
     }
 
-    fn location_finder_status(&self) -> StatusMessage {
-        self.with_base_status(
-            StatusKind::Quiet,
-            "location finder | enter scan | e edit path",
-        )
+    /// What the quick check and the folder search report. A report that
+    /// arrives after setup stopped waiting for it is dropped.
+    fn onboarding_task_actions(&self, event: OnboardingTaskEvent) -> Vec<AppAction> {
+        let phase = &self.onboarding.phase;
+        match event {
+            OnboardingTaskEvent::QuickCheckFinished(paths)
+                if matches!(phase, OnboardingPhase::QuickChecking) =>
+            {
+                if paths.is_empty() {
+                    // Not in the usual places: look through the home folder.
+                    self.onboarding_scan_actions(self.onboarding.scan_root.clone())
+                } else {
+                    vec![AppAction::SetOnboardingState(
+                        self.onboarding_found_state(paths),
+                    )]
+                }
+            }
+            OnboardingTaskEvent::DeepScanProgress(progress)
+                if matches!(phase, OnboardingPhase::DeepScanning(_)) =>
+            {
+                vec![AppAction::SetOnboardingState(
+                    self.onboarding.set_scan_progress(progress),
+                )]
+            }
+            OnboardingTaskEvent::DeepScanFinished(Ok(paths))
+                if matches!(phase, OnboardingPhase::DeepScanning(_)) && !paths.is_empty() =>
+            {
+                vec![AppAction::SetOnboardingState(
+                    self.onboarding_found_state(paths),
+                )]
+            }
+            OnboardingTaskEvent::DeepScanFinished(result)
+                if matches!(phase, OnboardingPhase::DeepScanning(_)) =>
+            {
+                let place = self.searched_place();
+                let note = match result {
+                    Ok(_)
+                        if self.onboarding.checked_usual_places && place == "your home folder" =>
+                    {
+                        "LemonUp looked in the usual install places and through your home folder."
+                            .to_string()
+                    }
+                    Ok(_) => format!("LemonUp looked through {place}."),
+                    Err(_) => format!("LemonUp couldn't look through {place}."),
+                };
+                vec![AppAction::SetOnboardingState(
+                    self.onboarding.not_found(note, not_found_choices()),
+                )]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The folder the last search looked through, in words.
+    fn searched_place(&self) -> String {
+        let root = &self.onboarding.scan_root;
+        if home_folder().is_some_and(|home| paths_match(&home, root)) {
+            "your home folder".to_string()
+        } else if root.parent().is_none() && root.has_root() && !cfg!(windows) {
+            "the whole computer".to_string()
+        } else {
+            friendly_path(root)
+        }
+    }
+
+    /// Enter in the game folder box. A folder of an install lists its game
+    /// versions; any other folder that exists is searched.
+    fn onboarding_check_folder_actions(&self) -> Vec<AppAction> {
+        let typed = self.onboarding.folder_box.value().trim();
+        let error = |message: &str| {
+            vec![AppAction::SetOnboardingState(
+                self.onboarding.typing_error(message),
+            )]
+        };
+        if typed.is_empty() {
+            return error("Type or paste a folder first.");
+        }
+        let folder = expand_home(typed);
+        if !folder.exists() {
+            return error(
+                "That folder doesn't exist. Check the spelling, or paste the path from your file manager.",
+            );
+        }
+        if !folder.is_dir() {
+            return error("That is a file. Type or paste the folder it is in.");
+        }
+        let paths = resolve_install_addons_paths(&folder);
+        if paths.is_empty() {
+            return self.onboarding_scan_actions(folder);
+        }
+        vec![AppAction::SetOnboardingState(
+            self.onboarding_found_state(paths),
+        )]
+    }
+
+    /// Setup was opened again from Settings, so quitting it goes back to
+    /// the list rather than closing LemonUp.
+    fn setup_is_rerun(&self) -> bool {
+        self.effective_addon_dir
+            .as_deref()
+            .is_some_and(|path| validate_addons_path(path).is_ok() && !self.is_guarded_path(path))
     }
 
     /// The game client the AddOns folder belongs to, for the header.
@@ -7245,20 +6561,6 @@ impl App {
         config_value_text(&self.config_pane.draft, field)
     }
 
-    fn onboarding_setting_value(&self, field: OnboardingSettingsField) -> String {
-        match field {
-            OnboardingSettingsField::BackupWtf => {
-                on_off(self.onboarding.draft.backup_wtf).to_string()
-            }
-            OnboardingSettingsField::BackupRetention => {
-                self.onboarding.draft.backup_retention.to_string()
-            }
-            OnboardingSettingsField::ShowLibs => {
-                on_off(self.onboarding.draft.show_libs).to_string()
-            }
-        }
-    }
-
     fn is_guarded_path(&self, candidate: &Path) -> bool {
         self.runtime.is_guarded_path(candidate)
     }
@@ -7268,14 +6570,6 @@ impl App {
             return None;
         }
 
-        if self.shell_mode == ShellMode::Onboarding
-            && self.is_guarded_path(Path::new(self.onboarding.input.trim()))
-        {
-            return Some(
-                "Warning: non-default profiles must use a sandbox AddOns directory.".to_string(),
-            );
-        }
-
         self.effective_addon_dir.as_ref().and_then(|path| {
             self.is_guarded_path(path).then(|| {
                 "Warning: non-default profiles must use a sandbox AddOns directory.".to_string()
@@ -7283,34 +6577,21 @@ impl App {
         })
     }
 
-    /// Found state for the discovered paths, moving the selection past any path this profile
-    /// must not target (ending on "Enter different path" when every path is guarded).
+    /// The installs found, each with its addon count, the first one this
+    /// profile may use chosen ("Somewhere else…" when it may use none).
     fn onboarding_found_state(&self, paths: Vec<PathBuf>) -> OnboardingState {
-        let mut state = self.onboarding.found_many(paths);
-        while state.selected_found_action() == FoundAction::UseThisPath
-            && self.is_guarded_path(Path::new(state.input.trim()))
-        {
-            state = state.next_found_action();
-        }
-        state
-    }
-
-    fn found_status_for_input(&self) -> StatusMessage {
-        self.found_status_for_path(Path::new(self.onboarding.input.trim()))
-    }
-
-    fn found_status_for_path(&self, path: &Path) -> StatusMessage {
-        if self.is_guarded_path(path) {
-            self.with_base_status(
-                StatusKind::Note,
-                "found default profile target | choose another location",
-            )
-        } else {
-            self.with_base_status(
-                StatusKind::Done,
-                "found WoW installation | choose an action, then press enter",
-            )
-        }
+        let installs = paths
+            .into_iter()
+            .map(|addons_dir| FoundInstall {
+                addons: addon_count(&addons_dir),
+                addons_dir,
+            })
+            .collect::<Vec<_>>();
+        let selected = installs
+            .iter()
+            .position(|install| !self.is_guarded_path(&install.addons_dir))
+            .unwrap_or(installs.len());
+        self.onboarding.found(installs, selected)
     }
 
     fn parent_has_drift(&self, folder: &str) -> bool {
@@ -8169,6 +7450,40 @@ fn dashboard_check_status_message(
 }
 
 /// `path` with the home folder shortened to `~` (not on Windows).
+/// The home folder, from `HOME` (or `USERPROFILE` on Windows).
+fn home_folder() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+/// A typed or pasted folder: quotes around it removed, and `~` read as the
+/// home folder.
+fn expand_home(typed: &str) -> PathBuf {
+    let typed = typed.trim();
+    let typed = ['"', '\'']
+        .into_iter()
+        .find_map(|quote| {
+            typed
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))
+        })
+        .unwrap_or(typed);
+    if let Some(home) = home_folder() {
+        if typed == "~" {
+            return home;
+        }
+        if let Some(rest) = typed
+            .strip_prefix("~/")
+            .or_else(|| typed.strip_prefix("~\\"))
+        {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(typed)
+}
+
 fn friendly_path(path: &Path) -> String {
     if !cfg!(windows)
         && let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
@@ -8447,9 +7762,7 @@ mod tests {
     use crate::backup::{BackupEntry, BackupRunOutcome, backup_root};
     use crate::drift::{DriftReport, OwnedChildDrift};
     use crate::event::TerminalEvent;
-    use crate::onboarding::{
-        FoundAction, FoundState, OnboardingPhase, OnboardingState, OnboardingStep,
-    };
+    use crate::onboarding::{OnboardingPhase, OnboardingState, OnboardingStep};
     use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
     use crate::update::LiveUpdateSummary;
     use crate::wago::{WagoInstallInspection, WagoInstallSummary, WagoSearchResult};
@@ -9149,14 +8462,16 @@ mod tests {
         app.backup_pane.pending_restore = Some(sample_backup());
         assert_eq!(app.messages_for_key(ctrl('c')), quit, "restore question");
 
-        let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Theme;
+        let app = app_for_tests(ShellMode::Onboarding);
         assert_eq!(app.messages_for_key(ctrl('c')), quit, "setup");
 
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.is_editing = true;
+        app.onboarding = app.onboarding.begin_typing();
         assert_eq!(app.messages_for_key(ctrl('c')), quit, "setup text box");
+
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding.step = OnboardingStep::Wago;
+        assert_eq!(app.messages_for_key(ctrl('c')), quit, "setup key box");
     }
 
     #[test]
@@ -9207,8 +8522,7 @@ mod tests {
         );
 
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.is_editing = true;
+        app.onboarding = app.onboarding.begin_typing();
         assert_eq!(
             app.messages_for_key(ctrl('u')),
             vec![AppMessage::TextBoxEdit(TextEdit::Clear)]
@@ -9284,45 +8598,44 @@ mod tests {
         exercise_text_box(&mut app, config_edit_value);
 
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.input = String::new();
-        app.onboarding = app.onboarding.begin_directory_editing();
-        exercise_text_box(&mut app, |app| app.onboarding.input.clone());
+        app.onboarding = app.onboarding.begin_typing();
+        exercise_text_box(&mut app, |app| {
+            app.onboarding.folder_box.value().to_string()
+        });
 
         let mut app = app_for_tests(ShellMode::Onboarding);
         app.onboarding.step = OnboardingStep::Wago;
-        app.onboarding = app.onboarding.begin_wago_editing();
-        exercise_text_box(&mut app, |app| {
-            app.onboarding.wago_api_key_value().to_string()
-        });
+        exercise_text_box(&mut app, |app| app.onboarding.key_box.value().to_string());
         assert_eq!(app.onboarding.draft.wago_api_key.as_deref(), Some("x"));
         press_text_key(&mut app, ctrl('u'));
         assert_eq!(app.onboarding.draft.wago_api_key, None);
     }
 
     #[test]
-    fn setup_path_box_starts_from_the_path_with_the_cursor_at_the_end() {
+    fn setup_folder_box_starts_empty_and_edits_at_the_cursor() {
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.phase = OnboardingPhase::Ready;
-        app.onboarding.input = "/games/Wow/AddOns".to_string();
-        press_text_key(&mut app, KeyEvent::from(KeyCode::Char('e')));
-        assert!(app.onboarding.is_editing);
+        app.onboarding = app
+            .onboarding
+            .not_found("nothing", crate::onboarding::not_found_choices());
+        press_text_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(app.onboarding.text_box_focused());
+        assert_eq!(app.onboarding.folder_box.value(), "");
+        type_text(&mut app, "/games/Wow/AddOns");
         for _ in 0.."AddOns".len() {
             press_text_key(&mut app, KeyEvent::from(KeyCode::Left));
         }
         press_text_key(&mut app, KeyEvent::from(KeyCode::Backspace));
         type_text(&mut app, "_retail_/Interface/");
-        assert_eq!(app.onboarding.input, "/games/Wow_retail_/Interface/AddOns");
+        assert_eq!(
+            app.onboarding.folder_box.value(),
+            "/games/Wow_retail_/Interface/AddOns"
+        );
         let rows = render_rows(&mut app, 80, 24);
         let editing = rows
             .iter()
-            .find(|row| row.contains("Editing:"))
-            .expect("editing line");
-        assert!(
-            editing.contains("/games/Wow_retail_/Interface/AddOns"),
-            "{editing}"
-        );
+            .find(|row| row.contains("/games/Wow_retail_/Interface/"))
+            .expect("box line");
+        assert!(editing.contains("│ "), "{editing}");
     }
 
     #[test]
@@ -9545,16 +8858,6 @@ mod tests {
             9
         );
         assert_eq!(scroll(&mut app, AppMessage::SheetScroll(SheetMove::Top)), 0);
-    }
-
-    #[test]
-    fn status_kind_sets_footer_color() {
-        let app = app_for_tests(ShellMode::Dashboard);
-        let theme = &app.ui_theme;
-        assert_eq!(app.status_kind_color(StatusKind::Done), theme.success);
-        assert_eq!(app.status_kind_color(StatusKind::Problem), theme.error);
-        assert_eq!(app.status_kind_color(StatusKind::Note), theme.info);
-        assert_eq!(app.status_kind_color(StatusKind::Working), theme.warning);
     }
 
     #[test]
@@ -10823,11 +10126,55 @@ mod tests {
         assert_eq!(app.shell_mode, ShellMode::Onboarding);
         assert_eq!(app.dashboard.detail_mode, DetailMode::Overview);
         assert_eq!(app.shell_ui.overlay.active, None);
+        // The folder is not on this disk, so setup looks for the game.
         assert_eq!(
-            app.onboarding.input,
-            "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+            app.onboarding.draft.addon_dir,
+            Some(PathBuf::from(
+                "D:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns"
+            ))
         );
-        assert!(matches!(app.onboarding.phase, OnboardingPhase::Ready));
+        assert_eq!(app.onboarding.step, OnboardingStep::FindGame);
+        assert!(matches!(
+            app.onboarding.phase,
+            OnboardingPhase::Bootstrapping
+        ));
+    }
+
+    #[test]
+    fn setup_from_settings_lists_the_install_in_use_and_esc_goes_back_to_the_list() {
+        let temp = tempdir().expect("tempdir");
+        let (_paths, retail, forever) = two_client_profile(temp.path());
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.effective_addon_dir = Some(forever.clone());
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.shell_ui.overlay.active = Some(OverlayKind::Config);
+
+        for action in app.update(AppMessage::ConfigRunOnboarding) {
+            app.apply(action);
+        }
+        let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+            panic!("found: {:?}", app.onboarding.phase);
+        };
+        assert_eq!(
+            found
+                .installs
+                .iter()
+                .map(|install| install.addons_dir.clone())
+                .collect::<Vec<_>>(),
+            vec![retail, forever.clone()]
+        );
+        assert_eq!(
+            found.selected_install().map(|install| &install.addons_dir),
+            Some(&forever)
+        );
+
+        press_text_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        let rows = render_rows(&mut app, 80, 24).join("\n");
+        assert!(rows.contains("back to my addons"), "{rows}");
+        press_text_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+        assert_eq!(app.shell_mode, ShellMode::Dashboard);
+        assert_eq!(app.effective_addon_dir, Some(forever));
+        assert!(!app.quit_requested);
     }
 
     #[test]
@@ -12934,26 +12281,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_quick_check_starts_a_scan_from_the_current_path() {
+    fn quick_checking_app() -> App {
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.phase = OnboardingPhase::QuickChecking;
-        app.onboarding.input = "/home/player".to_string();
+        app.onboarding = app.onboarding.begin_quick_check();
+        app.onboarding.scan_root = PathBuf::from("/home/player");
+        app
+    }
 
-        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+    fn task(app: &App, event: crate::onboarding::OnboardingTaskEvent) -> Vec<AppAction> {
+        app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(event)))
+    }
+
+    fn apply_actions(app: &mut App, actions: Vec<AppAction>) {
+        for action in actions {
+            app.apply(action);
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        press_text_key(app, KeyEvent::from(code));
+    }
+
+    #[test]
+    fn empty_quick_check_searches_the_home_folder_on_its_own() {
+        let app = quick_checking_app();
+        let actions = task(
+            &app,
             crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Vec::new()),
-        )));
+        );
 
         assert_eq!(
             actions,
             vec![
-                AppAction::SetOnboardingState(app.onboarding.start_deep_scan()),
-                AppAction::SetStatus(
-                    app.with_base_status(
-                        StatusKind::Working,
-                        "scanning for WoW installs | esc stop"
-                    )
+                AppAction::SetOnboardingState(
+                    app.onboarding
+                        .start_deep_scan(PathBuf::from("/home/player"))
                 ),
                 AppAction::StartOnboardingDeepScan(PathBuf::from("/home/player")),
             ]
@@ -12961,117 +12323,412 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_folder_choice_searches_it() {
-        let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        for phase in [
-            OnboardingPhase::Ready,
-            OnboardingPhase::Cancelled,
-            OnboardingPhase::Error("nothing".to_string()),
+    fn found_installs_are_listed_by_name_with_their_addon_counts() {
+        let temp = tempdir().expect("tempdir");
+        let (_paths, retail, forever) = two_client_profile(temp.path());
+        for name in ["Details", "WeakAuras"] {
+            std::fs::create_dir_all(retail.join(name)).expect("addon");
+            std::fs::write(
+                retail.join(name).join(format!("{name}.toc")),
+                "## Title: x\n",
+            )
+            .expect("toc");
+        }
+        let mut app = quick_checking_app();
+        let actions = task(
+            &app,
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(vec![
+                retail.clone(),
+                forever.clone(),
+            ]),
+        );
+        apply_actions(&mut app, actions);
+
+        let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+            panic!("found: {:?}", app.onboarding.phase);
+        };
+        assert_eq!(
+            found
+                .installs
+                .iter()
+                .map(|install| (install.addons_dir.clone(), install.addons))
+                .collect::<Vec<_>>(),
+            vec![(retail, 2), (forever, 0)]
+        );
+        assert_eq!(found.selected, 0);
+
+        for (width, height, question) in [
+            (80, 24, "Found World of Warcraft. Which game version?"),
+            (
+                120,
+                36,
+                "Found World of Warcraft. Which game version should LemonUp look after?",
+            ),
         ] {
-            app.onboarding.phase = phase;
-            assert_eq!(
-                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
-                vec![AppMessage::OnboardingDeepScan]
+            let rows = render_rows(&mut app, width, height);
+            let text = rows.join("\n");
+            assert!(text.contains(question), "{text}");
+            let retail_row = rows
+                .iter()
+                .find(|row| row.contains("▌ Retail"))
+                .expect("retail");
+            assert!(retail_row.contains("2 addons"), "{retail_row}");
+            assert!(retail_row.contains("_retail_"), "{retail_row}");
+            let forever_row = rows
+                .iter()
+                .find(|row| row.contains("WoW Forever"))
+                .expect("forever");
+            assert!(forever_row.contains("0 addons"), "{forever_row}");
+            assert!(text.contains("Somewhere else…"), "{text}");
+            assert!(text.contains("LemonUp looks after one game version at a time."));
+            assert!(text.contains("● Find your game  ───  ○ Wago.io  ───  ○ Preferences"));
+            assert!(text.contains("Step 1 of 3"), "{text}");
+            assert!(
+                rows[usize::from(height) - 1].contains("↑/↓ choose")
+                    && rows[usize::from(height) - 1].contains("enter continue")
+                    && rows[usize::from(height) - 1].contains("esc quit setup"),
+                "{}",
+                rows[usize::from(height) - 1]
             );
+            assert!(!text.contains("Review"), "{text}");
+            assert!(!text.contains("--profile"), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_empty_search_offers_plain_choices_and_names_where_it_looked() {
+        let mut app = quick_checking_app();
+        app.onboarding = app.onboarding.start_deep_scan(PathBuf::from("/srv/games"));
+        let actions = task(
+            &app,
+            crate::onboarding::OnboardingTaskEvent::DeepScanFinished(Ok(Vec::new())),
+        );
+        apply_actions(&mut app, actions);
+
+        let OnboardingPhase::NotFound(not_found) = &app.onboarding.phase else {
+            panic!("not found: {:?}", app.onboarding.phase);
+        };
+        assert_eq!(not_found.note, "LemonUp looked through /srv/games.");
+        assert_eq!(
+            not_found.choices.first(),
+            Some(&crate::onboarding::NotFoundChoice::TypeFolder)
+        );
+        let rows = render_rows(&mut app, 80, 24).join("\n");
+        assert!(rows.contains("Couldn't find World of Warcraft"), "{rows}");
+        assert!(rows.contains("▌ Type or paste the game folder"), "{rows}");
+        if !cfg!(windows) {
+            assert!(rows.contains("Search the whole computer"), "{rows}");
+        }
+    }
+
+    #[test]
+    fn a_stale_search_report_changes_nothing() {
+        let mut app = quick_checking_app();
+        app.onboarding = app.onboarding.not_found("stopped", Vec::new());
+        for event in [
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(Vec::new()),
+            crate::onboarding::OnboardingTaskEvent::DeepScanFinished(Ok(Vec::new())),
+            crate::onboarding::OnboardingTaskEvent::DeepScanProgress(
+                crate::onboarding::ScanProgressState {
+                    dirs_scanned: 3,
+                    current_path: "/x".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(task(&app, event), vec![]);
+        }
+    }
+
+    #[test]
+    fn esc_stops_the_search_and_offers_the_choices() {
+        let mut app = quick_checking_app();
+        app.onboarding = app
+            .onboarding
+            .start_deep_scan(PathBuf::from("/home/player"));
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+            vec![AppMessage::OnboardingStopSearch]
+        );
+        let actions = app.update(AppMessage::OnboardingStopSearch);
+        assert_eq!(actions[0], AppAction::CancelOnboardingScan);
+        apply_actions(&mut app, actions);
+        assert!(matches!(app.onboarding.phase, OnboardingPhase::NotFound(_)));
+        let table = app.key_table(80);
+        assert!(table.iter().any(|hint| hint.label == "quit setup"));
+    }
+
+    #[test]
+    fn step_one_keys_choose_continue_and_ask_before_quitting() {
+        let temp = tempdir().expect("tempdir");
+        let (_paths, retail, forever) = two_client_profile(temp.path());
+        let mut app = quick_checking_app();
+        app.onboarding = app.onboarding_found_state(vec![retail, forever.clone()]);
+
+        press(&mut app, KeyCode::Down);
+        let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+            panic!("found");
+        };
+        assert_eq!(found.selected, 1);
+
+        // Esc asks first; n keeps setting up, y quits.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.onboarding.quit_question);
+        let rows = render_rows(&mut app, 80, 24).join("\n");
+        assert!(rows.contains("Quit setup?"), "{rows}");
+        assert!(rows.contains("quit LemonUp"), "{rows}");
+        assert!(rows.contains("keep setting up"), "{rows}");
+        assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Down)), vec![]);
+        press(&mut app, KeyCode::Char('n'));
+        assert!(!app.onboarding.quit_question);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            app.update(AppMessage::OnboardingQuitConfirmed),
+            vec![AppAction::Quit]
+        );
+        press(&mut app, KeyCode::Char('n'));
+
+        // q quits straight away when no box has focus.
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
+            vec![AppMessage::QuitRequested]
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.onboarding.step, OnboardingStep::Wago);
+        assert_eq!(app.onboarding.draft.addon_dir, Some(forever));
+        assert!(app.onboarding.text_box_focused());
+    }
+
+    #[test]
+    fn the_folder_box_resolves_any_folder_of_the_game() {
+        let temp = tempdir().expect("tempdir");
+        let (_paths, retail, forever) = two_client_profile(temp.path());
+        let game = temp.path().join("World of Warcraft");
+        for (typed, expected) in [
+            (game.clone(), vec![retail.clone(), forever.clone()]),
+            (game.join("_retail_"), vec![retail.clone()]),
+            (
+                game.join("_retail_").join("Interface"),
+                vec![retail.clone()],
+            ),
+            (retail.clone(), vec![retail.clone()]),
+            (game.join("_forever_"), vec![forever.clone()]),
+        ] {
+            let mut app = quick_checking_app();
+            app.onboarding = app
+                .onboarding
+                .not_found("nothing", crate::onboarding::not_found_choices());
+            press(&mut app, KeyCode::Enter);
+            assert!(app.onboarding.text_box_focused());
+            assert_eq!(app.onboarding.folder_box.value(), "");
+            paste_text(&mut app, &typed.display().to_string());
+            press(&mut app, KeyCode::Enter);
+            let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+                panic!("{}: {:?}", typed.display(), app.onboarding.phase);
+            };
             assert_eq!(
-                app.messages_for_key(KeyEvent::from(KeyCode::Char('d'))),
-                vec![AppMessage::OnboardingDeepScan]
+                found
+                    .installs
+                    .iter()
+                    .map(|install| install.addons_dir.clone())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{}",
+                typed.display()
             );
         }
     }
 
     #[test]
-    fn empty_scan_result_names_the_folder_it_searched() {
-        let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.input = "/home/player".to_string();
+    fn the_folder_box_says_what_is_wrong_and_esc_goes_back() {
+        let temp = tempdir().expect("tempdir");
+        let mut app = quick_checking_app();
+        app.onboarding = app
+            .onboarding
+            .not_found("nothing", crate::onboarding::not_found_choices());
+        let before = app.onboarding.phase.clone();
+        press(&mut app, KeyCode::Enter);
 
-        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
-            crate::onboarding::OnboardingTaskEvent::DeepScanFinished(Ok(Vec::new())),
-        )));
-
-        assert_eq!(
-            actions.first(),
-            Some(&AppAction::SetOnboardingState(
-                app.onboarding
-                    .error("Couldn't find World of Warcraft under /home/player")
-            ))
-        );
-    }
-
-    #[test]
-    fn found_confirmation_uses_selected_action() {
-        let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.input =
-            "C:\\Games\\World of Warcraft\\_retail_\\Interface\\AddOns".to_string();
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.phase = OnboardingPhase::Found(FoundState {
-            paths: vec![app.onboarding.input.clone()],
-            selected_action: 0,
-        });
-
-        let actions = app.update(AppMessage::OnboardingFoundConfirm);
-        assert_eq!(
-            actions,
-            vec![
-                AppAction::SetOnboardingState(
-                    app.onboarding.apply_directory_to_draft().next_step()
-                ),
-                AppAction::SetStatus(
-                    app.with_base_status(StatusKind::Done, "folder chosen | step 3/5 Wago.io")
-                )
-            ]
-        );
-    }
-
-    #[test]
-    fn onboarding_edit_mode_treats_command_letters_as_input() {
-        let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding = app.onboarding.begin_directory_editing();
-
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char('d'))),
-            vec![AppMessage::OnboardingInputChar('d')]
-        );
+        // q is a letter here.
         assert_eq!(
             app.messages_for_key(KeyEvent::from(KeyCode::Char('q'))),
             vec![AppMessage::OnboardingInputChar('q')]
         );
+        press(&mut app, KeyCode::Enter);
+        let OnboardingPhase::Typing(typing) = &app.onboarding.phase else {
+            panic!("typing");
+        };
         assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
-            vec![AppMessage::OnboardingValidateInput]
+            typing.error.as_deref(),
+            Some("Type or paste a folder first.")
         );
+
+        type_text(&mut app, &temp.path().join("Wow").display().to_string());
+        press(&mut app, KeyCode::Enter);
+        let lines = render_rows(&mut app, 80, 24);
+        let top = lines
+            .iter()
+            .position(|row| row.contains("┌─ Game folder"))
+            .expect("box");
+        let box_width = |row: &str| row.trim_end().chars().count();
+        assert_eq!(box_width(&lines[top]), box_width(&lines[top + 1]));
+        assert_eq!(box_width(&lines[top]), box_width(&lines[top + 2]));
+        let rows = lines.join("\n");
+        assert!(rows.contains("! That folder doesn't exist."), "{rows}");
+        assert!(rows.contains("┌─ Game folder"), "{rows}");
+        assert!(rows.contains("enter check this folder"), "{rows}");
+
+        // A folder outside any install is searched.
+        app.onboarding.folder_box = TextInput::new(temp.path().display().to_string());
+        let actions = app.update(AppMessage::OnboardingCheckFolder);
         assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
-            vec![AppMessage::OnboardingStopEditing]
+            actions.last(),
+            Some(&AppAction::StartOnboardingDeepScan(
+                temp.path().to_path_buf()
+            ))
         );
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.onboarding.phase, before);
     }
 
     #[test]
-    fn deep_scan_progress_event_updates_onboarding_state() {
-        let app = app_for_tests(ShellMode::Onboarding);
+    fn the_wago_step_takes_a_key_masked_or_none() {
+        let mut app = app_for_tests(ShellMode::Onboarding);
+        app.onboarding = app
+            .onboarding
+            .choose_install(Path::new("/games/_retail_/Interface/AddOns"));
+        assert_eq!(app.onboarding.step, OnboardingStep::Wago);
 
-        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
-            crate::onboarding::OnboardingTaskEvent::DeepScanProgress(
-                crate::onboarding::ScanProgressState {
-                    dirs_scanned: 42,
-                    current_path: "C:\\".to_string(),
-                },
-            ),
-        )));
-
-        assert_eq!(
-            actions,
-            vec![AppAction::SetOnboardingState(
-                app.onboarding
-                    .set_scan_progress(crate::onboarding::ScanProgressState {
-                        dirs_scanned: 42,
-                        current_path: "C:\\".to_string(),
-                    },)
-            )]
+        let rows = render_rows(&mut app, 80, 24).join("\n");
+        assert!(rows.contains("Wago.io key (you can skip this)"), "{rows}");
+        assert!(
+            rows.contains("paste your key here, or leave empty"),
+            "{rows}"
         );
+        assert!(rows.contains("addons.wago.io/patreon"), "{rows}");
+        assert!(rows.contains("✓ Find your game"), "{rows}");
+
+        // Skipped: no key.
+        let mut skipped = app_for_tests(ShellMode::Onboarding);
+        skipped.onboarding = app.onboarding.clone();
+        press(&mut skipped, KeyCode::Enter);
+        assert_eq!(skipped.onboarding.step, OnboardingStep::Preferences);
+        assert_eq!(skipped.onboarding.draft.wago_api_key, None);
+
+        // Typed straight away, q included, and never shown.
+        type_text(&mut app, "abc123q");
+        let rows = render_rows(&mut app, 80, 24).join("\n");
+        assert!(!rows.contains("abc123q"), "{rows}");
+        assert!(rows.contains("•••••••"), "{rows}");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.onboarding.step, OnboardingStep::Preferences);
+        assert_eq!(
+            app.onboarding.draft.wago_api_key.as_deref(),
+            Some("abc123q")
+        );
+
+        // Esc goes back a step.
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.onboarding.step, OnboardingStep::Wago);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.onboarding.step, OnboardingStep::FindGame);
+    }
+
+    #[test]
+    fn preferences_change_with_left_and_right_and_finish_saves_them() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, _forever) = two_client_profile(temp.path());
+        let config_file = paths.config_file.clone();
+        std::fs::remove_file(&config_file).expect("start without a config");
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+        assert_eq!(app.shell_mode, ShellMode::Onboarding);
+        app.onboarding = app.onboarding.choose_install(&retail);
+        type_text(&mut app, "abc123");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.onboarding.step, OnboardingStep::Preferences);
+
+        let rows = render_rows(&mut app, 80, 24);
+        let text = rows.join("\n");
+        assert!(text.contains("▌ Colors"), "{text}");
+        assert!(text.contains("‹ Dark ›"), "{text}");
+        assert!(
+            text.contains("Back up my game settings before updates"),
+            "{text}"
+        );
+        assert!(text.contains("Backups to keep"), "{text}");
+        assert!(!text.contains("Show library folders"), "{text}");
+        assert!(rows[23].contains("←/→ change"), "{}", rows[23]);
+        assert!(
+            rows[23].contains("enter finish and show my addons"),
+            "{}",
+            rows[23]
+        );
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.onboarding.draft.theme, ThemeMode::Light);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Left);
+        let backup_wtf = app.onboarding.draft.backup_wtf;
+        press(&mut app, KeyCode::Down);
+        let kept = app.onboarding.draft.backup_retention;
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.onboarding.draft.backup_retention, kept + 1);
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.shell_mode, ShellMode::Dashboard);
+        let ConfigLoad::Loaded(saved) = ConfigStore::new(config_file).load().expect("load") else {
+            panic!("config saved");
+        };
+        assert_eq!(saved.addon_dir, Some(retail));
+        assert_eq!(saved.theme, ThemeMode::Light);
+        assert_eq!(saved.backup_wtf, backup_wtf);
+        assert_eq!(saved.backup_retention, kept + 1);
+        assert_eq!(saved.wago_api_key.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn every_setup_step_fits_80_by_24() {
+        let mut app = quick_checking_app();
+        let long = PathBuf::from(
+            "/home/player/Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft/_retail_/Interface/AddOns",
+        );
+        let screens = [
+            app.onboarding.clone(),
+            app.onboarding.start_deep_scan(PathBuf::from("/home/player")),
+            app.onboarding.found(
+                vec![crate::onboarding::FoundInstall {
+                    addons_dir: long.clone(),
+                    addons: 125,
+                }],
+                0,
+            ),
+            app.onboarding
+                .not_found("nothing", crate::onboarding::not_found_choices()),
+            app.onboarding
+                .not_found("nothing", Vec::new())
+                .begin_typing()
+                .typing_error(
+                    "That folder doesn't exist. Check the spelling, or paste the path from your file manager.",
+                ),
+            app.onboarding.choose_install(&long),
+            app.onboarding.choose_install(&long).next_step(),
+        ];
+        for state in screens {
+            app.onboarding = state;
+            let rows = render_rows(&mut app, 80, 24);
+            assert_eq!(rows.len(), 24);
+            let text = rows.join("\n");
+            assert!(rows[23].trim_start().starts_with(['↑', 'e']), "{text}");
+            assert!(
+                !text.contains("/home/player/Games/world-of-warcraft/drive_c/Program"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -13088,32 +12745,28 @@ mod tests {
     }
 
     #[test]
-    fn guarded_found_path_defaults_to_scan_another_location() {
+    fn a_guarded_install_cannot_be_chosen() {
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.runtime = AppRuntime::new(
-            "dev".to_string(),
-            None,
-            vec![PathBuf::from(
-                "D:\\World of Warcraft\\_retail_\\Interface\\AddOns",
-            )],
-        );
-
         let path = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
-        let actions = app.update(AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
-            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(vec![path.clone()]),
-        )));
+        app.runtime = AppRuntime::new("dev".to_string(), None, vec![path.clone()]);
+        app.onboarding = app.onboarding.begin_quick_check();
 
-        assert_eq!(
-            actions,
-            vec![
-                AppAction::SetOnboardingState(app.onboarding_found_state(vec![path.clone()])),
-                AppAction::SetStatus(app.found_status_for_path(&path)),
-            ]
+        let actions = task(
+            &app,
+            crate::onboarding::OnboardingTaskEvent::QuickCheckFinished(vec![path]),
         );
-        assert_eq!(
-            app.onboarding_found_state(vec![path])
-                .selected_found_action(),
-            FoundAction::EnterDifferentPath
+        apply_actions(&mut app, actions);
+        let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+            panic!("found");
+        };
+        // "Somewhere else…" is chosen; on the install, enter does nothing.
+        assert_eq!(found.selected_install(), None);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+        assert!(
+            !app.key_table(80)
+                .iter()
+                .any(|hint| hint.label == "continue")
         );
     }
 
@@ -13135,7 +12788,7 @@ mod tests {
         app.apply(AppAction::SaveOnboardingConfig(config));
 
         assert_eq!(app.shell_mode, ShellMode::Onboarding);
-        assert!(matches!(app.onboarding.phase, OnboardingPhase::Error(_)));
+        assert!(app.onboarding.problem.is_some());
         assert!(
             app.status_line
                 .text
@@ -13787,15 +13440,12 @@ mod tests {
     #[test]
     fn paste_into_onboarding_inputs_appends_text() {
         let mut app = app_for_tests(ShellMode::Onboarding);
-        app.onboarding.step = OnboardingStep::Directory;
-        app.onboarding.input = String::new();
-        app.onboarding.is_editing = true;
+        app.onboarding = app.onboarding.begin_typing();
 
         paste_text(&mut app, "/games/q\n/AddOns");
-        assert_eq!(app.onboarding.input, "/games/q/AddOns");
+        assert_eq!(app.onboarding.folder_box.value(), "/games/q/AddOns");
 
         app.onboarding.step = OnboardingStep::Wago;
-        app.onboarding.draft.wago_api_key = None;
         paste_text(&mut app, "key-with-q\n");
         assert_eq!(
             app.onboarding.draft.wago_api_key.as_deref(),

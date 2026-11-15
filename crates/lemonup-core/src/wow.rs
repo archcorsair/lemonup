@@ -290,6 +290,75 @@ where
     Ok(Vec::new())
 }
 
+/// How many addons an AddOns folder holds, counted the way the addon list
+/// counts them (folders that belong together count once). Zero when the
+/// folder cannot be read.
+pub fn addon_count(addons_dir: &Path) -> usize {
+    crate::scan::scan_addons_dir(addons_dir, GameFlavor::for_addons_dir(addons_dir))
+        .map_or(0, |addons| addons.len())
+}
+
+/// The AddOns folders of the WoW install that `path` is part of. Any folder
+/// of the install works: the game folder, `_retail_` or `_forever_`,
+/// `Interface`, `AddOns`, or a folder inside one of them. A folder inside one
+/// game version gives that version's AddOns folder; the game folder (or a
+/// folder beside the versions, such as `Data`) gives every version it has,
+/// retail first. Each folder returned passes [`validate_addons_path`], so the
+/// flavor is detected from it as usual. Empty when `path` is in no install.
+pub fn resolve_install_addons_paths(path: &Path) -> Vec<PathBuf> {
+    for folder in path.ancestors() {
+        let is_client = folder.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            CLIENT_FOLDERS
+                .iter()
+                .any(|client| name.eq_ignore_ascii_case(client))
+        });
+        if is_client {
+            let addons = client_addons_dir(folder);
+            if validate_addons_path(&addons).is_ok() {
+                return vec![addons];
+            }
+            continue;
+        }
+        let found = CLIENT_FOLDERS
+            .iter()
+            .filter_map(|client| child_dir_ignore_case(folder, client))
+            .map(|client_dir| client_addons_dir(&client_dir))
+            .filter(|addons| validate_addons_path(addons).is_ok())
+            .collect::<Vec<_>>();
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    Vec::new()
+}
+
+/// `<client>/Interface/AddOns`, using the folders' own spelling on disk.
+fn client_addons_dir(client_dir: &Path) -> PathBuf {
+    let interface = child_dir_ignore_case(client_dir, "Interface")
+        .unwrap_or_else(|| client_dir.join("Interface"));
+    child_dir_ignore_case(&interface, "AddOns").unwrap_or_else(|| interface.join("AddOns"))
+}
+
+/// The folder in `parent` named `name`, ignoring case. Links are not followed.
+fn child_dir_ignore_case(parent: &Path, name: &str) -> Option<PathBuf> {
+    let exact = parent.join(name);
+    if fs::symlink_metadata(&exact).is_ok_and(|metadata| metadata.is_dir()) {
+        return Some(exact);
+    }
+    fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+}
+
 fn common_relative_candidates() -> Vec<PathBuf> {
     if cfg!(windows) {
         windows_relative_candidates()
@@ -386,8 +455,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        quick_check_common_paths, search_for_wow, search_for_wow_installs, suggested_scan_roots,
-        validate_addons_path,
+        addon_count, quick_check_common_paths, resolve_install_addons_paths, search_for_wow,
+        search_for_wow_installs, suggested_scan_roots, validate_addons_path,
     };
 
     fn create_wow_install(root: &Path) -> PathBuf {
@@ -561,6 +630,82 @@ mod tests {
 
         assert_eq!(result, Some(addons));
         assert!(progress_calls > 0);
+    }
+
+    #[test]
+    fn any_folder_of_an_install_resolves_to_its_addons_folder() {
+        let temp = tempdir().expect("tempdir");
+        let retail = create_wow_client(temp.path(), "_retail_");
+        let forever = create_wow_client(temp.path(), "_forever_");
+        let game = temp.path().join("World of Warcraft");
+        fs::create_dir_all(retail.join("Details")).expect("addon folder");
+        fs::create_dir_all(game.join("_retail_").join("WTF")).expect("WTF");
+
+        // The game folder, or a folder beside the versions, gives both.
+        assert_eq!(
+            resolve_install_addons_paths(&game),
+            vec![retail.clone(), forever.clone()]
+        );
+        assert_eq!(
+            resolve_install_addons_paths(&game.join("Data")),
+            vec![retail.clone(), forever.clone()]
+        );
+        // A folder inside one version gives that version.
+        for inside in [
+            game.join("_retail_"),
+            game.join("_retail_").join("Interface"),
+            retail.clone(),
+            retail.join("Details"),
+            game.join("_retail_").join("WTF"),
+        ] {
+            assert_eq!(
+                resolve_install_addons_paths(&inside),
+                vec![retail.clone()],
+                "{}",
+                inside.display()
+            );
+        }
+        assert_eq!(
+            resolve_install_addons_paths(&game.join("_forever_").join("Interface")),
+            vec![forever.clone()]
+        );
+        // A trailing separator changes nothing.
+        let with_slash = PathBuf::from(format!("{}/", game.join("_retail_").display()));
+        assert_eq!(resolve_install_addons_paths(&with_slash), vec![retail]);
+    }
+
+    #[test]
+    fn folders_outside_an_install_resolve_to_nothing() {
+        let temp = tempdir().expect("tempdir");
+        create_wow_client(&temp.path().join("Games"), "_retail_");
+        let elsewhere = temp.path().join("Documents");
+        fs::create_dir_all(&elsewhere).expect("dir");
+
+        assert!(resolve_install_addons_paths(&elsewhere).is_empty());
+        // A folder above the game is not part of it.
+        assert!(resolve_install_addons_paths(&temp.path().join("Games")).is_empty());
+        assert!(resolve_install_addons_paths(&temp.path().join("missing")).is_empty());
+        // A client LemonUp does not look after is not an install it can use.
+        let classic = create_wow_client(&temp.path().join("Old"), "_classic_");
+        assert!(resolve_install_addons_paths(&classic).is_empty());
+    }
+
+    #[test]
+    fn addon_count_counts_addons_the_way_the_list_does() {
+        let temp = tempdir().expect("tempdir");
+        let addons = create_wow_install(temp.path());
+        assert_eq!(addon_count(&addons), 0);
+
+        for name in ["Details", "WeakAuras", "Bagnon"] {
+            fs::create_dir_all(addons.join(name)).expect("addon dir");
+            fs::write(
+                addons.join(name).join(format!("{name}.toc")),
+                format!("## Title: {name}\n"),
+            )
+            .expect("toc");
+        }
+        assert_eq!(addon_count(&addons), 3);
+        assert_eq!(addon_count(&temp.path().join("missing")), 0);
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub use transfer::{
 };
 pub use v1_migration::{V1Location, V1MigrationOutcome, V1MigrationReport, migrate_v1_if_needed};
 pub use wow::{
-    ScanProgressUpdate, detect_known_addons_path, detect_known_addons_paths,
-    quick_check_common_paths, search_for_wow, search_for_wow_installs, suggested_scan_roots,
-    validate_addons_path,
+    ScanProgressUpdate, addon_count, detect_known_addons_path, detect_known_addons_paths,
+    quick_check_common_paths, resolve_install_addons_paths, search_for_wow,
+    search_for_wow_installs, suggested_scan_roots, validate_addons_path,
 };

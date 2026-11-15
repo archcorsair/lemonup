@@ -51,6 +51,11 @@ pub(super) enum Question {
     QuitWhileUpdating {
         progress: Option<(usize, usize)>,
     },
+    /// Esc on setup's first step. `rerun`: setup was opened from Settings,
+    /// so a yes goes back to the list.
+    QuitSetup {
+        rerun: bool,
+    },
 }
 
 impl Question {
@@ -64,6 +69,7 @@ impl Question {
             Self::DeleteBackup { .. } => "Delete this backup?".to_string(),
             Self::ReplaceAddon { name, .. } => format!("Replace your copy of {name}?"),
             Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
+            Self::QuitSetup { .. } => "Quit setup?".to_string(),
         }
     }
 
@@ -84,6 +90,8 @@ impl Question {
             Self::DeleteBackup { .. } => ("delete it", "keep it"),
             Self::ReplaceAddon { .. } => ("replace it", "leave it alone"),
             Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
+            Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
+            Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
         }
     }
 
@@ -113,6 +121,10 @@ impl Question {
             Self::QuitWhileUpdating { .. } => {
                 (AppMessage::QuitConfirmed, AppMessage::QuitCancelled)
             }
+            Self::QuitSetup { .. } => (
+                AppMessage::OnboardingQuitConfirmed,
+                AppMessage::OnboardingQuitCancelled,
+            ),
         }
     }
 
@@ -261,6 +273,14 @@ impl Question {
                     text,
                 ))]
             }
+            Self::QuitSetup { rerun: false } => vec![Line::from(Span::styled(
+                "Nothing is saved yet. LemonUp opens setup again the next time you start it.",
+                text,
+            ))],
+            Self::QuitSetup { rerun: true } => vec![Line::from(Span::styled(
+                "Nothing you chose here is saved. Your game folder and settings stay as they were.",
+                text,
+            ))],
         }
     }
 
@@ -343,8 +363,10 @@ impl App {
     /// The question waiting for an answer, if any. Quitting comes first: it
     /// can be asked on top of another question.
     pub(super) fn active_question(&self) -> Option<Question> {
-        if self.shell_mode != ShellMode::Dashboard {
-            return None;
+        if self.shell_mode == ShellMode::Onboarding {
+            return self.onboarding.quit_question.then(|| Question::QuitSetup {
+                rerun: self.setup_is_rerun(),
+            });
         }
         if self.quit_question_open && self.dashboard.update_in_progress() {
             let progress = self

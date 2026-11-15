@@ -1,78 +1,6 @@
 use super::sheet::{SheetBody, SheetChrome};
 use super::*;
 impl App {
-    pub(super) fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.border));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let padded = if inner.width > 8 {
-            inner.inner(Margin {
-                horizontal: 2,
-                vertical: 0,
-            })
-        } else {
-            inner
-        };
-
-        let command_lines = self.footer_command_lines();
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(padded);
-
-        let status_lines = self.footer_status_lines();
-
-        let right_width = command_lines
-            .iter()
-            .map(|line| self.footer_hint_line_width(line) as u16)
-            .max()
-            .unwrap_or(0)
-            .min(padded.width.saturating_sub(20));
-
-        for (index, hints) in command_lines.iter().enumerate() {
-            let row = rows[index];
-            let status_line = status_lines[index].clone();
-            let status_is_empty = self.line_is_empty(&status_line);
-
-            if status_is_empty {
-                if !hints.is_empty() {
-                    let commands = Paragraph::new(self.footer_hint_line(hints))
-                        .alignment(Alignment::Center)
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(commands, row);
-                }
-            } else {
-                let [left, _, right] = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Fill(1),
-                        Constraint::Length(if right_width > 0 { 3 } else { 0 }),
-                        Constraint::Length(right_width),
-                    ])
-                    .areas(row);
-
-                let status = Paragraph::new(status_line)
-                    .alignment(Alignment::Left)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(status, left);
-
-                if !hints.is_empty() {
-                    let commands = Paragraph::new(self.footer_hint_line(hints))
-                        .alignment(Alignment::Right)
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(commands, right);
-                }
-            }
-        }
-    }
-
-    pub(super) fn line_is_empty(&self, line: &Line<'_>) -> bool {
-        line.spans.iter().all(|span| span.content.is_empty())
-    }
-
     /// Draws the open overlay as a sheet. `region` is the space above the
     /// status line and the key line.
     pub(super) fn render_overlay_host(&self, frame: &mut Frame<'_>, region: Rect, header: u16) {
@@ -181,57 +109,12 @@ impl App {
         }
     }
 
-    pub(super) fn footer_status_lines(&self) -> Vec<Line<'static>> {
-        vec![
-            self.footer_primary_status_line(),
-            self.footer_secondary_status_line(),
-        ]
-    }
-
-    pub(super) fn footer_primary_status_line(&self) -> Line<'static> {
-        if self.shell_mode == ShellMode::Dashboard
-            && let Some(job_line) = self.dashboard_job_footer_line()
-        {
-            return job_line;
-        }
-
-        Line::from(vec![Span::styled(
-            truncate_text(&self.footer_status_text(), 120),
-            Style::default().fg(self.status_kind_color(self.status_line.kind)),
-        )])
-    }
-
-    pub(super) fn footer_secondary_status_line(&self) -> Line<'static> {
-        Line::from(vec![Span::styled(
-            truncate_text(&self.footer_secondary_status_text(), 120),
-            Style::default().fg(self.ui_theme.muted),
-        )])
-    }
-
+    /// The status message as the status line words it, empty when none
+    /// shows.
+    #[cfg(test)]
     pub(super) fn footer_status_text(&self) -> String {
-        match self.shell_mode {
-            ShellMode::Dashboard => self.dashboard_footer_status_text(),
-            ShellMode::Onboarding => self.onboarding_footer_status_text(),
-        }
-    }
-
-    pub(super) fn footer_secondary_status_text(&self) -> String {
-        match self.shell_mode {
-            ShellMode::Dashboard => self.dashboard_footer_secondary_text(),
-            ShellMode::Onboarding => String::new(),
-        }
-    }
-
-    pub(super) fn dashboard_footer_status_text(&self) -> String {
-        if let Some(summary) = self.sanitized_footer_status_text() {
-            return summary;
-        }
-
-        String::new()
-    }
-
-    pub(super) fn dashboard_footer_secondary_text(&self) -> String {
-        String::new()
+        self.sanitized_status_text(&self.status_line)
+            .unwrap_or_default()
     }
 
     /// The status line message for `status`, or `None` when it is not
@@ -256,18 +139,6 @@ impl App {
             offer: status.offer,
             expires_at,
         })
-    }
-
-    pub(super) fn onboarding_footer_status_text(&self) -> String {
-        if let Some(summary) = self.sanitized_footer_status_text() {
-            return summary;
-        }
-
-        String::new()
-    }
-
-    pub(super) fn sanitized_footer_status_text(&self) -> Option<String> {
-        self.sanitized_status_text(&self.status_line)
     }
 
     /// The message part of a status, without the surface label and profile
@@ -296,54 +167,6 @@ impl App {
 
         let summary = parts.join(" · ");
         (!summary.is_empty()).then_some(summary)
-    }
-
-    /// Footer color for a status message, from its kind alone.
-    pub(super) fn status_kind_color(&self, kind: StatusKind) -> Color {
-        match kind {
-            StatusKind::Done => self.ui_theme.success,
-            StatusKind::Problem => self.ui_theme.error,
-            StatusKind::Working => self.ui_theme.warning,
-            StatusKind::Note | StatusKind::Quiet => self.ui_theme.info,
-        }
-    }
-
-    /// Setup's footer: the key table split over two rows.
-    pub(super) fn footer_command_lines(&self) -> Vec<Vec<KeyHint>> {
-        let mut primary = Vec::new();
-        let mut secondary = Vec::new();
-        for hint in self.key_table(u16::MAX) {
-            match hint.tier {
-                FooterHintTier::Primary => primary.push(hint),
-                FooterHintTier::Secondary => secondary.push(hint),
-            }
-        }
-        vec![primary, secondary]
-    }
-
-    pub(super) fn footer_hint_line(&self, hints: &[KeyHint]) -> Line<'static> {
-        let mut spans = Vec::new();
-        for (index, hint) in hints.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("   "));
-            }
-            let (key_style, label_style) = self.footer_hint_styles(hint.id);
-            spans.push(Span::styled(format!(" {} ", hint.key), key_style));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(hint.label.clone(), label_style));
-        }
-        Line::from(spans)
-    }
-
-    pub(super) fn footer_hint_line_width(&self, hints: &[KeyHint]) -> usize {
-        hints
-            .iter()
-            .enumerate()
-            .map(|(index, hint)| {
-                let base = hint.key.chars().count() + 2 + 1 + hint.label.chars().count();
-                if index == 0 { base } else { base + 3 }
-            })
-            .sum()
     }
 
     pub(super) fn overlay_section_title(&self, title: &str) -> Line<'static> {
