@@ -711,8 +711,8 @@ impl ConfigField {
             Self::ReduceMotion => "Reduce motion",
             Self::ShowLibs => "Start with folders shown",
             Self::ChangeGameFolder => "Change game folder…",
-            Self::SaveAddonList => "Save my addon list to a file…",
-            Self::LoadAddonList => "Load an addon list from a file…",
+            Self::SaveAddonList => "Export addon list to a file…",
+            Self::LoadAddonList => "Import addon list from a file…",
         }
     }
 
@@ -13992,7 +13992,7 @@ mod tests {
         let actions = app.update(AppMessage::ConfigToggleSelected);
         assert!(matches!(actions[0], AppAction::ReenterOnboarding));
 
-        // "Load an addon list from a file…" starts the import.
+        // "Import addon list from a file…" starts the import.
         app.config_pane.selected_field = last;
         let actions = app.update(AppMessage::ConfigToggleSelected);
         assert!(
