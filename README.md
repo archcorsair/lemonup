@@ -31,6 +31,26 @@ scoop bucket add lemon-bucket https://github.com/archcorsair/lemon-bucket
 scoop install lemonup
 ```
 
+**Nix** (flake, macOS and Linux):
+
+```sh
+nix run github:archcorsair/lemonup            # try it
+nix profile install github:archcorsair/lemonup
+```
+
+Or add it as a flake input for NixOS or Home Manager:
+
+```nix
+inputs.lemonup.url = "github:archcorsair/lemonup";
+# then: inputs.lemonup.packages.${pkgs.system}.default
+# in environment.systemPackages or home.packages
+```
+
+Nix downloads LemonUp prebuilt from the `lemonup` Cachix cache; it asks once whether to trust it.
+
+**Arch Linux:** AUR packages (`lemonup` and `lemonup-bin`) are coming soon. Until then, build
+the package from this repo with `makepkg -si` in `packaging/aur/lemonup-bin`.
+
 **Or download a binary** from [Releases](https://github.com/archcorsair/lemonup/releases) and put
 it on your `PATH`.
 
