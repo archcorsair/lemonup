@@ -43,6 +43,9 @@ pub(crate) struct FolderClash {
     pub(crate) replaceable: Vec<String>,
     /// `(folder, addon name)`: the parent or an owned folder of a linked addon.
     pub(crate) linked: Vec<(String, String)>,
+    /// Whether an addon in `linked` was linked by a newer LemonUp (it shows as "Not linked"
+    /// here, so LemonUp does not keep it updated).
+    pub(crate) newer_version_linked: bool,
     /// The name of the "Not linked" addon already there, when one is known.
     pub(crate) existing_name: Option<String>,
 }

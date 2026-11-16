@@ -482,7 +482,9 @@ impl GroupingGuard {
             if addon.source != SourceKind::Manual || addon.unrecognized.is_some() {
                 guard.standalone.insert(folder.clone());
             }
-            if addon.has_authoritative_owned_folders() {
+            // An owned-folder list stored by a newer LemonUp is kept as it is, so the name
+            // heuristic may not fold any other folder into that addon either.
+            if addon.has_authoritative_owned_folders() || addon.has_unrecognized_ownership() {
                 guard.authoritative.insert(
                     folder,
                     addon
@@ -1185,6 +1187,23 @@ mod tests {
         assert!(!guard.may_group("Parent", "Parent_Extra"));
         assert!(!guard.may_group("Other", "Other_Plugin"));
         assert!(guard.may_group("Other", "Other_Untracked"));
+    }
+
+    #[test]
+    fn grouping_guard_keeps_the_owned_folders_a_newer_version_stored() {
+        let mut newer = AddonRecord::new("Owned", "Owned", SourceKind::Manual);
+        newer.owned_folders = vec![OwnedFolder {
+            name: "Owned_Child".to_string(),
+        }];
+        newer.unrecognized = Some(crate::domain::UnrecognizedValues {
+            source: "manual".to_string(),
+            ownership_source: Some("exclusive".to_string()),
+            ..Default::default()
+        });
+        let guard = GroupingGuard::from_tracked(&[newer]);
+
+        assert!(guard.may_group("Owned", "Owned_Child"));
+        assert!(!guard.may_group("Owned", "Owned_Extra"));
     }
 
     #[cfg(unix)]

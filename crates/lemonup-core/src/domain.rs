@@ -177,6 +177,14 @@ impl AddonRecord {
     pub fn has_authoritative_owned_folders(&self) -> bool {
         self.effective_ownership_source() == OwnershipSource::Managed
     }
+
+    /// Whether a newer LemonUp stored how this addon's owned folders were assigned in a way this
+    /// version does not know. Its owned folders are then kept as stored but never acted on.
+    pub fn has_unrecognized_ownership(&self) -> bool {
+        self.unrecognized
+            .as_ref()
+            .is_some_and(|values| values.ownership_source.is_some())
+    }
 }
 
 #[cfg(test)]

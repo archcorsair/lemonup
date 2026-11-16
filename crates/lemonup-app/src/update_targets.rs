@@ -18,8 +18,8 @@ use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
 /// - A package folder outside that set may be taken over when its existing row is manual
 ///   (untracked) or it has no row at all. After the update it becomes an owned folder of the
 ///   updated addon, and `record_managed_addon` drops its separate row.
-/// - A package folder that is itself, or is owned by, a different tracked non-manual addon
-///   refuses the whole update.
+/// - A package folder that is itself, or is owned by, a different tracked non-manual addon, or
+///   one a newer LemonUp linked (shown as "Not linked" here), refuses the whole update.
 ///
 /// Returns the folders to move aside: those of the replaced set that exist on disk are moved by
 /// the caller (missing ones are skipped there).
@@ -54,10 +54,15 @@ fn plan_update_replacements_from_rows(
             continue;
         }
         if let Some(owner) = tracked_owner_of(rows, &tracked.folder, folder) {
-            conflicts.push(if same_folder_name(&owner, folder) {
+            conflicts.push(if owner.unrecognized.is_some() {
+                format!(
+                    "{folder} (belongs to {}, which a newer LemonUp linked)",
+                    display_name(owner)
+                )
+            } else if same_folder_name(&owner.folder, folder) {
                 format!("{folder} (linked separately)")
             } else {
-                format!("{folder} (owned by tracked addon {owner})")
+                format!("{folder} (owned by tracked addon {})", owner.folder)
             });
             continue;
         }
@@ -76,13 +81,31 @@ fn plan_update_replacements_from_rows(
     }
 }
 
-/// The folder of a tracked non-manual addon, other than `updating`, that is `folder` itself or
+/// The linked addon (see `holds_its_folders`), other than `updating`, that is `folder` itself or
 /// lists it among its owned folders.
-fn tracked_owner_of(rows: &[AddonRecord], updating: &str, folder: &str) -> Option<String> {
+fn tracked_owner_of<'a>(
+    rows: &'a [AddonRecord],
+    updating: &str,
+    folder: &str,
+) -> Option<&'a AddonRecord> {
     rows.iter()
-        .filter(|row| row.folder != updating && row.source != SourceKind::Manual)
+        .filter(|row| row.folder != updating && holds_its_folders(row))
         .find(|row| row_claims_folder(row, folder))
-        .map(|row| row.folder.clone())
+}
+
+/// Whether another addon's install or update must leave `row`'s folders alone: it is linked
+/// here, or a newer LemonUp linked it. Such a row shows as "Not linked" in this version, but its
+/// folders still belong to it.
+fn holds_its_folders(row: &AddonRecord) -> bool {
+    row.source != SourceKind::Manual || row.unrecognized.is_some()
+}
+
+fn display_name(row: &AddonRecord) -> String {
+    if row.name.trim().is_empty() {
+        row.folder.clone()
+    } else {
+        row.name.clone()
+    }
 }
 
 /// Whether two AddOns folder names name the same folder on disk.
@@ -109,10 +132,12 @@ fn row_claims_folder(row: &AddonRecord, folder: &str) -> bool {
 
 /// Sorts the folders a fresh install of a package brings into what is in the way.
 ///
-/// - A package folder that is the parent or an owned folder of a linked (non-manual) addon is
-///   `linked`, on disk or not, since recording the install would take it from that addon.
-///   `reinstalling` is the parent folder of the very addon being installed again (a Wago.io
-///   reinstall); its own folders are not counted as linked.
+/// - A package folder that is the parent or an owned folder of a linked (non-manual) addon, or of
+///   one a newer LemonUp linked, is `linked`, on disk or not, since recording the install would
+///   take it from that addon. `reinstalling` is the parent folder of the very addon being
+///   installed again (a Wago.io reinstall); its own folders are not counted as linked. An addon a
+///   newer LemonUp linked whose folder is the package parent is the same addon installed here
+///   (for example after "find online"), so it counts as "Not linked" and is asked about.
 /// - Any other package folder already in the AddOns folder is `replaceable`: it has no record or
 ///   a "Not linked" (manual) one.
 pub(crate) fn classify_install_folders(
@@ -127,15 +152,14 @@ pub(crate) fn classify_install_folders(
         let owner = rows
             .iter()
             .filter(|row| {
-                row.source != SourceKind::Manual && Some(row.folder.as_str()) != reinstalling
+                holds_its_folders(row)
+                    && Some(row.folder.as_str()) != reinstalling
+                    && !(row.unrecognized.is_some() && same_folder_name(&row.folder, parent_folder))
             })
             .find(|row| row_claims_folder(row, folder));
         if let Some(owner) = owner {
-            let name = if owner.name.trim().is_empty() {
-                owner.folder.clone()
-            } else {
-                owner.name.clone()
-            };
+            let name = display_name(owner);
+            clash.newer_version_linked |= owner.unrecognized.is_some();
             clash.linked.push((folder.clone(), name));
         } else if addon_dir.join(folder).exists() {
             clash.replaceable.push(folder.clone());
@@ -241,7 +265,7 @@ pub(crate) fn linked_folders_error(clash: FolderClash) -> SourceError {
 mod tests {
     use super::{plan_install_replacements_from_rows, plan_update_replacements_from_rows};
     use crate::source_error::SourceErrorKind;
-    use lemonup_core::{AddonRecord, OwnedFolder, SourceKind};
+    use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, UnrecognizedValues};
     use tempfile::tempdir;
 
     fn owned(names: &[&str]) -> Vec<OwnedFolder> {
@@ -609,5 +633,102 @@ mod tests {
         )
         .expect("own folders");
         assert_eq!(replaced, folders(&["AstralKeys"]));
+    }
+
+    /// A row a newer LemonUp wrote with a source this version does not know: it loads as
+    /// "Not linked" and keeps the stored values.
+    fn linked_by_newer_version(name: &str, folder: &str, owned_names: &[&str]) -> AddonRecord {
+        let mut row = AddonRecord::new(name, folder, SourceKind::Manual);
+        row.owned_folders = owned(owned_names);
+        row.unrecognized = Some(UnrecognizedValues {
+            source: "curseforge".to_string(),
+            ..UnrecognizedValues::default()
+        });
+        row
+    }
+
+    #[test]
+    fn update_refuses_folders_of_an_addon_a_newer_version_linked() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Foo", "Pawn", "Pawn_Extra"]);
+        let tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        let newer = linked_by_newer_version("Pawn", "Pawn", &["Pawn_Extra"]);
+        let rows = vec![tracked.clone(), newer];
+
+        let error = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&["Foo", "pawn", "Pawn_Extra"]),
+        )
+        .expect_err("folders of an addon a newer version linked must not be taken");
+
+        assert_eq!(
+            error,
+            "update refused because these addon folders are owned by something else on disk: \
+             pawn (belongs to Pawn, which a newer LemonUp linked), \
+             Pawn_Extra (belongs to Pawn, which a newer LemonUp linked)"
+        );
+    }
+
+    #[test]
+    fn install_refuses_folders_of_an_addon_a_newer_version_linked() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Pawn", "Pawn_Extra"]);
+        let newer = linked_by_newer_version("Pawn", "Pawn", &["Pawn_Extra"]);
+
+        for package in [&["MyPack", "Pawn"][..], &["MyPack", "pawn_extra"][..]] {
+            let error = plan_install_replacements_from_rows(
+                std::slice::from_ref(&newer),
+                temp.path(),
+                &folders(package),
+                "MyPack",
+                // Even a yes never takes them.
+                &folders(&package[1..]),
+                None,
+            )
+            .expect_err("folder of an addon a newer version linked");
+            assert_eq!(error.kind, SourceErrorKind::FoldersOfLinkedAddon);
+            let clash = error.clash.expect("clash");
+            assert_eq!(
+                clash.linked,
+                vec![(package[1].to_string(), "Pawn".to_string())]
+            );
+            assert!(clash.newer_version_linked);
+        }
+    }
+
+    #[test]
+    fn installing_the_same_addon_over_one_a_newer_version_linked_asks_first() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Pawn", "Pawn_Extra"]);
+        let newer = linked_by_newer_version("Pawn", "Pawn", &["Pawn_Extra"]);
+        let package = folders(&["Pawn", "Pawn_Extra"]);
+
+        // Like any "Not linked" copy: replaced only after a yes that names every folder.
+        let error = plan_install_replacements_from_rows(
+            std::slice::from_ref(&newer),
+            temp.path(),
+            &package,
+            "Pawn",
+            &[],
+            None,
+        )
+        .expect_err("asks first");
+        assert_eq!(error.kind, SourceErrorKind::FoldersInTheWay);
+        let clash = error.clash.expect("clash");
+        assert_eq!(clash.replaceable, package);
+        assert_eq!(clash.existing_name.as_deref(), Some("Pawn"));
+
+        let replaced = plan_install_replacements_from_rows(
+            std::slice::from_ref(&newer),
+            temp.path(),
+            &package,
+            "Pawn",
+            &package,
+            None,
+        )
+        .expect("confirmed");
+        assert_eq!(replaced, package);
     }
 }

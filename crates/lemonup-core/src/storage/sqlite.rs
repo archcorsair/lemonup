@@ -166,6 +166,25 @@ impl StateDatabase {
             .cloned()
             .collect::<HashSet<_>>();
 
+        // Another addon linked by a newer LemonUp is never deleted or stripped here: its folders
+        // are not this addon's to take (compared without case, like every ownership check).
+        let taken = represented_folders
+            .iter()
+            .map(|folder| folder.to_lowercase())
+            .collect::<HashSet<_>>();
+        if let Some(newer) = existing_addons.iter().find(|existing| {
+            existing.folder != addon.folder
+                && existing.unrecognized.is_some()
+                && std::iter::once(&existing.folder)
+                    .chain(existing.owned_folders.iter().map(|owned| &owned.name))
+                    .any(|folder| taken.contains(&folder.to_lowercase()))
+        }) {
+            return Err(LemonupError::InvalidArgument(format!(
+                "{} can't take folders of {}, which a newer LemonUp linked",
+                addon.folder, newer.folder
+            )));
+        }
+
         for mut existing in existing_addons
             .iter()
             .filter(|existing| existing.folder != addon.folder)
@@ -252,6 +271,27 @@ impl StateDatabase {
             .filter(|addon| active_authoritative_parents.contains(&addon.folder))
             .flat_map(|addon| addon.owned_folders.iter().map(|child| child.name.clone()))
             .collect::<HashSet<_>>();
+        // An addon whose owned folders a newer LemonUp assigned in a way this version can't read
+        // keeps its stored list, and its children stay listed under it as they were stored. Only
+        // folders without a row of their own or with a plain "Not linked" one are listed there;
+        // nothing is deleted from disk or taken from a linked addon on the strength of it.
+        let unrecognized_ownership_parents = existing_addons
+            .iter()
+            .filter(|addon| {
+                addon.has_unrecognized_ownership() && live_scanned_folders.contains(&addon.folder)
+            })
+            .map(|addon| addon.folder.clone())
+            .collect::<HashSet<_>>();
+        let unrecognized_ownership_children = existing_addons
+            .iter()
+            .filter(|addon| unrecognized_ownership_parents.contains(&addon.folder))
+            .flat_map(|addon| addon.owned_folders.iter().map(|child| child.name.clone()))
+            .filter(|child| {
+                existing_by_folder.get(child).is_none_or(|row| {
+                    row.source == SourceKind::Manual && row.unrecognized.is_none()
+                })
+            })
+            .collect::<HashSet<_>>();
         // Folders the scan saw on disk, whether as top-level entries or grouped children.
         let on_disk_folders = scanned_addons
             .iter()
@@ -276,12 +316,15 @@ impl StateDatabase {
         let mut represented_child_folders = HashSet::new();
 
         for scanned_addon in scanned_addons {
-            if authoritative_owned_children.contains(&scanned_addon.folder) {
+            if authoritative_owned_children.contains(&scanned_addon.folder)
+                || unrecognized_ownership_children.contains(&scanned_addon.folder)
+            {
                 continue;
             }
 
-            let preserve_owned_folders =
-                active_authoritative_parents.contains(&scanned_addon.folder);
+            let preserve_owned_folders = active_authoritative_parents
+                .contains(&scanned_addon.folder)
+                || unrecognized_ownership_parents.contains(&scanned_addon.folder);
             // Defense in depth for scans grouped without tracked-row knowledge: drop inferred
             // children that the tracked rows say must stay standalone.
             let mut guarded_addon = scanned_addon.clone();
@@ -2374,5 +2417,145 @@ mod tests {
         assert_eq!(stored_values(&database, "Kinded")[2], "plugin");
         assert_eq!(stored_values(&database, "Owned")[3], "exclusive");
         assert_eq!(stored_values(&database, "Plain")[0], "wago");
+    }
+
+    #[test]
+    fn recording_another_addon_never_deletes_or_strips_a_row_a_newer_version_linked() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut pawn = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+        pawn.source_url = Some("https://addons.wago.io/addons/pawn".to_string());
+        pawn.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Pawn_Extra".to_string(),
+        }]);
+        database.upsert_addon(&pawn).expect("seed pawn");
+        store_value(&database, "Pawn", "source", "curseforge");
+        let before = database
+            .get_addon_by_folder("Pawn")
+            .expect("get")
+            .expect("row");
+        assert!(before.unrecognized.is_some());
+
+        for taken in ["pawn", "Pawn_Extra"] {
+            let mut other = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+            other.source_url = Some("https://github.com/example/foo".to_string());
+            other.set_managed_owned_folders(vec![
+                OwnedFolder {
+                    name: "Foo".to_string(),
+                },
+                OwnedFolder {
+                    name: taken.to_string(),
+                },
+            ]);
+            database
+                .record_managed_addon(&other)
+                .expect_err("folders of an addon a newer version linked are not taken");
+        }
+
+        // An unrelated addon is recorded and leaves the row alone.
+        let mut other = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        other.source_url = Some("https://github.com/example/foo".to_string());
+        database.record_managed_addon(&other).expect("record foo");
+
+        let after = database
+            .get_addon_by_folder("Pawn")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(after.owned_folders, before.owned_folders);
+        assert_eq!(after.unrecognized, before.unrecognized);
+        assert_eq!(
+            stored_values(&database, "Pawn"),
+            ["curseforge", "retail", "addon", "managed"].map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn unknown_ownership_keeps_its_owned_folders_through_syncs_and_saves() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut owned = AddonRecord::new("Owned", "Owned", SourceKind::Manual);
+        owned.set_managed_owned_folders(vec![OwnedFolder {
+            name: "OwnedChild".to_string(),
+        }]);
+        database.upsert_addon(&owned).expect("seed owned");
+        store_value(&database, "Owned", "ownership_source", "exclusive");
+        let child_folder = || {
+            vec![OwnedFolder {
+                name: "OwnedChild".to_string(),
+            }]
+        };
+
+        // A sync that infers no children: the child folder is scanned on its own.
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("Owned", None, None),
+                scanned_with("OwnedChild", None, None),
+            ])
+            .expect("reconcile");
+        let synced = database
+            .get_addon_by_folder("Owned")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(synced.owned_folders, child_folder());
+        assert!(!synced.has_authoritative_owned_folders());
+        assert_eq!(stored_values(&database, "Owned")[3], "exclusive");
+        // Listed under its addon as stored, not as a separate row.
+        assert!(
+            database
+                .get_addon_by_folder("OwnedChild")
+                .expect("get")
+                .is_none()
+        );
+        // Removing the addon still plans only its own folder.
+        assert_eq!(
+            database.planned_removal_folders("Owned").expect("plan"),
+            vec!["Owned".to_string()]
+        );
+
+        // A sync where the child is not on disk keeps the stored list too.
+        database
+            .reconcile_scanned_addons(&[scanned_with("Owned", None, None)])
+            .expect("reconcile");
+        database.upsert_addon(&synced).expect("save");
+        let saved = database
+            .get_addon_by_folder("Owned")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(saved.owned_folders, child_folder());
+        assert_eq!(stored_values(&database, "Owned")[3], "exclusive");
+    }
+
+    #[test]
+    fn unknown_ownership_never_lists_a_linked_addon_under_it() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut owned = AddonRecord::new("Owned", "Owned", SourceKind::Manual);
+        owned.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Linked".to_string(),
+        }]);
+        database.upsert_addon(&owned).expect("seed owned");
+        store_value(&database, "Owned", "ownership_source", "exclusive");
+        let mut linked = AddonRecord::new("Linked", "Linked", SourceKind::Wago);
+        linked.source_url = Some("https://addons.wago.io/addons/linked".to_string());
+        database.upsert_addon(&linked).expect("seed linked");
+
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("Owned", None, None),
+                scanned_with("Linked", Some("2.0"), None),
+            ])
+            .expect("reconcile");
+
+        let linked = database
+            .get_addon_by_folder("Linked")
+            .expect("get")
+            .expect("linked row kept");
+        assert_eq!(linked.source, SourceKind::Wago);
+        assert_eq!(linked.version.as_deref(), Some("2.0"));
+        let owned = database
+            .get_addon_by_folder("Owned")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(owned.owned_folders.len(), 1);
     }
 }
