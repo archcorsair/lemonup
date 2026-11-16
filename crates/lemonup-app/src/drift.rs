@@ -157,6 +157,7 @@ mod tests {
                 embedded_libs: Vec::new(),
                 notes: None,
                 category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "WeakAuras".to_string(),
@@ -174,6 +175,7 @@ mod tests {
                 embedded_libs: Vec::new(),
                 notes: None,
                 category: None,
+                toc_title: None,
             },
         ];
 
@@ -212,6 +214,7 @@ mod tests {
             embedded_libs: Vec::new(),
             notes: None,
             category: None,
+            toc_title: None,
         }];
 
         let report = compute_drift_report(&[tracked], &scanned);
@@ -248,6 +251,7 @@ mod tests {
             embedded_libs: Vec::new(),
             notes: None,
             category: None,
+            toc_title: None,
         }];
 
         let report = compute_drift_report(&[tracked], &scanned);

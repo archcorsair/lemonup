@@ -20,7 +20,11 @@ pub struct TocSelectionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocMetadata {
+    /// The addon's name: the first `## Title:` line (indented ones included) with color codes
+    /// removed, or the fallback.
     pub title: String,
+    /// `## Title:` as the game reads it (the last base line wins), without color codes removed.
+    pub toc_title: Option<String>,
     /// `## Notes:` as the game reads it (the last base line wins), without color codes removed.
     pub notes: Option<String>,
     /// `## Category:` as the game reads it (the last base line wins).
@@ -52,6 +56,8 @@ pub struct ScannedAddon {
     pub notes: Option<String>,
     /// The selected TOC's `Category` (see [`TocMetadata::category`]).
     pub category: Option<String>,
+    /// The selected TOC's `Title` as the game reads it (see [`TocMetadata::toc_title`]).
+    pub toc_title: Option<String>,
 }
 
 /// Result of a scan that also reports what it could not read.
@@ -246,6 +252,7 @@ fn scan_addon_folder(
         embedded_libs: detect_embedded_libs(addon_path)?,
         notes: toc.notes,
         category: toc.category,
+        toc_title: toc.toc_title,
     }))
 }
 
@@ -325,13 +332,14 @@ pub fn select_toc_file(
 
 pub fn parse_toc_content(content: &str, fallback_title: &str) -> TocMetadata {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let title = directive_value(content, "Title")
+    let title = field_value(content, &["Title"])
         .map(strip_wow_color_codes)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
 
     TocMetadata {
         title,
+        toc_title: directive_value(content, "Title"),
         notes: directive_value(content, "Notes"),
         category: directive_value(content, "Category"),
         version: field_value(content, &["Version"]),
@@ -681,7 +689,7 @@ fn parse_dependency_list(raw: Option<String>) -> Vec<String> {
         .collect()
 }
 
-fn strip_wow_color_codes(value: String) -> String {
+pub(crate) fn strip_wow_color_codes(value: String) -> String {
     let mut result = String::with_capacity(value.len());
     let chars = value.chars().collect::<Vec<_>>();
     let mut index = 0usize;
@@ -782,7 +790,9 @@ mod tests {
             "## Title: First\r\n## Notes: Old notes\r\n## Category: Combat\r\n## Title-deDE: Erster\r\n## Notes-frFR: Notes\r\n# LemonUp: ## Category: Commented\r\n  ## Title: Indented\r\n## Title: |cff00ff00Last|r\r\n## Notes: New notes\r\n",
             "Fallback",
         );
-        assert_eq!(parsed.title, "Last");
+        // The name keeps the first Title line, indented or not, as before overrides existed.
+        assert_eq!(parsed.title, "First");
+        assert_eq!(parsed.toc_title.as_deref(), Some("|cff00ff00Last|r"));
         assert_eq!(parsed.notes.as_deref(), Some("New notes"));
         assert_eq!(parsed.category.as_deref(), Some("Combat"));
 
@@ -791,8 +801,23 @@ mod tests {
             "Fallback",
         );
         assert_eq!(overridden.title, "Mine");
+        assert_eq!(overridden.toc_title.as_deref(), Some("Mine"));
         assert_eq!(overridden.category, None);
         assert_eq!(overridden.notes, None);
+    }
+
+    #[test]
+    fn the_name_still_comes_from_the_first_title_line_even_when_indented() {
+        let parsed = parse_toc_content(
+            "## Interface: 110002\n  ## Title: |cffff0000Indented|r\n## Title: Later\n",
+            "Fallback",
+        );
+        assert_eq!(parsed.title, "Indented");
+        assert_eq!(parsed.toc_title.as_deref(), Some("Later"));
+        assert_eq!(
+            parse_toc_content("## Notes: x\n", "Fallback").title,
+            "Fallback"
+        );
     }
 
     #[test]
@@ -1134,6 +1159,7 @@ mod tests {
                 embedded_libs: Vec::new(),
                 notes: None,
                 category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "DBM Naxx".to_string(),
@@ -1151,6 +1177,7 @@ mod tests {
                 embedded_libs: Vec::new(),
                 notes: None,
                 category: None,
+                toc_title: None,
             },
         ];
 

@@ -1465,6 +1465,7 @@ mod tests {
             embedded_libs: Vec::new(),
             notes: None,
             category: None,
+            toc_title: None,
         };
 
         let record = build_managed_github_record(
@@ -1507,6 +1508,7 @@ mod tests {
             embedded_libs: Vec::new(),
             notes: None,
             category: None,
+            toc_title: None,
         };
 
         let record = build_managed_github_record(&resolved, &scanned, &["WeakAuras".to_string()]);
@@ -1947,6 +1949,8 @@ mod tests {
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("1.1.0"));
         assert_eq!(stored.toc_overrides, wanted);
+        // The Title override is the stored name, as a scan would store it.
+        assert_eq!(stored.name, "My Foo");
     }
 
     #[test]

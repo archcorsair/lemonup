@@ -888,6 +888,7 @@ mod tests {
             embedded_libs: Vec::new(),
             notes: None,
             category: None,
+            toc_title: None,
         };
 
         let record = build_managed_wowinterface_record(

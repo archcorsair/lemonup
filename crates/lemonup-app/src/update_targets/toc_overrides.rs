@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use lemonup_core::StateDatabase;
-use lemonup_core::toc_edit::{self, TocField};
+use lemonup_core::toc_edit;
 
 use super::folder_swap::FolderSwap;
 use super::{same_folder_name, tracked_owner_of};
@@ -27,6 +27,9 @@ pub(crate) fn stored_toc_overrides(
 
 /// [`FolderSwap::apply`] that also writes `overrides` into the root TOC files of every staged
 /// folder before anything live moves. Without overrides the package is placed as it is.
+///
+/// A stored value this version can't use (an older or newer LemonUp may have stored it) is
+/// skipped with a logged warning instead of blocking the install or update.
 pub(crate) fn swap_with_toc_overrides(
     addon_dir: &Path,
     source_root: &Path,
@@ -34,6 +37,11 @@ pub(crate) fn swap_with_toc_overrides(
     replaced: &[String],
     overrides: &BTreeMap<String, String>,
 ) -> Result<FolderSwap, String> {
+    let (overrides, skipped) = toc_edit::usable_overrides(overrides);
+    for warning in &skipped {
+        tracing::warn!(folders = ?new_folders, "{warning}");
+    }
+    let overrides = &overrides;
     if overrides.is_empty() {
         return FolderSwap::apply(addon_dir, source_root, new_folders, replaced);
     }
@@ -68,12 +76,29 @@ pub(crate) fn apply_toc_overrides_now(
     folder: &str,
     overrides: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
-    for field in TocField::ALL {
-        if let Some(value) = overrides.get(field.name()) {
-            toc_edit::validate_override_value(value)
-                .map_err(|error| format!("{} override: {error}", field.name()))?;
-        }
-    }
+    apply_toc_overrides_now_storing_with(
+        database,
+        addon_dir,
+        folder,
+        overrides,
+        |database, folder, overrides| {
+            database
+                .set_toc_overrides(folder, overrides)
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+/// [`apply_toc_overrides_now`] with the database write passed in, so tests can make it fail.
+fn apply_toc_overrides_now_storing_with(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    folder: &str,
+    overrides: &BTreeMap<String, String>,
+    store: impl FnOnce(&mut StateDatabase, &str, &BTreeMap<String, String>) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    // The same check the database write makes, so nothing is swapped for a value it refuses.
+    toc_edit::validate_stored_overrides(overrides).map_err(|error| error.to_string())?;
     let rows = database.list_addons().map_err(|error| error.to_string())?;
     let addon = rows
         .iter()
@@ -120,8 +145,8 @@ pub(crate) fn apply_toc_overrides_now(
         &folders,
         &mut |_, staged| write_overrides(staged, overrides),
     )?;
-    if let Err(error) = database.set_toc_overrides(&addon.folder, overrides) {
-        return Err(swap.abort(error.to_string()));
+    if let Err(error) = store(database, &addon.folder, overrides) {
+        return Err(swap.abort(error));
     }
     swap.commit();
     Ok(folders)
@@ -157,7 +182,9 @@ mod tests {
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
 
-    use super::apply_toc_overrides_now;
+    use super::{
+        apply_toc_overrides_now, apply_toc_overrides_now_storing_with, swap_with_toc_overrides,
+    };
     use crate::update_targets::folder_swap::STAGING_PREFIX;
 
     const FOO_TOC: &[u8] =
@@ -266,6 +293,14 @@ mod tests {
             )
             .is_err()
         );
+        let error = apply_toc_overrides_now(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            &overrides(&[("Title", "  My Foo ")]),
+        )
+        .expect_err("untrimmed value refused");
+        assert!(error.contains("Title override"), "{error}");
         assert!(
             apply_toc_overrides_now(
                 &mut database,
@@ -314,5 +349,106 @@ mod tests {
                 .is_empty()
         );
         assert!(!staging_left(&addon_dir));
+    }
+
+    #[test]
+    fn apply_now_refuses_a_folder_another_linked_addon_holds() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = seed(temp.path());
+        let mut other = AddonRecord::new("Bar", "Bar", SourceKind::Wago);
+        other.set_managed_owned_folders(vec![OwnedFolder {
+            name: "foo_options".to_string(),
+        }]);
+        database.upsert_addon(&other).expect("other linked addon");
+
+        let error = apply_toc_overrides_now(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            &overrides(&[("Title", "My Foo")]),
+        )
+        .expect_err("refused");
+        assert!(error.contains("belongs to Bar"), "{error}");
+        assert_eq!(
+            fs::read(addon_dir.join("Foo/Foo.toc")).expect("foo"),
+            FOO_TOC
+        );
+        assert_eq!(
+            fs::read(addon_dir.join("Foo_Options/Foo_Options.toc")).expect("options"),
+            OPTIONS_TOC
+        );
+        assert!(
+            database
+                .get_addon_by_folder("Foo")
+                .expect("get")
+                .expect("row")
+                .toc_overrides
+                .is_empty()
+        );
+        assert!(!staging_left(&addon_dir));
+    }
+
+    #[test]
+    fn apply_now_rolls_back_the_files_when_the_database_write_fails() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = seed(temp.path());
+        let before = overrides(&[("Notes", "Before")]);
+        database.set_toc_overrides("Foo", &before).expect("seed");
+
+        let error = apply_toc_overrides_now_storing_with(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            &overrides(&[("Title", "My Foo")]),
+            |_, _, _| Err("refused for the test".to_string()),
+        )
+        .expect_err("database write fails");
+        assert!(error.contains("refused for the test"), "{error}");
+        assert_eq!(
+            fs::read(addon_dir.join("Foo/Foo.toc")).expect("foo"),
+            FOO_TOC
+        );
+        assert_eq!(
+            fs::read(addon_dir.join("Foo_Options/Foo_Options.toc")).expect("options"),
+            OPTIONS_TOC
+        );
+        assert!(addon_dir.join("Foo/Libs/Lib.toc").exists());
+        assert_eq!(
+            database
+                .get_addon_by_folder("Foo")
+                .expect("get")
+                .expect("row")
+                .toc_overrides,
+            before
+        );
+        assert!(!staging_left(&addon_dir));
+    }
+
+    #[test]
+    fn an_install_skips_a_stored_value_this_version_cannot_use() {
+        let temp = tempdir().expect("tempdir");
+        let source_root = temp.path().join("package");
+        let addon_dir = temp.path().join("AddOns");
+        fs::create_dir_all(source_root.join("Foo")).expect("package");
+        fs::create_dir_all(&addon_dir).expect("addons");
+        fs::write(
+            source_root.join("Foo").join("Foo.toc"),
+            b"## Title: Foo\n## Category: Combat\n",
+        )
+        .expect("toc");
+
+        let swap = swap_with_toc_overrides(
+            &addon_dir,
+            &source_root,
+            &["Foo".to_string()],
+            &[],
+            &overrides(&[("Title", ""), ("Category", "Mine"), ("X-Future", "kept")]),
+        )
+        .expect("an unusable value does not block the swap");
+        swap.commit();
+        assert_eq!(
+            fs::read_to_string(addon_dir.join("Foo/Foo.toc")).expect("toc"),
+            "## Title: Foo\n# LemonUp: ## Category: Combat\n# LemonUp-managed\n## Category: Mine\n"
+        );
     }
 }

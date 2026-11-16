@@ -10,9 +10,10 @@
 //! 3. inserts `# LemonUp-managed` followed by `## <Field>: <value>` right after the last `##` line
 //!    of the header block, using the file's line ending.
 //!
-//! Restoring removes every `# LemonUp-managed` line together with the line after it and turns
-//! every `# LemonUp: X` line back into `X`, which gives back the original bytes exactly. A file
-//! LemonUp never touched is left as it is.
+//! Restoring removes every `# LemonUp-managed` line, together with the line after it when that is
+//! a base `## Title:`, `## Notes:` or `## Category:` line (any other line after a marker is kept),
+//! and turns every `# LemonUp: X` line back into `X`, which gives back the original bytes exactly.
+//! A file LemonUp never touched is left as it is.
 //!
 //! Only root `.toc` files are edited (the client loads one of them per addon folder, depending on
 //! the game version); TOC files in subfolders such as `Libs` are never touched.
@@ -30,6 +31,11 @@ pub const COMMENT_PREFIX: &[u8] = b"# LemonUp: ";
 pub const MANAGED_MARKER: &[u8] = b"# LemonUp-managed";
 /// Longest override value accepted, in characters.
 pub const MAX_VALUE_CHARS: usize = 255;
+/// Longest TOC line the game reads, in bytes, without its line ending.
+pub const MAX_LINE_BYTES: usize = 1024;
+/// Longest override value accepted, in bytes: `## Category: <value>`, the longest line LemonUp
+/// writes, stays within [`MAX_LINE_BYTES`].
+pub const MAX_VALUE_BYTES: usize = MAX_LINE_BYTES - "## Category: ".len();
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -61,7 +67,8 @@ impl TocField {
 }
 
 /// Checks an override value and returns it trimmed: it must not be empty, must not contain
-/// control characters or line breaks, and must be at most [`MAX_VALUE_CHARS`] characters.
+/// control characters or line breaks, and must be at most [`MAX_VALUE_CHARS`] characters and
+/// [`MAX_VALUE_BYTES`] bytes.
 pub fn validate_override_value(value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -80,7 +87,61 @@ pub fn validate_override_value(value: &str) -> Result<String> {
             "the value is {length} characters long; the limit is {MAX_VALUE_CHARS}"
         )));
     }
+    if trimmed.len() > MAX_VALUE_BYTES {
+        return Err(LemonupError::InvalidArgument(format!(
+            "the value is {} bytes long, too long for a TOC line; the limit is {MAX_VALUE_BYTES}",
+            trimmed.len()
+        )));
+    }
     Ok(trimmed.to_string())
+}
+
+/// Checks the known fields of a stored overrides map the way they are stored: each value must
+/// pass [`validate_override_value`] and already be trimmed. Unknown keys are not checked.
+pub fn validate_stored_overrides(overrides: &BTreeMap<String, String>) -> Result<()> {
+    for field in TocField::ALL {
+        if let Some(value) = overrides.get(field.name()) {
+            let checked = validate_override_value(value).map_err(|error| {
+                LemonupError::InvalidArgument(format!("{} override: {error}", field.name()))
+            })?;
+            if checked != *value {
+                return Err(LemonupError::InvalidArgument(format!(
+                    "{} override has leading or trailing spaces",
+                    field.name()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Splits a stored overrides map into what this version can write and a message for each known
+/// field it has to skip ("Skipped the Title override: ..."), so a value an older or newer
+/// LemonUp stored never blocks an install or update. Unknown keys are kept in the usable map
+/// (writing ignores them).
+pub fn usable_overrides(
+    overrides: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut usable = overrides.clone();
+    let mut skipped = Vec::new();
+    for field in TocField::ALL {
+        if let Some(value) = overrides.get(field.name())
+            && let Err(error) = validate_override_value(value)
+        {
+            usable.remove(field.name());
+            skipped.push(format!("Skipped the {} override: {error}", field.name()));
+        }
+    }
+    (usable, skipped)
+}
+
+/// The addon name a stored `Title` override gives (color codes removed), or `None` without a
+/// usable one. An addon with a Title override is listed under it, after installs, updates and
+/// scans alike.
+pub fn title_override_name(overrides: &BTreeMap<String, String>) -> Option<String> {
+    let value = overrides.get(TocField::Title.name())?;
+    let value = validate_override_value(value).ok()?;
+    Some(crate::scan::strip_wow_color_codes(value)).filter(|name| !name.trim().is_empty())
 }
 
 /// Sets (`Some`) or clears (`None`) one field in a stored overrides map. A value is validated
@@ -200,6 +261,31 @@ fn directive_field(content: &[u8]) -> Option<TocField> {
         .find(|field| base.eq_ignore_ascii_case(field.name().as_bytes()))
 }
 
+/// Whether a line after a `# LemonUp-managed` marker is one LemonUp wrote: a base (not localized)
+/// `## Title:`, `## Notes:` or `## Category:` directive, name matched without case.
+fn is_managed_directive(content: &[u8]) -> bool {
+    let Some(rest) = content.strip_prefix(b"##") else {
+        return false;
+    };
+    let Some(colon) = rest.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    let key = trim_ascii_space(&rest[..colon]);
+    TocField::ALL
+        .into_iter()
+        .any(|field| key.eq_ignore_ascii_case(field.name().as_bytes()))
+}
+
+/// The ending to give a last line that had none. A line whose content ends in a lone `\r` gets
+/// `\r\n`: a plain `\n` would join that `\r` into a CRLF ending, and restoring would drop it.
+fn ending_for_last_line(content: &[u8], eol: &'static [u8]) -> &'static [u8] {
+    if content.ends_with(b"\r") {
+        b"\r\n"
+    } else {
+        eol
+    }
+}
+
 /// Where LemonUp's lines go: right after the last `##` line of the header block (the leading run
 /// of `#` and blank lines before the first file line), or at the top when there is none.
 fn insert_index(lines: &[Line]) -> usize {
@@ -265,7 +351,7 @@ pub fn apply_overrides(bytes: &[u8], overrides: &BTreeMap<String, String>) -> Re
         && lines[at - 1].ending.is_empty()
         && let Some(last) = block.last_mut()
     {
-        lines[at - 1].ending = eol;
+        lines[at - 1].ending = ending_for_last_line(&lines[at - 1].content, eol);
         last.ending = b"";
     }
     lines.splice(at..at, block);
@@ -289,9 +375,14 @@ pub fn restore(bytes: &[u8]) -> Vec<u8> {
     while index < lines.len() {
         let line = &lines[index];
         if line.content == MANAGED_MARKER {
-            let last_removed = lines.get(index + 1).unwrap_or(line);
-            ends_without_newline = index + 2 >= lines.len() && last_removed.ending.is_empty();
-            index += 2;
+            // Only LemonUp's own directive goes with the marker; any other line stays.
+            let removed = match lines.get(index + 1) {
+                Some(next) if is_managed_directive(&next.content) => 2,
+                _ => 1,
+            };
+            let last_removed = &lines[index + removed - 1];
+            ends_without_newline = index + removed >= lines.len() && last_removed.ending.is_empty();
+            index += removed;
             continue;
         }
         let content = line
@@ -363,8 +454,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_VALUE_CHARS, TocField, apply_overrides, apply_overrides_to_folder, restore,
-        set_override, validate_override_value,
+        MAX_LINE_BYTES, MAX_VALUE_BYTES, MAX_VALUE_CHARS, TocField, apply_overrides,
+        apply_overrides_to_folder, restore, set_override, title_override_name, usable_overrides,
+        validate_override_value, validate_stored_overrides,
     };
 
     fn overrides(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -422,6 +514,12 @@ mod tests {
             b"\xEF\xBB\xBF",
             b"## Title: Foo\n## Title-deDE: Fuu\n## Notes-frFR: Note\n## Category-deDE: Kampf\nFoo.lua\n",
             b"## Title: First\nFoo.lua\n## Title: Late\n",
+            b"## Title: Foo\r",
+            b"## Interface: 110002\n## Title: Foo\r",
+            b"## Interface: 110002\r\n## Notes: Bar\r",
+            b"\xEF\xBB\xBF## Category: Combat\r",
+            b"## Interface: 110002\n## Title: Foo\nFoo.lua\r",
+            b"\r",
         ];
         for case in cases {
             assert_round_trip(case);
@@ -475,6 +573,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_removes_only_lemonup_directives_after_a_marker() {
+        let damaged =
+            b"## Interface: 110002\n## Title: Foo\n# LemonUp-managed\nCore.lua\nFoo.lua\n";
+        assert_eq!(
+            restore(damaged),
+            b"## Interface: 110002\n## Title: Foo\nCore.lua\nFoo.lua\n".to_vec()
+        );
+        let localized =
+            b"# LemonUp-managed\n## Title-deDE: Fuu\n# LemonUp-managed\n##  notes : Mine\n";
+        assert_eq!(restore(localized), b"## Title-deDE: Fuu\n".to_vec());
+        let other = b"# LemonUp-managed\n## Author: Someone\nFoo.lua";
+        assert_eq!(restore(other), b"## Author: Someone\nFoo.lua".to_vec());
+    }
+
+    #[test]
+    fn a_last_line_ending_in_a_lone_carriage_return_keeps_it() {
+        let original = b"## Interface: 110002\n## Title: Foo\r";
+        let applied = apply_overrides(original, &overrides(&[("Title", "Bar")])).expect("apply");
+        assert_eq!(
+            applied,
+            b"## Interface: 110002\n# LemonUp: ## Title: Foo\r\r\n# LemonUp-managed\n## Title: Bar"
+                .to_vec()
+        );
+        assert_eq!(restore(&applied), original.to_vec());
+    }
+
+    #[test]
     fn restore_leaves_untouched_files_alone() {
         let original = b"## Title: Foo\r\nFoo.lua";
         assert_eq!(restore(original), original.to_vec());
@@ -496,12 +621,58 @@ mod tests {
         );
         assert!(apply_overrides(b"## Title: Foo\n", &overrides(&[("Title", "a\rb")])).is_err());
 
+        // Four-byte characters reach the byte limit before the character limit.
+        let clef = "\u{1D11E}";
+        let fits = clef.repeat(MAX_VALUE_BYTES / clef.len());
+        let line = format!(
+            "## Category: {}",
+            validate_override_value(&fits).expect("fits")
+        );
+        assert!(line.len() <= MAX_LINE_BYTES);
+        let too_long = clef.repeat(MAX_VALUE_BYTES / clef.len() + 1);
+        assert!(too_long.chars().count() <= MAX_VALUE_CHARS);
+        let error = validate_override_value(&too_long).expect_err("too many bytes");
+        assert!(error.to_string().contains("bytes"), "{error}");
+
         let mut stored = overrides(&[("X-Future", "kept")]);
         assert!(set_override(&mut stored, TocField::Notes, Some("")).is_err());
         set_override(&mut stored, TocField::Notes, Some(" Note ")).expect("set");
         assert_eq!(stored.get("Notes").map(String::as_str), Some("Note"));
         set_override(&mut stored, TocField::Notes, None).expect("clear");
         assert_eq!(stored, overrides(&[("X-Future", "kept")]));
+    }
+
+    #[test]
+    fn stored_values_are_checked_as_stored_and_unusable_ones_are_skipped() {
+        assert!(validate_stored_overrides(&overrides(&[("Title", "Foo"), ("X", " y ")])).is_ok());
+        assert!(validate_stored_overrides(&overrides(&[("Title", " Foo")])).is_err());
+        assert!(validate_stored_overrides(&overrides(&[("Notes", "")])).is_err());
+
+        let (usable, skipped) = usable_overrides(&overrides(&[
+            ("Title", ""),
+            ("Notes", "Fine"),
+            ("X-Future", "kept"),
+        ]));
+        assert_eq!(
+            usable,
+            overrides(&[("Notes", "Fine"), ("X-Future", "kept")])
+        );
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0].starts_with("Skipped the Title override: "),
+            "{}",
+            skipped[0]
+        );
+    }
+
+    #[test]
+    fn title_override_name_strips_color_codes() {
+        assert_eq!(
+            title_override_name(&overrides(&[("Title", "|cff00ff00My|r Foo")])).as_deref(),
+            Some("My Foo")
+        );
+        assert_eq!(title_override_name(&overrides(&[("Title", "")])), None);
+        assert_eq!(title_override_name(&overrides(&[("Notes", "x")])), None);
     }
 
     #[test]
