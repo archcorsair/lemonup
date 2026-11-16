@@ -49,7 +49,7 @@ Coming from LemonUp 1? Your settings and linked addons carry over on the first r
 - **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong
   to another addon are never replaced, and deletes can be undone with `z`
 - **Backups of your game settings** (the WTF folder) before updates, with restore
-- **Keyboard first:** vim-style `j`/`k` and `h`/`l` alongside the arrow keys, `?` for Help on
+- **Keyboard first:** vim-style `j`/`k`, `h`/`l` and `gg`/`G` alongside the arrow keys, `?` for Help on
   every screen
 - **Works in any terminal:** a Terminal theme that uses your colors, `NO_COLOR` support, and an
   ASCII mode for consoles without Unicode
