@@ -42,7 +42,7 @@ fn plan_update_replacements_from_rows(
     let mut replaced = vec![tracked.folder.clone()];
     if tracked.has_authoritative_owned_folders() {
         for owned in &tracked.owned_folders {
-            if !replaced.contains(&owned.name) {
+            if !contains_folder(&replaced, &owned.name) {
                 replaced.push(owned.name.clone());
             }
         }
@@ -50,11 +50,11 @@ fn plan_update_replacements_from_rows(
 
     let mut conflicts = Vec::new();
     for folder in package_folders {
-        if replaced.contains(folder) {
+        if contains_folder(&replaced, folder) {
             continue;
         }
         if let Some(owner) = tracked_owner_of(rows, &tracked.folder, folder) {
-            conflicts.push(if owner == *folder {
+            conflicts.push(if same_folder_name(&owner, folder) {
                 format!("{folder} (tracked separately)")
             } else {
                 format!("{folder} (owned by tracked addon {owner})")
@@ -81,10 +81,30 @@ fn plan_update_replacements_from_rows(
 fn tracked_owner_of(rows: &[AddonRecord], updating: &str, folder: &str) -> Option<String> {
     rows.iter()
         .filter(|row| row.folder != updating && row.source != SourceKind::Manual)
-        .find(|row| {
-            row.folder == folder || row.owned_folders.iter().any(|owned| owned.name == folder)
-        })
+        .find(|row| row_claims_folder(row, folder))
         .map(|row| row.folder.clone())
+}
+
+/// Whether two AddOns folder names name the same folder on disk.
+///
+/// Windows and macOS (by default) have case-insensitive filesystems, so `Shared` and `shared`
+/// are one directory there. Ownership checks always compare without case: on a case-sensitive
+/// filesystem that only errs toward refusing, never toward replacing another addon's files.
+fn same_folder_name(left: &str, right: &str) -> bool {
+    left == right || left.to_lowercase() == right.to_lowercase()
+}
+
+fn contains_folder(folders: &[String], folder: &str) -> bool {
+    folders.iter().any(|known| same_folder_name(known, folder))
+}
+
+/// Whether `row` is `folder` itself or lists it among its owned folders (ignoring case).
+fn row_claims_folder(row: &AddonRecord, folder: &str) -> bool {
+    same_folder_name(&row.folder, folder)
+        || row
+            .owned_folders
+            .iter()
+            .any(|owned| same_folder_name(&owned.name, folder))
 }
 
 /// Sorts the folders a fresh install of a package brings into what is in the way.
@@ -109,9 +129,7 @@ pub(crate) fn classify_install_folders(
             .filter(|row| {
                 row.source != SourceKind::Manual && Some(row.folder.as_str()) != reinstalling
             })
-            .find(|row| {
-                row.folder == *folder || row.owned_folders.iter().any(|owned| owned.name == *folder)
-            });
+            .find(|row| row_claims_folder(row, folder));
         if let Some(owner) = owner {
             let name = if owner.name.trim().is_empty() {
                 owner.folder.clone()
@@ -126,7 +144,7 @@ pub(crate) fn classify_install_folders(
     // The "Not linked" addon already there: the package parent first, then any other folder.
     let manual_name = |folder: &str| {
         rows.iter()
-            .find(|row| row.source == SourceKind::Manual && row.folder == folder)
+            .find(|row| row.source == SourceKind::Manual && same_folder_name(&row.folder, folder))
             .map(|row| row.name.trim().to_string())
             .filter(|name| !name.is_empty())
     };
@@ -377,6 +395,79 @@ mod tests {
         assert!(
             error.ends_with("Shared_Lib (owned by tracked addon Bar)"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn update_refuses_a_folder_another_addon_owns_in_different_case() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Foo", "Shared"]);
+        let tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        let mut other = AddonRecord::new("Bar", "Bar", SourceKind::Tukui);
+        other.set_managed_owned_folders(owned(&["Shared"]));
+        let separate = AddonRecord::new("LibThing", "LibThing", SourceKind::Wago);
+        let rows = vec![tracked.clone(), other, separate];
+
+        // On a case-insensitive filesystem `shared` is the `Shared` folder Bar owns, and
+        // `LIBTHING` is the separately tracked `LibThing`.
+        let error = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&["Foo", "shared", "LIBTHING"]),
+        )
+        .expect_err("a differently cased folder of another tracked addon must not be taken");
+
+        assert!(
+            error.contains("shared (owned by tracked addon Bar)"),
+            "{error}"
+        );
+        assert!(error.contains("LIBTHING (tracked separately)"), "{error}");
+    }
+
+    #[test]
+    fn update_matches_its_own_folders_in_different_case() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["ElvUI", "ElvUI_Options"]);
+        let mut tracked = AddonRecord::new("ElvUI", "ElvUI", SourceKind::Tukui);
+        tracked.set_managed_owned_folders(owned(&["ElvUI_Options"]));
+
+        let replaced = plan_update_replacements_from_rows(
+            std::slice::from_ref(&tracked),
+            temp.path(),
+            &tracked,
+            &folders(&["elvui", "ELVUI_OPTIONS"]),
+        )
+        .expect("own folders in another case");
+
+        assert_eq!(replaced, folders(&["ElvUI", "ElvUI_Options"]));
+    }
+
+    #[test]
+    fn install_refuses_a_linked_addons_folder_in_different_case() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["DBM-Core", "DBM-Raids", "Details"]);
+        let mut dbm = AddonRecord::new("Deadly Boss Mods", "DBM-Core", SourceKind::Wago);
+        dbm.set_managed_owned_folders(owned(&["DBM-Raids"]));
+        let details = AddonRecord::new("Details!", "Details", SourceKind::GitHub);
+
+        let error = plan_install_replacements_from_rows(
+            &[dbm, details],
+            temp.path(),
+            &folders(&["MyRaidPack", "dbm-raids", "DETAILS"]),
+            "MyRaidPack",
+            &folders(&["dbm-raids", "DETAILS"]),
+            None,
+        )
+        .expect_err("differently cased folders of linked addons");
+
+        assert_eq!(error.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(
+            error.clash.expect("clash").linked,
+            vec![
+                ("dbm-raids".to_string(), "Deadly Boss Mods".to_string()),
+                ("DETAILS".to_string(), "Details!".to_string()),
+            ]
         );
     }
 
