@@ -264,6 +264,8 @@ const K_MOVE: &[KeyEvent] = &[press(KeyCode::Up), press(KeyCode::Down), ch('j'),
 const K_ARROWS: &[KeyEvent] = &[press(KeyCode::Up), press(KeyCode::Down)];
 const K_PAGE: &[KeyEvent] = &[press(KeyCode::PageUp), press(KeyCode::PageDown)];
 const K_ENDS: &[KeyEvent] = &[press(KeyCode::Home), press(KeyCode::End)];
+/// Home and End, and `gg` and `G` for the same. A test presses `g` twice.
+const K_ENDS_VIM: &[KeyEvent] = &[press(KeyCode::Home), press(KeyCode::End), ch('g'), ch('G')];
 const K_ENTER: &[KeyEvent] = &[press(KeyCode::Enter)];
 const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
 const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
@@ -318,7 +320,7 @@ static LIST_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "move", K_MOVE),
                 HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
-                HelpRow::key("Home End", "first, last", K_ENDS),
+                HelpRow::key("Home End  or  gg G", "first, last", K_ENDS_VIM),
                 HelpRow::key(
                     "→ ←  or  l h",
                     "show, hide an addon's folders",
@@ -420,7 +422,7 @@ static DETAILS_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "the previous or next addon", K_MOVE),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE),
-                HelpRow::key("Home End", "top, bottom of Details", K_ENDS),
+                HelpRow::key("Home End  or  gg G", "top, bottom of Details", K_ENDS_VIM),
             ],
         },
     ],
@@ -467,7 +469,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "The list keeps working",
             rows: &[
-                HelpRow::key("Home End", "first, last", K_ENDS),
+                HelpRow::key("Home End  or  gg G", "first, last", K_ENDS_VIM),
                 HelpRow::key(
                     "→ ←  or  l h",
                     "show, hide an addon's folders",
@@ -619,7 +621,7 @@ static SETTINGS_HELP: HelpPage = HelpPage {
                     K_ENTER,
                 ),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
-                HelpRow::key("Home End", "top, bottom", K_ENDS),
+                HelpRow::key("Home End  or  gg G", "top, bottom", K_ENDS_VIM),
             ],
         },
         HelpSection {
@@ -657,7 +659,7 @@ static BACKUPS_HELP: HelpPage = HelpPage {
             HelpRow::key("b", "back up your game settings now", &[ch('b')]),
             HelpRow::key("x", "delete this backup (asks first)", &[ch('x')]),
             HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
-            HelpRow::key("Home End", "top, bottom", K_ENDS),
+            HelpRow::key("Home End  or  gg G", "top, bottom", K_ENDS_VIM),
         ],
     }],
     right: &[
