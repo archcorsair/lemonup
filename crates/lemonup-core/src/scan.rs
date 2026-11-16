@@ -134,16 +134,28 @@ pub fn scan_addons_dir_report(
             }
             continue;
         }
+        let folder = entry.file_name().to_string_lossy().to_string();
         // Follow symlinks so linked development checkouts are scanned; a broken or looping link
-        // is skipped rather than failing the whole scan. The scan only reads.
-        let Ok(metadata) = fs::metadata(&addon_path) else {
-            continue;
+        // (or any entry whose metadata cannot be read) is skipped rather than failing the whole
+        // scan. It may still be an addon folder, so it is reported as skipped and reconciliation
+        // keeps its row. The scan only reads.
+        let metadata = match fs::metadata(&addon_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    folder = %folder,
+                    path = %addon_path.display(),
+                    %error,
+                    "skipping AddOns entry whose metadata could not be read"
+                );
+                skipped_folders.push(folder);
+                continue;
+            }
         };
         if !metadata.is_dir() {
             continue;
         }
 
-        let folder = entry.file_name().to_string_lossy().to_string();
         // One unreadable addon folder must not fail the whole scan (and with it `sync` or a
         // provider package scan): skip it and name it in the log.
         match scan_addon_folder(&addon_path, &folder, flavor) {
@@ -1203,10 +1215,15 @@ mod tests {
         std::os::unix::fs::symlink(addons.join("Loop"), addons.join("Loop"))
             .expect("looping symlink");
 
-        let scanned = scan_addons_dir(addons, GameFlavor::Retail).expect("scan addons");
+        let report = scan_addons_dir_report(addons, GameFlavor::Retail, &[]).expect("scan addons");
 
-        assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].folder, "RealAddon");
+        assert_eq!(report.addons.len(), 1);
+        assert_eq!(report.addons[0].folder, "RealAddon");
+        // Their metadata cannot be read, so they are reported as skipped (never dropped).
+        assert_eq!(
+            report.skipped_folders,
+            vec!["Broken".to_string(), "Loop".to_string()]
+        );
     }
     fn write_toc_bytes(addons: &std::path::Path, folder: &str, bytes: &[u8]) {
         let dir = addons.join(folder);

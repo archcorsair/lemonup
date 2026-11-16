@@ -2067,6 +2067,44 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_keeps_the_row_of_a_folder_whose_metadata_cannot_be_read() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(&addons).expect("create addons");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let mut linked = AddonRecord::new("MyAddon", "MyAddon", SourceKind::GitHub);
+        linked.source_url = Some("https://github.com/example/myaddon".to_string());
+        database.upsert_addon(&linked).expect("seed linked");
+        let before = database
+            .get_addon_by_folder("MyAddon")
+            .expect("get")
+            .expect("row exists");
+
+        // The AddOns folder lists the entry, but reading its metadata fails (here a symlink
+        // whose target is gone, for example an unmounted development checkout).
+        std::os::unix::fs::symlink(temp.path().join("missing-checkout"), addons.join("MyAddon"))
+            .expect("dangling symlink");
+        write_addon_folders(&addons, &["Healthy"]);
+
+        let tracked = database.list_addons().expect("list");
+        let report = crate::scan::scan_addons_dir_report(&addons, GameFlavor::Retail, &tracked)
+            .expect("scan survives");
+        assert_eq!(report.skipped_folders, vec!["MyAddon".to_string()]);
+        let summary = database.reconcile_scan(&report).expect("reconcile");
+
+        assert_eq!(summary.removed_addons, 0);
+        assert_eq!(
+            database
+                .get_addon_by_folder("MyAddon")
+                .expect("get")
+                .expect("row survives"),
+            before
+        );
+    }
+
     #[test]
     fn reconcile_still_removes_rows_for_folders_that_are_neither_scanned_nor_skipped() {
         let temp = tempdir().expect("tempdir");
