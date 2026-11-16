@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
+use crate::app::text_input::TextInput;
 use crate::app::{
-    BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
-    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, FooterKeyPulse, HelpContext,
-    InspectOverlayState, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
-    WagoInstallConfirmation,
+    BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
+    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
+    FooterKeyPulse, HelpContext, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
+    StatusMessage, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -14,31 +15,51 @@ use crate::onboarding::OnboardingState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     Quit,
+    /// Opens or closes the "quit while updating?" question.
+    SetQuitQuestion(bool),
     AdvanceMotionTick,
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),
-    SetInspectOverlayState(InspectOverlayState),
+    /// Scrolls the open sheet to this body row.
+    SetSheetOffset(u16),
+    /// Scrolls docked Details to this many rows down.
+    SetDockedDetailsOffset(u16),
     SetHelpOverlay(bool),
     SetHelpContext(HelpContext),
-    SetStatus(String),
+    SetStatus(StatusMessage),
     SetDashboardSelection(Option<usize>),
     ToggleDashboardSort(DashboardSortColumn),
+    SetDashboardFilter {
+        query: TextInput,
+        editing: bool,
+    },
     SetPendingDelete(Option<Vec<String>>),
     SetDashboardUndoDelete(Option<DashboardUndoDeleteState>),
     SetDashboardDriftReport(Option<DriftReport>),
     SetDashboardUndoInProgress(bool),
+    SetDashboardDeleteInProgress(bool),
     SetDashboardUpdateInProgress(bool),
     SetDashboardAutoCheckInProgress(bool),
     SetDashboardJobUi(Option<DashboardJobUiState>),
+    /// What a running check or update reported for one addon.
+    ApplyDashboardJobStep(DashboardJobStep),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
+    /// Folders the last update run updated, and the ones it failed on.
+    SetDashboardUpdateResults {
+        updated: Vec<String>,
+        failed: Vec<String>,
+    },
     SetSelectedDashboardParents(Vec<String>),
     SetInstallPaneState(InstallPaneState),
     SetSearchPaneState(SearchPaneState),
     SetConfigPaneState(ConfigPaneState),
     SetPersistedConfig(AppConfig),
     SetBackupPaneState(BackupPaneState),
+    /// Reads the backup folder again, for backups made outside the Backups sheet.
+    ReloadBackups,
     SetPendingWagoInstallConfirmation(Option<WagoInstallConfirmation>),
     SetWagoInstallInProgress(bool),
+    SetDirectInstallInProgress(bool),
     ToggleDashboardSelection,
     SelectAllDashboardParents,
     ClearDashboardSelection,
@@ -48,6 +69,8 @@ pub enum AppAction {
     CollapseDashboardExpanded,
     SetDetailMode(DetailMode),
     ReenterOnboarding,
+    /// Closes setup opened again from Settings, back to the list.
+    LeaveOnboarding,
     SetOnboardingState(OnboardingState),
     StartOnboardingQuickCheck,
     StartOnboardingDeepScan(PathBuf),
@@ -99,7 +122,16 @@ pub enum AppAction {
         addon_dir: PathBuf,
         api_key: String,
         request: PendingWagoInstallRequest,
-        allow_replace: bool,
+        /// `None` asks first when folders are in the way; `Some` is the list
+        /// the person said yes to replacing.
+        replace_folders: Option<Vec<String>>,
+    },
+    /// GitHub, WoWInterface or TukUI install from the install/search overlay.
+    StartDirectInstall {
+        addon_dir: PathBuf,
+        request: DirectInstallRequest,
+        /// The folders already in AddOns the person said yes to replacing.
+        replace_folders: Vec<String>,
     },
     ReplaceDashboardAddons(Vec<AddonRecord>),
     CompleteAddonScan {

@@ -1,274 +1,452 @@
+use super::render_dashboard::shorten_path_middle;
+use super::sheet::{SheetBody, text_height};
 use super::*;
 
-const CONFIG_CREDENTIALS_FIELDS: [ConfigField; 1] = [ConfigField::WagoApiKey];
-const CONFIG_UPDATES_FIELDS: [ConfigField; 3] = [
-    ConfigField::CheckInterval,
-    ConfigField::AutoCheckEnabled,
-    ConfigField::AutoCheckInterval,
+/// Settings in the order they show, under their section titles. "Your
+/// setup" also shows the game folder, read only, above its rows.
+const CONFIG_SECTIONS: [(&str, &[ConfigField]); 5] = [
+    ("Addon sources", &[ConfigField::WagoApiKey]),
+    (
+        "Updates",
+        &[
+            ConfigField::AutoCheckEnabled,
+            ConfigField::AutoCheckInterval,
+            ConfigField::CheckInterval,
+        ],
+    ),
+    (
+        "Backups",
+        &[ConfigField::BackupWtf, ConfigField::BackupRetention],
+    ),
+    (
+        "Look",
+        &[
+            ConfigField::Theme,
+            ConfigField::SimpleSymbols,
+            ConfigField::ReduceMotion,
+            ConfigField::ShowLibs,
+        ],
+    ),
+    (
+        "Your setup",
+        &[
+            ConfigField::ChangeGameFolder,
+            ConfigField::SaveAddonList,
+            ConfigField::LoadAddonList,
+        ],
+    ),
 ];
-const CONFIG_BACKUPS_FIELDS: [ConfigField; 2] =
-    [ConfigField::BackupWtf, ConfigField::BackupRetention];
-const CONFIG_DISPLAY_FIELDS: [ConfigField; 2] = [ConfigField::Theme, ConfigField::ShowLibs];
+
+/// The label column on a wide sheet, and on a narrow one.
+const LABEL_WIDTH_WIDE: usize = 49;
+const LABEL_WIDTH_NARROW: usize = 44;
 
 impl App {
-    pub(super) fn render_config_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
-        let content_area = area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        let summary_lines = self.config_summary_lines();
-        let summary_height = summary_lines.len() as u16;
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(summary_height),
-                Constraint::Length(2),
-                Constraint::Length(4),
-                Constraint::Length(3),
-                Constraint::Length(4),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-
-        frame.render_widget(
-            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
-            sections[0],
-        );
-        self.render_config_group(
-            frame,
-            sections[1],
-            " Credentials ",
-            &CONFIG_CREDENTIALS_FIELDS,
-        );
-        self.render_config_group(frame, sections[2], " Updates ", &CONFIG_UPDATES_FIELDS);
-        self.render_config_group(frame, sections[3], " Backups ", &CONFIG_BACKUPS_FIELDS);
-        self.render_config_group(frame, sections[4], " Display ", &CONFIG_DISPLAY_FIELDS);
-        frame.render_widget(Paragraph::new(""), sections[5]);
-        frame.render_widget(
-            Paragraph::new(self.config_action_line()).alignment(Alignment::Center),
-            sections[6],
-        );
-    }
-
-    fn config_summary_lines(&self) -> Vec<Line<'static>> {
-        let field = self.config_pane.selected_field();
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    "Changes save instantly",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    "Text fields apply on Enter",
-                    Style::default().fg(self.ui_theme.panel_title),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Selected: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    field.label(),
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
-        if let Some(status) = self.active_detail_status_message(DetailMode::Config) {
-            lines.push(Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(status, Style::default().fg(self.ui_theme.panel_title)),
-            ]));
-        }
-        lines.push(Line::from(vec![Span::styled(
-            self.config_field_help_text(field),
-            Style::default().fg(self.ui_theme.muted),
-        )]));
-        lines
-    }
-
-    fn render_config_group(
+    /// Every setting in one list that scrolls and keeps the cursor in view,
+    /// with the highlighted row explained at the bottom. With room the
+    /// sections have a blank row between them and the explanation is in
+    /// full; with less the blank rows go first, then the explanation is cut
+    /// to one line.
+    ///
+    /// A layout that fits under the header rows (`below_header`) comes
+    /// first, the explanation cut to one line if that is what it takes, so
+    /// the sheet only grows over the header when it has to.
+    pub(super) fn config_sheet_body(
         &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        title: &'static str,
-        fields: &[ConfigField],
-    ) {
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                title,
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let rows = fields
+        width: u16,
+        height: u16,
+        below_header: u16,
+    ) -> SheetBody<'static> {
+        let long = self.config_description(width, true);
+        let long_rows = text_height(&long, width);
+        let spaced_rows = self.config_list_rows(true);
+        let tight_rows = self.config_list_rows(false);
+        let short = self.config_description(width, false);
+        let short_rows = text_height(&short, width);
+        let (spaced, footer) = if spaced_rows + long_rows <= below_header {
+            (true, long)
+        } else if tight_rows + long_rows <= below_header {
+            (false, long)
+        } else if tight_rows + short_rows <= below_header {
+            (false, short)
+        } else if spaced_rows + long_rows <= height {
+            (true, long)
+        } else if tight_rows + long_rows <= height {
+            (false, long)
+        } else {
+            (false, short)
+        };
+
+        let mut body = SheetBody::new();
+        if spaced {
+            body.gap(1);
+        }
+        for (index, (title, fields)) in CONFIG_SECTIONS.iter().enumerate() {
+            if spaced && index > 0 {
+                body.gap(1);
+            }
+            body.text(vec![Line::from(Span::styled(
+                *title,
+                Style::default()
+                    .fg(self.ui_theme.roles.muted)
+                    .add_modifier(Modifier::BOLD),
+            ))]);
+            if *title == "Your setup" {
+                body.text(vec![self.config_game_folder_line(width)]);
+            }
+            for field in *fields {
+                body.text(vec![self.config_field_line(*field, width)]);
+                if self.config_pane.selected_field() == *field {
+                    body.focus_last();
+                }
+            }
+        }
+        body.footer(footer);
+        body
+    }
+
+    /// Rows the list takes, with or without a blank row between sections.
+    fn config_list_rows(&self, spaced: bool) -> u16 {
+        let rows = CONFIG_SECTIONS
             .iter()
-            .map(|field| self.config_field_line(*field, inner.width))
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(rows).wrap(Wrap { trim: false }), inner);
+            .map(|(_, fields)| fields.len() + 1)
+            .sum::<usize>()
+            + 1;
+        let gaps = if spaced { CONFIG_SECTIONS.len() } else { 0 };
+        u16::try_from(rows + gaps).unwrap_or(u16::MAX)
+    }
+
+    fn config_label_width(width: u16) -> usize {
+        if width >= 90 {
+            LABEL_WIDTH_WIDE
+        } else {
+            LABEL_WIDTH_NARROW.min(usize::from(width).saturating_sub(20))
+        }
+    }
+
+    /// "Game folder    Retail · ~/Games/…/_retail_/Interface/AddOns": shown
+    /// here, next to the row that changes it. The cursor does not stop on it.
+    fn config_game_folder_line(&self, width: u16) -> Line<'static> {
+        let roles = self.ui_theme.roles;
+        let label_width = Self::config_label_width(width);
+        let room = usize::from(width).saturating_sub(2 + label_width);
+        let path = self.friendly_addon_dir();
+        let value = if path.is_empty() {
+            "Not chosen yet".to_string()
+        } else {
+            let client = self.game_client_label();
+            let path = shorten_path_middle(&path, room.saturating_sub(client.len() + 3));
+            format!("{client} · {path}")
+        };
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<label_width$}", "Game folder"),
+                Style::default().fg(roles.text),
+            ),
+            Span::styled(
+                truncate_text(&value, room),
+                Style::default().fg(roles.muted),
+            ),
+        ])
     }
 
     fn config_field_line(&self, field: ConfigField, width: u16) -> Line<'static> {
+        let roles = self.ui_theme.roles;
         let is_selected = self.config_pane.selected_field() == field;
-        let is_editing = self
+        let edit = self
             .config_pane
             .edit
             .as_ref()
-            .is_some_and(|edit| edit.field == field);
-        let marker_style = Style::default()
-            .fg(if is_selected {
-                self.ui_theme.highlight
+            .filter(|edit| edit.field == field);
+        let bold = |style: Style| {
+            if is_selected {
+                style.add_modifier(Modifier::BOLD)
             } else {
-                self.ui_theme.muted
-            })
-            .add_modifier(Modifier::BOLD);
-        let label_style = Style::default()
-            .fg(if is_selected {
-                self.ui_theme.panel_title
-            } else {
-                self.ui_theme.muted
-            })
-            .add_modifier(if is_selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        let value_style = Style::default()
-            .fg(if is_editing {
-                self.ui_theme.highlight
-            } else {
-                self.ui_theme.panel_title
-            })
-            .add_modifier(if is_editing {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+                style
+            }
+        };
+        let label_width = Self::config_label_width(width);
+        let room = usize::from(width).saturating_sub(2 + label_width).max(1);
 
-        let label_width = width.saturating_div(2).clamp(16, 24) as usize;
-        let label = truncate_text(field.label(), label_width.saturating_sub(1));
-        let mut spans = vec![
-            Span::styled(if is_selected { "› " } else { "  " }, marker_style),
-            Span::styled(format!("{label:<width$}", width = label_width), label_style),
-        ];
-
-        if is_editing {
-            let edit = self
-                .config_pane
-                .edit
-                .as_ref()
-                .expect("checked editing state");
-            let value = if edit.value.is_empty() {
-                "▌".to_string()
-            } else {
-                format!("{} ▌", edit.value)
-            };
-            spans.push(Span::styled(value, value_style));
-        } else {
+        let mut spans = vec![Span::styled(
+            if is_selected { "▌ " } else { "  " },
+            Style::default().fg(roles.lemon),
+        )];
+        let label_style = bold(Style::default().fg(roles.text));
+        if field.kind() == ConfigRowKind::Action {
             spans.push(Span::styled(
-                truncate_text(&self.render_config_field_value(field), width as usize),
-                value_style,
+                truncate_text(field.label(), usize::from(width).saturating_sub(2)),
+                label_style,
             ));
+            return Line::from(spans);
+        }
+        spans.push(Span::styled(
+            format!(
+                "{:<label_width$}",
+                truncate_text(field.label(), label_width.saturating_sub(1))
+            ),
+            label_style,
+        ));
+
+        if let Some(edit) = edit {
+            // The key is a secret: every character shows as a dot.
+            spans.extend(
+                edit.value.masked('•').spans(
+                    room,
+                    Style::default()
+                        .fg(roles.lemon)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(roles.lemon),
+                    true,
+                ),
+            );
+            if edit.value.is_empty() {
+                spans.push(Span::styled(
+                    " paste your key here",
+                    Style::default().fg(roles.muted),
+                ));
+            }
+            return Line::from(spans);
         }
 
+        let value = self.render_config_field_value(field);
+        if field.supports_quick_adjust() {
+            let arrows = Style::default().fg(roles.dim);
+            spans.extend([
+                Span::styled("‹ ", arrows),
+                Span::styled(
+                    truncate_text(&value, room.saturating_sub(4).max(1)),
+                    bold(Style::default().fg(roles.text)),
+                ),
+                Span::styled(" ›", arrows),
+            ]);
+        } else {
+            spans.push(Span::styled(
+                truncate_text(&value, room),
+                Style::default().fg(roles.muted),
+            ));
+        }
         Line::from(spans)
     }
 
-    fn config_action_line(&self) -> Line<'static> {
-        let chips = if self.config_pane.edit.is_some() {
-            vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: "apply",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "esc",
-                    label: "cancel",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "backspace",
-                    label: "delete",
-                    enabled: true,
-                },
-            ]
-        } else {
-            vec![
-                SearchActionChip {
-                    key: "↑/↓",
-                    label: "fields",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "enter",
-                    label: if self.config_pane.selected_field().is_textual() {
-                        "edit"
-                    } else {
-                        "toggle"
-                    },
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "←/→",
-                    label: "change",
-                    enabled: self.config_pane.selected_field().supports_quick_adjust(),
-                },
-                SearchActionChip {
-                    key: "r",
-                    label: "onboarding",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "i",
-                    label: "import",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "x",
-                    label: "export",
-                    enabled: true,
-                },
-            ]
+    /// What the last action said, while the sheet is open (the status line
+    /// shows nothing under a sheet): a problem, work in progress, or the
+    /// result of an action row while the cursor is on it.
+    fn config_status_line(&self, width: u16) -> Option<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let message = self.active_detail_status_message(DetailMode::Config)?;
+        let kind = self.status_line.kind;
+        let on_action = self.config_pane.selected_field().kind() == ConfigRowKind::Action;
+        let color = match kind {
+            StatusKind::Problem => roles.red,
+            StatusKind::Working => roles.text,
+            StatusKind::Done if on_action => roles.green,
+            StatusKind::Note if on_action => roles.text,
+            _ => return None,
         };
+        Some(Line::from(Span::styled(
+            truncate_text(&message, usize::from(width)),
+            Style::default().fg(color),
+        )))
+    }
 
-        let mut spans = Vec::new();
-        for (index, chip) in chips.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("   "));
-            }
-            spans.push(Span::styled(
-                format!(" {} ", chip.key),
-                Style::default()
-                    .fg(if chip.enabled {
-                        self.ui_theme.panel_title
-                    } else {
-                        self.ui_theme.muted
-                    })
-                    .bg(if chip.enabled {
-                        self.ui_theme.key_bg
-                    } else {
-                        self.ui_theme.key_bg_disabled
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                chip.label,
-                Style::default().fg(if chip.enabled {
-                    self.ui_theme.highlight
-                } else {
-                    self.ui_theme.muted
-                }),
-            ));
+    /// The highlighted row explained, pinned under the list: a rule, its
+    /// name and what it does (`long`), or one line "Name: what it does".
+    /// A message from the last action goes under it, or in place of the one
+    /// line.
+    fn config_description(&self, width: u16, long: bool) -> Vec<Line<'static>> {
+        let status = self.config_status_line(width);
+        if !long && let Some(status) = status {
+            return vec![status];
+        }
+        let mut lines = self.config_description_text(width, long);
+        lines.extend(status);
+        lines
+    }
+
+    fn config_description_text(&self, width: u16, long: bool) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let field = self.config_pane.selected_field();
+        let muted = Style::default().fg(roles.muted);
+        let link = Style::default().fg(roles.blue);
+        let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
+        let editing = self.config_pane.edit.is_some();
+        let display = self.runtime.display;
+        let following = self.follow_terminal.get();
+        let transfer_path = || {
+            default_transfer_path()
+                .map(|path| friendly_path(&path))
+                .unwrap_or_else(|_| "your home folder".to_string())
+        };
+        if !long {
+            let text = match field {
+                ConfigField::WagoApiKey if editing => {
+                    "enter saves it, esc keeps the one you had".to_string()
+                }
+                ConfigField::WagoApiKey => {
+                    "needed to search Wago.io and to update addons from it".to_string()
+                }
+                ConfigField::AutoCheckEnabled => {
+                    "checks for updates in the background while LemonUp is open".to_string()
+                }
+                ConfigField::AutoCheckInterval => "how often the background check runs".to_string(),
+                ConfigField::CheckInterval => {
+                    "an addon checked this recently is not checked again yet".to_string()
+                }
+                ConfigField::BackupWtf => {
+                    "copies your keybinds, macros and addon setups before updates".to_string()
+                }
+                ConfigField::BackupRetention => "older backups past this number go".to_string(),
+                ConfigField::Theme if display.no_color => {
+                    "NO_COLOR is set, so colors are off".to_string()
+                }
+                ConfigField::Theme if following => {
+                    "your terminal does not report full color, so Terminal for now".to_string()
+                }
+                ConfigField::Theme => "dark, light, or your terminal's own colors".to_string(),
+                ConfigField::SimpleSymbols if !display.utf8 => {
+                    "on, because your locale is not UTF-8".to_string()
+                }
+                ConfigField::SimpleSymbols => {
+                    "plain ASCII symbols, and LEMONUP in place of the logo".to_string()
+                }
+                ConfigField::ReduceMotion => {
+                    "a still … in place of the spinner, and no shimmer".to_string()
+                }
+                ConfigField::ShowLibs => "each addon's folders open in the list".to_string(),
+                ConfigField::ChangeGameFolder => {
+                    "opens setup to choose a different game folder".to_string()
+                }
+                ConfigField::SaveAddonList => {
+                    format!("saves your addon list to {}", transfer_path())
+                }
+                ConfigField::LoadAddonList => {
+                    format!("installs the addons listed in {}", transfer_path())
+                }
+            };
+            let name = field.label().trim_end_matches('…');
+            let line = format!("{name}: {text}.");
+            return vec![Line::from(Span::styled(
+                truncate_text(&line, usize::from(width)),
+                muted,
+            ))];
         }
 
-        Line::from(spans)
+        let plain = |text: &str| vec![Span::styled(text.to_string(), muted)];
+        let text: Vec<Span<'static>> = match field {
+            ConfigField::WagoApiKey if editing => vec![
+                Span::styled("Type or paste your key, then press ", muted),
+                Span::styled("enter", key),
+                Span::styled(" to save it. Leave the box empty to remove it. ", muted),
+                Span::styled("esc", key),
+                Span::styled(" keeps the one you had.", muted),
+            ],
+            ConfigField::WagoApiKey => vec![
+                Span::styled(
+                    "Needed to search Wago.io and to update addons that came from it. Wago \
+                     gives a key to its Patreon supporters: ",
+                    muted,
+                ),
+                Span::styled("addons.wago.io/patreon", link),
+                Span::styled(". Press ", muted),
+                Span::styled("enter", key),
+                Span::styled(
+                    if self.config_pane.draft.wago_api_key.is_some() {
+                        " to change it."
+                    } else {
+                        " to type or paste it."
+                    },
+                    muted,
+                ),
+            ],
+            ConfigField::AutoCheckEnabled => {
+                plain("While LemonUp is open, it checks your addons for updates in the background.")
+            }
+            ConfigField::AutoCheckInterval => plain(if self.config_pane.draft.auto_check_enabled {
+                "How often the background check runs."
+            } else {
+                "How often the background check runs. Automatic checks are off now."
+            }),
+            ConfigField::CheckInterval => plain(
+                "An addon checked less than this long ago is not checked again yet, which \
+                 keeps checks quick.",
+            ),
+            ConfigField::BackupWtf => plain(
+                "Before updates, LemonUp saves a copy of your game settings: your keybinds, \
+                 macros and addon setups (the game's WTF folder).",
+            ),
+            ConfigField::BackupRetention => plain(
+                "LemonUp keeps this many backups of your game settings and removes older ones.",
+            ),
+            ConfigField::Theme => {
+                let mut text = String::from(
+                    "Dark or Light colors, or Terminal: your terminal's own background and its \
+                     16 colors. When NO_COLOR is set, LemonUp uses Terminal with no colors at all.",
+                );
+                if display.no_color {
+                    text.push_str(" NO_COLOR is set now.");
+                } else if following {
+                    text.push_str(
+                        " Your terminal does not report full color, so LemonUp starts in \
+                         Terminal. You can still choose Dark or Light here.",
+                    );
+                }
+                plain(&text)
+            }
+            ConfigField::SimpleSymbols => {
+                let mut text = String::from(
+                    "Plain ASCII symbols, such as ^ for an update and ok for up to date, and the \
+                     word LEMONUP in place of the block logo. For terminals and fonts that show \
+                     boxes or question marks.",
+                );
+                if !display.utf8 {
+                    text.push_str(
+                        " It is on now because your locale (LC_ALL, LC_CTYPE or LANG) is not \
+                         UTF-8.",
+                    );
+                }
+                plain(&text)
+            }
+            ConfigField::ReduceMotion => plain(
+                "Shows a still … in place of the spinner on the line that is working, and \
+                 turns off the shimmer.",
+            ),
+            ConfigField::ShowLibs => plain(
+                "When this is on, the addon list opens with every addon's folders shown under \
+                 it. ] and [ still show or hide them all while LemonUp runs.",
+            ),
+            ConfigField::ChangeGameFolder => {
+                plain("Opens setup, where you can choose a different game folder.")
+            }
+            ConfigField::SaveAddonList => plain(&format!(
+                "Saves the list of your addons to {}, so you can load it on another computer.",
+                transfer_path()
+            )),
+            ConfigField::LoadAddonList => {
+                let saved = default_transfer_path().is_ok_and(|path| path.exists());
+                plain(&format!(
+                    "Installs the addons listed in {} into this game folder.{}",
+                    transfer_path(),
+                    if saved {
+                        ""
+                    } else {
+                        " No list has been saved there yet."
+                    }
+                ))
+            }
+        };
+        vec![
+            Line::default(),
+            Line::from(Span::styled(
+                "─".repeat(usize::from(width)),
+                Style::default().fg(roles.dim),
+            )),
+            Line::from(Span::styled(
+                field.label().trim_end_matches('…').to_string(),
+                Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(text),
+        ]
     }
 }

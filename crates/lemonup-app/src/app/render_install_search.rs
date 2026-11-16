@@ -1,555 +1,553 @@
+use ratatui::buffer::Buffer;
+use ratatui::widgets::Widget;
+
+use super::direct_install::DirectInstallProvider;
+use super::sheet::{SheetBody, render_stateful, text_height, wrap_lines_hanging};
 use super::*;
+use crate::source_error::FolderClash;
+
+/// What the sheet says for each kind of source error: what happened and
+/// what to do. The raw error is shown under it as a technical detail.
+pub(super) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> String {
+    match kind {
+        SourceErrorKind::NoConnection => format!(
+            "LemonUp couldn't reach {provider}. Check your internet connection and try again."
+        ),
+        SourceErrorKind::KeyRejected if provider == "Wago.io" => {
+            "Wago.io didn't accept your Wago.io key. Check it and paste it again.".to_string()
+        }
+        SourceErrorKind::KeyRejected => format!(
+            "{provider} didn't accept the token LemonUp sent (GITHUB_TOKEN or GH_TOKEN). \
+             Fix it or unset it, then try again."
+        ),
+        SourceErrorKind::NotFound => {
+            format!("{provider} doesn't have that addon. Check the name or the link and try again.")
+        }
+        SourceErrorKind::SlowDown => {
+            format!("{provider} asked LemonUp to slow down. Wait a few minutes, then try again.")
+        }
+        SourceErrorKind::FoldersInTheWay => {
+            "Its folders are already in your AddOns folder.".to_string()
+        }
+        SourceErrorKind::FoldersOfLinkedAddon => "Its folders belong to an addon LemonUp \
+                                                  already keeps updated, so LemonUp won't \
+                                                  replace them."
+            .to_string(),
+        SourceErrorKind::Other => "Something went wrong on the way. Try again; if it keeps \
+                                   happening, the technical detail helps with a bug report."
+            .to_string(),
+    }
+}
+
+/// `source_error_advice`, naming the folder and the linked addon it belongs
+/// to when an install was refused for that.
+pub(super) fn install_error_advice(
+    kind: SourceErrorKind,
+    provider: &str,
+    clash: Option<&FolderClash>,
+) -> String {
+    let linked = clash.map_or(&[][..], |clash| clash.linked.as_slice());
+    match (kind, linked) {
+        (SourceErrorKind::FoldersOfLinkedAddon, [(folder, addon)]) => format!(
+            "{folder} belongs to {addon}, which LemonUp already keeps updated, so LemonUp \
+             won't replace it."
+        ),
+        (SourceErrorKind::FoldersOfLinkedAddon, [(folder, addon), rest @ ..]) => {
+            let others = if rest.iter().all(|(_, owner)| owner == addon) {
+                format!("{addon}, which LemonUp already keeps updated")
+            } else {
+                format!("{addon} and other addons LemonUp already keeps updated")
+            };
+            format!(
+                "{folder} and {} more belong to {others}, so LemonUp won't replace them.",
+                rest.len()
+            )
+        }
+        _ => source_error_advice(kind, provider),
+    }
+}
+
+/// Columns before the text of "  Technical detail: ".
+const TECHNICAL_DETAIL_INDENT: u16 = 20;
+
+/// An addon already in the list that a result matches.
+pub(super) struct InstalledCopy {
+    pub(super) linked: bool,
+}
+
 impl App {
-    pub(super) fn render_search_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
-        let content_area = area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        let summary_lines = self.search_summary_lines();
-        let summary_height = summary_lines.len() as u16;
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(summary_height),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Min(8),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
+    /// The box (always drawn), one line saying what enter will do with its
+    /// text, then the body for what the sheet is doing. The results get the
+    /// rows the rest leaves.
+    pub(super) fn search_sheet_body(&self, width: u16, max_height: u16) -> SheetBody<'_> {
+        let mut body = SheetBody::new();
+        body.widget(3, |area, buffer| self.render_search_input(area, buffer))
+            .text(vec![self.search_hint_line()])
+            .gap(1);
 
-        frame.render_widget(
-            Paragraph::new(summary_lines).wrap(Wrap { trim: false }),
-            sections[0],
-        );
+        let pane = &self.search_pane;
+        if pane.key_box.is_some() {
+            body.text(self.search_key_box_intro_lines())
+                .widget(3, |area, buffer| self.render_wago_key_box(area, buffer))
+                .text(vec![self.body_keys_line(&[
+                    ("enter", "save the key and search", true),
+                    ("esc", "back to the search box", false),
+                ])]);
+            return body;
+        }
+        if let Some(request) = pane.pending_direct_install() {
+            let card = self.direct_install_card_lines(request);
+            let height = u16::try_from(card.len()).unwrap_or(u16::MAX) + 2;
+            body.widget(height, move |area, buffer| {
+                let card_width = area.width.min(68);
+                let card_area = Rect::new(area.x, area.y, card_width, area.height);
+                Paragraph::new(card)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(self.ui_theme.roles.border)),
+                    )
+                    .wrap(Wrap { trim: false })
+                    .render(card_area, buffer);
+            });
+            return body;
+        }
+        if let Some(lines) = self.search_state_lines(width) {
+            body.text(lines);
+            return body;
+        }
+        if pane.results.is_empty() {
+            body.text(self.search_empty_state_lines());
+            return body;
+        }
 
-        self.render_search_input(frame, sections[1]);
-
-        frame.render_widget(Paragraph::new(""), sections[2]);
-
-        self.render_search_compose_first_body(frame, sections[3]);
-        frame.render_widget(Paragraph::new(""), sections[4]);
-        frame.render_widget(
-            Paragraph::new(self.search_action_line()).alignment(Alignment::Center),
-            sections[5],
-        );
+        let preview = self.search_selected_preview_lines(width);
+        // Box, hint, gap and the preview.
+        let fixed = 5u16.saturating_add(text_height(&preview, width));
+        let needed = u16::try_from(pane.results.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1);
+        let room = max_height.saturating_sub(fixed);
+        let results_height = if needed <= room {
+            needed
+        } else {
+            room.max(needed.min(4))
+        };
+        body.widget(results_height, |area, buffer| {
+            self.render_search_results_list(area, buffer)
+        })
+        .focus_last();
+        if !preview.is_empty() {
+            body.text(preview);
+        }
+        body
     }
 
-    pub(super) fn render_search_input(&self, frame: &mut Frame<'_>, area: Rect) {
-        let active = self.search_pane.is_editing || self.search_pane.in_progress;
+    /// Whether typed keys go to the install box right now.
+    fn search_box_focused(&self) -> bool {
+        let pane = &self.search_pane;
+        pane.key_box.is_none()
+            && pane.pending_direct_install().is_none()
+            && pane.pending_direct_replace().is_none()
+            && !pane.results_focused()
+            && !self.install_running()
+    }
+
+    pub(super) fn render_search_input(&self, area: Rect, buffer: &mut Buffer) {
+        let focused = self.search_box_focused();
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(if active {
-                Style::default().fg(self.ui_theme.highlight)
+            .border_style(if focused {
+                Style::default().fg(self.ui_theme.roles.lemon)
             } else {
-                Style::default().fg(self.ui_theme.border)
+                Style::default().fg(self.ui_theme.roles.border)
             })
-            .title(" Addon ");
-
-        let mut spans = Vec::new();
-        if self.search_pane.query.trim().is_empty() {
-            if self.search_pane.is_editing {
-                spans.push(Span::styled(
-                    "▌",
-                    Style::default().fg(self.ui_theme.brand_gold),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    "Type an addon name or paste a Wago URL",
-                    Style::default().fg(self.ui_theme.muted),
-                ));
-            }
+            .title(" Addon name or link ");
+        let room = usize::from(area.width.saturating_sub(2));
+        // Dimmed while an install runs: the box takes no text then.
+        let text_style = if self.install_running() {
+            Style::default().fg(self.ui_theme.roles.muted)
         } else {
+            Style::default()
+                .fg(self.ui_theme.roles.lemon)
+                .add_modifier(Modifier::BOLD)
+        };
+        let spans = self.search_pane.query.spans(
+            room,
+            text_style,
+            Style::default().fg(self.ui_theme.roles.lemon),
+            focused,
+        );
+        Paragraph::new(Line::from(spans))
+            .block(block)
+            .render(area, buffer);
+    }
+
+    fn render_wago_key_box(&self, area: Rect, buffer: &mut Buffer) {
+        let width = area.width.min(82);
+        let area = Rect::new(area.x, area.y, width, area.height);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.ui_theme.roles.lemon))
+            .title(" Wago.io key ");
+        let key = self.search_pane.key_box.clone().unwrap_or_default();
+        let room = usize::from(area.width.saturating_sub(2));
+        let mut spans = key.masked('•').spans(
+            room,
+            Style::default().fg(self.ui_theme.roles.lemon),
+            Style::default().fg(self.ui_theme.roles.lemon),
+            true,
+        );
+        if key.is_empty() {
             spans.push(Span::styled(
-                self.search_pane.query.clone(),
+                " paste your key here",
+                Style::default().fg(self.ui_theme.roles.muted),
+            ));
+        }
+        Paragraph::new(Line::from(spans))
+            .block(block)
+            .render(area, buffer);
+    }
+
+    /// The line under the box: what enter will do with the text.
+    pub(super) fn search_hint_line(&self) -> Line<'static> {
+        let pane = &self.search_pane;
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let quiet = matches!(
+            pane.install_state,
+            SearchInstallState::Success { .. }
+                | SearchInstallState::Error { .. }
+                | SearchInstallState::Checking { .. }
+                | SearchInstallState::Installing { .. }
+                | SearchInstallState::InstallingDirect { .. }
+        ) || pane.in_progress;
+        if self.install_running() && pane.key_box.is_none() {
+            return Line::from(Span::styled(
+                "Installing. You can type again when it's done.",
+                muted,
+            ));
+        }
+        if quiet && pane.key_box.is_none() {
+            return Line::from("");
+        }
+        match classify_search_input(pane.query.value()) {
+            SearchInputIntent::Empty => Line::from(""),
+            SearchInputIntent::Direct(request) => Line::from(Span::styled(
+                match request.provider {
+                    DirectInstallProvider::Tukui => {
+                        format!("Installs {} from TukUI.", request.display)
+                    }
+                    provider => format!("That's a {} link.", provider.label()),
+                },
+                muted,
+            )),
+            SearchInputIntent::WagoUrl(_) => {
+                Line::from(Span::styled("That's a Wago.io link.", muted))
+            }
+            SearchInputIntent::WagoSearch(query) => {
+                let count = pane.results.len();
+                let text = if count > 0 && pane.last_query.as_deref() == Some(query.as_str()) {
+                    format!(
+                        "{count} addon{} on Wago.io match \"{query}\"",
+                        plural_suffix(count)
+                    )
+                } else {
+                    format!("Search Wago.io for \"{query}\"")
+                };
+                Line::from(Span::styled(text, muted))
+            }
+            SearchInputIntent::InvalidUrl(message) => Line::from(Span::styled(
+                message,
+                Style::default().fg(self.ui_theme.roles.amber),
+            )),
+        }
+    }
+
+    fn search_key_box_intro_lines(&self) -> Vec<Line<'static>> {
+        let rejected = matches!(
+            self.search_pane.install_state,
+            SearchInstallState::Error {
+                kind: SourceErrorKind::KeyRejected,
+                ..
+            }
+        );
+        let headline = if rejected {
+            "Wago.io didn't accept that key. Check it and paste it again."
+        } else {
+            "Searching Wago.io needs your Wago.io key."
+        };
+        vec![
+            Line::from(Span::styled(
+                headline,
                 Style::default()
-                    .fg(self.ui_theme.highlight)
+                    .fg(self.ui_theme.roles.text)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("Wago gives a key to its Patreon supporters: "),
+                Span::styled(
+                    "addons.wago.io/patreon",
+                    Style::default().fg(self.ui_theme.roles.blue),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "GitHub, WoWInterface and TukUI links work without one.",
+                Style::default().fg(self.ui_theme.roles.muted),
+            )),
+            Line::from(""),
+        ]
+    }
+
+    /// Keys written into the body, as the mockups show them.
+    fn body_keys_line(&self, keys: &[(&str, &str, bool)]) -> Line<'static> {
+        let mut spans = Vec::new();
+        for (index, (key, label, primary)) in keys.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("          "));
+            }
+            spans.push(Span::styled(
+                key.to_string(),
+                Style::default()
+                    .fg(if *primary {
+                        self.ui_theme.roles.lemon
+                    } else {
+                        self.ui_theme.roles.blue
+                    })
                     .add_modifier(Modifier::BOLD),
             ));
-        }
-
-        if self.search_pane.in_progress {
             spans.push(Span::raw("  "));
-            spans.extend(shimmer_text_spans(
-                "searching…",
-                self.ui_theme.warning,
-                self.ui_theme.shimmer_glow,
-                ShimmerConfig::action(),
-            ));
-        } else if self.search_pane.is_editing && !self.search_pane.query.trim().is_empty() {
             spans.push(Span::styled(
-                " ▌",
-                Style::default().fg(self.ui_theme.brand_gold),
+                label.to_string(),
+                if *primary {
+                    Style::default().fg(self.ui_theme.roles.text)
+                } else {
+                    Style::default().fg(self.ui_theme.roles.muted)
+                },
             ));
         }
-
-        let query = Paragraph::new(Line::from(spans))
-            .block(block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(query, area);
+        Line::from(spans)
     }
 
-    pub(super) fn search_summary_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(vec![
-            Span::styled("Use: ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                "Search Wago by addon name",
-                Style::default().fg(self.ui_theme.panel_title),
-            ),
-            Span::styled("  ·  ", Style::default().fg(self.ui_theme.muted)),
-            Span::styled(
-                "Paste a Wago URL to install directly",
-                Style::default().fg(self.ui_theme.panel_title),
-            ),
-        ])];
-
-        let status_line = if self.wago_api_key.is_none() {
-            Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    "Wago API key required for this screen",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-        } else if self.search_pane.in_progress {
-            let mut spans = vec![Span::styled(
-                "Status: ",
-                Style::default().fg(self.ui_theme.muted),
-            )];
-            spans.extend(shimmer_text_spans(
-                "Searching Wago…",
-                self.ui_theme.warning,
-                self.ui_theme.shimmer_glow,
-                ShimmerConfig::action(),
-            ));
-            Line::from(spans)
-        } else if let Some(state) = self.active_search_install_state() {
-            match state {
-                SearchInstallState::Checking { .. } => {
-                    let mut spans = vec![Span::styled(
-                        "Status: ",
-                        Style::default().fg(self.ui_theme.muted),
-                    )];
-                    spans.extend(shimmer_text_spans(
-                        "Preparing install…",
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    ));
-                    Line::from(spans)
-                }
-                SearchInstallState::Installing { .. } => {
-                    let mut spans = vec![Span::styled(
-                        "Status: ",
-                        Style::default().fg(self.ui_theme.muted),
-                    )];
-                    spans.extend(shimmer_text_spans(
-                        "Installing from Wago…",
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    ));
-                    Line::from(spans)
-                }
-                SearchInstallState::Success { parent_folder, .. } => Line::from(vec![
-                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                    Span::styled(
-                        format!("Installed into {parent_folder}"),
-                        Style::default()
-                            .fg(self.ui_theme.success)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                SearchInstallState::ConfirmReplace { tracked_parent, .. } => Line::from(vec![
-                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                    Span::styled(
-                        format!("Already installed as {tracked_parent}"),
-                        Style::default()
-                            .fg(self.ui_theme.panel_title)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                SearchInstallState::Error { message, .. } => Line::from(vec![
-                    Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                    Span::styled(
-                        message.clone(),
-                        Style::default()
-                            .fg(self.ui_theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                SearchInstallState::Idle => self.default_search_status_line(),
+    fn direct_install_card_lines(&self, request: &DirectInstallRequest) -> Vec<Line<'static>> {
+        let link = match request.provider {
+            DirectInstallProvider::Github => format!("github.com/{}", request.display),
+            DirectInstallProvider::Wowinterface => {
+                format!("wowinterface.com, {}", request.display)
             }
-        } else {
-            self.default_search_status_line()
+            DirectInstallProvider::Tukui => "tukui.org".to_string(),
         };
-        lines.push(status_line);
-        lines
-    }
-
-    pub(super) fn default_search_status_line(&self) -> Line<'static> {
-        if self.search_pane.results.is_empty() {
-            Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    if self.search_pane.query.trim().is_empty() {
-                        "Enter an addon name or Wago URL"
-                    } else if self.search_direct_install_target().is_some() {
-                        "Press Enter to install directly"
-                    } else {
-                        "Press Enter to search Wago"
-                    },
-                    Style::default().fg(self.ui_theme.panel_title),
+        vec![
+            Line::from(Span::styled(
+                format!(
+                    " Install {} from {}?",
+                    request.name(),
+                    request.provider.label()
                 ),
-            ])
-        } else {
-            let count = self.search_pane.results.len();
-            let query = self.search_pane.last_query.as_deref().unwrap_or("query");
-            Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(self.ui_theme.muted)),
-                Span::styled(
-                    format!("{count} result{} for “{query}”", plural_suffix(count)),
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-        }
+                Style::default()
+                    .fg(self.ui_theme.roles.text)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(" {link}"),
+                Style::default().fg(self.ui_theme.roles.muted),
+            )),
+            Line::from(""),
+            {
+                let mut line =
+                    self.body_keys_line(&[("enter", "install", true), ("esc", "not now", false)]);
+                line.spans.insert(0, Span::raw("     "));
+                line
+            },
+        ]
     }
 
-    pub(super) fn selected_search_install_state(&self) -> Option<&SearchInstallState> {
-        let result = self.search_pane.selected_result()?;
-        self.search_install_state_for_result(result)
-    }
-
-    pub(super) fn active_search_install_state(&self) -> Option<&SearchInstallState> {
-        self.selected_search_install_state().or({
-            if matches!(self.search_pane.install_state, SearchInstallState::Idle) {
-                None
-            } else {
-                Some(&self.search_pane.install_state)
+    /// The body while something runs, is done, failed or waits for the
+    /// replace question, `width` columns wide. `None` when the sheet shows
+    /// results or examples.
+    pub(super) fn search_state_lines(&self, width: u16) -> Option<Vec<Line<'static>>> {
+        let pane = &self.search_pane;
+        let title = Style::default()
+            .fg(self.ui_theme.roles.text)
+            .add_modifier(Modifier::BOLD);
+        let working = |text: String| {
+            let mut spans = vec![Span::styled(
+                format!("{} ", self.spinner_frame()),
+                Style::default().fg(self.ui_theme.roles.lemon),
+            )];
+            spans.extend(working_text_spans(
+                &text,
+                self.ui_theme.roles.text,
+                self.ui_theme.roles.lemon,
+                self.ui_theme.reduce_motion,
+            ));
+            vec![Line::from(spans)]
+        };
+        match &pane.install_state {
+            SearchInstallState::Checking { addon_name, .. }
+            | SearchInstallState::Installing { addon_name, .. } => {
+                return Some(working(format!("Installing {addon_name} from Wago.io…")));
             }
-        })
-    }
-
-    pub(super) fn search_direct_install_target(&self) -> Option<String> {
-        let trimmed = self.search_pane.query.trim();
-        let parsed = parse_wago_target(trimmed).ok()?;
-        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-            return Some(parsed);
+            SearchInstallState::InstallingDirect { request } => {
+                return Some(working(format!(
+                    "Installing {} from {}…",
+                    request.name(),
+                    request.provider.label()
+                )));
+            }
+            SearchInstallState::ConfirmDirectReplace { name, .. } => {
+                return Some(vec![Line::from(Span::styled(
+                    format!("{name}'s folders are already in your AddOns folder."),
+                    Style::default().fg(self.ui_theme.roles.muted),
+                ))]);
+            }
+            SearchInstallState::Success {
+                addon_name,
+                warning,
+                ..
+            } => {
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        format!("{} {addon_name} is installed.", self.ui_theme.symbols.done),
+                        Style::default()
+                            .fg(self.ui_theme.roles.green)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw("  It's in your addon list now. Reload the game interface ("),
+                        Span::styled("/reload", title),
+                        Span::raw(") to use it."),
+                    ]),
+                ];
+                if let Some(warning) = warning {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {warning}"),
+                        Style::default().fg(self.ui_theme.roles.amber),
+                    )));
+                }
+                lines.push(Line::from(""));
+                let mut keys = self.body_keys_line(&[
+                    ("enter", "install another", true),
+                    ("esc", "back to my addons", false),
+                ]);
+                keys.spans.insert(0, Span::raw("  "));
+                lines.push(keys);
+                return Some(lines);
+            }
+            SearchInstallState::Error {
+                addon_name,
+                provider,
+                kind,
+                detail,
+                clash,
+                ..
+            } => {
+                let headline = match addon_name {
+                    Some(name) => format!("! Couldn't install {name}."),
+                    None => format!("! Couldn't search {provider}."),
+                };
+                let mut keys =
+                    self.body_keys_line(&[("enter", "try again", true), ("esc", "close", false)]);
+                keys.spans.insert(0, Span::raw("  "));
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        headline,
+                        Style::default()
+                            .fg(self.ui_theme.roles.red)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(format!(
+                        "  {}",
+                        install_error_advice(*kind, provider, clash.as_ref())
+                    )),
+                    Line::from(""),
+                    keys,
+                    Line::from(""),
+                ];
+                // A long detail wraps under its own start, not under the label.
+                lines.extend(wrap_lines_hanging(
+                    &[Line::from(Span::styled(
+                        format!("  Technical detail: {detail}"),
+                        Style::default().fg(self.ui_theme.roles.muted),
+                    ))],
+                    width,
+                    TECHNICAL_DETAIL_INDENT,
+                ));
+                return Some(lines);
+            }
+            SearchInstallState::Idle
+            | SearchInstallState::ConfirmReplace { .. }
+            | SearchInstallState::ConfirmDirect { .. } => {}
+        }
+        if pane.in_progress {
+            let query = pane.last_query.clone().unwrap_or_default();
+            return Some(working(format!("Searching Wago.io for \"{query}\"…")));
         }
         None
     }
 
-    pub(super) fn search_action_line(&self) -> Line<'static> {
-        let submit_label = if self.search_direct_install_target().is_some() {
-            "install"
-        } else {
-            "search"
-        };
-        let chips: Vec<SearchActionChip> = if self.pending_wago_install_confirmation.is_some() {
-            vec![
-                SearchActionChip {
-                    key: "y",
-                    label: "reinstall",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "n",
-                    label: "cancel",
-                    enabled: true,
-                },
-            ]
-        } else if self.search_pane.is_editing || self.search_pane.in_progress {
-            let mut chips = vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: submit_label,
-                    enabled: !self.search_pane.in_progress,
-                },
-                SearchActionChip {
-                    key: "esc",
-                    label: "stop editing",
-                    enabled: self.search_pane.is_editing,
-                },
+    /// No results yet: the things you can type, or why a search found none.
+    pub(super) fn search_empty_state_lines(&self) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        if let Some(query) = &self.search_pane.last_query {
+            return vec![
+                Line::from(Span::styled(
+                    format!("No addons on Wago.io match \"{query}\"."),
+                    Style::default()
+                        .fg(self.ui_theme.roles.text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Check the spelling, or try fewer words. You can also paste a link to \
+                     the addon's page.",
+                    muted,
+                )),
             ];
-            if self.wago_api_key.is_none() && !self.search_pane.in_progress {
-                chips.push(SearchActionChip {
-                    key: ",",
-                    label: "config",
-                    enabled: true,
-                });
-            }
-            chips
-        } else if self.search_pane.results.is_empty() {
-            vec![
-                SearchActionChip {
-                    key: "enter",
-                    label: submit_label,
-                    enabled: self.wago_api_key.is_some(),
-                },
-                SearchActionChip {
-                    key: "/",
-                    label: "edit input",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: ",",
-                    label: "config",
-                    enabled: self.wago_api_key.is_none(),
-                },
-            ]
-        } else {
-            vec![
-                SearchActionChip {
-                    key: "↑/↓",
-                    label: "move",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "enter",
-                    label: "install",
-                    enabled: true,
-                },
-                SearchActionChip {
-                    key: "/",
-                    label: "edit query",
-                    enabled: true,
-                },
-            ]
-        };
-
-        let mut spans = Vec::new();
-        for (index, chip) in chips.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("   "));
-            }
-            let key_bg = if chip.enabled {
-                self.ui_theme.key_bg
-            } else {
-                self.ui_theme.key_bg_disabled
-            };
-            let key_fg = if chip.enabled {
-                self.ui_theme.panel_title
-            } else {
-                self.ui_theme.muted
-            };
-            spans.push(Span::styled(
-                format!(" {} ", chip.key),
-                Style::default()
-                    .fg(key_fg)
-                    .bg(key_bg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                chip.label,
-                if chip.enabled {
-                    Style::default().fg(self.ui_theme.highlight)
-                } else {
-                    Style::default().fg(self.ui_theme.muted)
-                },
-            ));
         }
-
-        Line::from(spans)
-    }
-
-    pub(super) fn render_search_compose_first_body(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.search_pane.results.is_empty() {
-            self.render_search_empty_state(frame, area);
-            return;
-        }
-
-        let [results, preview] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(5)])
-            .areas(area);
-
-        let results_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Results ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let results_inner = results_block.inner(results);
-        frame.render_widget(results_block, results);
-        self.render_search_results_list(frame, results_inner);
-
-        let preview_block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(self.ui_theme.border))
-            .title(Span::styled(
-                " Selected ",
-                Style::default().fg(self.ui_theme.muted),
-            ));
-        let preview_inner = preview_block.inner(preview);
-        frame.render_widget(preview_block, preview);
-        self.render_search_selected_preview(frame, preview_inner);
-    }
-
-    pub(super) fn render_search_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
-        let message = if self.wago_api_key.is_none() {
-            vec![
-                Line::from(Span::styled(
-                    "Wago install/search is unavailable",
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "This screen installs from Wago only.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-                Line::from(Span::styled(
-                    "Press , to open Config and add your Wago API key.",
-                    Style::default().fg(self.ui_theme.panel_title),
-                )),
-            ]
-        } else if let Some(state) = self.active_search_install_state() {
-            match state {
-                SearchInstallState::Checking { addon_name, .. } => vec![
-                    Line::from(shimmer_text_spans(
-                        &format!("Preparing {addon_name} for install…"),
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "LemonUp is checking tracked state and preparing the package.",
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
-                ],
-                SearchInstallState::Installing { addon_name, .. } => vec![
-                    Line::from(shimmer_text_spans(
-                        &format!("Installing {addon_name} from Wago…"),
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "The addon will appear in Manage when install and sync complete.",
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
-                ],
-                SearchInstallState::Success {
-                    addon_name,
-                    parent_folder,
-                    ..
-                } => vec![
-                    Line::from(vec![
-                        Span::styled(
-                            "✓ ",
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("Installed {addon_name}"),
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!("Installed into {parent_folder}."),
-                        Style::default().fg(self.ui_theme.panel_title),
-                    )),
-                ],
-                SearchInstallState::ConfirmReplace {
-                    addon_name,
-                    tracked_parent,
-                    ..
-                } => vec![
-                    Line::from(Span::styled(
-                        format!("{addon_name} is already installed."),
-                        Style::default()
-                            .fg(self.ui_theme.panel_title)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!(
-                            "Press y to reinstall over tracked addon {tracked_parent}, or n to cancel."
-                        ),
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
-                ],
-                SearchInstallState::Error { message, .. } => vec![
-                    Line::from(Span::styled(
-                        "Install failed",
-                        Style::default()
-                            .fg(self.ui_theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        message.clone(),
-                        Style::default().fg(self.ui_theme.error),
-                    )),
-                ],
-                SearchInstallState::Idle => unreachable!(),
-            }
-        } else if self.search_pane.in_progress {
-            vec![
-                Line::from(Span::styled(
-                    "Searching Wago…",
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Results will appear here when the search completes.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ]
-        } else if let Some(last_query) = &self.search_pane.last_query {
-            vec![
-                Line::from(Span::styled(
-                    format!("No results for “{last_query}”"),
-                    Style::default()
-                        .fg(self.ui_theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Try a broader name or a known addon title.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ]
-        } else {
-            vec![
-                Line::from(Span::styled(
-                    "Start with an addon name or Wago URL",
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press Enter to search Wago or install directly.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ]
+        let example = |label: &str, text: &str| {
+            Line::from(vec![
+                Span::raw(format!("  {label:<22}")),
+                Span::styled(text.to_string(), muted),
+            ])
         };
-
-        let paragraph = Paragraph::new(message)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
+        vec![
+            Line::from(Span::styled("You can type or paste any of these:", muted)),
+            Line::from(""),
+            example("an addon name", "searches Wago.io"),
+            example("a GitHub link", "github.com/BigWigsMods/LittleWigs"),
+            example(
+                "a WoWInterface link",
+                "wowinterface.com/downloads/info4802-Pawn.html",
+            ),
+            example("a Wago.io link", "addons.wago.io/addons/details"),
+            Line::from(vec![
+                Span::styled(
+                    "  elvui",
+                    Style::default()
+                        .fg(self.ui_theme.roles.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  or  "),
+                Span::styled(
+                    "tukui",
+                    Style::default()
+                        .fg(self.ui_theme.roles.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(22 - 16)),
+                Span::styled("installs ElvUI or Tukui", muted),
+            ]),
+        ]
     }
 
-    pub(super) fn render_search_results_list(&self, frame: &mut Frame<'_>, area: Rect) {
-        let result_count = self.search_pane.results.len();
+    pub(super) fn render_search_results_list(&self, area: Rect, buffer: &mut Buffer) {
+        let pane = &self.search_pane;
+        let result_count = pane.results.len();
+        let focused = pane.results_focused();
         let mut show_above = false;
         let mut show_below = false;
         let mut window_start = 0;
@@ -560,7 +558,7 @@ impl App {
             let visible_rows = area.height.saturating_sub(reserved_rows).max(1) as usize;
             let (start, end) = visible_search_result_window(
                 result_count,
-                self.search_pane.selected_result,
+                pane.selected_result.filter(|_| focused),
                 visible_rows,
             );
             window_start = start;
@@ -581,334 +579,179 @@ impl App {
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
         let mut area_index = 0;
         if show_above {
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("↑ ", Style::default().fg(self.ui_theme.muted)),
-                    Span::styled(
-                        format!(
-                            "{} more result{} above",
-                            window_start,
-                            plural_suffix(window_start)
-                        ),
-                        Style::default().fg(self.ui_theme.muted),
+            Widget::render(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        "↑ {} more result{} above",
+                        window_start,
+                        plural_suffix(window_start)
                     ),
-                ])),
+                    muted,
+                ))),
                 areas[area_index],
+                buffer,
             );
             area_index += 1;
         }
         let table_area = areas[area_index];
         area_index += 1;
 
-        let header = Row::new([
-            Cell::from(Span::styled(
-                "Name",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-            Cell::from(Span::styled(
-                "Author",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-            Cell::from(Span::styled(
-                "Version",
-                Style::default().fg(self.ui_theme.muted),
-            )),
-            Cell::from(Span::styled("DL", Style::default().fg(self.ui_theme.muted))),
-        ]);
+        // Narrow sheets drop the author before anything else.
+        let show_author = table_area.width >= 72;
+        let heading = muted.add_modifier(Modifier::BOLD);
+        let mut header = vec![Cell::from(Span::styled("  Addon", heading))];
+        if show_author {
+            header.push(Cell::from(Span::styled("Author", heading)));
+        }
+        header.push(Cell::from(Span::styled("Downloads", heading)));
+        header.push(Cell::from(Span::styled("Version", heading)));
+        header.push(Cell::from(""));
         let mut rows = Vec::new();
-        let mut selected_row = None;
-
-        for (index, result) in self.search_pane.results[window_start..window_end]
-            .iter()
-            .enumerate()
-        {
-            let absolute_index = window_start + index;
-            let selected = self.search_pane.selected_result == Some(absolute_index);
-            let tracked_folder = self.tracked_wago_result_folder(result);
-            let install_state = self.search_install_state_for_result(result);
+        for (index, result) in pane.results[window_start..window_end].iter().enumerate() {
+            let selected = focused && pane.selected_result == Some(window_start + index);
             let author = result
                 .owner
                 .as_deref()
                 .or_else(|| result.authors.first().map(String::as_str))
-                .unwrap_or("unknown");
-            let version = result.version.as_deref().unwrap_or("unknown");
-            let row_style = if selected {
-                selected_row = Some(index);
-                Style::default().bg(self.ui_theme.row_highlight_bg)
-            } else {
-                Style::default()
-            };
-
-            rows.push(
-                Row::new([
-                    Cell::from(self.search_result_name_line(
-                        result,
-                        selected,
-                        tracked_folder.as_deref(),
-                        install_state,
-                    )),
-                    Cell::from(Span::styled(
-                        truncate_text(author, 18),
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
-                    Cell::from(Span::styled(
-                        truncate_text(version, 18),
-                        if install_state.is_some() {
-                            Style::default().fg(self.ui_theme.warning)
-                        } else {
-                            Style::default().fg(self.ui_theme.panel_title)
-                        },
-                    )),
-                    Cell::from(Span::styled(
-                        result
-                            .download_count
-                            .map(format_download_count)
-                            .unwrap_or_else(|| "—".to_string()),
-                        Style::default().fg(self.ui_theme.muted),
-                    )),
+                .unwrap_or("");
+            let mut cells = vec![Cell::from(Line::from(vec![
+                Span::styled(
+                    if selected { "▌ " } else { "  " },
+                    Style::default().fg(self.ui_theme.roles.lemon),
+                ),
+                Span::styled(
+                    result.display_name.clone(),
+                    if selected {
+                        Style::default()
+                            .fg(self.ui_theme.roles.lemon)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.ui_theme.roles.text)
+                    },
+                ),
+            ]))];
+            if show_author {
+                cells.push(Cell::from(Span::styled(author.to_string(), muted)));
+            }
+            cells.push(Cell::from(Span::styled(
+                format!(
+                    "{:>9}",
+                    result
+                        .download_count
+                        .map(format_download_count)
+                        .unwrap_or_default()
+                ),
+                muted,
+            )));
+            cells.push(Cell::from(Span::styled(
+                result.version.clone().unwrap_or_default(),
+                muted,
+            )));
+            cells.push(Cell::from(if self.installed_copy(result).is_some() {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", self.ui_theme.symbols.done),
+                        Style::default().fg(self.ui_theme.roles.green),
+                    ),
+                    Span::styled("Installed", muted),
                 ])
-                .style(row_style),
-            );
+            } else {
+                Line::from("")
+            }));
+            rows.push(Row::new(cells));
         }
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Min(48),
-                Constraint::Length(18),
-                Constraint::Length(18),
-                Constraint::Length(8),
-            ],
-        )
-        .header(header)
-        .column_spacing(2)
-        .row_highlight_style(
-            Style::default()
-                .bg(self.ui_theme.row_highlight_bg)
-                .add_modifier(Modifier::BOLD),
-        );
-        let mut state = TableState::default().with_selected(selected_row);
-        frame.render_stateful_widget(table, table_area, &mut state);
+        let mut widths = vec![Constraint::Min(16)];
+        if show_author {
+            widths.push(Constraint::Length(20));
+        }
+        widths.extend([
+            Constraint::Length(9),
+            Constraint::Length(12),
+            Constraint::Length(11),
+        ]);
+        let table = Table::new(rows, widths)
+            .header(Row::new(header))
+            .column_spacing(2);
+        let mut state = TableState::default();
+        render_stateful(table, table_area, buffer, &mut state);
 
         if show_below {
             let remaining_below = result_count.saturating_sub(window_end);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("↓ ", Style::default().fg(self.ui_theme.muted)),
-                    Span::styled(
-                        format!(
-                            "{} more result{} below",
-                            remaining_below,
-                            plural_suffix(remaining_below)
-                        ),
-                        Style::default().fg(self.ui_theme.muted),
+            Widget::render(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        "↓ {} more result{} below",
+                        remaining_below,
+                        plural_suffix(remaining_below)
                     ),
-                ])),
+                    muted,
+                ))),
                 areas[area_index],
+                buffer,
             );
         }
     }
 
-    pub(super) fn render_search_selected_preview(&self, frame: &mut Frame<'_>, area: Rect) {
-        let lines = if let Some(result) = self.search_pane.selected_result() {
-            let author = result
-                .owner
-                .as_deref()
-                .or_else(|| result.authors.first().map(String::as_str))
-                .unwrap_or("unknown");
-            let tracked_folder = self.tracked_wago_result_folder(result);
-            let install_state = self.search_install_state_for_result(result);
-            let mut lines = vec![Line::from(Span::styled(
+    /// Under the results, for the one the cursor is on: its name, summary
+    /// and what enter does if you already have it.
+    pub(super) fn search_selected_preview_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if !self.search_pane.results_focused() {
+            return Vec::new();
+        }
+        let Some(result) = self.search_pane.selected_result() else {
+            return Vec::new();
+        };
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "─".repeat(usize::from(width.saturating_sub(2))),
+                Style::default().fg(self.ui_theme.roles.border),
+            )),
+            Line::from(Span::styled(
                 result.display_name.clone(),
                 Style::default()
-                    .fg(self.ui_theme.highlight)
+                    .fg(self.ui_theme.roles.text)
                     .add_modifier(Modifier::BOLD),
-            ))];
-            match install_state {
-                Some(SearchInstallState::Checking { .. }) => {
-                    lines.push(Line::from(shimmer_text_spans(
-                        "Checking tracked state and preparing install…",
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    )));
-                }
-                Some(SearchInstallState::Installing { .. }) => {
-                    lines.push(Line::from(shimmer_text_spans(
-                        "Installing from Wago…",
-                        self.ui_theme.warning,
-                        self.ui_theme.shimmer_glow,
-                        ShimmerConfig::action(),
-                    )));
-                }
-                Some(SearchInstallState::Success { parent_folder, .. }) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "✓ ",
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("Installed successfully into {parent_folder}"),
-                            Style::default()
-                                .fg(self.ui_theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                }
-                Some(SearchInstallState::ConfirmReplace { tracked_parent, .. }) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "📦 installed ",
-                            Style::default()
-                                .fg(self.ui_theme.panel_title)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("as {tracked_parent} · y reinstall · n cancel"),
-                            Style::default().fg(self.ui_theme.panel_title),
-                        ),
-                    ]));
-                }
-                Some(SearchInstallState::Error { message, .. }) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "Error ",
-                            Style::default()
-                                .fg(self.ui_theme.error)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(message.clone(), Style::default().fg(self.ui_theme.error)),
-                    ]));
-                }
-                _ => {
-                    if let Some(folder) = tracked_folder.as_deref() {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                "📦 installed ",
-                                Style::default()
-                                    .fg(self.ui_theme.panel_title)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                format!("already installed as {folder}"),
-                                Style::default().fg(self.ui_theme.panel_title),
-                            ),
-                        ]));
-                    }
-                }
-            }
-            lines.push(Line::from(""));
-            lines.extend([
-                self.overlay_kv_line("Author", author),
-                self.overlay_kv_line("Version", result.version.as_deref().unwrap_or("unknown")),
-                self.overlay_kv_line("Slug", result.id.as_str()),
-                self.overlay_kv_line(
-                    "Summary",
-                    result.summary.as_deref().unwrap_or("No summary provided."),
-                ),
-            ]);
-            lines
-        } else {
-            vec![
-                Line::from(Span::styled(
-                    "No result selected",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Run a search, then use ↑/↓ to choose a result.",
-                    Style::default().fg(self.ui_theme.muted),
-                )),
-            ]
-        };
-
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
+            )),
+        ];
+        if let Some(summary) = result.summary.as_deref().filter(|text| !text.is_empty()) {
+            lines.push(Line::from(summary.to_string()));
+        }
+        match self.installed_copy(result) {
+            Some(InstalledCopy { linked: true }) => lines.push(Line::from(Span::styled(
+                "You already have this one. Enter reinstalls it over your copy.",
+                muted,
+            ))),
+            Some(InstalledCopy { linked: false }) => lines.push(Line::from(Span::styled(
+                "You have a copy that isn't linked. Enter replaces it with this one and \
+                 links it. Your addon settings stay as they are.",
+                muted,
+            ))),
+            None => {}
+        }
+        lines
     }
 
-    pub(super) fn search_result_name_line(
-        &self,
-        result: &WagoSearchResult,
-        selected: bool,
-        tracked_folder: Option<&str>,
-        install_state: Option<&SearchInstallState>,
-    ) -> Line<'static> {
-        let mut spans = vec![Span::styled(
-            if selected { "› " } else { "  " },
-            Style::default().fg(self.ui_theme.highlight),
-        )];
-
-        let name_spans = if install_state.is_some() {
-            shimmer_text_spans(
-                &truncate_text(&result.display_name, 28),
-                self.ui_theme.info,
-                self.ui_theme.shimmer_glow,
-                ShimmerConfig::action(),
-            )
-        } else {
-            vec![Span::styled(
-                truncate_text(&result.display_name, 28),
-                if selected {
-                    Style::default()
-                        .fg(self.ui_theme.highlight)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.ui_theme.info)
-                },
-            )]
-        };
-        spans.extend(name_spans);
-
-        if let Some(state) = install_state {
-            spans.push(Span::raw("  "));
-            match state {
-                SearchInstallState::Checking { .. } => spans.extend(shimmer_text_spans(
-                    "checking",
-                    self.ui_theme.warning,
-                    self.ui_theme.shimmer_glow,
-                    ShimmerConfig::action(),
-                )),
-                SearchInstallState::Installing { .. } => spans.extend(shimmer_text_spans(
-                    "installing",
-                    self.ui_theme.warning,
-                    self.ui_theme.shimmer_glow,
-                    ShimmerConfig::action(),
-                )),
-                SearchInstallState::Success { .. } => spans.push(Span::styled(
-                    "✓ installed",
-                    Style::default()
-                        .fg(self.ui_theme.success)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                SearchInstallState::ConfirmReplace { .. } => spans.push(Span::styled(
-                    "📦 installed",
-                    Style::default()
-                        .fg(self.ui_theme.panel_title)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                SearchInstallState::Error { .. } => spans.push(Span::styled(
-                    "error",
-                    Style::default()
-                        .fg(self.ui_theme.error)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                SearchInstallState::Idle => {}
-            }
-        } else if tracked_folder.is_some() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                "📦 installed",
-                Style::default()
-                    .fg(self.ui_theme.panel_title)
-                    .add_modifier(Modifier::BOLD),
-            ));
+    /// Whether a result is already in the addon list: linked to it on
+    /// Wago.io, or a not linked addon with the same name.
+    pub(super) fn installed_copy(&self, result: &WagoSearchResult) -> Option<InstalledCopy> {
+        if self.tracked_wago_result_folder(result).is_some() {
+            return Some(InstalledCopy { linked: true });
         }
-
-        Line::from(spans)
+        self.dashboard
+            .items
+            .iter()
+            .any(|item| {
+                item.source == SourceKind::Manual
+                    && (item.name.eq_ignore_ascii_case(&result.display_name)
+                        || item.folder.eq_ignore_ascii_case(&result.display_name))
+            })
+            .then_some(InstalledCopy { linked: false })
     }
 
     pub(super) fn tracked_wago_result_folder(&self, result: &WagoSearchResult) -> Option<String> {
@@ -925,20 +768,5 @@ impl App {
                         .is_some_and(|slug| slug.eq_ignore_ascii_case(&result_slug))
             })
             .map(|item| item.folder.clone())
-    }
-
-    pub(super) fn search_install_state_for_result(
-        &self,
-        result: &WagoSearchResult,
-    ) -> Option<&SearchInstallState> {
-        let (addon_id, _) = self.search_pane.install_identity();
-        if addon_id.as_deref() == Some(result.id.as_str()) {
-            match &self.search_pane.install_state {
-                SearchInstallState::Idle => None,
-                state => Some(state),
-            }
-        } else {
-            None
-        }
     }
 }

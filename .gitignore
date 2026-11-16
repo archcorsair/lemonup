@@ -5,8 +5,7 @@ test-output/
 coverage/
 *.lcov
 logs/
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+*.log
 .env
 .env.development.local
 .env.test.local
@@ -18,5 +17,3 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 CLAUDE.md
 GEMINI.md
 .claude/
-conductor/
-node_modules/

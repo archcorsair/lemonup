@@ -8,17 +8,21 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TerminalEvent {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    /// Text delivered through bracketed paste.
+    Paste(String),
 }
 
 pub struct EventHandler {
-    receiver: mpsc::UnboundedReceiver<TerminalEvent>,
+    /// Each event with when it was read from the terminal.
+    receiver: mpsc::UnboundedReceiver<(TerminalEvent, Instant)>,
     tick_rate_ms: Arc<AtomicU64>,
+    last_read_at: Option<Instant>,
 }
 
 impl EventHandler {
@@ -36,17 +40,34 @@ impl EventHandler {
                 match event::poll(timeout) {
                     Ok(true) => match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
-                            if sender.send(TerminalEvent::Key(key)).is_err() {
+                            if sender
+                                .send((TerminalEvent::Key(key), Instant::now()))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
                         Ok(CrosstermEvent::Mouse(mouse)) => {
-                            if sender.send(TerminalEvent::Mouse(mouse)).is_err() {
+                            if sender
+                                .send((TerminalEvent::Mouse(mouse), Instant::now()))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
                         Ok(CrosstermEvent::Resize(width, height)) => {
-                            if sender.send(TerminalEvent::Resize(width, height)).is_err() {
+                            if sender
+                                .send((TerminalEvent::Resize(width, height), Instant::now()))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(CrosstermEvent::Paste(text)) => {
+                            if sender
+                                .send((TerminalEvent::Paste(text), Instant::now()))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -58,7 +79,7 @@ impl EventHandler {
                 }
 
                 if last_tick.elapsed() >= tick_rate {
-                    if sender.send(TerminalEvent::Tick).is_err() {
+                    if sender.send((TerminalEvent::Tick, Instant::now())).is_err() {
                         break;
                     }
                     last_tick = Instant::now();
@@ -69,6 +90,7 @@ impl EventHandler {
         Self {
             receiver,
             tick_rate_ms,
+            last_read_at: None,
         }
     }
 
@@ -78,6 +100,15 @@ impl EventHandler {
     }
 
     pub async fn next(&mut self) -> Option<TerminalEvent> {
-        self.receiver.recv().await
+        let (event, read_at) = self.receiver.recv().await?;
+        self.last_read_at = Some(read_at);
+        Some(event)
+    }
+
+    /// When the event `next` last returned was read from the terminal. A key
+    /// can wait in the queue while the app works, so this can be well before
+    /// the app handles it.
+    pub fn last_read_at(&self) -> Option<Instant> {
+        self.last_read_at
     }
 }

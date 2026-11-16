@@ -1,0 +1,523 @@
+//! The question dialog: one centered box for every yes or no question.
+//!
+//! The title is the question, the body names exactly what is affected, and
+//! the two answers are written as outcomes ("keep them"). `y` says yes; `n`,
+//! `esc` and `q` say no; `enter` does nothing, because it is what people hit
+//! by reflex. The border is red for delete and restore only.
+
+use super::keymap::KeyHint;
+use super::sheet::{dim_area, wrap_lines};
+use super::*;
+use crate::theme::ColorRoles;
+
+/// The widest a dialog gets, borders included.
+const DIALOG_WIDTH: u16 = 64;
+/// Columns between the border and the text, on each side.
+const DIALOG_PADDING: u16 = 2;
+/// The most addon names a delete question (or folders a replace question)
+/// lists before "and N more".
+const DIALOG_MAX_NAMES: usize = 8;
+
+/// An addon a delete question names, with the folders that go with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeleteTarget {
+    pub(super) name: String,
+    pub(super) folders: usize,
+}
+
+/// The question that is open, if any. Built fresh from the app's state on
+/// every draw and key press, so it never says anything that stopped being true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Question {
+    DeleteAddons(Vec<DeleteTarget>),
+    /// `when` is "today at 09:15", `ago` is "2 hours ago".
+    RestoreBackup {
+        when: String,
+        ago: String,
+    },
+    DeleteBackup {
+        when: String,
+        ago: String,
+    },
+    /// `direct` is a GitHub, WoWInterface or TukUI install, `source` its
+    /// label; otherwise Wago.io. `folders` are exactly what a yes replaces.
+    ReplaceAddon {
+        name: String,
+        source: &'static str,
+        direct: bool,
+        folders: Vec<String>,
+    },
+    /// `progress` is (done, total) once the update phase has started.
+    QuitWhileUpdating {
+        progress: Option<(usize, usize)>,
+    },
+    /// Esc on setup's first step. `rerun`: setup was opened from Settings,
+    /// so a yes goes back to the list.
+    QuitSetup {
+        rerun: bool,
+    },
+}
+
+impl Question {
+    pub(super) fn title(&self) -> String {
+        match self {
+            Self::DeleteAddons(targets) if targets.len() == 1 => {
+                format!("Delete {}?", targets[0].name)
+            }
+            Self::DeleteAddons(targets) => format!("Delete {} addons?", targets.len()),
+            Self::RestoreBackup { .. } => "Restore this backup?".to_string(),
+            Self::DeleteBackup { .. } => "Delete this backup?".to_string(),
+            Self::ReplaceAddon { name, .. } => format!("Replace your copy of {name}?"),
+            Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
+            Self::QuitSetup { .. } => "Quit setup?".to_string(),
+        }
+    }
+
+    /// Delete and restore get the red border; replace and quit do not.
+    pub(super) fn danger(&self) -> bool {
+        matches!(
+            self,
+            Self::DeleteAddons(_) | Self::RestoreBackup { .. } | Self::DeleteBackup { .. }
+        )
+    }
+
+    /// What `y` and `n` do, as outcomes.
+    pub(super) fn answers(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::DeleteAddons(targets) if targets.len() == 1 => ("delete it", "keep it"),
+            Self::DeleteAddons(_) => ("delete them", "keep them"),
+            Self::RestoreBackup { .. } => ("restore", "keep what I have now"),
+            Self::DeleteBackup { .. } => ("delete it", "keep it"),
+            Self::ReplaceAddon { .. } => ("replace it", "leave it alone"),
+            Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
+            Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
+            Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
+        }
+    }
+
+    /// The messages `y` and a "no" key send.
+    fn messages(&self) -> (AppMessage, AppMessage) {
+        match self {
+            Self::DeleteAddons(_) => (
+                AppMessage::DashboardConfirmDelete,
+                AppMessage::DashboardCancelPendingDelete,
+            ),
+            Self::RestoreBackup { .. } => (
+                AppMessage::BackupConfirmRestore,
+                AppMessage::BackupCancelRestore,
+            ),
+            Self::DeleteBackup { .. } => (
+                AppMessage::BackupConfirmDelete,
+                AppMessage::BackupCancelRestore,
+            ),
+            Self::ReplaceAddon { direct: true, .. } => (
+                AppMessage::SearchConfirmReplace,
+                AppMessage::SearchCancelReplace,
+            ),
+            Self::ReplaceAddon { .. } => (
+                AppMessage::WagoConfirmInstall,
+                AppMessage::WagoCancelInstall,
+            ),
+            Self::QuitWhileUpdating { .. } => {
+                (AppMessage::QuitConfirmed, AppMessage::QuitCancelled)
+            }
+            Self::QuitSetup { .. } => (
+                AppMessage::OnboardingQuitConfirmed,
+                AppMessage::OnboardingQuitCancelled,
+            ),
+        }
+    }
+
+    /// The body above the answers, before wrapping. `names` is how many
+    /// addon names a delete question may list.
+    fn body_lines(&self, roles: ColorRoles, names: usize) -> Vec<Line<'static>> {
+        let text = Style::default().fg(roles.text);
+        let strong = text.add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(roles.muted);
+        let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
+        match self {
+            Self::DeleteAddons(targets) => {
+                let mut lines = Vec::new();
+                let shown = if targets.len() > names {
+                    names.saturating_sub(1)
+                } else {
+                    targets.len()
+                };
+                let column = targets
+                    .iter()
+                    .take(shown)
+                    .map(|target| target.name.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for target in targets.iter().take(shown) {
+                    let mut spans = vec![Span::styled(target.name.clone(), strong)];
+                    if target.folders > 0 {
+                        let pad = column - target.name.chars().count() + 2;
+                        spans.push(Span::raw(" ".repeat(pad)));
+                        spans.push(Span::styled(
+                            format!(
+                                "and the {} folder{} that belong{} to it",
+                                target.folders,
+                                plural_suffix(target.folders),
+                                if target.folders == 1 { "s" } else { "" }
+                            ),
+                            muted,
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                if shown < targets.len() {
+                    lines.push(Line::from(Span::styled(
+                        format!("and {} more", targets.len() - shown),
+                        muted,
+                    )));
+                }
+                let these = if targets.len() == 1 {
+                    "this addon"
+                } else {
+                    "these addons"
+                };
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("Your settings for {these} are not touched."),
+                    muted,
+                )));
+                lines.push(Line::from(vec![
+                    Span::styled("You can undo the delete with ", muted),
+                    Span::styled("z", key),
+                    Span::styled(".", muted),
+                ]));
+                lines
+            }
+            Self::RestoreBackup { when, ago } => vec![
+                Line::from(vec![
+                    Span::styled(format!("Backup from {when}"), strong),
+                    Span::styled(format!(" ({ago})"), muted),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "This puts back the keybinds, macros and addon setups from that moment \
+                     and replaces the ones you have now.",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "Close the game first, or it will overwrite them again.",
+                    Style::default().fg(roles.amber),
+                )),
+            ],
+            Self::DeleteBackup { when, ago } => vec![
+                Line::from(vec![
+                    Span::styled(format!("Backup from {when}"), strong),
+                    Span::styled(format!(" ({ago})"), muted),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("This can't be undone.", text)),
+            ],
+            Self::ReplaceAddon {
+                name,
+                source,
+                folders,
+                ..
+            } => {
+                let mut lines = vec![Line::from(Span::styled(
+                    format!(
+                        "{name} is already installed. Installing it from {source} replaces \
+                         the files in your AddOns folder, and LemonUp keeps it updated."
+                    ),
+                    text,
+                ))];
+                if !folders.is_empty() {
+                    let these = if folders.len() == 1 {
+                        "This folder is replaced:"
+                    } else {
+                        "These folders are replaced:"
+                    };
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(these, muted)));
+                    let shown = if folders.len() > names {
+                        names.saturating_sub(1)
+                    } else {
+                        folders.len()
+                    };
+                    for folder in folders.iter().take(shown) {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                    if shown < folders.len() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  and {} more", folders.len() - shown),
+                            muted,
+                        )));
+                    }
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("Your {name} settings are kept."),
+                    muted,
+                )));
+                lines
+            }
+            Self::QuitWhileUpdating { progress } => {
+                let first = match progress {
+                    Some((done, total)) => format!(
+                        "{done} of {total} addon{} {} done.",
+                        plural_suffix(*total),
+                        if *done == 1 { "is" } else { "are" }
+                    ),
+                    None => "LemonUp is still working out which addons to update.".to_string(),
+                };
+                vec![Line::from(Span::styled(
+                    format!(
+                        "{first} If you quit now, the update stops and the addons it has \
+                         not finished stay as they are."
+                    ),
+                    text,
+                ))]
+            }
+            Self::QuitSetup { rerun: false } => vec![Line::from(Span::styled(
+                "Nothing is saved yet. LemonUp opens setup again the next time you start it.",
+                text,
+            ))],
+            Self::QuitSetup { rerun: true } => vec![Line::from(Span::styled(
+                "Nothing you chose here is saved. Your game folder and settings stay as they were.",
+                text,
+            ))],
+        }
+    }
+
+    /// The answers row: `    y  delete them          n  keep them`.
+    fn answer_line(&self, roles: ColorRoles) -> Line<'static> {
+        let (yes, no) = self.answers();
+        let yes_key = if self.danger() {
+            roles.red
+        } else {
+            roles.lemon
+        };
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                "y",
+                Style::default().fg(yes_key).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {yes}"), Style::default().fg(roles.text)),
+            Span::raw("          "),
+            Span::styled(
+                "n",
+                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {no}"), Style::default().fg(roles.text)),
+        ])
+    }
+
+    /// Every row inside the border at `width` columns, at most `max_rows`
+    /// of them: a long list of addons gives way to "and N more" first.
+    pub(super) fn lines(&self, roles: ColorRoles, width: u16, max_rows: u16) -> Vec<Line<'static>> {
+        let build = |names: usize| {
+            let mut lines = vec![Line::from("")];
+            lines.extend(wrap_lines(&self.body_lines(roles, names), width));
+            lines.push(Line::from(""));
+            lines.extend(wrap_lines(&[self.answer_line(roles)], width));
+            lines.push(Line::from(""));
+            lines
+        };
+        let mut names = match self {
+            Self::DeleteAddons(targets) => targets.len().min(DIALOG_MAX_NAMES),
+            Self::ReplaceAddon { folders, .. } => folders.len().min(DIALOG_MAX_NAMES),
+            _ => 0,
+        };
+        let mut lines = build(names);
+        while lines.len() > usize::from(max_rows) && names > 1 {
+            names -= 1;
+            lines = build(names);
+        }
+        lines
+    }
+}
+
+impl App {
+    /// Remembers the question a draw shows and when it first showed it.
+    pub(super) fn note_question_shown(&mut self, now: Instant) {
+        match self.active_question() {
+            Some(question) => {
+                if self
+                    .question_shown
+                    .as_ref()
+                    .is_none_or(|(shown, _)| *shown != question)
+                {
+                    self.question_shown = Some((question, now));
+                }
+            }
+            None => self.question_shown = None,
+        }
+    }
+
+    /// Whether `question` was on screen before the key being handled was read.
+    fn question_seen_before_key(&self, question: &Question) -> bool {
+        match &self.question_shown {
+            Some((shown, shown_at)) if shown == question => {
+                self.key_read_at.is_none_or(|read_at| read_at >= *shown_at)
+            }
+            _ => false,
+        }
+    }
+
+    /// The question waiting for an answer, if any. Quitting comes first: it
+    /// can be asked on top of another question.
+    pub(super) fn active_question(&self) -> Option<Question> {
+        if self.shell_mode == ShellMode::Onboarding {
+            return self.onboarding.quit_question.then(|| Question::QuitSetup {
+                rerun: self.setup_is_rerun(),
+            });
+        }
+        if self.quit_question_open && self.dashboard.update_in_progress() {
+            let progress = self
+                .dashboard
+                .job_ui()
+                .filter(|job| job.kind == DashboardJobKind::Update)
+                .map(|job| (job.current_index.saturating_sub(1), job.total));
+            return Some(Question::QuitWhileUpdating { progress });
+        }
+        if let Some(folders) = self.dashboard.pending_delete_folders() {
+            let targets = folders
+                .iter()
+                .map(|folder| {
+                    let item = self
+                        .dashboard
+                        .items
+                        .iter()
+                        .find(|item| item.folder == *folder);
+                    DeleteTarget {
+                        name: item.map_or_else(|| folder.clone(), |item| item.name.clone()),
+                        folders: item.map_or(0, |item| item.owned_folder_count),
+                    }
+                })
+                .collect();
+            return Some(Question::DeleteAddons(targets));
+        }
+        if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
+            return Some(Question::ReplaceAddon {
+                name: confirmation.inspection.addon_name.clone(),
+                source: "Wago.io",
+                direct: false,
+                folders: confirmation.inspection.existing_folders.clone(),
+            });
+        }
+        if self.dashboard.detail_mode == DetailMode::Search
+            && let Some((request, name, folders)) = self.search_pane.pending_direct_replace()
+        {
+            return Some(Question::ReplaceAddon {
+                name: name.to_string(),
+                source: request.provider.label(),
+                direct: true,
+                folders: folders.to_vec(),
+            });
+        }
+        if let Some(backup) = &self.backup_pane.pending_restore {
+            return Some(Question::RestoreBackup {
+                when: self.backup_when_phrase(backup),
+                ago: self.backup_age_phrase(backup),
+            });
+        }
+        if let Some(backup) = &self.backup_pane.pending_delete {
+            return Some(Question::DeleteBackup {
+                when: self.backup_when_phrase(backup),
+                ago: self.backup_age_phrase(backup),
+            });
+        }
+        None
+    }
+
+    /// Keys while a question is open: `y` yes, `n` `esc` `q` no, and every
+    /// other key does nothing. `None` when no question is open.
+    ///
+    /// A replace question arrives from a background install, so its `y`
+    /// counts only when read after the question was first drawn: a `y` typed
+    /// while the install ran never answers it.
+    pub(super) fn question_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        let question = self.active_question()?;
+        if key.code == KeyCode::Char('y')
+            && matches!(question, Question::ReplaceAddon { .. })
+            && !self.question_seen_before_key(&question)
+        {
+            return Some(vec![]);
+        }
+        let (yes, no) = question.messages();
+        Some(match key.code {
+            KeyCode::Char('y') => vec![yes],
+            KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => vec![no],
+            _ => vec![],
+        })
+    }
+
+    /// The key line while a question is open.
+    pub(super) fn question_key_table(&self) -> Vec<KeyHint> {
+        vec![
+            KeyHint::key(FooterHintId::Confirm, "y", "yes", &[KeyCode::Char('y')]).kept(),
+            KeyHint::key(
+                FooterHintId::Cancel,
+                "n",
+                "no",
+                &[KeyCode::Char('n'), KeyCode::Char('q')],
+            )
+            .kept(),
+            KeyHint::key(FooterHintId::Close, "esc", "no", &[KeyCode::Esc]).kept(),
+        ]
+    }
+
+    /// Draws the open question centered in `region`, the space above the
+    /// status line and the key line, over a dimmed screen.
+    pub(super) fn render_question(&self, frame: &mut Frame<'_>, region: Rect) {
+        let Some(question) = self.active_question() else {
+            return;
+        };
+        if region.width < 4 || region.height < 3 {
+            return;
+        }
+        let roles = self.ui_theme.roles;
+        let width = DIALOG_WIDTH.min(region.width.saturating_sub(2).max(4));
+        let text_width = width.saturating_sub(2 + DIALOG_PADDING * 2).max(1);
+        let lines = question.lines(roles, text_width, region.height.saturating_sub(2));
+        let height = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2).min(region.height);
+        let outer = Rect::new(
+            region.x + (region.width - width) / 2,
+            region.y + (region.height - height) / 2,
+            width,
+            height,
+        );
+
+        dim_area(frame.buffer_mut(), region, roles);
+        frame.render_widget(Clear, outer);
+        let outline = Style::default().fg(if question.danger() {
+            roles.red
+        } else {
+            roles.border
+        });
+        let title_style = Style::default()
+            .fg(if question.danger() {
+                roles.red
+            } else {
+                roles.text
+            })
+            .add_modifier(Modifier::BOLD);
+        let title = truncate_text(&question.title(), usize::from(width.saturating_sub(6)));
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(symbols::border::ROUNDED)
+                .border_style(outline)
+                .style(Style::default().bg(roles.sheet).fg(roles.text))
+                .title(Line::from(vec![
+                    Span::styled("─ ", outline),
+                    Span::styled(title, title_style),
+                    Span::styled(" ", outline),
+                ])),
+            outer,
+        );
+        let inner = Rect::new(
+            outer.x + 1 + DIALOG_PADDING,
+            outer.y + 1,
+            text_width.min(outer.width.saturating_sub(2)),
+            outer.height.saturating_sub(2),
+        );
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}

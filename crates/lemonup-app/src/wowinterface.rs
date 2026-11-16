@@ -1,7 +1,6 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
@@ -10,6 +9,10 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use time::OffsetDateTime;
 use zip::ZipArchive;
+
+use crate::archive::safe_entry_relative_path;
+use crate::source_error::{SourceError, SourceErrorKind};
+use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://api.mmoui.com/v3/game/WOW/filedetails";
 
@@ -21,6 +24,7 @@ pub(crate) struct WowinterfaceInstallSummary {
     pub(crate) installed_folders: Vec<String>,
     pub(crate) version: Option<String>,
     pub(crate) dry_run: bool,
+    pub(crate) warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,13 +36,26 @@ pub(crate) struct WowinterfaceUpdateSummary {
     pub(crate) previous_version: Option<String>,
     pub(crate) remote_version: Option<String>,
     pub(crate) updated: bool,
+    /// Not updated because the remote version is older than the installed one.
+    pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
+    pub(crate) warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WowinterfaceRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
+}
+
+/// WoWInterface has no WoW Forever category, so its files are not tagged for that client.
+/// Installs into a Forever AddOns folder are allowed but carry this warning.
+pub(crate) fn forever_install_warning(addon_dir: &Path, addon_name: &str) -> Option<String> {
+    (GameFlavor::for_addons_dir(addon_dir) == GameFlavor::Forever).then(|| {
+        format!(
+            "WoWInterface does not tag WoW Forever builds; the files for '{addon_name}' may target another game version"
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -102,16 +119,37 @@ pub(crate) async fn install_wowinterface_addon(
     target: &str,
     dry_run: bool,
 ) -> Result<WowinterfaceInstallSummary, String> {
+    install_wowinterface_addon_checked(state_database, addon_dir, target, dry_run, &[])
+        .await
+        .map_err(String::from)
+}
+
+/// `install_wowinterface_addon` with the error kind kept. `replace` is the
+/// list of folders the person agreed to replace (see `plan_install_replacements`).
+pub(crate) async fn install_wowinterface_addon_checked(
+    state_database: &mut StateDatabase,
+    addon_dir: &Path,
+    target: &str,
+    dry_run: bool,
+    replace: &[String],
+) -> Result<WowinterfaceInstallSummary, SourceError> {
     let addon_id = normalize_wowinterface_install_target(target)?;
     let client = build_wowinterface_client()?;
     let addon = fetch_wowinterface_addon(&client, &addon_id).await?;
     let bytes = download_wowinterface_release_bytes(&client, &addon).await?;
-    install_downloaded_wowinterface_addon(state_database, addon_dir, &addon, &bytes, dry_run)
+    install_downloaded_wowinterface_addon(
+        state_database,
+        addon_dir,
+        &addon,
+        &bytes,
+        dry_run,
+        replace,
+    )
 }
 
 pub(crate) async fn fetch_wowinterface_remote_version(
     addon: &AddonRecord,
-) -> Result<WowinterfaceRemoteVersion, String> {
+) -> Result<WowinterfaceRemoteVersion, SourceError> {
     let addon_id = resolve_tracked_wowinterface_id(addon)?;
     let client = build_wowinterface_client()?;
     let remote = fetch_wowinterface_addon(&client, &addon_id).await?;
@@ -140,7 +178,18 @@ pub(crate) async fn update_wowinterface_addon(
     let remote = fetch_wowinterface_addon(&client, &addon_id).await?;
     let remote_version = Some(remote.ui_version.clone());
 
-    if !force && versions_match(tracked.version.as_deref(), remote_version.as_deref()) {
+    let remote_older = !force
+        && crate::update::remote_is_older(tracked.version.as_deref(), remote_version.as_deref());
+    if remote_older
+        || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
+    {
+        crate::update::record_skipped_update_check(
+            state_database,
+            tracked,
+            remote_version.as_deref(),
+            Some(canonical_source_url(&remote.uid)),
+            dry_run,
+        )?;
         return Ok(WowinterfaceUpdateSummary {
             addon_id: remote.uid.clone(),
             addon_name: remote.ui_name.clone(),
@@ -151,7 +200,9 @@ pub(crate) async fn update_wowinterface_addon(
             previous_version: tracked.version.clone(),
             remote_version,
             updated: false,
+            remote_older,
             dry_run,
+            warning: None,
         });
     }
 
@@ -176,35 +227,41 @@ fn build_wowinterface_client() -> Result<Client, String> {
 async fn fetch_wowinterface_addon(
     client: &Client,
     addon_id: &str,
-) -> Result<WowinterfaceAddon, String> {
+) -> Result<WowinterfaceAddon, SourceError> {
     let url = format!("{API_BASE}/{addon_id}.json");
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
 
     if response.status() == StatusCode::NOT_FOUND {
-        return Err(format!("WoWInterface addon '{addon_id}' was not found"));
+        return Err(SourceError::new(
+            SourceErrorKind::NotFound,
+            format!("WoWInterface addon '{addon_id}' was not found"),
+        ));
     }
 
     let response = response
         .error_for_status()
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceError::from_keyless_reqwest)?;
     match response
         .json::<WowinterfaceResponse>()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
     {
         WowinterfaceResponse::Addons(addons) => addons.into_iter().next().ok_or_else(|| {
-            format!("WoWInterface addon '{addon_id}' returned an empty details payload")
+            format!("WoWInterface addon '{addon_id}' returned an empty details payload").into()
         }),
         WowinterfaceResponse::Error(error) => {
             if error.error.contains("No AddOn found") {
-                Err(format!("WoWInterface addon '{addon_id}' was not found"))
+                Err(SourceError::new(
+                    SourceErrorKind::NotFound,
+                    format!("WoWInterface addon '{addon_id}' was not found"),
+                ))
             } else {
-                Err(format!("WoWInterface API error: {}", error.error))
+                Err(format!("WoWInterface API error: {}", error.error).into())
             }
         }
     }
@@ -213,20 +270,20 @@ async fn fetch_wowinterface_addon(
 async fn download_wowinterface_release_bytes(
     client: &Client,
     addon: &WowinterfaceAddon,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SourceError> {
     let download_url = validate_wowinterface_download_url(&addon.ui_download)?;
     client
         .get(download_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(SourceError::from_keyless_reqwest)?
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| error.to_string())
+        .map_err(SourceError::from_keyless_reqwest)
 }
 
 fn install_downloaded_wowinterface_addon(
@@ -235,11 +292,12 @@ fn install_downloaded_wowinterface_addon(
     addon: &WowinterfaceAddon,
     archive_bytes: &[u8],
     dry_run: bool,
-) -> Result<WowinterfaceInstallSummary, String> {
+    replace: &[String],
+) -> Result<WowinterfaceInstallSummary, SourceError> {
     let temp_root = create_temp_work_dir("wowi-install")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let outcome = (|| {
+    let outcome = (|| -> Result<WowinterfaceInstallSummary, SourceError> {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
         extract_zip_archive(&zip_path, &extract_root)?;
 
@@ -247,8 +305,11 @@ fn install_downloaded_wowinterface_addon(
         let target_name = addon.ui_file_name.trim_end_matches(".zip");
         let parent_folder =
             determine_parent_folder(&extracted.folders, target_name, Some(&addon.ui_name))?;
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == parent_folder)
@@ -267,23 +328,31 @@ fn install_downloaded_wowinterface_addon(
                 installed_folders: extracted.folders,
                 version: Some(addon.ui_version.clone()),
                 dry_run: true,
+                warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
 
-        preflight_install_targets(addon_dir, &extracted.folders)?;
-        let mut copied_folders = Vec::new();
-        for folder in &extracted.folders {
-            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
-            copied_folders.push(folder.clone());
-        }
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            None,
+        )?;
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            &replaced,
+        )?;
 
         let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            for folder in copied_folders.iter().rev() {
-                let _ = fs::remove_dir_all(addon_dir.join(folder));
-            }
-            return Err(error.to_string());
+            return Err(swap.abort(error.to_string()).into());
         }
+        swap.commit();
 
         Ok(WowinterfaceInstallSummary {
             addon_id: addon.uid.clone(),
@@ -292,6 +361,7 @@ fn install_downloaded_wowinterface_addon(
             installed_folders: extracted.folders,
             version: Some(addon.ui_version.clone()),
             dry_run: false,
+            warning: forever_install_warning(addon_dir, &addon.ui_name),
         })
     })();
 
@@ -310,8 +380,6 @@ fn update_downloaded_wowinterface_addon(
     let temp_root = create_temp_work_dir("wowi-update")?;
     let zip_path = temp_root.join("package.zip");
     let extract_root = temp_root.join("extract");
-    let backup_root = temp_root.join("backup");
-    fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
     let previous_version = tracked.version.clone();
     let outcome = (|| {
         fs::write(&zip_path, archive_bytes).map_err(|error| error.to_string())?;
@@ -328,8 +396,11 @@ fn update_downloaded_wowinterface_addon(
             ));
         }
 
-        let scanned = scan_addons_dir(&extracted.source_root, GameFlavor::Retail)
-            .map_err(|error| error.to_string())?;
+        let scanned = scan_addons_dir(
+            &extracted.source_root,
+            GameFlavor::for_addons_dir(addon_dir),
+        )
+        .map_err(|error| error.to_string())?;
         let parent_metadata = scanned
             .iter()
             .find(|candidate| candidate.folder == tracked.folder)
@@ -340,11 +411,14 @@ fn update_downloaded_wowinterface_addon(
                 )
             })?;
 
-        let managed_folders = std::iter::once(tracked.folder.clone())
-            .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-            .collect::<Vec<_>>();
-
-        preflight_update_targets(addon_dir, &extracted.folders, &managed_folders)?;
+        // Parent plus owned folders (authoritative ownership only) and any package folders
+        // taken over from manual rows; refuses folders of other tracked addons.
+        let managed_folders = crate::update_targets::plan_update_replacements(
+            state_database,
+            addon_dir,
+            tracked,
+            &extracted.folders,
+        )?;
 
         if dry_run {
             return Ok(WowinterfaceUpdateSummary {
@@ -355,33 +429,26 @@ fn update_downloaded_wowinterface_addon(
                 previous_version,
                 remote_version: Some(addon.ui_version.clone()),
                 updated: true,
+                remote_older: false,
                 dry_run: true,
+                warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
 
-        let mut moved_existing = Vec::new();
-        for folder in &managed_folders {
-            let source = addon_dir.join(folder);
-            if !source.exists() {
-                continue;
-            }
-            let backup = backup_root.join(folder);
-            copy_dir_recursively(&source, &backup)?;
-            fs::remove_dir_all(&source).map_err(|error| error.to_string())?;
-            moved_existing.push(folder.clone());
-        }
-
-        let mut copied_new = Vec::new();
-        for folder in &extracted.folders {
-            copy_dir_recursively(&extracted.source_root.join(folder), &addon_dir.join(folder))?;
-            copied_new.push(folder.clone());
-        }
+        // Stage, move aside and place by same-volume rename; any failure restores the old
+        // folders before the error is returned.
+        let swap = FolderSwap::apply(
+            addon_dir,
+            &extracted.source_root,
+            &extracted.folders,
+            &managed_folders,
+        )?;
 
         let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
-            rollback_updated_folders(addon_dir, &backup_root, &copied_new, &moved_existing);
-            return Err(error.to_string());
+            return Err(swap.abort(error.to_string()));
         }
+        swap.commit();
 
         Ok(WowinterfaceUpdateSummary {
             addon_id: addon.uid.clone(),
@@ -391,7 +458,9 @@ fn update_downloaded_wowinterface_addon(
             previous_version,
             remote_version: Some(addon.ui_version.clone()),
             updated: true,
+            remote_older: false,
             dry_run: false,
+            warning: forever_install_warning(addon_dir, &addon.ui_name),
         })
     })();
 
@@ -666,45 +735,6 @@ fn normalize_version(value: &str) -> String {
     normalized.to_ascii_lowercase()
 }
 
-fn preflight_install_targets(addon_dir: &Path, folders: &[String]) -> Result<(), String> {
-    let collisions = folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists())
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "install refused because these addon folders already exist: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
-fn preflight_update_targets(
-    addon_dir: &Path,
-    new_folders: &[String],
-    replaceable_folders: &[String],
-) -> Result<(), String> {
-    let replaceable = replaceable_folders
-        .iter()
-        .collect::<std::collections::HashSet<_>>();
-    let collisions = new_folders
-        .iter()
-        .filter(|folder| addon_dir.join(folder).exists() && !replaceable.contains(folder))
-        .cloned()
-        .collect::<Vec<_>>();
-    if collisions.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "update refused because these addon folders are owned by something else on disk: {}",
-            collisions.join(", ")
-        ))
-    }
-}
-
 fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let file = File::open(zip_path).map_err(|error| error.to_string())?;
@@ -712,7 +742,7 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+        let Some(relative_path) = safe_entry_relative_path(entry.name()) else {
             continue;
         };
         let output_path = destination.join(relative_path);
@@ -732,76 +762,26 @@ fn extract_zip_archive(zip_path: &Path, destination: &Path) -> Result<(), String
     Ok(())
 }
 
-fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
-            copy_dir_recursively(&from, &to)?;
-        } else {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::copy(&from, &to).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
+/// A fresh, uniquely named work directory under the system temp dir; the caller removes it.
+///
+/// `tempfile` creates it atomically with a random suffix, so parallel operations (and tests)
+/// can never share one. A millisecond-timestamp name with an `exists()` check could hand the
+/// same directory to two callers in the same millisecond, and one would delete the other's
+/// extracted package.
 fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis();
-    let root = std::env::temp_dir();
-
-    for attempt in 0..100u16 {
-        let candidate = if attempt == 0 {
-            root.join(format!("lemonup-{prefix}-{timestamp}"))
-        } else {
-            root.join(format!("lemonup-{prefix}-{timestamp}-{attempt}"))
-        };
-        if !candidate.exists() {
-            fs::create_dir_all(&candidate).map_err(|error| error.to_string())?;
-            return Ok(candidate);
-        }
-    }
-
-    Err("failed to create a unique temporary WoWInterface work directory".to_string())
-}
-
-fn rollback_updated_folders(
-    addon_dir: &Path,
-    backup_root: &Path,
-    copied_new: &[String],
-    moved_existing: &[String],
-) {
-    for folder in copied_new.iter().rev() {
-        let _ = fs::remove_dir_all(addon_dir.join(folder));
-    }
-
-    for folder in moved_existing {
-        let backup = backup_root.join(folder);
-        if !backup.exists() {
-            continue;
-        }
-        let restored = addon_dir.join(folder);
-        let _ = copy_dir_recursively(&backup, &restored);
-    }
+    tempfile::Builder::new()
+        .prefix(&format!("lemonup-{prefix}-"))
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         WowinterfaceResponse, build_managed_wowinterface_record, determine_parent_folder,
-        parse_wowinterface_id_from_url, parse_wowinterface_target,
-        update_downloaded_wowinterface_addon, versions_match,
+        install_downloaded_wowinterface_addon, parse_wowinterface_id_from_url,
+        parse_wowinterface_target, update_downloaded_wowinterface_addon, versions_match,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
     use tempfile::tempdir;
@@ -966,12 +946,193 @@ mod tests {
         .expect("update");
 
         assert!(summary.updated);
+        assert_eq!(summary.warning, None);
         let stored = database
             .get_addon_by_folder("ElvUI_WindTools")
             .expect("get addon")
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("4.16"));
         assert_eq!(stored.source, SourceKind::WowInterface);
+    }
+
+    fn seed_dbm_layout(
+        addon_dir: &std::path::Path,
+        database: &StateDatabase,
+        gui_source: SourceKind,
+    ) -> AddonRecord {
+        for folder in ["DBM-Core", "DBM-GUI", "DBM-StatusBarTimers"] {
+            std::fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            std::fs::write(
+                addon_dir.join(folder).join(format!("{folder}.toc")),
+                "## Title: DBM\n## Version: 11.0.1\n## Interface: 110205\n",
+            )
+            .expect("write toc");
+            std::fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale");
+        }
+        // Migrated from v1: tracked, no owned folders.
+        let mut tracked = AddonRecord::new("DBM", "DBM-Core", SourceKind::WowInterface);
+        tracked.version = Some("11.0.1".to_string());
+        tracked.source_url =
+            Some("https://www.wowinterface.com/downloads/info8814.html".to_string());
+        database.upsert_addon(&tracked).expect("seed parent");
+        database
+            .upsert_addon(&AddonRecord::new("DBM-GUI", "DBM-GUI", gui_source))
+            .expect("seed gui row");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM-StatusBarTimers",
+                "DBM-StatusBarTimers",
+                SourceKind::Manual,
+            ))
+            .expect("seed timers row");
+        tracked
+    }
+
+    fn dbm_package() -> (super::WowinterfaceAddon, Vec<u8>) {
+        let addon = super::WowinterfaceAddon {
+            uid: "8814".to_string(),
+            ui_name: "Deadly Boss Mods".to_string(),
+            ui_version: "11.0.2".to_string(),
+            ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=8814".to_string(),
+            ui_author_name: "MysticalOS".to_string(),
+            ui_file_name: "DBM-Core.zip".to_string(),
+        };
+        let toc = "## Title: DBM\n## Version: 11.0.2\n## Interface: 110205\n";
+        let bytes = build_zip(&[
+            ("DBM-Core/DBM-Core.toc", toc),
+            ("DBM-GUI/DBM-GUI.toc", toc),
+            ("DBM-StatusBarTimers/DBM-StatusBarTimers.toc", toc),
+            ("DBM-VPVEM/DBM-VPVEM.toc", toc),
+        ]);
+        (addon, bytes)
+    }
+
+    #[test]
+    fn update_downloaded_wowinterface_addon_takes_over_manual_package_folders() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let tracked = seed_dbm_layout(&addon_dir, &database, SourceKind::Manual);
+        let (addon, bytes) = dbm_package();
+
+        let summary = update_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            false,
+        )
+        .expect("update");
+
+        assert!(summary.updated);
+        for folder in ["DBM-Core", "DBM-GUI", "DBM-StatusBarTimers"] {
+            assert!(
+                !addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder} must be replaced, not merged"
+            );
+        }
+        assert!(addon_dir.join("DBM-VPVEM").join("DBM-VPVEM.toc").exists());
+        let stored = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(stored.has_authoritative_owned_folders());
+        let mut owned = stored
+            .owned_folders
+            .iter()
+            .map(|owned| owned.name.as_str())
+            .collect::<Vec<_>>();
+        owned.sort();
+        assert_eq!(owned, vec!["DBM-GUI", "DBM-StatusBarTimers", "DBM-VPVEM"]);
+        let folders = database
+            .list_addons()
+            .expect("list")
+            .into_iter()
+            .map(|row| row.folder)
+            .collect::<Vec<_>>();
+        assert_eq!(folders, vec!["DBM-Core".to_string()]);
+    }
+
+    #[test]
+    fn update_downloaded_wowinterface_addon_refuses_folders_of_other_tracked_addons() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let tracked = seed_dbm_layout(&addon_dir, &database, SourceKind::Wago);
+        let (addon, bytes) = dbm_package();
+
+        let error = update_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            false,
+        )
+        .expect_err("a separately tracked folder must not be taken over");
+
+        assert_eq!(
+            error,
+            "update refused because these addon folders are owned by something else on disk: DBM-GUI (tracked separately)"
+        );
+        assert!(addon_dir.join("DBM-Core").join("stale.lua").exists());
+        assert!(addon_dir.join("DBM-GUI").join("stale.lua").exists());
+        assert!(!addon_dir.join("DBM-VPVEM").exists());
+        assert_eq!(database.list_addons().expect("list").len(), 3);
+    }
+
+    #[test]
+    fn forever_install_warns_that_wowinterface_does_not_tag_forever_builds() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        let addon = super::WowinterfaceAddon {
+            uid: "25687".to_string(),
+            ui_name: "ElvUI_WindTools".to_string(),
+            ui_version: "4.16".to_string(),
+            ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=25687".to_string(),
+            ui_author_name: "fang2hou".to_string(),
+            ui_file_name: "ElvUI_WindTools-4.16.zip".to_string(),
+        };
+        let bytes = build_zip(&[(
+            "ElvUI_WindTools/ElvUI_WindTools.toc",
+            "## Title: ElvUI WindTools\n## Version: 4.16\n## Interface: 120105, 16001\n",
+        )]);
+
+        let summary = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            false,
+            &[],
+        )
+        .expect("install is allowed on Forever");
+
+        assert!(addon_dir.join("ElvUI_WindTools").exists());
+        let warning = summary.warning.expect("forever warning");
+        assert!(warning.contains("WoWInterface does not tag WoW Forever builds"));
+        assert!(warning.contains("ElvUI_WindTools"));
+        let stored = database
+            .get_addon_by_folder("ElvUI_WindTools")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.flavor, lemonup_core::GameFlavor::Forever);
     }
 
     #[test]

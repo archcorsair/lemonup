@@ -49,7 +49,11 @@ pwsh -Command "& 'target/debug/lemonup.exe' --profile manual-smoke --addon-dir '
 
 Quick checklist:
 - run one provider-backed selected update
-- verify one manual addon reports a skip path cleanly
+- verify one Not linked addon reports a skip path cleanly
 - confirm selection remains stable
-- confirm list/detail text stays readable
+- confirm list and Details text stays readable (Details docks at 120 columns and wider)
 - verify backup restore round-trips against the smoke profile when that flow changes
+
+## Screenshots
+
+Website screenshots come from `scripts/screenshots/generate.sh` (bash, needs `vhs`, `ttyd`, `python3`, `sqlite3` and ImageMagick). It builds the release binary, records every tape in `scripts/screenshots/tapes/` against an offline fixture in `/tmp/lemonup-demo`, and writes 2x lossless WebP files to `../lemonup.org/docs/public/screens` (override with `--out`, reuse a binary with `--bin`). It never touches your real LemonUp config or WoW install. See `scripts/screenshots/README.md`.

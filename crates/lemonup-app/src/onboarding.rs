@@ -1,42 +1,38 @@
-use std::path::PathBuf;
+//! Setup: three steps, Find your game, Wago.io and Preferences.
+//!
+//! Step 1 searches on its own first. What it finds is listed by game
+//! version with an addon count; when it finds nothing it offers plain
+//! choices, one of them a folder box that takes any folder of the game.
 
-use lemonup_core::{AppConfig, ThemeMode, suggested_scan_roots};
+use std::path::{Path, PathBuf};
+
+use lemonup_core::{AppConfig, suggested_scan_roots};
+
+use crate::app::text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
-    Theme,
-    Directory,
+    FindGame,
     Wago,
-    Settings,
-    Review,
+    Preferences,
 }
 
 impl OnboardingStep {
-    pub const ALL: [Self; 5] = [
-        Self::Theme,
-        Self::Directory,
-        Self::Wago,
-        Self::Settings,
-        Self::Review,
-    ];
+    pub const ALL: [Self; 3] = [Self::FindGame, Self::Wago, Self::Preferences];
 
     pub fn index(self) -> usize {
         match self {
-            Self::Theme => 0,
-            Self::Directory => 1,
-            Self::Wago => 2,
-            Self::Settings => 3,
-            Self::Review => 4,
+            Self::FindGame => 0,
+            Self::Wago => 1,
+            Self::Preferences => 2,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Theme => "Theme",
-            Self::Directory => "Directory",
-            Self::Wago => "Wago",
-            Self::Settings => "Settings",
-            Self::Review => "Review",
+            Self::FindGame => "Find your game",
+            Self::Wago => "Wago.io",
+            Self::Preferences => "Preferences",
         }
     }
 
@@ -44,7 +40,49 @@ impl OnboardingStep {
         Self::ALL
             .get(self.index() + 1)
             .copied()
-            .unwrap_or(Self::Review)
+            .unwrap_or(Self::Preferences)
+    }
+
+    pub fn previous(self) -> Self {
+        self.index()
+            .checked_sub(1)
+            .and_then(|index| Self::ALL.get(index).copied())
+            .unwrap_or(Self::FindGame)
+    }
+}
+
+/// The settings step 3 shows, worded as the Settings sheet words them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferenceField {
+    Theme,
+    BackupWtf,
+    BackupRetention,
+}
+
+impl PreferenceField {
+    pub const ALL: [Self; 3] = [Self::Theme, Self::BackupWtf, Self::BackupRetention];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Theme => 0,
+            Self::BackupWtf => 1,
+            Self::BackupRetention => 2,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Theme => "Theme",
+            Self::BackupWtf => "Back up my game settings before updates",
+            Self::BackupRetention => "Backups to keep",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL
+            .get(self.index() + 1)
+            .copied()
+            .unwrap_or(Self::BackupRetention)
     }
 
     pub fn previous(self) -> Self {
@@ -55,81 +93,90 @@ impl OnboardingStep {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnboardingSettingsField {
-    BackupWtf,
-    BackupRetention,
-    ShowLibs,
-}
-
-impl OnboardingSettingsField {
-    pub const ALL: [Self; 3] = [Self::BackupWtf, Self::BackupRetention, Self::ShowLibs];
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::BackupWtf => 0,
-            Self::BackupRetention => 1,
-            Self::ShowLibs => 2,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::BackupWtf => "Back up WTF",
-            Self::BackupRetention => "Backup retention",
-            Self::ShowLibs => "Show libraries",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        Self::ALL
-            .get(self.index() + 1)
-            .copied()
-            .unwrap_or(Self::ShowLibs)
-    }
-
-    pub fn previous(self) -> Self {
-        self.index()
-            .checked_sub(1)
-            .and_then(|index| Self::ALL.get(index).copied())
-            .unwrap_or(Self::BackupWtf)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanProgressState {
     pub dirs_scanned: usize,
     pub current_path: String,
 }
 
+/// One game version found: its AddOns folder and the addons in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundInstall {
+    pub addons_dir: PathBuf,
+    pub addons: usize,
+}
+
+/// The game versions found, then "Somewhere else…".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundState {
-    pub path: String,
-    pub selected_action: usize,
+    pub installs: Vec<FoundInstall>,
+    pub selected: usize,
+}
+
+impl FoundState {
+    pub fn choice_count(&self) -> usize {
+        self.installs.len() + 1
+    }
+
+    /// The selected install; `None` on "Somewhere else…".
+    pub fn selected_install(&self) -> Option<&FoundInstall> {
+        self.installs.get(self.selected)
+    }
+}
+
+/// A choice when nothing was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotFoundChoice {
+    TypeFolder,
+    Search(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotFoundState {
+    /// Where LemonUp looked, or why it stopped, as a sentence.
+    pub note: String,
+    pub choices: Vec<NotFoundChoice>,
+    pub selected: usize,
+}
+
+impl NotFoundState {
+    pub fn selected_choice(&self) -> Option<&NotFoundChoice> {
+        self.choices.get(self.selected)
+    }
+}
+
+/// The folder box. `back` is the screen esc returns to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingState {
+    pub error: Option<String>,
+    pub back: Box<OnboardingPhase>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingPhase {
     Bootstrapping,
     QuickChecking,
-    Ready,
     DeepScanning(ScanProgressState),
     Found(FoundState),
-    Error(String),
-    Cancelled,
+    NotFound(NotFoundState),
+    Typing(TypingState),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FoundAction {
-    UseThisPath,
-    EnterDifferentPath,
+impl OnboardingPhase {
+    /// Looking for the game: the usual places, then a folder search.
+    pub fn is_searching(&self) -> bool {
+        matches!(
+            self,
+            Self::Bootstrapping | Self::QuickChecking | Self::DeepScanning(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingTaskEvent {
-    QuickCheckFinished(Option<PathBuf>),
+    QuickCheckFinished(Vec<PathBuf>),
     DeepScanProgress(ScanProgressState),
-    DeepScanFinished(std::result::Result<Option<PathBuf>, String>),
+    DeepScanFinished(std::result::Result<Vec<PathBuf>, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,11 +184,20 @@ pub struct OnboardingState {
     pub step: OnboardingStep,
     pub phase: OnboardingPhase,
     pub draft: AppConfig,
-    pub input: String,
-    pub suggestions: Vec<String>,
-    pub selected_suggestion: Option<usize>,
-    pub settings_selection: OnboardingSettingsField,
-    pub is_editing: bool,
+    /// The folder the current (or last) search started from. The search
+    /// that starts on its own uses the home folder.
+    pub scan_root: PathBuf,
+    /// The game folder box on step 1. It starts empty.
+    pub folder_box: TextInput,
+    /// The Wago.io key box on step 2; its text is the draft's key.
+    pub key_box: TextInput,
+    pub preference: PreferenceField,
+    /// "Quit setup?" is open.
+    pub quit_question: bool,
+    /// Why the last save failed, shown on step 3.
+    pub problem: Option<String>,
+    /// The usual install places were checked this time.
+    pub checked_usual_places: bool,
 }
 
 impl OnboardingState {
@@ -150,72 +206,49 @@ impl OnboardingState {
         Self::from_config(AppConfig::new_unconfigured())
     }
 
-    #[cfg(test)]
-    pub fn with_input(input: String) -> Self {
-        let mut draft = AppConfig::new_unconfigured();
-        draft.addon_dir = Some(PathBuf::from(input.clone()));
-        Self::from_config_with_input(draft, input)
-    }
-
-    pub fn from_config(mut draft: AppConfig) -> Self {
-        let suggestions = suggested_scan_roots()
+    pub fn from_config(draft: AppConfig) -> Self {
+        let scan_root = suggested_scan_roots()
             .into_iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-        let input = draft
-            .addon_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .or_else(|| suggestions.first().cloned())
+            .next()
             .unwrap_or_default();
-        draft.addon_dir = if input.trim().is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(input.clone()))
-        };
-
+        let key_box = TextInput::new(draft.wago_api_key.clone().unwrap_or_default());
         Self {
-            step: OnboardingStep::Theme,
+            step: OnboardingStep::FindGame,
             phase: OnboardingPhase::Bootstrapping,
             draft,
-            input,
-            suggestions,
-            selected_suggestion: Some(0),
-            settings_selection: OnboardingSettingsField::BackupWtf,
-            is_editing: false,
+            scan_root,
+            folder_box: TextInput::default(),
+            key_box,
+            preference: PreferenceField::Theme,
+            quit_question: false,
+            problem: None,
+            checked_usual_places: false,
         }
     }
 
-    pub fn from_config_with_input(mut draft: AppConfig, input: String) -> Self {
-        let mut next = Self::from_config(draft.clone());
-        next.phase = OnboardingPhase::Ready;
-        next.input = input.clone();
-        next.selected_suggestion = None;
-        draft.addon_dir = Some(PathBuf::from(input));
-        next.draft = draft;
-        next
-    }
-
-    pub fn ready(&self) -> Self {
-        let mut next = self.clone();
-        next.phase = OnboardingPhase::Ready;
-        next.is_editing = false;
-        next
+    /// Whether a text box has focus: the folder box, or the key box.
+    pub fn text_box_focused(&self) -> bool {
+        match self.step {
+            OnboardingStep::FindGame => matches!(self.phase, OnboardingPhase::Typing(_)),
+            OnboardingStep::Wago => true,
+            OnboardingStep::Preferences => false,
+        }
     }
 
     pub fn begin_quick_check(&self) -> Self {
         let mut next = self.clone();
         next.phase = OnboardingPhase::QuickChecking;
+        next.checked_usual_places = true;
         next
     }
 
-    pub fn start_deep_scan(&self) -> Self {
+    pub fn start_deep_scan(&self, root: PathBuf) -> Self {
         let mut next = self.clone();
         next.phase = OnboardingPhase::DeepScanning(ScanProgressState {
             dirs_scanned: 0,
-            current_path: next.input.clone(),
+            current_path: root.display().to_string(),
         });
-        next.is_editing = false;
+        next.scan_root = root;
         next
     }
 
@@ -225,274 +258,306 @@ impl OnboardingState {
         next
     }
 
-    pub fn found(&self, path: PathBuf) -> Self {
+    /// The installs to choose from; `selected` is preselected.
+    pub fn found(&self, installs: Vec<FoundInstall>, selected: usize) -> Self {
         let mut next = self.clone();
-        let rendered = path.display().to_string();
-        next.input = rendered.clone();
-        next.phase = OnboardingPhase::Found(FoundState {
-            path: rendered,
-            selected_action: 0,
+        let selected = selected.min(installs.len());
+        next.phase = OnboardingPhase::Found(FoundState { installs, selected });
+        next
+    }
+
+    pub fn not_found(&self, note: impl Into<String>, choices: Vec<NotFoundChoice>) -> Self {
+        let mut next = self.clone();
+        next.phase = OnboardingPhase::NotFound(NotFoundState {
+            note: note.into(),
+            choices,
+            selected: 0,
         });
-        next.is_editing = false;
         next
     }
 
-    pub fn error(&self, message: impl Into<String>) -> Self {
+    /// Opens the folder box, empty; esc goes back to the screen it came from.
+    pub fn begin_typing(&self) -> Self {
         let mut next = self.clone();
-        next.phase = OnboardingPhase::Error(message.into());
-        next.is_editing = false;
+        let back = match &next.phase {
+            OnboardingPhase::Typing(typing) => typing.back.clone(),
+            phase => Box::new(phase.clone()),
+        };
+        next.phase = OnboardingPhase::Typing(TypingState { error: None, back });
+        next.folder_box = TextInput::default();
         next
     }
 
-    pub fn cancelled(&self) -> Self {
+    /// Leaves the folder box for the screen it was opened from.
+    pub fn stop_typing(&self) -> Self {
         let mut next = self.clone();
-        next.phase = OnboardingPhase::Cancelled;
-        next.is_editing = false;
+        if let OnboardingPhase::Typing(typing) = &next.phase {
+            next.phase = (*typing.back).clone();
+        }
+        next
+    }
+
+    pub fn typing_error(&self, message: impl Into<String>) -> Self {
+        let mut next = self.clone();
+        if let OnboardingPhase::Typing(typing) = &mut next.phase {
+            typing.error = Some(message.into());
+        }
+        next
+    }
+
+    /// Step 1's choice moves down (`forward`) or up, wrapping.
+    pub fn move_choice(&self, forward: bool) -> Self {
+        let mut next = self.clone();
+        let (selected, count) = match &mut next.phase {
+            OnboardingPhase::Found(found) => {
+                let count = found.choice_count();
+                (&mut found.selected, count)
+            }
+            OnboardingPhase::NotFound(not_found) => {
+                let count = not_found.choices.len();
+                (&mut not_found.selected, count)
+            }
+            _ => return next,
+        };
+        if count > 0 {
+            *selected = if forward {
+                (*selected + 1) % count
+            } else {
+                selected.checked_sub(1).unwrap_or(count - 1)
+            };
+        }
+        next
+    }
+
+    /// Uses `addons_dir` for the game and moves on to step 2.
+    pub fn choose_install(&self, addons_dir: &Path) -> Self {
+        let mut next = self.clone();
+        next.draft.addon_dir = Some(addons_dir.to_path_buf());
+        next.step = OnboardingStep::Wago;
+        next.key_box = TextInput::new(next.draft.wago_api_key.clone().unwrap_or_default());
         next
     }
 
     pub fn next_step(&self) -> Self {
         let mut next = self.clone();
         next.step = next.step.next();
-        next.is_editing = false;
+        next.problem = None;
         next
     }
 
     pub fn previous_step(&self) -> Self {
         let mut next = self.clone();
         next.step = next.step.previous();
-        next.is_editing = false;
+        next.problem = None;
         next
     }
 
-    pub fn toggle_theme(&self) -> Self {
+    pub fn set_quit_question(&self, open: bool) -> Self {
         let mut next = self.clone();
-        next.draft.theme = match next.draft.theme {
-            ThemeMode::Dark => ThemeMode::Light,
-            ThemeMode::Light => ThemeMode::Dark,
-        };
+        next.quit_question = open;
         next
     }
 
-    pub fn begin_directory_editing(&self) -> Self {
+    pub fn with_problem(&self, message: impl Into<String>) -> Self {
         let mut next = self.clone();
-        next.is_editing = true;
-        if !matches!(
-            next.phase,
-            OnboardingPhase::Ready | OnboardingPhase::Error(_) | OnboardingPhase::Cancelled
-        ) {
-            next.phase = OnboardingPhase::Ready;
+        next.problem = Some(message.into());
+        next
+    }
+
+    /// Applies `change` to the focused box at its cursor: the folder box on
+    /// step 1, the key box on step 2 (whose text becomes the draft's key).
+    pub fn edit_text(&self, change: impl FnOnce(&mut TextInput)) -> Self {
+        let mut next = self.clone();
+        if !next.text_box_focused() {
+            return next;
         }
-        next
-    }
-
-    pub fn begin_wago_editing(&self) -> Self {
-        let mut next = self.clone();
-        next.is_editing = true;
-        next
-    }
-
-    pub fn stop_editing(&self) -> Self {
-        let mut next = self.clone();
-        next.is_editing = false;
-        if next.step == OnboardingStep::Directory
-            && matches!(
-                next.phase,
-                OnboardingPhase::Error(_) | OnboardingPhase::Cancelled
-            )
-        {
-            next.phase = OnboardingPhase::Ready;
+        match next.step {
+            OnboardingStep::Wago => {
+                change(&mut next.key_box);
+                let key = next.key_box.value().trim().to_string();
+                next.draft.wago_api_key = (!key.is_empty()).then_some(key);
+            }
+            _ => {
+                change(&mut next.folder_box);
+                if let OnboardingPhase::Typing(typing) = &mut next.phase {
+                    typing.error = None;
+                }
+            }
         }
         next
     }
 
     pub fn insert_char(&self, value: char) -> Self {
-        let mut next = self.clone();
-        match next.step {
-            OnboardingStep::Directory => next.input.push(value),
-            OnboardingStep::Wago => {
-                let value_ref = next.draft.wago_api_key.get_or_insert_with(String::new);
-                value_ref.push(value);
-            }
-            _ => {}
-        }
-        next
+        self.edit_text(|text| text.insert_char(value))
     }
 
     pub fn backspace(&self) -> Self {
-        let mut next = self.clone();
-        match next.step {
-            OnboardingStep::Directory => {
-                next.input.pop();
-            }
-            OnboardingStep::Wago => {
-                if let Some(value) = &mut next.draft.wago_api_key {
-                    value.pop();
-                    if value.is_empty() {
-                        next.draft.wago_api_key = None;
-                    }
-                }
-            }
-            _ => {}
-        }
-        next
+        self.edit_text(TextInput::backspace)
     }
 
-    pub fn next_suggestion(&self) -> Self {
+    pub fn move_preference(&self, forward: bool) -> Self {
         let mut next = self.clone();
-        if next.suggestions.is_empty() {
-            return next;
-        }
-
-        let selected = match next.selected_suggestion {
-            Some(index) => (index + 1) % next.suggestions.len(),
-            None => 0,
+        next.preference = if forward {
+            next.preference.next()
+        } else {
+            next.preference.previous()
         };
-        next.selected_suggestion = Some(selected);
-        if let Some(suggestion) = next.suggestions.get(selected) {
-            next.input = suggestion.clone();
-        }
-        if matches!(
-            next.phase,
-            OnboardingPhase::Error(_) | OnboardingPhase::Cancelled
-        ) {
-            next.phase = OnboardingPhase::Ready;
-        }
         next
     }
 
-    pub fn previous_suggestion(&self) -> Self {
+    /// ←/→ on step 3. Backups to keep moves by one and never goes below
+    /// one, as in Settings.
+    pub fn change_preference(&self, delta: i16) -> Self {
         let mut next = self.clone();
-        if next.suggestions.is_empty() {
-            return next;
-        }
-
-        let selected = match next.selected_suggestion {
-            Some(0) | None => next.suggestions.len() - 1,
-            Some(index) => index - 1,
-        };
-        next.selected_suggestion = Some(selected);
-        if let Some(suggestion) = next.suggestions.get(selected) {
-            next.input = suggestion.clone();
-        }
-        if matches!(
-            next.phase,
-            OnboardingPhase::Error(_) | OnboardingPhase::Cancelled
-        ) {
-            next.phase = OnboardingPhase::Ready;
-        }
-        next
-    }
-
-    pub fn next_found_action(&self) -> Self {
-        let mut next = self.clone();
-        if let OnboardingPhase::Found(found) = &mut next.phase {
-            found.selected_action = (found.selected_action + 1) % 2;
-        }
-        next
-    }
-
-    pub fn previous_found_action(&self) -> Self {
-        let mut next = self.clone();
-        if let OnboardingPhase::Found(found) = &mut next.phase {
-            found.selected_action = if found.selected_action == 0 { 1 } else { 0 };
-        }
-        next
-    }
-
-    pub fn selected_found_action(&self) -> FoundAction {
-        match &self.phase {
-            OnboardingPhase::Found(found) => match found.selected_action {
-                0 => FoundAction::UseThisPath,
-                _ => FoundAction::EnterDifferentPath,
-            },
-            _ => FoundAction::UseThisPath,
-        }
-    }
-
-    pub fn apply_directory_to_draft(&self) -> Self {
-        let mut next = self.clone();
-        next.draft.addon_dir = Some(PathBuf::from(next.input.trim()));
-        next
-    }
-
-    pub fn next_settings_field(&self) -> Self {
-        let mut next = self.clone();
-        next.settings_selection = next.settings_selection.next();
-        next
-    }
-
-    pub fn previous_settings_field(&self) -> Self {
-        let mut next = self.clone();
-        next.settings_selection = next.settings_selection.previous();
-        next
-    }
-
-    pub fn adjust_settings_field(&self, delta: i16) -> Self {
-        let mut next = self.clone();
-        match next.settings_selection {
-            OnboardingSettingsField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
-            OnboardingSettingsField::BackupRetention => {
+        match next.preference {
+            PreferenceField::Theme => {
+                next.draft.theme = crate::theme::cycle_theme(next.draft.theme, delta);
+            }
+            PreferenceField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
+            PreferenceField::BackupRetention => {
                 let current = i32::from(next.draft.backup_retention);
-                let updated = (current + i32::from(delta)).clamp(1, 30) as u16;
-                next.draft.backup_retention = updated;
+                next.draft.backup_retention =
+                    u16::try_from((current + i32::from(delta)).max(1)).unwrap_or(u16::MAX);
             }
-            OnboardingSettingsField::ShowLibs => next.draft.show_libs = !next.draft.show_libs,
         }
         next
     }
+}
 
-    pub fn wago_api_key_value(&self) -> &str {
-        self.draft.wago_api_key.as_deref().unwrap_or("")
+/// The choices when nothing was found: the folder box first, because
+/// someone who gets here usually knows where the game is, then wider
+/// searches.
+pub fn not_found_choices() -> Vec<NotFoundChoice> {
+    let mut choices = vec![NotFoundChoice::TypeFolder];
+    if cfg!(windows) {
+        choices.extend(
+            suggested_scan_roots()
+                .into_iter()
+                .skip(1)
+                .filter(|root| root.exists())
+                .map(NotFoundChoice::Search),
+        );
+    } else {
+        let drives = if cfg!(target_os = "macos") {
+            "/Volumes"
+        } else {
+            "/mnt"
+        };
+        if Path::new(drives).is_dir() {
+            choices.push(NotFoundChoice::Search(PathBuf::from(drives)));
+        }
+        choices.push(NotFoundChoice::Search(PathBuf::from("/")));
     }
+    choices
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use lemonup_core::{AppConfig, ThemeMode};
+    use lemonup_core::ThemeMode;
 
     use super::{
-        FoundAction, OnboardingPhase, OnboardingSettingsField, OnboardingState, OnboardingStep,
+        FoundInstall, NotFoundChoice, OnboardingPhase, OnboardingState, OnboardingStep,
+        PreferenceField, not_found_choices,
     };
 
-    #[test]
-    fn with_input_prefills_without_suggestion_selection() {
-        let state = OnboardingState::with_input("D:\\Sandbox\\Interface\\AddOns".to_string());
-        assert_eq!(state.phase, OnboardingPhase::Ready);
-        assert_eq!(state.input, "D:\\Sandbox\\Interface\\AddOns");
-        assert_eq!(state.selected_suggestion, None);
+    fn install(path: &str, addons: usize) -> FoundInstall {
+        FoundInstall {
+            addons_dir: PathBuf::from(path),
+            addons,
+        }
     }
 
     #[test]
-    fn suggestion_navigation_updates_input() {
-        let state = OnboardingState {
-            suggestions: vec!["C:\\".to_string(), "D:\\".to_string()],
-            input: "C:\\".to_string(),
-            selected_suggestion: Some(0),
-            is_editing: false,
-            phase: OnboardingPhase::Ready,
-            step: OnboardingStep::Directory,
-            draft: AppConfig::new_unconfigured(),
-            settings_selection: OnboardingSettingsField::BackupWtf,
+    fn three_steps_and_no_review() {
+        assert_eq!(
+            OnboardingStep::ALL.map(OnboardingStep::label),
+            ["Find your game", "Wago.io", "Preferences"]
+        );
+        assert_eq!(
+            OnboardingStep::Preferences.next(),
+            OnboardingStep::Preferences
+        );
+        assert_eq!(
+            OnboardingStep::FindGame.previous(),
+            OnboardingStep::FindGame
+        );
+    }
+
+    #[test]
+    fn found_choices_wrap_through_somewhere_else() {
+        let state = OnboardingState::new().found(
+            vec![
+                install("/r/_retail_/Interface/AddOns", 25),
+                install("/r/_forever_/Interface/AddOns", 0),
+            ],
+            0,
+        );
+        let OnboardingPhase::Found(found) = &state.phase else {
+            panic!("found");
         };
+        assert_eq!(found.selected_install().map(|i| i.addons), Some(25));
 
-        let next = state.next_suggestion();
-        assert_eq!(next.selected_suggestion, Some(1));
-        assert_eq!(next.input, "D:\\");
+        let other = state.move_choice(true).move_choice(true);
+        let OnboardingPhase::Found(found) = &other.phase else {
+            panic!("found");
+        };
+        assert_eq!(found.selected_install(), None);
+        let OnboardingPhase::Found(found) = &state.move_choice(false).phase else {
+            panic!("found");
+        };
+        assert_eq!(found.selected, 2);
     }
 
     #[test]
-    fn found_action_wraps() {
-        let state = OnboardingState::new().found(PathBuf::from("C:\\Games\\WoW"));
-        let rotated = state.next_found_action().next_found_action();
-        assert_eq!(rotated.selected_found_action(), FoundAction::UseThisPath);
+    fn the_folder_box_starts_empty_and_esc_returns_to_where_it_opened() {
+        let state = OnboardingState::new().not_found("nothing", not_found_choices());
+        let typing = state.begin_typing();
+        assert!(typing.text_box_focused());
+        assert_eq!(typing.folder_box.value(), "");
+        let typed = typing.insert_char('~').typing_error("no").insert_char('/');
+        assert_eq!(typed.folder_box.value(), "~/");
+        // Typing clears the last error.
+        let OnboardingPhase::Typing(t) = &typed.phase else {
+            panic!("typing");
+        };
+        assert_eq!(t.error, None);
+        assert_eq!(typed.stop_typing().phase, state.phase);
+        assert_eq!(
+            not_found_choices().first(),
+            Some(&NotFoundChoice::TypeFolder)
+        );
     }
 
     #[test]
-    fn theme_toggle_updates_draft() {
-        let state = OnboardingState::new();
-        assert_eq!(state.toggle_theme().draft.theme, ThemeMode::Light);
+    fn the_key_box_is_the_drafts_key() {
+        let mut state = OnboardingState::new();
+        state.step = OnboardingStep::Wago;
+        let typed = state.insert_char('a').insert_char('b');
+        assert_eq!(typed.draft.wago_api_key.as_deref(), Some("ab"));
+        assert_eq!(typed.backspace().backspace().draft.wago_api_key, None);
+    }
+
+    #[test]
+    fn preferences_change_with_the_settings_rules() {
+        let mut state = OnboardingState::new();
+        state.step = OnboardingStep::Preferences;
+        assert_eq!(state.change_preference(1).draft.theme, ThemeMode::Light);
+        let backups = state.move_preference(true).move_preference(true);
+        assert_eq!(backups.preference, PreferenceField::BackupRetention);
+        let kept = backups.draft.backup_retention;
+        assert_eq!(
+            backups.change_preference(1).draft.backup_retention,
+            kept + 1
+        );
+        let mut one = backups.clone();
+        one.draft.backup_retention = 1;
+        assert_eq!(one.change_preference(-1).draft.backup_retention, 1);
+        let wtf = state.move_preference(true);
+        assert_eq!(
+            wtf.change_preference(-1).draft.backup_wtf,
+            !state.draft.backup_wtf
+        );
     }
 }
