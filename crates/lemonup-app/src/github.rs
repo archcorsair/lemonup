@@ -14,7 +14,6 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
-use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://api.github.com";
 
@@ -476,11 +475,15 @@ fn install_downloaded_github_addon(
             replace,
             None,
         )?;
-        let swap = FolderSwap::apply(
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides =
+            crate::update_targets::stored_toc_overrides(state_database, &parent_folder)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
             &extracted.folders,
             &replaced,
+            &toc_overrides,
         )?;
 
         let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
@@ -570,11 +573,15 @@ fn update_downloaded_github_addon(
 
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
-        let swap = FolderSwap::apply(
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides =
+            crate::update_targets::stored_toc_overrides(state_database, &tracked.folder)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
             &extracted.folders,
             &managed_folders,
+            &toc_overrides,
         )?;
 
         let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
@@ -1456,6 +1463,8 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
         };
 
         let record = build_managed_github_record(
@@ -1496,6 +1505,8 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
         };
 
         let record = build_managed_github_record(&resolved, &scanned, &["WeakAuras".to_string()]);
@@ -1893,6 +1904,102 @@ mod tests {
             .expect("get addon")
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("2.0.0"));
+    }
+
+    fn toc_overrides(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn update_writes_the_stored_toc_overrides_into_every_new_folder() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database, tracked, bytes) = seed_foo_with_options(temp.path());
+        let wanted = toc_overrides(&[("Title", "My Foo"), ("Category", "Mine")]);
+        database
+            .set_toc_overrides("Foo", &wanted)
+            .expect("set overrides");
+
+        update_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &resolved_repo("x", "Foo"),
+            &bytes,
+            false,
+        )
+        .expect("update");
+
+        for toc in ["Foo/Foo.toc", "Foo_Options/Foo_Options.toc"] {
+            let text = std::fs::read_to_string(addon_dir.join(toc)).expect("toc");
+            assert_eq!(
+                text,
+                "## Title: Foo\n## Version: 1.1.0\n## Interface: 110205\n# LemonUp-managed\n## Title: My Foo\n# LemonUp-managed\n## Category: Mine\n"
+                    .replace("## Title: Foo\n", "# LemonUp: ## Title: Foo\n"),
+                "{toc}"
+            );
+        }
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.version.as_deref(), Some("1.1.0"));
+        assert_eq!(stored.toc_overrides, wanted);
+    }
+
+    #[test]
+    fn install_over_a_not_linked_addon_keeps_its_toc_overrides() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("AdiBags")).expect("not linked copy");
+        std::fs::write(addon_dir.join("AdiBags").join("AdiBags.toc"), ADIBAGS_TOC).expect("toc");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&AddonRecord::new("AdiBags", "AdiBags", SourceKind::Manual))
+            .expect("not linked row");
+        let wanted = toc_overrides(&[("Notes", "My bags")]);
+        database
+            .set_toc_overrides("AdiBags", &wanted)
+            .expect("set overrides");
+
+        install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved_repo("AdiAddons", "AdiBags"),
+            &adibags_shaped_zip("-- v1"),
+            false,
+            &["AdiBags".to_string()],
+        )
+        .expect("install");
+
+        for toc in [
+            "AdiBags/AdiBags.toc",
+            "AdiBags/AdiBags_Vanilla.toc",
+            "AdiBags_Config/AdiBags_Config.toc",
+        ] {
+            let text = std::fs::read_to_string(addon_dir.join(toc)).expect("toc");
+            assert!(
+                text.contains("# LemonUp-managed\n## Notes: My bags\n"),
+                "{toc}: {text}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(addon_dir.join("AdiBags/Libs/LibStub/LibStub.toc"))
+                .expect("lib toc"),
+            "## Title: LibStub\n"
+        );
+        let linked = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("linked");
+        assert_eq!(linked.source, SourceKind::GitHub);
+        assert_eq!(linked.toc_overrides, wanted);
     }
 
     fn seed_foo_with_options(

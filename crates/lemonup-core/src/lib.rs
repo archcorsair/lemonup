@@ -6,6 +6,7 @@ pub mod events;
 pub mod paths;
 pub mod scan;
 pub mod storage;
+pub mod toc_edit;
 pub mod transfer;
 pub mod v1_migration;
 pub mod wow;
@@ -24,6 +25,7 @@ pub use scan::{
     scan_addons_dir_with_tracked, select_toc_file,
 };
 pub use storage::StateDatabase;
+pub use toc_edit::TocField;
 pub use transfer::{
     DEFAULT_TRANSFER_FILE_NAME, ImportAnalysis, TransferAddon, TransferFile, TransferSourceKind,
     analyze_import, default_transfer_path, export_addons, parse_import_file,

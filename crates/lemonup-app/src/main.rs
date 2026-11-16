@@ -1715,6 +1715,8 @@ mod tests {
             required_deps: vec!["Ace3".to_string()],
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
         };
 
         let refreshed = build_managed_update_record(&existing, &scanned);

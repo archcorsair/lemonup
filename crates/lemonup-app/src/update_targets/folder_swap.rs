@@ -3,7 +3,8 @@
 //! A swap runs in three steps, all inside one hidden staging directory created in the AddOns
 //! folder itself (so every rename stays on the same volume and is atomic per folder):
 //!
-//! 1. the new package folders are copied into `<staging>/new`;
+//! 1. the new package folders are copied into `<staging>/new`, and an optional prepare step
+//!    edits those staged copies (for example to write the user's TOC overrides);
 //! 2. each existing target folder is renamed aside into `<staging>/old`;
 //! 3. each new folder is renamed from `<staging>/new` into the AddOns folder.
 //!
@@ -23,6 +24,10 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Edits one staged copy before anything live moves: called with the folder name and the path of
+/// its copy inside staging. An error aborts the swap with nothing live changed.
+pub(crate) type PrepareStaged<'a> = dyn FnMut(&str, &Path) -> Result<(), String> + 'a;
 
 /// Name prefix of the per-operation staging directory inside the AddOns folder. Shared with the
 /// scan, which reports leftovers by this name.
@@ -50,6 +55,24 @@ impl FolderSwap {
         new_folders: &[String],
         replaced: &[String],
     ) -> Result<Self, String> {
+        Self::apply_prepared(
+            addon_dir,
+            source_root,
+            new_folders,
+            replaced,
+            &mut |_, _| Ok(()),
+        )
+    }
+
+    /// [`FolderSwap::apply`] with a step that edits each staged copy after all of them are copied
+    /// and before any live folder moves.
+    pub(crate) fn apply_prepared(
+        addon_dir: &Path,
+        source_root: &Path,
+        new_folders: &[String],
+        replaced: &[String],
+        prepare: &mut PrepareStaged<'_>,
+    ) -> Result<Self, String> {
         for folder in new_folders.iter().chain(replaced) {
             validate_folder_name(folder)?;
         }
@@ -67,7 +90,7 @@ impl FolderSwap {
             placed: Vec::new(),
             finished: false,
         };
-        match swap.run(source_root, new_folders, replaced) {
+        match swap.run(source_root, new_folders, replaced, prepare) {
             Ok(()) => Ok(swap),
             Err(error) => Err(match swap.restore() {
                 Ok(()) => error,
@@ -119,6 +142,7 @@ impl FolderSwap {
         source_root: &Path,
         new_folders: &[String],
         replaced: &[String],
+        prepare: &mut PrepareStaged<'_>,
     ) -> Result<(), String> {
         let new_root = self.new_root();
         let old_root = self.old_root();
@@ -131,6 +155,11 @@ impl FolderSwap {
         for folder in new_folders {
             copy_tree(&source_root.join(folder), &new_root.join(folder))
                 .map_err(|error| format!("could not stage new folder '{folder}': {error}"))?;
+        }
+
+        for folder in new_folders {
+            prepare(folder, &new_root.join(folder))
+                .map_err(|error| format!("could not prepare new folder '{folder}': {error}"))?;
         }
 
         for folder in replaced {
@@ -345,6 +374,74 @@ mod tests {
             Some("new"),
             "source kept"
         );
+    }
+
+    #[test]
+    fn prepare_step_edits_the_staged_copies_only() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp.path().join("AddOns");
+        let source = temp.path().join("source");
+        write_folder(&addon_dir, "Foo", "old");
+        write_folder(&source, "Foo", "new");
+        write_folder(&source, "Foo_Extra", "new");
+
+        let mut seen = Vec::new();
+        let swap = FolderSwap::apply_prepared(
+            &addon_dir,
+            &source,
+            &names(&["Foo", "Foo_Extra"]),
+            &names(&["Foo"]),
+            &mut |folder, staged| {
+                assert_eq!(marker(&addon_dir, "Foo").as_deref(), Some("old"));
+                assert!(staged.starts_with(&addon_dir));
+                seen.push(folder.to_string());
+                fs::write(staged.join("marker.txt"), "prepared").map_err(|e| e.to_string())
+            },
+        )
+        .expect("swap");
+        swap.commit();
+
+        assert_eq!(seen, names(&["Foo", "Foo_Extra"]));
+        assert_eq!(marker(&addon_dir, "Foo").as_deref(), Some("prepared"));
+        assert_eq!(marker(&addon_dir, "Foo_Extra").as_deref(), Some("prepared"));
+        assert_eq!(
+            marker(&source, "Foo").as_deref(),
+            Some("new"),
+            "source kept"
+        );
+    }
+
+    #[test]
+    fn failing_prepare_step_leaves_live_folders_untouched() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp.path().join("AddOns");
+        let source = temp.path().join("source");
+        write_folder(&addon_dir, "Foo", "old");
+        write_folder(&source, "Foo", "new");
+        write_folder(&source, "Foo_Extra", "new");
+
+        let error = FolderSwap::apply_prepared(
+            &addon_dir,
+            &source,
+            &names(&["Foo", "Foo_Extra"]),
+            &names(&["Foo"]),
+            &mut |folder, _| {
+                if folder == "Foo_Extra" {
+                    Err("bad toc".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("prepare fails");
+
+        assert!(
+            error.contains("Foo_Extra") && error.contains("bad toc"),
+            "{error}"
+        );
+        assert_eq!(marker(&addon_dir, "Foo").as_deref(), Some("old"));
+        assert!(!addon_dir.join("Foo_Extra").exists());
+        assert!(staging_dirs(&addon_dir).is_empty());
     }
 
     #[test]

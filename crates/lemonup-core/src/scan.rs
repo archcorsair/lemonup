@@ -21,6 +21,10 @@ pub struct TocSelectionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocMetadata {
     pub title: String,
+    /// `## Notes:` as the game reads it (the last base line wins), without color codes removed.
+    pub notes: Option<String>,
+    /// `## Category:` as the game reads it (the last base line wins).
+    pub category: Option<String>,
     pub version: Option<String>,
     pub author: Option<String>,
     pub interface: Option<String>,
@@ -44,6 +48,10 @@ pub struct ScannedAddon {
     pub required_deps: Vec<String>,
     pub optional_deps: Vec<String>,
     pub embedded_libs: Vec<String>,
+    /// The selected TOC's `Notes` (see [`TocMetadata::notes`]).
+    pub notes: Option<String>,
+    /// The selected TOC's `Category` (see [`TocMetadata::category`]).
+    pub category: Option<String>,
 }
 
 /// Result of a scan that also reports what it could not read.
@@ -236,6 +244,8 @@ fn scan_addon_folder(
         required_deps: toc.required_deps,
         optional_deps: toc.optional_deps,
         embedded_libs: detect_embedded_libs(addon_path)?,
+        notes: toc.notes,
+        category: toc.category,
     }))
 }
 
@@ -315,13 +325,15 @@ pub fn select_toc_file(
 
 pub fn parse_toc_content(content: &str, fallback_title: &str) -> TocMetadata {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let title = field_value(content, &["Title"])
+    let title = directive_value(content, "Title")
         .map(strip_wow_color_codes)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
 
     TocMetadata {
         title,
+        notes: directive_value(content, "Notes"),
+        category: directive_value(content, "Category"),
         version: field_value(content, &["Version"]),
         author: field_value(content, &["Author"]),
         interface: field_value(content, &["Interface"]),
@@ -636,6 +648,28 @@ fn field_value(content: &str, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// The value the game uses for a display directive: the last `## <key>:` line that starts in
+/// column 0 and has no locale suffix wins. Lines LemonUp commented out (`# LemonUp: ...`) are not
+/// directives, so an override LemonUp wrote is what this returns.
+fn directive_value(content: &str, key: &str) -> Option<String> {
+    let mut found = None;
+    for line in content.lines() {
+        let Some(remainder) = line.strip_prefix("##") else {
+            continue;
+        };
+        let Some((raw_key, raw_value)) = remainder.split_once(':') else {
+            continue;
+        };
+        if raw_key.trim().eq_ignore_ascii_case(key) {
+            let value = raw_value.trim();
+            if !value.is_empty() {
+                found = Some(value.to_string());
+            }
+        }
+    }
+    found
+}
+
 fn parse_dependency_list(raw: Option<String>) -> Vec<String> {
     let Some(raw) = raw else {
         return Vec::new();
@@ -740,6 +774,41 @@ mod tests {
         );
         assert_eq!(parsed.optional_deps, vec!["ElvUI", "Masque"]);
         assert!(parsed.x_library);
+    }
+
+    #[test]
+    fn display_fields_follow_the_game_last_line_wins_and_skip_lemonup_comments() {
+        let parsed = parse_toc_content(
+            "## Title: First\r\n## Notes: Old notes\r\n## Category: Combat\r\n## Title-deDE: Erster\r\n## Notes-frFR: Notes\r\n# LemonUp: ## Category: Commented\r\n  ## Title: Indented\r\n## Title: |cff00ff00Last|r\r\n## Notes: New notes\r\n",
+            "Fallback",
+        );
+        assert_eq!(parsed.title, "Last");
+        assert_eq!(parsed.notes.as_deref(), Some("New notes"));
+        assert_eq!(parsed.category.as_deref(), Some("Combat"));
+
+        let overridden = parse_toc_content(
+            "## Interface: 110002\n# LemonUp: ## Title: Original\n# LemonUp: ## Category: Combat\n# LemonUp-managed\n## Title: Mine\n",
+            "Fallback",
+        );
+        assert_eq!(overridden.title, "Mine");
+        assert_eq!(overridden.category, None);
+        assert_eq!(overridden.notes, None);
+    }
+
+    #[test]
+    fn scan_reports_notes_and_category_of_the_selected_toc() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(addons.join("Foo")).expect("dir");
+        fs::write(
+            addons.join("Foo").join("Foo.toc"),
+            "## Title: Foo\n## Notes: Does things\n## Category: Bags\n",
+        )
+        .expect("toc");
+        let scanned = scan_addons_dir(&addons, GameFlavor::Retail).expect("scan");
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].notes.as_deref(), Some("Does things"));
+        assert_eq!(scanned[0].category.as_deref(), Some("Bags"));
     }
 
     #[test]
@@ -1063,6 +1132,8 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
             },
             ScannedAddon {
                 name: "DBM Naxx".to_string(),
@@ -1078,6 +1149,8 @@ mod tests {
                 required_deps: vec!["DBM-Core".to_string()],
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
             },
         ];
 

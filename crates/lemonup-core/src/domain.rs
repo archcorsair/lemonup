@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,11 @@ pub struct AddonRecord {
     pub updated_at: OffsetDateTime,
     pub last_checked_at: Option<OffsetDateTime>,
     pub remote_version: Option<String>,
+    /// The user's overrides of TOC display fields, by field name (`Title`, `Notes`, `Category`;
+    /// see `toc_edit::TocField`). LemonUp writes them into the addon's TOC files on every install
+    /// and update. Keys this version does not know are kept as they are and never acted on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub toc_overrides: BTreeMap<String, String>,
     /// Set only for a row written by a newer LemonUp with values this version does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unrecognized: Option<UnrecognizedValues>,
@@ -139,6 +145,7 @@ impl AddonRecord {
             updated_at: now,
             last_checked_at: None,
             remote_version: None,
+            toc_overrides: BTreeMap::new(),
             unrecognized: None,
         }
     }

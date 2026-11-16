@@ -14,7 +14,6 @@ use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
 use crate::source_error::{SourceError, SourceErrorKind};
-use crate::update_targets::folder_swap::FolderSwap;
 
 const API_URL: &str = "https://api.tukui.org/v1/addons";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -427,7 +426,16 @@ fn install_downloaded_tukui_addon(
             replace,
             None,
         )?;
-        let swap = FolderSwap::apply(addon_dir, &layout.source_root, &layout.folders, &replaced)?;
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides =
+            crate::update_targets::stored_toc_overrides(state_database, &layout.parent_folder)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
+            addon_dir,
+            &layout.source_root,
+            &layout.folders,
+            &replaced,
+            &toc_overrides,
+        )?;
 
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
@@ -511,11 +519,15 @@ fn update_downloaded_tukui_addon(
 
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
-        let swap = FolderSwap::apply(
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides =
+            crate::update_targets::stored_toc_overrides(state_database, &tracked.folder)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &layout.source_root,
             &layout.folders,
             &managed_folders,
+            &toc_overrides,
         )?;
 
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
@@ -997,6 +1009,8 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
         };
         let addon = super::TukuiAddon {
             slug: "elvui".to_string(),
