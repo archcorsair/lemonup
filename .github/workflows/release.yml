@@ -4,26 +4,32 @@ on:
   push:
     tags:
       - 'v*'
+  # Dry run from main: verify, build and artifacts run, publish is skipped.
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15
         with:
           toolchain: 1.94.1
           components: rustfmt, clippy
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --all --check
@@ -38,6 +44,7 @@ jobs:
     name: Build ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -57,16 +64,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15
         with:
           toolchain: 1.94.1
           components: rustfmt, clippy
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
         run: cargo build --release -p lemonup-app --bin lemonup
@@ -78,8 +84,33 @@ jobs:
           $binary = if ($env:RUNNER_OS -eq 'Windows') { 'target/release/lemonup.exe' } else { 'target/release/lemonup' }
           Copy-Item -LiteralPath $binary -Destination (Join-Path 'dist' '${{ matrix.asset_name }}') -Force
 
-      - name: Publish release asset
-        uses: softprops/action-gh-release@v2
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: dist/${{ matrix.asset_name }}
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  # The only job with write access. It runs after all four builds succeed.
+  publish:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          files: dist/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
