@@ -21,7 +21,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::config::{AppConfig, ConfigStore, ThemeMode};
 use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
 use crate::error::{LemonupError, Result};
-use crate::paths::{AppPaths, DEFAULT_PROFILE};
+use crate::paths::{AppPaths, DEFAULT_PROFILE, same_addons_folder};
 use crate::storage::StateDatabase;
 use crate::transfer::TransferSourceKind;
 use crate::wow::validate_addons_path;
@@ -180,6 +180,21 @@ fn import_v1_addons(
     addon_dir: &Path,
     report: &mut V1MigrationReport,
 ) -> Result<()> {
+    // The v2 config can be gone while its state database stays (for example a deleted
+    // config.toml). That database may already track another game folder; importing v1's rows
+    // into it would mix two installs before the binding check refuses the folder.
+    if let Some(bound) = StateDatabase::read_bound_addon_dir(&paths.state_db_file)?
+        && !same_addons_folder(&bound, addon_dir)
+    {
+        tracing::warn!(
+            bound = %bound.display(),
+            v1_addon_dir = %addon_dir.display(),
+            "v1 addons not imported: existing v2 state belongs to another AddOns folder"
+        );
+        report.addons_not_imported = Some(bound_elsewhere_reason(&bound, addon_dir));
+        return Ok(());
+    }
+
     let rows = read_v1_addons(database_file, &paths.cache_dir)?;
     if rows.is_empty() {
         return Ok(());
@@ -203,6 +218,15 @@ fn import_v1_addons(
         report.migrated_addons.push(record.folder);
     }
     Ok(())
+}
+
+/// Why v1 addons were left out when the v2 state is bound to another AddOns folder.
+fn bound_elsewhere_reason(bound: &Path, v1_addon_dir: &Path) -> String {
+    format!(
+        "existing LemonUp state is bound to the AddOns folder {}, not v1's {}; v1 addons were left in v1 so the two are not mixed",
+        bound.display(),
+        v1_addon_dir.display()
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1054,6 +1078,80 @@ mod tests {
             migrate_v1_if_needed(&fixture.paths, &fixture.v1).expect("second run"),
             V1MigrationOutcome::NotApplicable
         );
+    }
+
+    #[test]
+    fn state_bound_to_another_addons_folder_imports_no_v1_addons() {
+        let fixture = fixture(DEFAULT_PROFILE);
+        write_v1_config_for_addon_dir(&fixture);
+        write_v1_database(&fixture);
+        create_addon_folders(&fixture, &["DBM-Core", "ElvUI", "Plater", "LibStub"]);
+        // config.toml is gone, but the v2 state stays and already tracks Forever.
+        let forever = fixture
+            .addon_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("wow root")
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&forever).expect("forever addons");
+        {
+            let database = StateDatabase::open(&fixture.paths.state_db_file).expect("v2 db");
+            database.bind_addon_dir(&forever).expect("bind forever");
+            database
+                .upsert_addon(&AddonRecord::new(
+                    "Forever Addon",
+                    "ForeverAddon",
+                    SourceKind::Wago,
+                ))
+                .expect("seed forever row");
+        }
+        let before = snapshot_dir(&fixture.v1.dir);
+
+        let report = migrated(&fixture);
+
+        assert_eq!(snapshot_dir(&fixture.v1.dir), before);
+        assert!(report.migrated_addons.is_empty());
+        let reason = report.addons_not_imported.as_deref().expect("skip reason");
+        assert!(reason.contains("_forever_"), "{reason}");
+        assert!(reason.contains("not mixed"), "{reason}");
+        assert!(
+            report
+                .summary_line()
+                .contains("addons not imported: existing LemonUp state is bound to")
+        );
+
+        let database = StateDatabase::open(&fixture.paths.state_db_file).expect("v2 db");
+        let folders = database
+            .list_addons()
+            .expect("list")
+            .into_iter()
+            .map(|addon| addon.folder)
+            .collect::<Vec<_>>();
+        assert_eq!(folders, vec!["ForeverAddon".to_string()]);
+        assert_eq!(
+            database.bound_addon_dir().expect("binding"),
+            Some(forever.clone())
+        );
+    }
+
+    #[test]
+    fn state_bound_to_the_same_addons_folder_still_imports_v1_addons() {
+        let fixture = fixture(DEFAULT_PROFILE);
+        write_v1_config_for_addon_dir(&fixture);
+        write_v1_database(&fixture);
+        create_addon_folders(&fixture, &["DBM-Core", "ElvUI", "Plater", "LibStub"]);
+        StateDatabase::open(&fixture.paths.state_db_file)
+            .expect("v2 db")
+            .bind_addon_dir(&fixture.addon_dir)
+            .expect("bind retail");
+
+        let report = migrated(&fixture);
+
+        assert_eq!(report.addons_not_imported, None);
+        assert_eq!(report.migrated_addons.len(), 4);
     }
 
     #[test]
