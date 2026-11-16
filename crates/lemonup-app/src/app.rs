@@ -16200,6 +16200,22 @@ mod tests {
             assert!(text.contains(" more"), "{text}");
             let keys = rows.last().expect("key line").clone();
             assert!(keys.contains("pgup/pgdn scroll details"), "{keys}");
+
+            // Help opened from the overflowing panel lists the scroll keys.
+            press(&mut app, KeyCode::Char('?'));
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+            assert!(matches!(
+                app.shell_ui.help_context,
+                HelpContext::DetailsDocked
+            ));
+            assert!(app.help_row_applies(HelpWhen::DetailsOverflow));
+            let help = render_rows(&mut app, 160, 60).join("\n");
+            assert!(help.contains("scroll Details"), "{help}");
+            press(&mut app, KeyCode::Esc);
+            assert!(app.details_docked());
+            let rows = render_rows(&mut app, 160, 14);
+            let keys = rows.last().expect("key line").clone();
+            assert!(keys.contains("pgup/pgdn scroll details"), "{keys}");
             let panel = app.docked_details_area().expect("panel");
             let panel_text = |app: &mut App| -> Vec<String> {
                 render_rows(app, 160, 14)

@@ -37,7 +37,15 @@ impl App {
             HelpWhen::NotLinked => self.not_linked_current_item().is_some(),
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
             HelpWhen::NoJob => self.dashboard_job_running().is_none(),
-            HelpWhen::DetailsOverflow => self.docked_details_overflow(),
+            // Help opened from docked Details keeps the panel's saved scroll
+            // state, so the row shows there too.
+            HelpWhen::DetailsOverflow => {
+                self.docked_details_overflow()
+                    || (matches!(self.shell_ui.help_context, HelpContext::DetailsDocked)
+                        && self
+                            .docked_details_scroll()
+                            .overflows(Some(OverlayKind::Inspect)))
+            }
         }
     }
 
