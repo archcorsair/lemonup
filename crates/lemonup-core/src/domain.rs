@@ -69,6 +69,23 @@ pub struct OwnedFolder {
     pub name: String,
 }
 
+/// Values a newer LemonUp stored for an addon that this version does not know (a new source,
+/// flavor, kind or ownership value).
+///
+/// Such an addon loads as not linked (`source` is [`SourceKind::Manual`]), so it is never
+/// checked or updated, and the known fields stand in with safe fallbacks. The stored values are
+/// written back unchanged on every save until this version links the addon to a source itself,
+/// so upgrading again restores the link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnrecognizedValues {
+    /// The stored source, even when it is known: an unknown flavor, kind or ownership value also
+    /// leaves the addon not linked here.
+    pub source: String,
+    pub flavor: Option<String>,
+    pub kind: Option<String>,
+    pub ownership_source: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddonRecord {
     pub id: Option<i64>,
@@ -92,6 +109,9 @@ pub struct AddonRecord {
     pub updated_at: OffsetDateTime,
     pub last_checked_at: Option<OffsetDateTime>,
     pub remote_version: Option<String>,
+    /// Set only for a row written by a newer LemonUp with values this version does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrecognized: Option<UnrecognizedValues>,
 }
 
 impl AddonRecord {
@@ -119,6 +139,7 @@ impl AddonRecord {
             updated_at: now,
             last_checked_at: None,
             remote_version: None,
+            unrecognized: None,
         }
     }
 
@@ -155,6 +176,14 @@ impl AddonRecord {
 
     pub fn has_authoritative_owned_folders(&self) -> bool {
         self.effective_ownership_source() == OwnershipSource::Managed
+    }
+
+    /// Whether a newer LemonUp stored how this addon's owned folders were assigned in a way this
+    /// version does not know. Its owned folders are then kept as stored but never acted on.
+    pub fn has_unrecognized_ownership(&self) -> bool {
+        self.unrecognized
+            .as_ref()
+            .is_some_and(|values| values.ownership_source.is_some())
     }
 }
 

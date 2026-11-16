@@ -47,14 +47,23 @@ pub(super) fn install_error_advice(
     clash: Option<&FolderClash>,
 ) -> String {
     let linked = clash.map_or(&[][..], |clash| clash.linked.as_slice());
+    // An addon a newer LemonUp linked shows as "Not linked" here, so this version does not
+    // claim to keep it updated.
+    let newer = clash.is_some_and(|clash| clash.newer_version_linked);
+    let keeps = if newer {
+        "a newer LemonUp linked"
+    } else {
+        "LemonUp already keeps updated"
+    };
     match (kind, linked) {
-        (SourceErrorKind::FoldersOfLinkedAddon, [(folder, addon)]) => format!(
-            "{folder} belongs to {addon}, which LemonUp already keeps updated, so LemonUp \
-             won't replace it."
-        ),
+        (SourceErrorKind::FoldersOfLinkedAddon, [(folder, addon)]) => {
+            format!("{folder} belongs to {addon}, which {keeps}, so LemonUp won't replace it.")
+        }
         (SourceErrorKind::FoldersOfLinkedAddon, [(folder, addon), rest @ ..]) => {
             let others = if rest.iter().all(|(_, owner)| owner == addon) {
-                format!("{addon}, which LemonUp already keeps updated")
+                format!("{addon}, which {keeps}")
+            } else if newer {
+                format!("{addon} and other linked addons")
             } else {
                 format!("{addon} and other addons LemonUp already keeps updated")
             };

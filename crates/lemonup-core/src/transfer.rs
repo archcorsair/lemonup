@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::OffsetDateTime;
 
 use crate::domain::{AddonRecord, SourceKind};
@@ -11,14 +11,17 @@ use crate::error::{LemonupError, Result};
 
 pub const DEFAULT_TRANSFER_FILE_NAME: &str = "lemonup-addons.json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The `type` of an exported addon. `Other` holds a type this version does not know (a source
+/// added by a newer LemonUp): such entries load and are written back verbatim, but this version
+/// cannot reinstall them.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferSourceKind {
     GitHub,
     Tukui,
     Wowinterface,
     Manual,
     Wago,
+    Other(String),
 }
 
 impl TransferSourceKind {
@@ -32,14 +35,51 @@ impl TransferSourceKind {
         }
     }
 
-    pub fn as_source_kind(self) -> SourceKind {
-        match self {
-            Self::GitHub => SourceKind::GitHub,
-            Self::Tukui => SourceKind::Tukui,
-            Self::Wowinterface => SourceKind::WowInterface,
-            Self::Manual => SourceKind::Manual,
-            Self::Wago => SourceKind::Wago,
+    /// Parses a stored `type` string; anything unknown becomes [`Self::Other`].
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "github" => Self::GitHub,
+            "tukui" => Self::Tukui,
+            "wowinterface" => Self::Wowinterface,
+            "manual" => Self::Manual,
+            "wago" => Self::Wago,
+            other => Self::Other(other.to_string()),
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::GitHub => "github",
+            Self::Tukui => "tukui",
+            Self::Wowinterface => "wowinterface",
+            Self::Manual => "manual",
+            Self::Wago => "wago",
+            Self::Other(other) => other,
+        }
+    }
+
+    /// The matching source, or `None` for a type this version does not know.
+    pub fn as_source_kind(&self) -> Option<SourceKind> {
+        match self {
+            Self::GitHub => Some(SourceKind::GitHub),
+            Self::Tukui => Some(SourceKind::Tukui),
+            Self::Wowinterface => Some(SourceKind::WowInterface),
+            Self::Manual => Some(SourceKind::Manual),
+            Self::Wago => Some(SourceKind::Wago),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl Serialize for TransferSourceKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TransferSourceKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|name| Self::from_name(&name))
     }
 }
 
@@ -66,14 +106,41 @@ impl TransferAddon {
                 .collect::<Vec<_>>()
         });
 
+        // A row from a newer LemonUp is exported with the source it stored, as that version
+        // would export it, so a newer LemonUp can still reinstall it from the list.
+        let source = match &addon.unrecognized {
+            Some(unrecognized) => TransferSourceKind::from_name(&unrecognized.source),
+            None => TransferSourceKind::from_source_kind(addon.source),
+        };
+        let reinstallable = source != TransferSourceKind::Manual && addon.source_url.is_some();
+
         Self {
             name: addon.name.clone(),
             folder: addon.folder.clone(),
-            source: TransferSourceKind::from_source_kind(addon.source),
+            source,
             url: addon.source_url.clone(),
             owned_folders,
-            reinstallable: addon.source != SourceKind::Manual && addon.source_url.is_some(),
+            reinstallable,
         }
+    }
+
+    /// The `type` when this version does not know it (a source added by a newer LemonUp).
+    pub fn unknown_source(&self) -> Option<&str> {
+        match &self.source {
+            TransferSourceKind::Other(other) => Some(other),
+            _ => None,
+        }
+    }
+
+    /// Why this version skips the entry, for one whose `type` it does not know.
+    pub fn unknown_source_warning(&self) -> Option<String> {
+        self.unknown_source().map(|source| {
+            format!(
+                "{}: linked to '{source}', which this version of LemonUp can't install; \
+                 skipped (a newer version can)",
+                self.name
+            )
+        })
     }
 
     pub fn represented_folders(&self) -> Vec<String> {
@@ -178,6 +245,12 @@ pub fn analyze_import(
             .map(|folder| folder.to_ascii_lowercase())
             .collect::<Vec<_>>();
 
+        if let Some(warning) = addon.unknown_source_warning() {
+            tracing::info!("{warning}");
+            analysis.unsupported_addons.push(addon.clone());
+            continue;
+        }
+
         if !addon.reinstallable {
             analysis.manual_addons.push(addon.clone());
             continue;
@@ -281,5 +354,46 @@ mod tests {
         assert_eq!(analysis.already_installed.len(), 0);
         assert_eq!(analysis.duplicate_addons.len(), 1);
         assert_eq!(analysis.manual_addons.len(), 1);
+    }
+
+    #[test]
+    fn export_keeps_an_unknown_source_and_import_skips_it() {
+        let temp = tempdir().expect("tempdir");
+        let output = temp.path().join("lemonup-addons.json");
+        let mut curse = AddonRecord::new("Curse", "CurseAddon", SourceKind::Manual);
+        curse.source_url = Some("https://www.curseforge.com/wow/addons/curse".to_string());
+        curse.unrecognized = Some(crate::UnrecognizedValues {
+            source: "curseforge".to_string(),
+            ..Default::default()
+        });
+        let mut wago = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        wago.source_url = Some("https://addons.wago.io/addons/weakauras".to_string());
+
+        let exported = export_addons(&[curse, wago], &output).expect("export");
+        assert_eq!(exported.addons.len(), 2);
+        let curse = &exported.addons[0];
+        assert_eq!(
+            curse.source,
+            TransferSourceKind::Other("curseforge".to_string())
+        );
+        assert_eq!(curse.unknown_source(), Some("curseforge"));
+        assert!(
+            std::fs::read_to_string(&output)
+                .expect("read export")
+                .contains("\"type\": \"curseforge\"")
+        );
+
+        let reparsed = parse_import_file(&output).expect("parse import");
+        assert_eq!(reparsed, exported);
+        let analysis = analyze_import(&reparsed, &HashSet::new());
+        assert_eq!(analysis.to_install.len(), 1);
+        assert_eq!(analysis.to_install[0].folder, "WeakAuras");
+        assert_eq!(analysis.unsupported_addons.len(), 1);
+        assert!(
+            analysis.unsupported_addons[0]
+                .unknown_source_warning()
+                .expect("warning")
+                .contains("linked to 'curseforge'")
+        );
     }
 }

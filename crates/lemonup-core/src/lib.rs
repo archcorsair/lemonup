@@ -13,7 +13,7 @@ pub mod wow;
 pub use config::{AppConfig, ConfigLoad, ConfigStore, ThemeMode};
 pub use domain::{
     AddonKind, AddonRecord, GameFlavor, InstallPlan, InstallSource, OwnedFolder, OwnershipSource,
-    SourceKind, UpdateCheck, UpdateStatus,
+    SourceKind, UnrecognizedValues, UpdateCheck, UpdateStatus,
 };
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};

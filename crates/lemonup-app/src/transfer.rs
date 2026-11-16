@@ -112,5 +112,9 @@ async fn install_transfer_addon(
         TransferSourceKind::Manual => {
             Err("exports of addons that are not linked cannot be reinstalled".to_string())
         }
+        TransferSourceKind::Other(_) => Err(format!(
+            "this version of LemonUp can't install addons from '{}'",
+            addon.source.as_str()
+        )),
     }
 }

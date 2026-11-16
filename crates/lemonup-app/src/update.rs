@@ -887,6 +887,7 @@ pub(crate) fn build_managed_update_record(
         updated_at: existing.updated_at,
         last_checked_at: existing.last_checked_at,
         remote_version: existing.remote_version.clone(),
+        unrecognized: existing.unrecognized.clone(),
     };
     refreshed.set_managed_owned_folders(existing.owned_folders.clone());
     refreshed
@@ -1586,5 +1587,62 @@ mod tests {
                 Some("Wago API key not configured")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn addon_from_newer_version_is_checked_and_updated_like_a_not_linked_one() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp.path().join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut curse = AddonRecord::new("Curse", "CurseAddon", SourceKind::Manual);
+        curse.source_url = Some("https://www.curseforge.com/wow/addons/curse".to_string());
+        curse.version = Some("1.0.0".to_string());
+        curse.remote_version = Some("2.0.0".to_string());
+        curse.unrecognized = Some(lemonup_core::UnrecognizedValues {
+            source: "curseforge".to_string(),
+            ..Default::default()
+        });
+        database.upsert_addon(&curse).expect("seed curseforge row");
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            |_, _| async { panic!("an addon from a newer version is never fetched") },
+        )
+        .await
+        .expect("refresh checks");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, UpdateStatus::Unknown);
+        assert_eq!(
+            checks[0].message.as_deref(),
+            Some("addons that are not linked cannot be checked yet")
+        );
+
+        let run = apply_live_updates(
+            &mut database,
+            &addon_dir,
+            &[],
+            Some("unused"),
+            false,
+            true,
+            |_, _, _| {},
+        )
+        .await
+        .expect("apply live updates");
+        assert_eq!(run.summary.skipped_manual, 1);
+        assert_eq!(run.results[0].status, LiveUpdateStatus::SkippedManual);
+
+        let stored = database
+            .get_addon_by_folder("CurseAddon")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(stored.source, SourceKind::Manual);
+        assert_eq!(
+            stored.unrecognized.map(|values| values.source).as_deref(),
+            Some("curseforge")
+        );
     }
 }

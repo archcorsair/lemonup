@@ -4926,16 +4926,29 @@ impl App {
                         .and_then(|database| database.list_addons())
                         .and_then(|addons| export_addons(&addons, &output_path))
                     {
-                        Ok(exported) => vec![AppAction::SetStatus(self.dashboard_status_for(
-                            StatusKind::Done,
-                            DetailMode::Config,
-                            &format!(
+                        Ok(exported) => {
+                            let mut message = format!(
                                 "Saved {} addon{} to {}",
                                 exported.addons.len(),
                                 plural_suffix(exported.addons.len()),
                                 friendly_path(&output_path)
-                            ),
-                        ))],
+                            );
+                            let newer = exported
+                                .addons
+                                .iter()
+                                .filter(|addon| addon.unknown_source().is_some())
+                                .count();
+                            if newer > 0 {
+                                message.push_str(&format!(
+                                    " · {newer} linked by a newer LemonUp (only a newer version can reinstall)"
+                                ));
+                            }
+                            vec![AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Done,
+                                DetailMode::Config,
+                                &message,
+                            ))]
+                        }
                         Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
@@ -10013,6 +10026,7 @@ mod tests {
                 replaceable: folders.iter().map(|folder| (*folder).to_string()).collect(),
                 linked: Vec::new(),
                 existing_name: existing_name.map(str::to_string),
+                ..FolderClash::default()
             },
         )
     }
@@ -10133,6 +10147,7 @@ mod tests {
                 replaceable: Vec::new(),
                 linked: vec![("ElvUI".to_string(), "ElvUI".to_string())],
                 existing_name: None,
+                ..FolderClash::default()
             },
         );
         apply_all(
@@ -10166,11 +10181,43 @@ mod tests {
                 ("BigWigs".to_string(), "BigWigs".to_string()),
             ],
             existing_name: None,
+            ..FolderClash::default()
         };
         assert_eq!(
             install_error_advice(SourceErrorKind::FoldersOfLinkedAddon, "GitHub", Some(&many)),
             "DBM-Core and 2 more belong to Deadly Boss Mods and other addons LemonUp already \
              keeps updated, so LemonUp won't replace them."
+        );
+    }
+
+    #[test]
+    fn a_folder_of_an_addon_a_newer_version_linked_says_so() {
+        let one = FolderClash {
+            linked: vec![("Pawn".to_string(), "Pawn".to_string())],
+            newer_version_linked: true,
+            ..FolderClash::default()
+        };
+        assert_eq!(
+            install_error_advice(SourceErrorKind::FoldersOfLinkedAddon, "GitHub", Some(&one)),
+            "Pawn belongs to Pawn, which a newer LemonUp linked, so LemonUp won't replace it."
+        );
+
+        let mixed = FolderClash {
+            linked: vec![
+                ("Pawn".to_string(), "Pawn".to_string()),
+                ("BigWigs".to_string(), "BigWigs".to_string()),
+            ],
+            newer_version_linked: true,
+            ..FolderClash::default()
+        };
+        assert_eq!(
+            install_error_advice(
+                SourceErrorKind::FoldersOfLinkedAddon,
+                "GitHub",
+                Some(&mixed)
+            ),
+            "Pawn and 1 more belong to Pawn and other linked addons, so LemonUp won't replace \
+             them."
         );
     }
 
