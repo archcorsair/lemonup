@@ -1,0 +1,40 @@
+pkgname=lemonup
+pkgver=2.1.0
+pkgrel=1
+pkgdesc='Terminal addon manager for World of Warcraft (Retail and WoW Forever)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/archcorsair/lemonup'
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+makedepends=('cargo')
+conflicts=('lemonup-bin')
+# makepkg's LTO flags make the bundled SQLite C objects unlinkable by Rust's linker.
+options=('!lto')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/archcorsair/lemonup/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('87dad7aef797828d2b20160ba1f982bfe717c3166e4aff3929d78ea8927291cc')
+
+prepare() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p lemonup-app --bin lemonup
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+  install -Dm755 target/release/lemonup "${pkgdir}/usr/bin/lemonup"
+  install -Dm644 license "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
