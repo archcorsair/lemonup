@@ -6,6 +6,7 @@ mod cli;
 mod drift;
 mod event;
 mod github;
+mod http;
 mod onboarding;
 mod shimmer;
 mod source_error;

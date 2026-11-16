@@ -769,8 +769,7 @@ fn normalize_version(value: &str) -> String {
 }
 
 fn build_wago_client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
+    crate::http::client_builder()
         .build()
         .map_err(|error| error.to_string())
 }
