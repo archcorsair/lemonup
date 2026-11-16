@@ -1,8 +1,14 @@
 {
   description = "Terminal addon manager for World of Warcraft (Retail and WoW Forever)";
 
-  # The lemonup Cachix cache goes in a nixConfig block here
-  # (extra-substituters and extra-trusted-public-keys) once the cache exists.
+  # Prebuilt binaries from the lemonup Cachix cache, which CI fills for every
+  # system. Nix asks once whether to trust it (or add both lines to nix.conf).
+  nixConfig = {
+    extra-substituters = [ "https://lemonup.cachix.org" ];
+    extra-trusted-public-keys = [
+      "lemonup.cachix.org-1:AgnIoDYMOCqPYKjZTprybwJ19cEqLxlmCP3H3myo03A="
+    ];
+  };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
