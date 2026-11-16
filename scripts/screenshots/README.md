@@ -105,3 +105,20 @@ named `light` runs with `theme = "light"` in the sandbox config. A tape can
 change the terminal size with `Set FontSize` after `Source` (Details docks at
 120 columns or wider; FontSize 32 gives about 140). It does not remove images
 of screens that no longer have a tape; delete those from the website by hand.
+
+## Link preview card
+
+`og/build.sh` makes the image link previews show for lemonup.org (`og:image`,
+1200x630). It crops the logo and the top of the addon list from
+`docs/public/screens/dashboard.webp`, places them in `og/card.html`, renders that with a
+headless Chromium and writes `docs/public/og-card.jpg` in the website checkout. Run it after
+`generate.sh` whenever the addon list changes:
+
+```sh
+scripts/screenshots/og/build.sh                  # website checkout at ../lemonup.org
+scripts/screenshots/og/build.sh --site <path> --chrome <path>
+```
+
+It needs ImageMagick 7 and a Chromium-based browser (it also finds Playwright's headless
+shell). Link previews are cached by URL, so give the file a new name when the card changes a
+lot and update `og:image` in the website's `.vitepress/config.ts`.

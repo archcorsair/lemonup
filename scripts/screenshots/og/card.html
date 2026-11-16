@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    background:
+      radial-gradient(900px 420px at 18% -10%, rgba(224, 175, 104, 0.16), transparent 70%),
+      #1a1b26;
+    font-family: "FiraCode Nerd Font", "DejaVu Sans Mono", monospace;
+    color: #c0caf5;
+    position: relative;
+  }
+  .top {
+    position: absolute;
+    left: 72px;
+    top: 58px;
+  }
+  .logo {
+    display: block;
+    width: 448px;
+    height: auto;
+  }
+  .tagline {
+    margin-top: 26px;
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    color: #c0caf5;
+  }
+  .meta {
+    margin-top: 12px;
+    font-size: 22px;
+    color: #9aa5ce;
+  }
+  .meta b { color: #e0af68; font-weight: 600; }
+  .window {
+    position: absolute;
+    left: 72px;
+    right: 72px;
+    top: 292px;
+    height: 400px;
+    background: #24283b;
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -2px 0 rgba(255, 255, 255, 0.04), 0 30px 80px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+  }
+  .bar {
+    height: 40px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding-left: 18px;
+  }
+  .bar i {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    display: block;
+  }
+  .list {
+    display: block;
+    width: 1056px;
+    height: auto;
+    margin-left: 4px;
+  }
+</style>
+</head>
+<body>
+  <div class="top">
+    <img class="logo" src="logo.png" alt="">
+    <div class="tagline">A terminal addon manager for World of Warcraft</div>
+    <div class="meta">Retail &amp; WoW Forever <b>·</b> Linux, macOS &amp; Windows <b>·</b> lemonup.org</div>
+  </div>
+  <div class="window">
+    <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <img class="list" src="list.png" alt="">
+  </div>
+</body>
+</html>
