@@ -183,6 +183,13 @@ pub(crate) async fn update_wowinterface_addon(
     if remote_older
         || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
     {
+        crate::update::record_skipped_update_check(
+            state_database,
+            tracked,
+            remote_version.as_deref(),
+            Some(canonical_source_url(&remote.uid)),
+            dry_run,
+        )?;
         return Ok(WowinterfaceUpdateSummary {
             addon_id: remote.uid.clone(),
             addon_name: remote.ui_name.clone(),

@@ -174,6 +174,13 @@ pub(crate) async fn update_github_addon(
     let installed_commit = tracked.git_commit.as_deref().or(tracked.version.as_deref());
 
     if !force && commits_match(installed_commit, remote_version.as_deref()) {
+        crate::update::record_skipped_update_check(
+            state_database,
+            tracked,
+            remote_version.as_deref(),
+            Some(resolved.metadata.html_url.clone()),
+            dry_run,
+        )?;
         return Ok(GithubUpdateSummary {
             repo_url: resolved.metadata.html_url.clone(),
             repo_name: resolved.metadata.repo.clone(),

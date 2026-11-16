@@ -431,6 +431,17 @@ pub(crate) async fn update_wago_addon(
     if remote_older
         || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
     {
+        crate::update::record_skipped_update_check(
+            state_database,
+            tracked,
+            remote_version.as_deref(),
+            Some(
+                resolved.addon.website_url.clone().unwrap_or_else(|| {
+                    format!("https://addons.wago.io/addons/{}", resolved.addon.id)
+                }),
+            ),
+            dry_run,
+        )?;
         return Ok(WagoUpdateSummary {
             addon_id: resolved.addon.id.clone(),
             addon_name: resolved.addon.display_name.clone(),

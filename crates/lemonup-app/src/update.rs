@@ -600,6 +600,35 @@ pub(crate) fn compare_release_versions(installed: &str, remote: &str) -> Option<
     Some(Ordering::Equal)
 }
 
+/// Saves what an update that installed nothing (remote older or already current) learned from
+/// the provider, the same way a check does: the fresh remote version, the source URL and the
+/// check time. Without it the row keeps an older remote version and can show an update again.
+///
+/// A dry run writes nothing, and a row removed in the meantime is not recreated.
+pub(crate) fn record_skipped_update_check(
+    database: &StateDatabase,
+    tracked: &AddonRecord,
+    remote_version: Option<&str>,
+    source_url: Option<String>,
+    dry_run: bool,
+) -> Result<(), String> {
+    if dry_run {
+        return Ok(());
+    }
+    let Some(mut refreshed) = database
+        .get_addon_by_folder(&tracked.folder)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    refreshed.remote_version = remote_version.map(str::to_string);
+    refreshed.source_url = source_url.or(refreshed.source_url);
+    refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
+    database
+        .upsert_addon(&refreshed)
+        .map_err(|error| error.to_string())
+}
+
 /// True only when both versions parse and the remote one is strictly lower. Updates that would
 /// install it are held back unless forced.
 pub(crate) fn remote_is_older(installed: Option<&str>, remote: Option<&str>) -> bool {
@@ -937,12 +966,94 @@ fn normalize_version(value: &str) -> String {
 mod tests {
     use super::{
         LiveUpdateStatus, apply_live_updates, compare_release_versions, determine_update_status,
-        refresh_live_update_checks_with, remote_is_older, remote_older_result,
-        serialize_live_update_status, serialize_update_status,
+        record_skipped_update_check, refresh_live_update_checks_with, remote_is_older,
+        remote_older_result, serialize_live_update_status, serialize_update_status,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
     use std::cmp::Ordering;
     use tempfile::tempdir;
+
+    #[test]
+    fn skipped_update_saves_the_fresh_remote_version_so_the_row_stops_offering_it() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+
+        // An earlier check saw 4.4.0; the author pulled it and the provider now serves 4.3.0.
+        let mut addon = AddonRecord::new("Postal", "Postal", SourceKind::WowInterface);
+        addon.version = Some("4.3.5".to_string());
+        addon.remote_version = Some("4.4.0".to_string());
+        addon.source_url = Some("https://www.wowinterface.com/downloads/info1.html".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+        let addon = database
+            .get_addon_by_folder("Postal")
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+
+        // A dry run learns the same thing but saves nothing.
+        record_skipped_update_check(&database, &addon, Some("4.3.0"), None, true).expect("dry run");
+        let unchanged = database
+            .get_addon_by_folder("Postal")
+            .expect("get")
+            .expect("row");
+        assert_eq!(unchanged, addon);
+
+        record_skipped_update_check(
+            &database,
+            &addon,
+            Some("4.3.0"),
+            Some("https://www.wowinterface.com/downloads/info2.html".to_string()),
+            false,
+        )
+        .expect("record");
+        let stored = database
+            .get_addon_by_folder("Postal")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.remote_version.as_deref(), Some("4.3.0"));
+        assert_eq!(
+            stored.source_url.as_deref(),
+            Some("https://www.wowinterface.com/downloads/info2.html")
+        );
+        assert!(stored.last_checked_at.is_some());
+        assert_eq!(stored.version, addon.version);
+        assert_eq!(
+            determine_update_status(&stored).0,
+            UpdateStatus::RemoteOlder
+        );
+
+        // Already current: the stale remote version is replaced too, and no source URL keeps
+        // the stored one.
+        let mut current = stored.clone();
+        current.remote_version = Some("4.4.0".to_string());
+        database.upsert_addon(&current).expect("stale again");
+        record_skipped_update_check(&database, &current, Some("4.3.5"), None, false)
+            .expect("record");
+        let stored = database
+            .get_addon_by_folder("Postal")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.remote_version.as_deref(), Some("4.3.5"));
+        assert_eq!(
+            stored.source_url.as_deref(),
+            Some("https://www.wowinterface.com/downloads/info2.html")
+        );
+        assert_eq!(determine_update_status(&stored).0, UpdateStatus::UpToDate);
+    }
+
+    #[test]
+    fn skipped_update_does_not_recreate_a_removed_row() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let addon = AddonRecord::new("Gone", "Gone", SourceKind::Tukui);
+
+        record_skipped_update_check(&database, &addon, Some("1.0"), None, false).expect("record");
+
+        assert!(database.get_addon_by_folder("Gone").expect("get").is_none());
+    }
 
     #[tokio::test]
     async fn live_checks_refresh_wago_remote_versions_from_mocked_provider() {

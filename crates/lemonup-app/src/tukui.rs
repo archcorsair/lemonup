@@ -246,6 +246,13 @@ pub(crate) async fn update_tukui_addon(
         dry_run,
     )?;
     if let TukuiUpdatePlan::UpToDate(summary) = plan {
+        crate::update::record_skipped_update_check(
+            state_database,
+            tracked,
+            summary.remote_version.as_deref(),
+            Some(addon.web_url.clone()),
+            dry_run,
+        )?;
         return Ok(summary);
     }
 
