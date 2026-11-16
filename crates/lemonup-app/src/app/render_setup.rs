@@ -10,8 +10,9 @@ use crate::onboarding::{FoundState, NotFoundChoice, NotFoundState, PreferenceFie
 
 /// Columns before every line of the page.
 const INDENT: &str = "   ";
-/// Header, blank, stepper, rule, blank, title, blank.
-const TOP_ROWS: u16 = 7;
+/// Header (two rows), blank, stepper and the top rule: the rows above the
+/// page and any question over it.
+const ABOVE_PAGE_ROWS: u16 = 5;
 /// Rule, blank, keys.
 const BOTTOM_ROWS: u16 = 3;
 /// The widest a text box gets.
@@ -30,7 +31,7 @@ impl App {
             area,
         );
         // "Quit setup?" sits over the page, between the two rules.
-        let top = (TOP_ROWS - 2).min(area.height);
+        let top = ABOVE_PAGE_ROWS.min(area.height);
         let region = Rect::new(
             area.x,
             area.y + top,
@@ -61,7 +62,10 @@ impl App {
             ),
         ]));
         lines.push(Line::from(""));
-        let space = usize::from(height.saturating_sub(TOP_ROWS + BOTTOM_ROWS));
+        // The page gets what the rows above it and the key line leave.
+        let space = usize::from(height)
+            .saturating_sub(lines.len())
+            .saturating_sub(usize::from(BOTTOM_ROWS));
         lines.extend(body.into_iter().take(space));
         let filled = usize::from(height.saturating_sub(BOTTOM_ROWS));
         while lines.len() < filled {

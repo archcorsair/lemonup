@@ -56,4 +56,4 @@ Quick checklist:
 
 ## Screenshots
 
-Website screenshots come from `scripts/screenshots/generate.sh` (bash, needs `vhs`, `ttyd`, `python3`, `sqlite3` and ImageMagick). It builds the release binary, records every tape in `scripts/screenshots/tapes/` against an offline fixture in `/tmp/lemonup-demo`, and writes 2x PNGs to `../lemonup.org/docs/public/screens` (override with `--out`, reuse a binary with `--bin`). It never touches your real LemonUp config or WoW install. See `scripts/screenshots/README.md`.
+Website screenshots come from `scripts/screenshots/generate.sh` (bash, needs `vhs`, `ttyd`, `python3`, `sqlite3` and ImageMagick). It builds the release binary, records every tape in `scripts/screenshots/tapes/` against an offline fixture in `/tmp/lemonup-demo`, and writes 2x lossless WebP files to `../lemonup.org/docs/public/screens` (override with `--out`, reuse a binary with `--bin`). It never touches your real LemonUp config or WoW install. See `scripts/screenshots/README.md`.

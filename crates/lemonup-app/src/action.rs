@@ -22,6 +22,8 @@ pub enum AppAction {
     SetInspectOverlay(bool),
     /// Scrolls the open sheet to this body row.
     SetSheetOffset(u16),
+    /// Scrolls docked Details to this many rows down.
+    SetDockedDetailsOffset(u16),
     SetHelpOverlay(bool),
     SetHelpContext(HelpContext),
     SetStatus(StatusMessage),
@@ -53,6 +55,8 @@ pub enum AppAction {
     SetConfigPaneState(ConfigPaneState),
     SetPersistedConfig(AppConfig),
     SetBackupPaneState(BackupPaneState),
+    /// Reads the backup folder again, for backups made outside the Backups sheet.
+    ReloadBackups,
     SetPendingWagoInstallConfirmation(Option<WagoInstallConfirmation>),
     SetWagoInstallInProgress(bool),
     SetDirectInstallInProgress(bool),

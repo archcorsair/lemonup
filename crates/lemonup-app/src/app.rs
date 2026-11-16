@@ -376,6 +376,8 @@ enum AppMessage {
     DashboardCloseOverlay,
     /// Scrolls the open sheet's body.
     SheetScroll(SheetMove),
+    /// Scrolls docked Details, which the list keys leave alone.
+    DockedDetailsScroll(SheetMove),
     InspectToggleSelected,
     InspectRequestDelete,
     InspectRunCheck,
@@ -994,6 +996,30 @@ impl BackupPaneState {
         }
         next.pending_restore = None;
         next.pending_delete = None;
+        next
+    }
+
+    /// The list as it is on disk now. The cursor stays on the same backup,
+    /// and an open question stays only while its backup is still there.
+    fn reloaded(&self, backups: Vec<BackupEntry>) -> Self {
+        let mut next = self.clone();
+        let selected_path = self.selected_backup().map(|entry| entry.path.clone());
+        let present = |pending: &Option<BackupEntry>| {
+            pending
+                .as_ref()
+                .is_some_and(|entry| backups.iter().any(|backup| backup.path == entry.path))
+        };
+        if !present(&next.pending_restore) {
+            next.pending_restore = None;
+        }
+        if !present(&next.pending_delete) {
+            next.pending_delete = None;
+        }
+        next.selected_backup = selected_path
+            .and_then(|path| backups.iter().position(|backup| backup.path == path))
+            .unwrap_or(next.selected_backup)
+            .min(backups.len().saturating_sub(1));
+        next.backups = backups;
         next
     }
 
@@ -2404,6 +2430,20 @@ impl SearchPaneState {
             .and_then(|index| self.results.get(index))
     }
 
+    /// The result enter installs: after a failure, the addon that failed,
+    /// otherwise the one the cursor is on.
+    fn install_target(&self) -> Option<&WagoSearchResult> {
+        if let SearchInstallState::Error {
+            addon_id: Some(addon_id),
+            ..
+        } = &self.install_state
+            && let Some(failed) = self.results.iter().find(|result| &result.id == addon_id)
+        {
+            return Some(failed);
+        }
+        self.selected_result()
+    }
+
     fn start_install_check(&self, result: &WagoSearchResult) -> Self {
         let mut next = self.clone();
         next.install_state = SearchInstallState::Checking {
@@ -2689,6 +2729,8 @@ pub struct App {
     last_frame_width: Option<u16>,
     /// The open sheet as last drawn, so keys can scroll it.
     sheet_scroll: std::cell::Cell<SheetScroll>,
+    /// Docked Details as last drawn, so PgUp, PgDn and the wheel scroll it.
+    docked_scroll: std::cell::RefCell<render_inspect::DockedScroll>,
     onboarding: OnboardingState,
     task_events_tx: mpsc::UnboundedSender<AppTaskEvent>,
     task_events_rx: mpsc::UnboundedReceiver<AppTaskEvent>,
@@ -2854,6 +2896,7 @@ impl App {
             last_list_click: std::cell::Cell::new(None),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            docked_scroll: std::cell::RefCell::default(),
             onboarding,
             task_events_tx,
             task_events_rx,
@@ -3289,6 +3332,24 @@ impl App {
             };
         }
 
+        // The wheel over docked Details scrolls it.
+        if let MouseEventKind::ScrollDown | MouseEventKind::ScrollUp = mouse.kind
+            && let Some(area) = self.docked_details_area()
+            && (area.left()..area.right()).contains(&mouse.column)
+            && (area.top()..area.bottom()).contains(&mouse.row)
+        {
+            if !self.docked_details_overflow() {
+                return vec![];
+            }
+            return vec![AppMessage::DockedDetailsScroll(
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    SheetMove::LineUp
+                } else {
+                    SheetMove::LineDown
+                },
+            )];
+        }
+
         match mouse.kind {
             MouseEventKind::ScrollDown => vec![AppMessage::DashboardSelectionNext],
             MouseEventKind::ScrollUp => vec![AppMessage::DashboardSelectionPrevious],
@@ -3319,6 +3380,23 @@ impl App {
             && let KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') = key.code
         {
             return vec![AppMessage::DashboardCloseOverlay];
+        }
+        // Docked, PgUp and PgDn scroll Details, not the list; with nothing
+        // hidden they do nothing.
+        if docked_details
+            && !self.dashboard.filter_editing()
+            && let KeyCode::PageUp | KeyCode::PageDown = key.code
+        {
+            if !self.docked_details_overflow() {
+                return vec![];
+            }
+            return vec![AppMessage::DockedDetailsScroll(
+                if key.code == KeyCode::PageUp {
+                    SheetMove::PageUp
+                } else {
+                    SheetMove::PageDown
+                },
+            )];
         }
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) && !docked_details {
@@ -3604,6 +3682,22 @@ impl App {
                 KeyCode::Esc => vec![AppMessage::SearchCloseKeyBox],
                 KeyCode::Backspace => vec![AppMessage::SearchKeyBackspace],
                 KeyCode::Char(character) => vec![AppMessage::SearchKeyChar(character)],
+                _ => vec![],
+            });
+        }
+
+        // A failure hides the results: the arrows move nothing, and enter
+        // tries the same addon again.
+        if matches!(pane.install_state, SearchInstallState::Error { .. }) {
+            return Some(match key.code {
+                KeyCode::Enter if pane.results_focused() => {
+                    vec![AppMessage::SearchInstallSelected]
+                }
+                KeyCode::Enter => vec![AppMessage::SearchSubmit],
+                KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
+                KeyCode::Char('?') if pane.query.is_empty() => vec![AppMessage::DashboardOpenHelp],
+                KeyCode::Backspace => vec![AppMessage::SearchBackspace],
+                KeyCode::Char(character) => vec![AppMessage::SearchInputChar(character)],
                 _ => vec![],
             });
         }
@@ -3968,6 +4062,10 @@ impl App {
                 self.sheet_scroll
                     .get()
                     .moved(movement, self.shell_ui.overlay.active),
+            )],
+            AppMessage::DockedDetailsScroll(movement) => vec![AppAction::SetDockedDetailsOffset(
+                self.docked_details_scroll()
+                    .moved(movement, Some(OverlayKind::Inspect)),
             )],
             AppMessage::InspectToggleSelected => match self.inspect_resolved_target() {
                 Some(target) => {
@@ -4524,7 +4622,7 @@ impl App {
                         DetailMode::Search,
                         "LemonUp doesn't know your AddOns folder yet",
                     ))]
-                } else if let Some(result) = self.search_pane.selected_result() {
+                } else if let Some(result) = self.search_pane.install_target() {
                     let request = PendingWagoInstallRequest {
                         target: result.id.clone(),
                         source: WagoInstallSource::SearchResult,
@@ -5169,7 +5267,12 @@ impl App {
                     )),
                 ],
                 AppTaskEvent::DashboardJobStep(step) => {
-                    vec![AppAction::ApplyDashboardJobStep(step.clone())]
+                    let mut actions = vec![AppAction::ApplyDashboardJobStep(step.clone())];
+                    // The automatic backup made (and pruned) archives.
+                    if matches!(step, DashboardJobStep::BackedUp(_)) {
+                        actions.push(AppAction::ReloadBackups);
+                    }
+                    actions
                 }
                 AppTaskEvent::DashboardCheckFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
@@ -5491,6 +5594,15 @@ impl App {
         }
     }
 
+    /// Reads the backup folder again. A folder that can't be read keeps the
+    /// list as it was.
+    fn reload_backups(&mut self) {
+        match list_backups(&self.backup_dir) {
+            Ok(backups) => self.backup_pane = self.backup_pane.reloaded(backups),
+            Err(error) => tracing::warn!(%error, "could not read the backup folder"),
+        }
+    }
+
     fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.quit_requested = true,
@@ -5522,6 +5634,7 @@ impl App {
                 scroll.offset = offset;
                 self.sheet_scroll.set(scroll);
             }
+            AppAction::SetDockedDetailsOffset(offset) => self.set_docked_details_offset(offset),
             AppAction::SetHelpOverlay(active) => {
                 if active {
                     self.shell_ui.overlay.active = Some(OverlayKind::Help);
@@ -5639,6 +5752,7 @@ impl App {
             AppAction::SetBackupPaneState(state) => {
                 self.backup_pane = state;
             }
+            AppAction::ReloadBackups => self.reload_backups(),
             AppAction::SetPendingWagoInstallConfirmation(confirmation) => {
                 self.pending_wago_install_confirmation = confirmation;
             }
@@ -5732,6 +5846,10 @@ impl App {
                     DetailMode::Config => Some(OverlayKind::Config),
                     DetailMode::Backup => Some(OverlayKind::Backup),
                 };
+                // Backups shows what is on disk, automatic backups included.
+                if detail_mode == DetailMode::Backup {
+                    self.reload_backups();
+                }
             }
             AppAction::ReenterOnboarding => {
                 self.shell_mode = ShellMode::Onboarding;
@@ -5921,6 +6039,14 @@ impl App {
                         }
                     }
                     Err(error) => {
+                        // The config still names the old folder, so the binding must
+                        // too, or the next launch refuses the folder on a mismatch.
+                        if let Some(previous) = &rebind.previous
+                            && let Err(restore_error) = StateDatabase::open(&self.state_db_file)
+                                .and_then(|database| database.bind_addon_dir(previous))
+                        {
+                            tracing::warn!(%restore_error, "could not restore the previous AddOns folder binding");
+                        }
                         self.onboarding = self
                             .onboarding
                             .with_problem(format!("LemonUp couldn't save your setup: {error}"));
@@ -8304,6 +8430,7 @@ mod tests {
             last_list_click: std::cell::Cell::new(None),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            docked_scroll: std::cell::RefCell::default(),
             onboarding: OnboardingState::new(),
             task_events_tx,
             task_events_rx,
@@ -10306,6 +10433,79 @@ mod tests {
         assert!(app.search_pane.in_progress);
         // The status line never shows the key.
         assert!(!app.status_line.text.contains("test-key-123"));
+    }
+
+    #[test]
+    fn a_failed_result_install_retries_that_addon_and_the_arrows_do_nothing() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.apply(AppAction::SetDetailMode(DetailMode::Search));
+        app.effective_addon_dir = Some(PathBuf::from(
+            "C:\\Sandbox\\World of Warcraft\\_retail_\\Interface\\AddOns",
+        ));
+        let result = |id: &str, name: &str| WagoSearchResult {
+            id: id.to_string(),
+            display_name: name.to_string(),
+            summary: None,
+            owner: None,
+            authors: Vec::new(),
+            website_url: None,
+            download_count: None,
+            version: None,
+        };
+        app.search_pane = SearchPaneState {
+            query: "aura".into(),
+            presentation_mode: SearchPresentationMode::ComposeFirst,
+            focus: SearchFocus::Results,
+            key_box: None,
+            in_progress: false,
+            results: vec![result("first", "WeakAuras"), result("second", "Plater")],
+            selected_result: Some(0),
+            last_query: Some("aura".to_string()),
+            install_state: SearchInstallState::Idle,
+        };
+        let checking = app
+            .search_pane
+            .start_install_check(app.search_pane.selected_result().expect("selected"));
+        let (addon_id, addon_name) = checking.install_identity();
+        app.search_pane = checking.fail_install(
+            addon_id,
+            addon_name,
+            "Wago.io",
+            &SourceError {
+                kind: SourceErrorKind::Other,
+                detail: "boom".to_string(),
+                clash: None,
+            },
+        );
+
+        for code in [KeyCode::Down, KeyCode::Up] {
+            assert!(
+                app.messages_for_key(KeyEvent::from(code)).is_empty(),
+                "{code:?} should do nothing on the error screen"
+            );
+        }
+        assert_eq!(
+            app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+            vec![AppMessage::SearchInstallSelected]
+        );
+        let labels: Vec<String> = app
+            .key_table(100)
+            .iter()
+            .map(|hint| hint.label.to_string())
+            .collect();
+        assert!(
+            labels.iter().any(|label| label == "try again"),
+            "{labels:?}"
+        );
+        assert!(!labels.iter().any(|label| label == "choose"), "{labels:?}");
+
+        // Even a selection that moved retries the addon that failed.
+        app.search_pane.selected_result = Some(1);
+        let actions = app.update(AppMessage::SearchInstallSelected);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            AppAction::StartWagoInstall { request, .. } if request.target == "first"
+        )));
     }
 
     #[test]
@@ -12399,6 +12599,80 @@ mod tests {
     }
 
     #[test]
+    fn header_answer_line_counts_failed_and_unchecked_addons() {
+        let now = OffsetDateTime::now_utc();
+        let checked = |name: &str, remote: Option<&str>| {
+            let mut addon = versioned(SourceKind::Wago, "1.0", remote);
+            addon.name = name.to_string();
+            addon.folder = name.to_string();
+            addon.last_checked_at = Some(now - Duration::minutes(5));
+            addon
+        };
+        let never = |name: &str| {
+            let mut addon = versioned(SourceKind::Wago, "1.0", None);
+            addon.name = name.to_string();
+            addon.folder = name.to_string();
+            addon
+        };
+        let mut app = app_for_tests(ShellMode::Dashboard);
+
+        // Up to date, one never checked: not "all up to date".
+        app.dashboard =
+            DashboardState::from_addons(vec![checked("A", Some("1.0")), never("B"), never("C")]);
+        assert_eq!(
+            answer_text(&app, now),
+            "3 addons · 2 not checked yet · checked 5 min ago"
+        );
+
+        // A check that failed this session.
+        app.dashboard =
+            DashboardState::from_addons(vec![checked("A", Some("1.0")), checked("B", Some("1.0"))]);
+        app.dashboard.check_failures.insert(
+            "B".to_string(),
+            super::CheckFailure {
+                kind: SourceErrorKind::NoConnection,
+                source: SourceKind::Wago,
+                detail: "offline".to_string(),
+            },
+        );
+        assert_eq!(
+            answer_text(&app, now),
+            "2 addons · 1 couldn't be checked · checked 5 min ago"
+        );
+
+        // With an update ready the counts follow it.
+        app.dashboard = DashboardState::from_addons(vec![
+            checked("A", Some("1.1")),
+            checked("B", Some("1.0")),
+            never("C"),
+        ]);
+        app.dashboard.check_failures.insert(
+            "B".to_string(),
+            super::CheckFailure {
+                kind: SourceErrorKind::NoConnection,
+                source: SourceKind::Wago,
+                detail: "offline".to_string(),
+            },
+        );
+        assert_eq!(
+            answer_text(&app, now),
+            "3 addons · 1 update ready · 1 couldn't be checked · 1 not checked yet · checked 5 min ago"
+        );
+
+        // A first check that failed for everything has no time to show.
+        app.dashboard = DashboardState::from_addons(vec![never("A")]);
+        app.dashboard.check_failures.insert(
+            "A".to_string(),
+            super::CheckFailure {
+                kind: SourceErrorKind::NoConnection,
+                source: SourceKind::Wago,
+                detail: "offline".to_string(),
+            },
+        );
+        assert_eq!(answer_text(&app, now), "1 addon · 1 couldn't be checked");
+    }
+
+    #[test]
     fn done_and_note_messages_fade_after_about_four_seconds() {
         for kind in [StatusKind::Done, StatusKind::Note] {
             let mut app = app_for_tests(ShellMode::Dashboard);
@@ -13539,6 +13813,37 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_config_save_in_setup_keeps_the_old_binding() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, forever) = two_client_profile(temp.path());
+        let state_db_file = paths.state_db_file.clone();
+        {
+            let database = StateDatabase::open(&state_db_file).expect("open");
+            database.bind_addon_dir(&retail).expect("bind retail");
+        }
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+        // A directory where the config file should be makes the write fail.
+        let blocked = temp.path().join("blocked-config");
+        std::fs::create_dir_all(&blocked).expect("blocked config dir");
+        app.config_store = ConfigStore::new(blocked);
+        let before = app.effective_addon_dir.clone();
+
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(forever);
+        app.apply(AppAction::SaveOnboardingConfig(config));
+
+        assert!(app.onboarding.problem.is_some());
+        assert!(app.status_line.text.contains("failed to save config"));
+        let database = StateDatabase::open(&state_db_file).expect("open");
+        assert_eq!(database.bound_addon_dir().expect("binding"), Some(retail));
+        assert_eq!(app.effective_addon_dir, before);
+    }
+
+    #[test]
     fn dashboard_tick_starts_pending_scan() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.scan_state = ScanState::Pending;
@@ -13982,6 +14287,35 @@ mod tests {
         paste_text(&mut app, "12345\n");
 
         assert_eq!(app.install_pane.input, "12345");
+    }
+
+    #[test]
+    fn every_setup_step_keeps_its_key_line_on_screen() {
+        for step in OnboardingStep::ALL {
+            for height in [20, 24] {
+                let mut app = app_for_tests(ShellMode::Onboarding);
+                app.onboarding.step = step;
+                let keys: String = app
+                    .dashboard_key_line(80)
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                assert!(!keys.trim().is_empty(), "{step:?}");
+                assert_eq!(
+                    app.setup_lines(80, height).len(),
+                    usize::from(height),
+                    "{step:?} at 80x{height}"
+                );
+                let rows = render_rows(&mut app, 80, height);
+                let text = rows.join("\n");
+                assert_eq!(
+                    rows.last().expect("last row").trim_end(),
+                    keys.trim_end(),
+                    "{step:?} at 80x{height}:\n{text}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -15857,6 +16191,85 @@ mod tests {
         }
 
         #[test]
+        fn docked_details_scrolls_with_pgup_pgdn_and_the_wheel() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_inspect(&mut app);
+            let rows = render_rows(&mut app, 160, 14);
+            let text = rows.join("\n");
+            assert!(app.details_docked(), "{text}");
+            assert!(text.contains(" more"), "{text}");
+            let keys = rows.last().expect("key line").clone();
+            assert!(keys.contains("pgup/pgdn scroll details"), "{keys}");
+            let panel = app.docked_details_area().expect("panel");
+            let panel_text = |app: &mut App| -> Vec<String> {
+                render_rows(app, 160, 14)
+                    .iter()
+                    .skip(usize::from(panel.y))
+                    .take(usize::from(panel.height))
+                    .map(|row| row.chars().skip(usize::from(panel.x)).collect::<String>())
+                    .collect()
+            };
+            let top = panel_text(&mut app);
+
+            // PgDn scrolls the panel; the list keys still move the list.
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::PageDown)),
+                vec![AppMessage::DockedDetailsScroll(SheetMove::PageDown)]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+                vec![AppMessage::DashboardSelectionNext]
+            );
+            assert!(
+                !app.messages_for_key(KeyEvent::from(KeyCode::Home))
+                    .iter()
+                    .any(|message| matches!(message, AppMessage::DockedDetailsScroll(_)))
+            );
+            press(&mut app, KeyCode::PageDown);
+            let scrolled = panel_text(&mut app);
+            assert_ne!(top, scrolled);
+            assert!(app.docked_details_scroll().offset > 0);
+            press(&mut app, KeyCode::PageUp);
+            assert_eq!(panel_text(&mut app), top);
+
+            // The wheel over the panel scrolls it; over the list it moves the list.
+            let wheel = |column: u16, row: u16| MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert_eq!(
+                app.messages_for_mouse(wheel(panel.x + 2, panel.y + 1)),
+                vec![AppMessage::DockedDetailsScroll(SheetMove::LineDown)]
+            );
+            assert_eq!(
+                app.messages_for_mouse(wheel(2, panel.y + 1)),
+                vec![AppMessage::DashboardSelectionNext]
+            );
+            apply_all(
+                &mut app,
+                AppMessage::DockedDetailsScroll(SheetMove::LineDown),
+            );
+            assert_eq!(app.docked_details_scroll().offset, 1);
+
+            // Another addon starts at the top.
+            press(&mut app, KeyCode::Down);
+            assert_eq!(app.docked_details_scroll().offset, 0);
+            panel_text(&mut app);
+            assert_eq!(app.docked_details_scroll().offset, 0);
+
+            // Everything fits: no scroll key, and PgDn does nothing.
+            let rows = render_rows(&mut app, 160, 60);
+            let keys = rows.last().expect("key line");
+            assert!(!keys.contains("scroll details"), "{keys}");
+            assert!(
+                app.messages_for_key(KeyEvent::from(KeyCode::PageDown))
+                    .is_empty()
+            );
+        }
+
+        #[test]
         fn details_offers_update_only_when_an_update_is_ready() {
             let keys = |app: &App| -> Vec<String> {
                 app.key_table(80)
@@ -16008,7 +16421,7 @@ mod tests {
             match when {
                 HelpWhen::Always => {}
                 HelpWhen::NoWagoKey => app.wago_api_key = None,
-                HelpWhen::NotLinked | HelpWhen::NoJob => {}
+                HelpWhen::NotLinked | HelpWhen::NoJob | HelpWhen::DetailsOverflow => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),
@@ -16017,6 +16430,10 @@ mod tests {
                 }
             }
             help_state(context, title)(&mut app);
+            // Short enough that docked Details does not fit.
+            if when == HelpWhen::DetailsOverflow {
+                render_rows(&mut app, 160, 14);
+            }
             // The cursor (and Details) on the one addon that is not linked.
             if when == HelpWhen::NotLinked {
                 let index = app
@@ -17412,6 +17829,51 @@ mod tests {
             let text = render_rows(&mut app, 100, 30).join("\n");
             assert!(text.contains("! Check failed"), "{text}");
             assert!(text.contains("Couldn't reach GitHub."), "{text}");
+        }
+
+        #[test]
+        fn backups_show_what_is_on_disk_after_an_automatic_backup() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.backup_dir = temp.path().to_path_buf();
+            let older = temp.path().join("WTF-20260401T120000.000Z.zip");
+            std::fs::write(&older, "zip").expect("older backup");
+
+            // Opening Backups reads the folder.
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            let names = |app: &App| -> Vec<String> {
+                app.backup_pane
+                    .backups
+                    .iter()
+                    .map(|entry| entry.file_name.clone())
+                    .collect()
+            };
+            assert_eq!(names(&app), vec!["WTF-20260401T120000.000Z.zip"]);
+
+            // An update's automatic backup adds one and prunes the older one.
+            std::fs::write(temp.path().join("WTF-20260402T120000.000Z.zip"), "zip")
+                .expect("newer backup");
+            std::fs::remove_file(&older).expect("prune");
+            send(
+                &mut app,
+                step(DashboardJobStep::BackedUp(
+                    "backed up your game settings first".to_string(),
+                )),
+            );
+            assert_eq!(names(&app), vec!["WTF-20260402T120000.000Z.zip"]);
+
+            // Closing and opening again reads it again too.
+            app.apply(AppAction::SetDetailMode(DetailMode::Overview));
+            std::fs::write(temp.path().join("WTF-20260403T120000.000Z.zip"), "zip")
+                .expect("newest backup");
+            app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+            assert_eq!(
+                names(&app),
+                vec![
+                    "WTF-20260403T120000.000Z.zip",
+                    "WTF-20260402T120000.000Z.zip"
+                ]
+            );
         }
 
         #[test]

@@ -37,6 +37,7 @@ impl App {
             HelpWhen::NotLinked => self.not_linked_current_item().is_some(),
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
             HelpWhen::NoJob => self.dashboard_job_running().is_none(),
+            HelpWhen::DetailsOverflow => self.docked_details_overflow(),
         }
     }
 

@@ -5,7 +5,7 @@
 use super::render_dashboard::{
     RowStatus, dashboard_item_installed_version, dashboard_item_remote_label, dashboard_source_name,
 };
-use super::sheet::{SheetBody, wrap_lines};
+use super::sheet::{SheetBody, SheetScroll, wrap_lines};
 use super::*;
 
 /// At this width and wider, Details docks beside the list.
@@ -488,8 +488,52 @@ impl App {
         lines
     }
 
+    fn docked_details_folder(&self) -> Option<String> {
+        self.inspect_resolved_target()
+            .map(|target| target.item.folder.clone())
+    }
+
+    /// How far the docked panel is scrolled, for the addon it shows now:
+    /// another addon starts at the top.
+    pub(super) fn docked_details_scroll(&self) -> SheetScroll {
+        let docked = self.docked_scroll.borrow();
+        if docked.folder.is_some() && docked.folder == self.docked_details_folder() {
+            docked.scroll
+        } else {
+            SheetScroll::default()
+        }
+    }
+
+    /// True while Details is docked and does not fit beside the list.
+    pub(super) fn docked_details_overflow(&self) -> bool {
+        self.details_docked()
+            && self
+                .docked_details_scroll()
+                .overflows(Some(OverlayKind::Inspect))
+    }
+
+    /// Where the docked panel's body was last drawn.
+    pub(super) fn docked_details_area(&self) -> Option<Rect> {
+        if self.details_docked() {
+            self.docked_scroll.borrow().area
+        } else {
+            None
+        }
+    }
+
+    /// Scrolls the docked panel to `offset` rows; the next draw clamps it.
+    pub(super) fn set_docked_details_offset(&self, offset: u16) {
+        let folder = self.docked_details_folder();
+        let mut docked = self.docked_scroll.borrow_mut();
+        if docked.folder != folder {
+            docked.folder = folder;
+            docked.scroll = SheetScroll::default();
+        }
+        docked.scroll.offset = offset;
+    }
+
     /// The docked panel: the addon name on the column header row, then the
-    /// details. What does not fit ends in "↓ N more".
+    /// details from the scroll offset. What does not fit ends in "↓ N more".
     pub(super) fn render_docked_details(&self, frame: &mut Frame<'_>, title: Rect, body: Rect) {
         let roles = self.ui_theme.roles;
         let text_width = body.width.saturating_sub(2);
@@ -507,6 +551,26 @@ impl App {
             title,
         );
         let mut lines = self.details_docked_lines(text_width);
+        let folder = self.docked_details_folder();
+        {
+            let mut docked = self.docked_scroll.borrow_mut();
+            if docked.folder != folder {
+                docked.folder = folder;
+                docked.scroll = SheetScroll::default();
+            }
+            let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+            let max_offset = total.saturating_sub(body.height);
+            let offset = docked.scroll.offset.min(max_offset);
+            docked.scroll = SheetScroll {
+                kind: Some(OverlayKind::Inspect),
+                offset,
+                focus: None,
+                max_offset,
+                viewport: body.height,
+            };
+            docked.area = Some(body);
+            lines.drain(..usize::from(offset));
+        }
         let height = usize::from(body.height);
         if height > 0 && lines.len() > height {
             let shown = height - 1;
@@ -519,6 +583,16 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines), body);
     }
+}
+
+/// Docked Details as last drawn, so PgUp, PgDn and the wheel can scroll it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct DockedScroll {
+    /// The addon the panel showed; another one starts at the top.
+    folder: Option<String>,
+    scroll: SheetScroll,
+    /// The panel body on screen.
+    area: Option<Rect>,
 }
 
 fn spans_text_width(spans: &[Span<'_>]) -> usize {

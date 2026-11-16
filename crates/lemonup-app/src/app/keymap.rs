@@ -172,6 +172,8 @@ pub(super) enum HelpWhen {
     /// No check or update is running: only then do the keys that start one
     /// do anything.
     NoJob,
+    /// Docked Details does not fit beside the list: PgUp and PgDn scroll it.
+    DetailsOverflow,
 }
 
 /// The left hand side of a Help row.
@@ -454,6 +456,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
                     .when(HelpWhen::NotLinked),
+                HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
                 HelpRow::key(
                     "enter  esc  q",
                     "close Details",
@@ -464,7 +467,6 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "The list keeps working",
             rows: &[
-                HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
                 HelpRow::key("Home End", "first, last", K_ENDS),
                 HelpRow::key(
                     "→ ←  or  l h",
@@ -871,6 +873,14 @@ impl App {
         ));
         if docked {
             hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", UP_DOWN));
+            if self.docked_details_overflow() {
+                hints.push(KeyHint::key(
+                    Id::Scroll,
+                    "pgup/pgdn",
+                    "scroll details",
+                    PAGE,
+                ));
+            }
         } else {
             hints.push(
                 KeyHint::key(Id::Nav, "↑/↓", "previous or next addon", UP_DOWN)
@@ -1035,7 +1045,8 @@ impl App {
                 close("close"),
             ];
         }
-        if pane.results_focused() {
+        let failed = matches!(pane.install_state, SearchInstallState::Error { .. });
+        if pane.results_focused() && !failed {
             let mut hints = vec![
                 KeyHint::text("type to change the search"),
                 KeyHint::key(Id::Results, "↑/↓", "choose", ARROWS),

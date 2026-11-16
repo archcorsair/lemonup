@@ -727,32 +727,70 @@ impl App {
             ));
             return spans;
         }
-        let Some(checked_at) = items.iter().filter_map(|item| item.last_checked_at).max() else {
+        // What the Status column says for each linked addon, before any
+        // update result: a failed check, or no answer yet.
+        let mut failed = 0;
+        let mut unchecked = 0;
+        for item in items
+            .iter()
+            .filter(|item| item.source != SourceKind::Manual)
+        {
+            if self.dashboard.check_failure(&item.folder).is_some() {
+                failed += 1;
+                continue;
+            }
+            match dashboard_item_row_status(item) {
+                RowStatus::CheckFailed => failed += 1,
+                RowStatus::NotChecked => unchecked += 1,
+                _ => {}
+            }
+        }
+        let checked_at = items.iter().filter_map(|item| item.last_checked_at).max();
+        if checked_at.is_none() && failed == 0 {
             spans.push(dot());
             spans.push(Span::styled(
                 "not checked yet",
                 Style::default().fg(roles.muted),
             ));
             return spans;
-        };
+        }
         let updates = self.dashboard.update_ready_folders().len();
-        spans.push(dot());
-        spans.push(if updates > 0 {
-            Span::styled(
+        if updates > 0 {
+            spans.push(dot());
+            spans.push(Span::styled(
                 format!("{updates} update{} ready", plural_suffix(updates)),
                 Style::default().fg(roles.amber).add_modifier(bold),
-            )
-        } else {
-            Span::styled(
+            ));
+        }
+        if failed > 0 {
+            spans.push(dot());
+            spans.push(Span::styled(
+                format!("{failed} couldn't be checked"),
+                Style::default().fg(roles.red).add_modifier(bold),
+            ));
+        }
+        if unchecked > 0 {
+            spans.push(dot());
+            spans.push(Span::styled(
+                format!("{unchecked} not checked yet"),
+                Style::default().fg(roles.muted),
+            ));
+        }
+        // Only when every linked addon has an answer and none needs one.
+        if updates == 0 && failed == 0 && unchecked == 0 {
+            spans.push(dot());
+            spans.push(Span::styled(
                 "all up to date",
                 Style::default().fg(roles.green).add_modifier(bold),
-            )
-        });
-        spans.push(dot());
-        spans.push(Span::styled(
-            checked_ago_label(now, checked_at),
-            Style::default().fg(roles.muted),
-        ));
+            ));
+        }
+        if let Some(checked_at) = checked_at {
+            spans.push(dot());
+            spans.push(Span::styled(
+                checked_ago_label(now, checked_at),
+                Style::default().fg(roles.muted),
+            ));
+        }
         spans
     }
 
