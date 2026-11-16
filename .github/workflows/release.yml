@@ -114,3 +114,85 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Updates the AUR packages after a stable release is published. It does
+  # nothing until the AUR_SSH_PRIVATE_KEY secret is set. See packaging/aur.
+  aur:
+    name: Update AUR packages
+    needs: publish
+    if: github.event_name == 'push' && !contains(github.ref_name, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # One AUR update at a time across all tags, so runs can't race each other.
+    concurrency:
+      group: aur
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Checkout code
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set package version
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $TAG is not a stable version"
+            exit 1
+          fi
+          for pkgbuild in packaging/aur/lemonup/PKGBUILD packaging/aur/lemonup-bin/PKGBUILD; do
+            sed -i -e "s/^pkgver=.*/pkgver=$version/" -e 's/^pkgrel=.*/pkgrel=1/' "$pkgbuild"
+          done
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # Never replace a newer AUR package with an older release (a late or rerun job).
+      - name: Check published AUR versions
+        id: aur_versions
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          info="$(curl -fsSL --retry 3 'https://aur.archlinux.org/rpc/v5/info?arg[]=lemonup-bin&arg[]=lemonup')"
+          for pkg in lemonup-bin lemonup; do
+            published="$(jq -r --arg name "$pkg" '.results[] | select(.Name == $name) | .Version' <<<"$info")"
+            published="${published%-*}"
+            push=true
+            if [ -n "$published" ]; then
+              newest="$(printf '%s\n%s\n' "$published" "$VERSION" | sort -V | tail -n1)"
+              if [ "$published" = "$VERSION" ] || [ "$newest" != "$VERSION" ]; then
+                push=false
+                echo "::notice::$pkg is $published on the AUR; not replacing it with $VERSION"
+              fi
+            fi
+            echo "${pkg//-/_}=$push" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Update lemonup-bin
+        if: env.AUR_SSH_PRIVATE_KEY != '' && steps.aur_versions.outputs.lemonup_bin == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: lemonup-bin
+          pkgbuild: packaging/aur/lemonup-bin/PKGBUILD
+          updpkgsums: true
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ github.ref_name }}
+
+      - name: Update lemonup
+        if: env.AUR_SSH_PRIVATE_KEY != '' && steps.aur_versions.outputs.lemonup == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: lemonup
+          pkgbuild: packaging/aur/lemonup/PKGBUILD
+          updpkgsums: true
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ github.ref_name }}
