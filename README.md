@@ -10,64 +10,80 @@
 
 [![Test](https://github.com/archcorsair/lemonup/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/archcorsair/lemonup/actions/workflows/test.yml)
 
-**LemonUp** is a Rust TUI and CLI for installing, checking, updating, importing, exporting, backing up, and restoring World of Warcraft addons.
+**LemonUp** finds your WoW install, shows every addon and whether it has an update, and keeps
+them up to date from GitHub, WoWInterface, TukUI and Wago.io. It runs in your terminal as a TUI,
+with a CLI for scripts, and ships as one binary for Linux, macOS and Windows.
 
-## Current Scope
+![LemonUp updating addons](https://lemonup.org/demos/lemonup-manage.gif)
 
-- Retail and WoW Forever (`_forever_`) support, one AddOns folder per profile (use `--profile` to manage both)
-- GitHub, TukUI, WoWInterface, and Wago sources
-- TUI + CLI workflows
-- Background update checks
-- WTF backup and restore
+## Install
 
-## Highlights
+**Homebrew** (macOS and Linux):
 
-- Terminal-native addon list with Details, sorting, a `/` filter, multi-select, bulk update/delete, and `z` undo delete
-- Not linked addons can be matched to a source with `f` (find online)
-- Install by search or from a pasted URL
-- Guided setup in three steps with strict addon-path safety rails
-- Portable addon import/export format
-- Wago search and install support with your own API key
+```sh
+brew install archcorsair/lemonup/lemonup
+```
 
-## Quick Start
+**Scoop** (Windows):
 
-Launch the TUI:
+```sh
+scoop bucket add lemon-bucket https://github.com/archcorsair/lemon-bucket
+scoop install lemonup
+```
 
-```powershell
+**Or download a binary** from [Releases](https://github.com/archcorsair/lemonup/releases) and put
+it on your `PATH`.
+
+Coming from LemonUp 1? Your settings and linked addons carry over on the first run. See
+[Upgrading](https://lemonup.org/upgrading).
+
+## Features
+
+- **Setup in three steps:** LemonUp searches for your game, lists Retail and WoW Forever with
+  their addon counts, and accepts any folder inside the install
+- **Addon list:** every addon with its status (Update ready, Up to date, Newer than source, Not
+  linked), sorting, a `/` filter, multi-select, and Details docked on the right in wide terminals
+- **Install** by name (Wago.io) or by pasting a GitHub, WoWInterface, TukUI or Wago.io link
+- **Find online:** press `f` on a "Not linked" addon to link it to its source, so LemonUp keeps
+  it updated
+- **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong
+  to another addon are never replaced, and deletes can be undone with `z`
+- **Backups of your game settings** (the WTF folder) before updates, with restore
+- **Keyboard first:** vim-style `j`/`k` and `h`/`l` alongside the arrow keys, `?` for Help on
+  every screen
+- **Works in any terminal:** a Terminal theme that uses your colors, `NO_COLOR` support, and an
+  ASCII mode for consoles without Unicode
+- **CLI** for scripts and automation, plus addon list import and export
+
+## Quick start
+
+Run the TUI:
+
+```sh
 lemonup
 ```
 
-Use a separate profile when you want isolated config/state, for example:
-- manual smoke testing
-- trying a different addon directory
-- keeping work and personal setups separate
+Main keys: `U` updates every addon with an update ready, `C` checks every addon, `enter` opens
+Details, `i` installs, `s` opens Settings, `b` opens Backups, and `?` shows Help for the current
+screen. `q` goes back, and quits from the addon list.
 
-```powershell
-lemonup --profile manual-smoke tui
-```
+Check and update from the command line:
 
-Main keys in the TUI: `U` updates every addon with an update ready, `C` checks every addon,
-`s` or `,` opens Settings, `b` opens Backups, `?` shows Help for the current screen. `q` goes
-back and quits only from the list.
-
-Check for updates:
-
-```powershell
+```sh
 lemonup check
 lemonup check WeakAuras
-```
-
-Update addons:
-
-```powershell
-lemonup update
 lemonup update WeakAuras
 lemonup update-all --dry-run
 ```
 
-## Releases
+Searching Wago.io by name needs a Wago.io API key (Wago gives them to Patreon supporters).
+GitHub, WoWInterface and TukUI links work without one.
 
-Download the latest binaries from [Releases](https://github.com/archcorsair/lemonup/releases).
+To manage a second game version, or to keep separate setups, use a profile:
+
+```sh
+lemonup --profile forever
+```
 
 ## Troubleshooting
 
@@ -81,17 +97,15 @@ addon folder you want back out of its `old` subfolder, then delete the whole
 
 ## Documentation
 
-For installation, configuration, usage guides, and detailed docs, visit:
-
-[**lemonup.org**](https://lemonup.org)
+Guides for setup, keyboard shortcuts, addon sources, configuration and the CLI are at
+[**lemonup.org**](https://lemonup.org).
 
 ## Contributing
 
-Contributions are welcome.
+Contributions are welcome. Read [AGENTS.md](AGENTS.md) first: it covers the architecture, the
+safety rules every change has to keep, and the checks to run:
 
-Validation:
-
-```powershell
+```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
