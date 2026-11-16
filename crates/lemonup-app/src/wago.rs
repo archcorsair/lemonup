@@ -373,12 +373,7 @@ pub(crate) async fn fetch_wago_remote_version(
         .source_url
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "tracked Wago addon '{}' is missing a source URL",
-                addon.folder
-            )
-        })?;
+        .ok_or_else(|| format!("linked Wago addon '{}' has no source URL", addon.folder))?;
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
     let resolved = resolve_wago_release(&client, &addon_id, api_key, addon.flavor, None).await?;
@@ -404,7 +399,7 @@ pub(crate) async fn update_wago_addon(
     dry_run: bool,
 ) -> Result<WagoUpdateSummary, String> {
     if tracked.source != SourceKind::Wago {
-        return Err(format!("addon '{}' is not tracked as Wago", tracked.folder));
+        return Err(format!("addon '{}' is not linked to Wago", tracked.folder));
     }
     // No ownership gate: an addon without authoritative ownership (for example migrated from
     // v1) is updated like a fresh install, taking its folder set from the package; see
@@ -414,12 +409,7 @@ pub(crate) async fn update_wago_addon(
         .source_url
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "tracked Wago addon '{}' is missing a source URL",
-                tracked.folder
-            )
-        })?;
+        .ok_or_else(|| format!("linked Wago addon '{}' has no source URL", tracked.folder))?;
     let addon_id = parse_wago_target(target)?;
     let client = build_wago_client()?;
     let flavor = GameFlavor::for_addons_dir(addon_dir);
@@ -627,7 +617,7 @@ fn update_downloaded_wago_addon(
             .any(|folder| folder == &tracked.folder)
         {
             return Err(format!(
-                "Wago update for '{}' does not contain the tracked parent folder '{}'",
+                "Wago update for '{}' does not contain the linked parent folder '{}'",
                 addon.display_name, tracked.folder
             ));
         }
@@ -642,7 +632,7 @@ fn update_downloaded_wago_addon(
             .find(|candidate| candidate.folder == tracked.folder)
             .ok_or_else(|| {
                 format!(
-                    "updated Wago package for '{}' did not yield a scannable tracked parent folder '{}'",
+                    "updated Wago package for '{}' did not yield a scannable linked parent folder '{}'",
                     addon.display_name, tracked.folder
                 )
             })?;

@@ -229,10 +229,7 @@ pub(crate) async fn update_tukui_addon(
     dry_run: bool,
 ) -> Result<TukuiUpdateSummary, String> {
     if tracked.source != SourceKind::Tukui {
-        return Err(format!(
-            "addon '{}' is not tracked as TukUI",
-            tracked.folder
-        ));
+        return Err(format!("addon '{}' is not linked to TukUI", tracked.folder));
     }
 
     let slug = resolve_tracked_tukui_target(tracked)?;
@@ -472,7 +469,7 @@ fn update_downloaded_tukui_addon(
         let layout = inspect_tukui_package_layout(&extract_root, addon)?;
         if layout.parent_folder != tracked.folder {
             return Err(format!(
-                "TukUI update for '{}' resolved parent '{}' but tracked addon folder is '{}'",
+                "TukUI update for '{}' resolved parent '{}' but linked addon folder is '{}'",
                 addon.name, layout.parent_folder, tracked.folder
             ));
         }
@@ -653,7 +650,7 @@ fn resolve_tracked_tukui_target(addon: &AddonRecord) -> Result<String, String> {
         .or_else(|| parse_tukui_target(&addon.name).ok())
         .ok_or_else(|| {
             format!(
-                "tracked TukUI addon '{}' does not resolve to the canonical ElvUI or Tukui package",
+                "linked TukUI addon '{}' does not resolve to the canonical ElvUI or Tukui package",
                 addon.folder
             )
         })

@@ -55,7 +55,7 @@ fn plan_update_replacements_from_rows(
         }
         if let Some(owner) = tracked_owner_of(rows, &tracked.folder, folder) {
             conflicts.push(if same_folder_name(&owner, folder) {
-                format!("{folder} (tracked separately)")
+                format!("{folder} (linked separately)")
             } else {
                 format!("{folder} (owned by tracked addon {owner})")
             });
@@ -371,7 +371,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "update refused because these addon folders are owned by something else on disk: GatherMate2_Data (tracked separately)"
+            "update refused because these addon folders are owned by something else on disk: GatherMate2_Data (linked separately)"
         );
     }
 
@@ -422,7 +422,7 @@ mod tests {
             error.contains("shared (owned by tracked addon Bar)"),
             "{error}"
         );
-        assert!(error.contains("LIBTHING (tracked separately)"), "{error}");
+        assert!(error.contains("LIBTHING (linked separately)"), "{error}");
     }
 
     #[test]

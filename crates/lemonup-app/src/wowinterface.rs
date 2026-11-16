@@ -168,7 +168,7 @@ pub(crate) async fn update_wowinterface_addon(
 ) -> Result<WowinterfaceUpdateSummary, String> {
     if tracked.source != SourceKind::WowInterface {
         return Err(format!(
-            "addon '{}' is not tracked as WoWInterface",
+            "addon '{}' is not linked to WoWInterface",
             tracked.folder
         ));
     }
@@ -390,7 +390,7 @@ fn update_downloaded_wowinterface_addon(
             determine_parent_folder(&extracted.folders, target_name, Some(&addon.ui_name))?;
         if resolved_parent != tracked.folder {
             return Err(format!(
-                "WoWInterface update for '{}' resolved parent '{}' but tracked addon folder is '{}'",
+                "WoWInterface update for '{}' resolved parent '{}' but linked addon folder is '{}'",
                 addon.ui_name, resolved_parent, tracked.folder
             ));
         }
@@ -405,7 +405,7 @@ fn update_downloaded_wowinterface_addon(
             .find(|candidate| candidate.folder == tracked.folder)
             .ok_or_else(|| {
                 format!(
-                    "updated WoWInterface package for '{}' did not yield a scannable tracked parent folder '{}'",
+                    "updated WoWInterface package for '{}' did not yield a scannable linked parent folder '{}'",
                     addon.ui_name, tracked.folder
                 )
             })?;
@@ -511,7 +511,7 @@ fn resolve_tracked_wowinterface_id(addon: &AddonRecord) -> Result<String, String
         .as_deref()
         .ok_or_else(|| {
             format!(
-                "tracked WoWInterface addon '{}' is missing a source URL",
+                "linked WoWInterface addon '{}' has no source URL",
                 addon.folder
             )
         })
@@ -1081,7 +1081,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "update refused because these addon folders are owned by something else on disk: DBM-GUI (tracked separately)"
+            "update refused because these addon folders are owned by something else on disk: DBM-GUI (linked separately)"
         );
         assert!(addon_dir.join("DBM-Core").join("stale.lua").exists());
         assert!(addon_dir.join("DBM-GUI").join("stale.lua").exists());

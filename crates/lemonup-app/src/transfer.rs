@@ -109,6 +109,8 @@ async fn install_transfer_addon(
             .await
             .map(|_| None)
         }
-        TransferSourceKind::Manual => Err("manual addon exports are not reinstallable".to_string()),
+        TransferSourceKind::Manual => {
+            Err("exports of addons that are not linked cannot be reinstalled".to_string())
+        }
     }
 }

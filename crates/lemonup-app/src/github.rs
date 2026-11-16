@@ -162,7 +162,7 @@ pub(crate) async fn update_github_addon(
 ) -> Result<GithubUpdateSummary, String> {
     if tracked.source != SourceKind::GitHub {
         return Err(format!(
-            "addon '{}' is not tracked as GitHub",
+            "addon '{}' is not linked to GitHub",
             tracked.folder
         ));
     }
@@ -525,7 +525,7 @@ fn update_downloaded_github_addon(
         let resolved_parent = extracted.parent_folder(&resolved.metadata.repo)?;
         if resolved_parent != tracked.folder {
             return Err(format!(
-                "GitHub update for '{}' resolved parent '{}' but tracked addon folder is '{}'",
+                "GitHub update for '{}' resolved parent '{}' but linked addon folder is '{}'",
                 resolved.metadata.repo, resolved_parent, tracked.folder
             ));
         }
@@ -540,7 +540,7 @@ fn update_downloaded_github_addon(
             .find(|candidate| candidate.folder == tracked.folder)
             .ok_or_else(|| {
                 format!(
-                    "updated GitHub repo '{}' did not yield a scannable tracked parent folder '{}'",
+                    "updated GitHub repo '{}' did not yield a scannable linked parent folder '{}'",
                     resolved.metadata.repo, tracked.folder
                 )
             })?;
@@ -658,12 +658,7 @@ fn resolve_tracked_github_repo(addon: &AddonRecord) -> Result<GithubRepoRef, Str
     addon
         .source_url
         .as_deref()
-        .ok_or_else(|| {
-            format!(
-                "tracked GitHub addon '{}' is missing a source URL",
-                addon.folder
-            )
-        })
+        .ok_or_else(|| format!("linked GitHub addon '{}' has no source URL", addon.folder))
         .and_then(parse_github_repo_url)
 }
 
