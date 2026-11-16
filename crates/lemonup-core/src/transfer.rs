@@ -246,7 +246,7 @@ pub fn analyze_import(
             .collect::<Vec<_>>();
 
         if let Some(warning) = addon.unknown_source_warning() {
-            tracing::warn!("{warning}");
+            tracing::info!("{warning}");
             analysis.unsupported_addons.push(addon.clone());
             continue;
         }

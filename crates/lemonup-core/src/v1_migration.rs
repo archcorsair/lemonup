@@ -566,7 +566,7 @@ fn v1_row_to_record(
 fn parse_v1_source(raw: &str) -> SourceKind {
     let source = TransferSourceKind::from_name(&raw.to_ascii_lowercase());
     source.as_source_kind().unwrap_or_else(|| {
-        tracing::warn!(
+        tracing::info!(
             source = raw,
             "v1 addon linked to a source this version doesn't know; imported as Not linked"
         );

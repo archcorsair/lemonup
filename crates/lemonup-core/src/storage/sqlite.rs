@@ -896,7 +896,7 @@ fn unrecognized_value<T>(column: &'static str, parsed: Option<T>, stored: &str) 
         .map(|mut warned| warned.insert((column, stored.to_string())))
         .unwrap_or(false);
     if first_time {
-        tracing::warn!(
+        tracing::info!(
             column,
             value = stored,
             "state database has a value this LemonUp version does not know (written by a newer \
