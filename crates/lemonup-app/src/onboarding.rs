@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lemonup_core::{AppConfig, ThemeMode, suggested_scan_roots};
+use lemonup_core::{AppConfig, suggested_scan_roots};
 
 use crate::app::text_input::TextInput;
 
@@ -72,7 +72,7 @@ impl PreferenceField {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Theme => "Colors",
+            Self::Theme => "Theme",
             Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
         }
@@ -411,10 +411,7 @@ impl OnboardingState {
         let mut next = self.clone();
         match next.preference {
             PreferenceField::Theme => {
-                next.draft.theme = match next.draft.theme {
-                    ThemeMode::Dark => ThemeMode::Light,
-                    ThemeMode::Light => ThemeMode::Dark,
-                };
+                next.draft.theme = crate::theme::cycle_theme(next.draft.theme, delta);
             }
             PreferenceField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
             PreferenceField::BackupRetention => {

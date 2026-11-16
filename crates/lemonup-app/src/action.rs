@@ -4,7 +4,7 @@ use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::text_input::TextInput;
 use crate::app::{
-    BackupPaneState, ConfigPaneState, DashboardJobUiState, DashboardSortColumn,
+    BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
     FooterKeyPulse, HelpContext, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
     StatusMessage, WagoInstallConfirmation,
@@ -39,6 +39,8 @@ pub enum AppAction {
     SetDashboardUpdateInProgress(bool),
     SetDashboardAutoCheckInProgress(bool),
     SetDashboardJobUi(Option<DashboardJobUiState>),
+    /// What a running check or update reported for one addon.
+    ApplyDashboardJobStep(DashboardJobStep),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
     /// Folders the last update run updated, and the ones it failed on.
     SetDashboardUpdateResults {

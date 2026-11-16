@@ -143,7 +143,7 @@ pub(crate) async fn install_github_addon_checked(
 
 pub(crate) async fn fetch_github_remote_version(
     addon: &AddonRecord,
-) -> Result<GithubRemoteVersion, String> {
+) -> Result<GithubRemoteVersion, SourceError> {
     let repo = resolve_tracked_github_repo(addon)?;
     let client = build_github_client()?;
     let resolved = fetch_github_repo(&client, &repo).await?;

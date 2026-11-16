@@ -169,6 +169,9 @@ pub(super) enum HelpWhen {
     NotLinked,
     /// The welcome card is on the list.
     FirstRunCard,
+    /// No check or update is running: only then do the keys that start one
+    /// do anything.
+    NoJob,
 }
 
 /// The left hand side of a Help row.
@@ -360,10 +363,14 @@ static LIST_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Getting things done",
             rows: &[
-                HelpRow::key("U", "update every addon that has an update", &[ch('U')]),
-                HelpRow::key("u", "update this addon, or the selected ones", &[ch('u')]),
-                HelpRow::key("C", "check every addon for updates", &[ch('C')]),
-                HelpRow::key("c", "check this addon, or the selected ones", &[ch('c')]),
+                HelpRow::key("U", "update every addon that has an update", &[ch('U')])
+                    .when(HelpWhen::NoJob),
+                HelpRow::key("u", "update this addon, or the selected ones", &[ch('u')])
+                    .when(HelpWhen::NoJob),
+                HelpRow::key("C", "check every addon for updates", &[ch('C')])
+                    .when(HelpWhen::NoJob),
+                HelpRow::key("c", "check this addon, or the selected ones", &[ch('c')])
+                    .when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete this addon, or the selected ones", &[ch('x')]),
                 HelpRow::key("z", "undo the last delete", &[ch('z')]),
                 HelpRow::key("f", "find a \"Not linked\" addon online", K_FIND)
@@ -398,8 +405,8 @@ static DETAILS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "This addon",
             rows: &[
-                HelpRow::key("u", "update it", &[ch('u')]),
-                HelpRow::key("c", "check it for updates", &[ch('c')]),
+                HelpRow::key("u", "update it", &[ch('u')]).when(HelpWhen::NoJob),
+                HelpRow::key("c", "check it for updates", &[ch('c')]).when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete it", &[ch('x')]),
                 HelpRow::key("space", "select or unselect it", &[ch(' ')]),
                 HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
@@ -439,8 +446,10 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
             title: "Details",
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "move; Details follows", K_MOVE),
-                HelpRow::key("u", "update it, or the selected ones", &[ch('u')]),
-                HelpRow::key("c", "check it, or the selected ones", &[ch('c')]),
+                HelpRow::key("u", "update it, or the selected ones", &[ch('u')])
+                    .when(HelpWhen::NoJob),
+                HelpRow::key("c", "check it, or the selected ones", &[ch('c')])
+                    .when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
@@ -482,8 +491,10 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Getting things done",
             rows: &[
-                HelpRow::key("U", "update every addon that has an update", &[ch('U')]),
-                HelpRow::key("C", "check every addon for updates", &[ch('C')]),
+                HelpRow::key("U", "update every addon that has an update", &[ch('U')])
+                    .when(HelpWhen::NoJob),
+                HelpRow::key("C", "check every addon for updates", &[ch('C')])
+                    .when(HelpWhen::NoJob),
                 HelpRow::key("z", "undo the last delete", &[ch('z')]),
             ],
         },
@@ -823,15 +834,17 @@ impl App {
         }
         let status = self.dashboard_row_status(target.item);
         let update = |label| KeyHint::primary(Id::Update, "u", label, &[KeyCode::Char('u')]);
-        if selected > 0 {
+        // While a check or update runs, `u` and `c` would start nothing.
+        let idle = self.dashboard_job_running().is_none();
+        if idle && selected > 0 {
             hints.push(update("update").main());
-        } else if status == RowStatus::UpdateReady && !self.dashboard.update_in_progress() {
+        } else if idle && status == RowStatus::UpdateReady {
             hints.push(update("update"));
         }
         if target.item.source == SourceKind::Manual {
             hints.push(self.find_online_hint().main());
         }
-        if selected > 0 || target.item.source != SourceKind::Manual {
+        if idle && (selected > 0 || target.item.source != SourceKind::Manual) {
             let check = &[KeyCode::Char('c')];
             hints.push(if selected == 0 && status == RowStatus::CheckFailed {
                 KeyHint::primary(Id::Check, "c", "try again", check)
@@ -1114,13 +1127,14 @@ impl App {
             hints.extend(self.text_box_hints());
             return hints;
         }
-        if self
-            .dashboard
-            .job_ui()
-            .is_some_and(|job| job.kind == DashboardJobKind::Update)
-        {
+        if let Some(job) = self.dashboard_job_running() {
             return vec![
-                KeyHint::text("LemonUp is updating. You can keep browsing."),
+                KeyHint::text(match job {
+                    DashboardJobKind::Update => "LemonUp is updating. You can keep browsing.",
+                    DashboardJobKind::Check => {
+                        "LemonUp is checking for updates. You can keep browsing."
+                    }
+                }),
                 details,
                 filter,
                 help,

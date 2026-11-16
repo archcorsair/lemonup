@@ -36,6 +36,7 @@ impl App {
             HelpWhen::NoWagoKey => self.wago_api_key.is_none(),
             HelpWhen::NotLinked => self.not_linked_current_item().is_some(),
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
+            HelpWhen::NoJob => self.dashboard_job_running().is_none(),
         }
     }
 
@@ -76,6 +77,11 @@ impl App {
         }
         lines.push(Line::default());
         let muted = Style::default().fg(self.ui_theme.roles.muted);
+        // LemonUp takes the mouse, so the terminal's own selection needs Shift.
+        lines.push(Line::from(Span::styled(
+            "Hold Shift while dragging to copy text",
+            muted,
+        )));
         lines.push(Line::from(vec![
             Span::styled(format!("LemonUp {} · ", env!("CARGO_PKG_VERSION")), muted),
             Span::styled(
@@ -194,7 +200,7 @@ impl App {
                 keys,
                 Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
             )],
-            HelpLabel::Status(status) => status.spans(" ", roles),
+            HelpLabel::Status(status) => status.spans(" ", &self.ui_theme),
             HelpLabel::Typed(text) => vec![Span::styled(text, Style::default().fg(roles.text))],
         }
     }

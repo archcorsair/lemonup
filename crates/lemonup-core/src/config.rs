@@ -10,6 +10,8 @@ use crate::error::Result;
 pub enum ThemeMode {
     Dark,
     Light,
+    /// The terminal's own background and 16 colors.
+    Terminal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +31,10 @@ pub struct AppConfig {
     /// The welcome card on the addon list was hidden with `d`. Configs
     /// written before it existed load as `false`.
     pub hide_first_run_card: bool,
+    /// Plain ASCII symbols and the word LEMONUP in place of the block logo.
+    pub simple_symbols: bool,
+    /// A still symbol in place of the spinner, and no shimmer.
+    pub reduce_motion: bool,
 }
 
 impl AppConfig {
@@ -48,6 +54,8 @@ impl AppConfig {
             theme: ThemeMode::Dark,
             wago_api_key: None,
             hide_first_run_card: false,
+            simple_symbols: false,
+            reduce_motion: false,
         }
     }
 }
@@ -150,6 +158,44 @@ mod tests {
         match store.load().expect("load old config") {
             ConfigLoad::Loaded(config) => assert!(!config.hide_first_run_card),
             ConfigLoad::Missing(_) => panic!("old config should load"),
+        }
+    }
+
+    #[test]
+    fn terminal_theme_and_look_toggles_round_trip_and_old_configs_load() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::new(path.clone());
+
+        let mut config = AppConfig::new_unconfigured();
+        assert!(!config.simple_symbols);
+        assert!(!config.reduce_motion);
+        config.theme = ThemeMode::Terminal;
+        config.simple_symbols = true;
+        config.reduce_motion = true;
+        store.write_config(&config).expect("write config");
+        let raw = std::fs::read_to_string(&path).expect("read config");
+        assert!(raw.contains("theme = \"terminal\""), "{raw}");
+        assert_eq!(
+            store.load().expect("load config"),
+            ConfigLoad::Loaded(config)
+        );
+
+        // Written before Terminal and the two toggles existed.
+        for theme in ["dark", "light"] {
+            std::fs::write(
+                &path,
+                format!("schema_version = 1\ntheme = \"{theme}\"\nshow_libs = true\n"),
+            )
+            .expect("write old config");
+            match store.load().expect("load old config") {
+                ConfigLoad::Loaded(config) => {
+                    assert!(!config.simple_symbols);
+                    assert!(!config.reduce_motion);
+                    assert!(config.show_libs);
+                }
+                ConfigLoad::Missing(_) => panic!("old config should load"),
+            }
         }
     }
 

@@ -1,56 +1,122 @@
-use lemonup_core::ThemeMode;
-use ratatui::style::Color;
+//! Colors, symbols and motion for the whole TUI. Every frame is drawn with
+//! one `UiTheme`, and `UiTheme::finish_frame` makes the last pass over the
+//! drawn buffer: no colors at all under `NO_COLOR`, only the terminal's own
+//! 16 colors in the Terminal theme, and plain ASCII with simple symbols.
+
+use lemonup_core::{AppConfig, ThemeMode};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier, Style};
+
+/// What the terminal and environment allow, read once at start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayEnv {
+    /// `NO_COLOR` is set to a non-empty value: no colors at all.
+    pub no_color: bool,
+    /// The terminal reports 24-bit color (`COLORTERM`).
+    pub truecolor: bool,
+    /// The locale can show symbols beyond ASCII.
+    pub utf8: bool,
+}
+
+impl DisplayEnv {
+    /// Everything available. Tests use this so they never depend on the
+    /// terminal they run in.
+    pub const FULL: Self = Self {
+        no_color: false,
+        truecolor: true,
+        utf8: true,
+    };
+
+    pub fn detect() -> Self {
+        Self::from_vars(
+            |name| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned()),
+            cfg!(windows),
+        )
+    }
+
+    /// `get` reads one environment variable. An empty value counts as not
+    /// set.
+    pub(crate) fn from_vars(get: impl Fn(&str) -> Option<String>, windows: bool) -> Self {
+        let set = |name: &str| get(name).filter(|value| !value.is_empty());
+        let no_color = set("NO_COLOR").is_some();
+        // Windows Terminal draws 24-bit color but does not always say so in
+        // COLORTERM; WT_SESSION is how it identifies itself.
+        let truecolor = set("COLORTERM").is_some_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "truecolor" | "24bit")
+        }) || set("WT_SESSION").is_some();
+        // On Windows the console is written in UTF-16 whatever its code
+        // page, so the locale says nothing about which symbols show.
+        let utf8 = windows
+            || ["LC_ALL", "LC_CTYPE", "LANG"]
+                .iter()
+                .find_map(|name| set(name))
+                .is_some_and(|locale| {
+                    let locale = locale.to_ascii_lowercase();
+                    locale.contains("utf-8") || locale.contains("utf8")
+                });
+        Self {
+            no_color,
+            truecolor,
+            utf8,
+        }
+    }
+}
+
+/// The theme a saved choice shows as right now: Terminal while `NO_COLOR`
+/// is set, or while LemonUp follows a terminal without 24-bit color.
+pub(crate) fn effective_theme(
+    saved: ThemeMode,
+    display: DisplayEnv,
+    follow_terminal: bool,
+) -> ThemeMode {
+    if display.no_color || follow_terminal {
+        ThemeMode::Terminal
+    } else {
+        saved
+    }
+}
+
+/// The next Theme value: Dark, Light, Terminal and round again.
+pub(crate) fn cycle_theme(current: ThemeMode, delta: i16) -> ThemeMode {
+    const ORDER: [ThemeMode; 3] = [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal];
+    let index = ORDER.iter().position(|mode| *mode == current).unwrap_or(0);
+    let step = if delta < 0 { ORDER.len() - 1 } else { 1 };
+    ORDER[(index + step) % ORDER.len()]
+}
+
+pub(crate) fn theme_name(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::Dark => "Dark",
+        ThemeMode::Light => "Light",
+        ThemeMode::Terminal => "Terminal",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UiTheme {
-    pub(crate) brand_hot: Color,
-    pub(crate) brand_warm: Color,
-    pub(crate) brand_gold: Color,
-    pub(crate) warning: Color,
-    pub(crate) error: Color,
-    pub(crate) success: Color,
-    pub(crate) info: Color,
-    pub(crate) highlight: Color,
-    pub(crate) muted: Color,
-    pub(crate) border: Color,
-    pub(crate) panel_title: Color,
-    pub(crate) app_bg: Color,
-    pub(crate) overlay_bg: Color,
-    pub(crate) scrim_bg: Color,
-    pub(crate) key_bg: Color,
-    pub(crate) key_bg_disabled: Color,
-    pub(crate) key_bg_selected: Color,
-    pub(crate) key_fg_selected: Color,
-    pub(crate) row_highlight_bg: Color,
-    pub(crate) toast_info_bg: Color,
-    pub(crate) toast_info_icon: Color,
-    pub(crate) toast_info_badge_bg: Color,
-    pub(crate) toast_success_bg: Color,
-    pub(crate) toast_success_icon: Color,
-    pub(crate) toast_success_badge_bg: Color,
-    pub(crate) toast_error_bg: Color,
-    pub(crate) toast_error_icon: Color,
-    pub(crate) toast_error_badge_bg: Color,
-    pub(crate) shimmer_glow: Color,
-    pub(crate) job_check_bg: Color,
-    pub(crate) job_update_bg: Color,
-    pub(crate) installed_text: Color,
-    pub(crate) package_icon: Color,
-    /// The redesign's color roles. New frame and list code uses only these.
+    /// The color roles. All drawing code uses only these.
     pub(crate) roles: ColorRoles,
+    /// The theme on screen, which can differ from the saved one.
+    pub(crate) mode: ThemeMode,
+    /// `NO_COLOR` is set: the last pass removes every color.
+    pub(crate) no_color: bool,
+    pub(crate) symbols: Symbols,
+    /// A still symbol in place of the spinner, and no shimmer.
+    pub(crate) reduce_motion: bool,
 }
 
 /// Color roles from the approved design. Each role has one meaning, so a
 /// color never has to be guessed at from context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColorRoles {
-    /// Where you are and the main action: cursor bar, primary key, focus.
+    /// Where you are and the main action: cursor bar, primary key, focus,
+    /// logo.
     pub(crate) lemon: Color,
     /// An update is ready, and the new version.
     pub(crate) amber: Color,
     /// Done, or nothing to do.
     pub(crate) green: Color,
-    /// A problem, or a delete. Nothing else.
+    /// A problem, or the delete and restore questions. Nothing else.
     pub(crate) red: Color,
     /// Keys you can press, and links.
     pub(crate) blue: Color,
@@ -66,17 +132,20 @@ pub(crate) struct ColorRoles {
     pub(crate) sheet: Color,
     /// The outline of a sheet.
     pub(crate) border: Color,
+    /// The cursor row is reverse video and bold, not a background color:
+    /// the Terminal theme has no background of its own.
+    pub(crate) reverse_cursor: bool,
 }
 
 impl ColorRoles {
     pub(crate) fn dark() -> Self {
         Self {
-            lemon: Color::Rgb(0xf0, 0xc8, 0x5a),
-            amber: Color::Rgb(0xff, 0x9e, 0x64),
-            green: Color::Rgb(0x9e, 0xce, 0x6a),
-            red: Color::Rgb(0xf7, 0x76, 0x8e),
-            blue: Color::Rgb(0x7a, 0xa2, 0xf7),
-            muted: Color::Rgb(0x8c, 0x96, 0xc0),
+            lemon: Color::Rgb(240, 200, 90),
+            amber: Color::Rgb(255, 158, 100),
+            green: Color::Rgb(158, 206, 106),
+            red: Color::Rgb(247, 118, 142),
+            blue: Color::Rgb(122, 162, 247),
+            muted: Color::Rgb(140, 150, 192),
             dim: Color::Rgb(0x45, 0x4b, 0x6c),
             text: Color::Rgb(0xc5, 0xcd, 0xf2),
             background: Color::Rgb(0x24, 0x28, 0x3b),
@@ -84,17 +153,20 @@ impl ColorRoles {
             selected_row: Color::Rgb(0x2c, 0x31, 0x48),
             sheet: Color::Rgb(0x29, 0x2e, 0x45),
             border: Color::Rgb(0x5d, 0x66, 0x94),
+            reverse_cursor: false,
         }
     }
 
     pub(crate) fn light() -> Self {
         Self {
-            lemon: Color::Rgb(0x7a, 0x5a, 0x00),
-            amber: Color::Rgb(0x96, 0x50, 0x0a),
-            green: Color::Rgb(0x46, 0x64, 0x1e),
-            red: Color::Rgb(0xc0, 0x3a, 0x3a),
-            blue: Color::Rgb(0x1c, 0x5c, 0xbe),
-            muted: Color::Rgb(0x56, 0x5e, 0x86),
+            lemon: Color::Rgb(122, 90, 0),
+            amber: Color::Rgb(150, 78, 0),
+            green: Color::Rgb(70, 100, 40),
+            // The design's 198,67,67 is 3.9:1 on this background; this is
+            // the nearest red that reaches 4.5:1.
+            red: Color::Rgb(180, 48, 48),
+            blue: Color::Rgb(28, 92, 190),
+            muted: Color::Rgb(86, 94, 134),
             dim: Color::Rgb(0xa9, 0xaf, 0xc8),
             text: Color::Rgb(0x2b, 0x31, 0x50),
             background: Color::Rgb(0xe4, 0xe5, 0xeb),
@@ -102,99 +174,382 @@ impl ColorRoles {
             selected_row: Color::Rgb(0xd8, 0xdb, 0xe6),
             sheet: Color::Rgb(0xee, 0xef, 0xf4),
             border: Color::Rgb(0x7f, 0x88, 0xad),
+            reverse_cursor: false,
+        }
+    }
+
+    /// The terminal's own 16 colors on its own background. The palette has
+    /// one yellow that reads on both light and dark backgrounds, so lemon
+    /// and amber share it; an update is bold as well.
+    pub(crate) fn terminal() -> Self {
+        Self {
+            lemon: Color::Yellow,
+            amber: Color::Yellow,
+            green: Color::Green,
+            red: Color::Red,
+            blue: Color::Cyan,
+            muted: Color::DarkGray,
+            dim: Color::DarkGray,
+            text: Color::Reset,
+            background: Color::Reset,
+            cursor_row: Color::Reset,
+            selected_row: Color::Reset,
+            sheet: Color::Reset,
+            border: Color::DarkGray,
+            reverse_cursor: true,
+        }
+    }
+
+    /// The row the cursor is on.
+    pub(crate) fn cursor_row_style(self) -> Style {
+        if self.reverse_cursor {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            Style::default().bg(self.cursor_row)
+        }
+    }
+
+    /// A row marked with space.
+    pub(crate) fn selected_row_style(self) -> Style {
+        if self.reverse_cursor {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(self.selected_row)
+        }
+    }
+
+    /// The colors the logo runs through, left to right. One color when the
+    /// theme cannot blend.
+    pub(crate) fn logo_colors(self) -> Vec<Color> {
+        if matches!(self.lemon, Color::Rgb(..)) {
+            vec![self.amber, self.lemon, self.lemon]
+        } else {
+            vec![self.lemon]
         }
     }
 }
 
+/// The symbols that are wider than one cell in plain ASCII. Every other
+/// symbol is one cell either way and is swapped by `finish_frame`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Symbols {
+    /// Plain ASCII and the word LEMONUP in place of the block logo.
+    pub(crate) simple: bool,
+    /// Up to date, done.
+    pub(crate) done: &'static str,
+    /// From the installed version to the new one.
+    pub(crate) arrow: &'static str,
+    /// Work in progress, and the spinner under reduce motion.
+    pub(crate) ellipsis: &'static str,
+    pub(crate) spinner: &'static [&'static str],
+}
+
+impl Symbols {
+    pub(crate) const FANCY: Self = Self {
+        simple: false,
+        done: "✓",
+        arrow: "→",
+        ellipsis: "…",
+        spinner: &["⠋", "⠙", "⠸", "⠴"],
+    };
+
+    pub(crate) const SIMPLE: Self = Self {
+        simple: true,
+        done: "ok",
+        arrow: "->",
+        ellipsis: "...",
+        spinner: &["|", "/", "-", "\\"],
+    };
+}
+
+/// The ASCII cell for a symbol drawn one cell wide, or `None` for anything
+/// that is not one of LemonUp's symbols (such as letters in an addon name).
+pub(crate) fn ascii_symbol(symbol: &str) -> Option<&'static str> {
+    let mut chars = symbol.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() || ch.is_ascii() {
+        return None;
+    }
+    let ascii = match ch {
+        '↑' | '▲' => "^",
+        '↓' | '▼' | '▾' => "v",
+        '←' | '‹' => "<",
+        '→' | '›' | '▸' => ">",
+        '·' | '─' | '━' | '⠸' => "-",
+        '•' | '●' | '✓' => "*",
+        '○' => "o",
+        '▌' | '│' | '┃' | '⠋' => "|",
+        '⠙' => "/",
+        '⠴' => "\\",
+        '…' => ".",
+        '┼' | '├' | '┤' | '┬' | '┴' | '└' | '┘' | '┌' | '┐' | '╭' | '╮' | '╯' | '╰' => {
+            "+"
+        }
+        '█' | '▀' | '▄' => "#",
+        '░' => ".",
+        // Anything else from the arrow, box, block, shape or symbol blocks.
+        '\u{2190}'..='\u{2bff}' => "*",
+        _ => return None,
+    };
+    Some(ascii)
+}
+
 impl UiTheme {
-    pub(crate) fn storm() -> Self {
+    fn build(mode: ThemeMode) -> Self {
         Self {
-            brand_hot: Color::Rgb(255, 95, 95),
-            brand_warm: Color::Rgb(255, 158, 100),
-            brand_gold: Color::Rgb(224, 175, 104),
-            warning: Color::Rgb(224, 175, 104),
-            error: Color::Rgb(247, 118, 142),
-            success: Color::Rgb(158, 206, 106),
-            info: Color::Rgb(13, 185, 215),
-            highlight: Color::Rgb(255, 158, 100),
-            muted: Color::Rgb(86, 95, 137),
-            border: Color::Rgb(54, 59, 84),
-            panel_title: Color::Rgb(122, 162, 247),
-            app_bg: Color::Rgb(36, 40, 59),
-            overlay_bg: Color::Rgb(36, 40, 59),
-            scrim_bg: Color::Rgb(26, 29, 44),
-            key_bg: Color::Rgb(49, 54, 83),
-            key_bg_disabled: Color::Rgb(41, 45, 66),
-            key_bg_selected: Color::Rgb(40, 46, 67),
-            key_fg_selected: Color::Rgb(172, 220, 255),
-            row_highlight_bg: Color::Rgb(49, 54, 83),
-            toast_info_bg: Color::Rgb(34, 55, 75),
-            toast_info_icon: Color::Rgb(125, 207, 255),
-            toast_info_badge_bg: Color::Rgb(25, 43, 60),
-            toast_success_bg: Color::Rgb(42, 58, 46),
-            toast_success_icon: Color::Rgb(196, 235, 144),
-            toast_success_badge_bg: Color::Rgb(34, 49, 38),
-            toast_error_bg: Color::Rgb(60, 42, 50),
-            toast_error_icon: Color::Rgb(255, 182, 194),
-            toast_error_badge_bg: Color::Rgb(52, 35, 43),
-            shimmer_glow: Color::Rgb(255, 244, 214),
-            job_check_bg: Color::Rgb(25, 41, 56),
-            job_update_bg: Color::Rgb(48, 38, 28),
-            installed_text: Color::Rgb(172, 182, 220),
-            package_icon: Color::Rgb(212, 175, 55),
-            roles: ColorRoles::dark(),
+            roles: match mode {
+                ThemeMode::Dark => ColorRoles::dark(),
+                ThemeMode::Light => ColorRoles::light(),
+                ThemeMode::Terminal => ColorRoles::terminal(),
+            },
+            mode,
+            no_color: false,
+            symbols: Symbols::FANCY,
+            reduce_motion: false,
         }
     }
 
-    pub(crate) fn day() -> Self {
-        Self {
-            brand_hot: Color::Rgb(245, 42, 101),
-            brand_warm: Color::Rgb(177, 92, 0),
-            brand_gold: Color::Rgb(140, 108, 62),
-            warning: Color::Rgb(140, 108, 62),
-            error: Color::Rgb(198, 67, 67),
-            success: Color::Rgb(88, 117, 57),
-            info: Color::Rgb(7, 135, 157),
-            highlight: Color::Rgb(177, 92, 0),
-            muted: Color::Rgb(132, 140, 181),
-            border: Color::Rgb(166, 173, 207),
-            panel_title: Color::Rgb(46, 125, 233),
-            app_bg: Color::Rgb(225, 226, 231),
-            overlay_bg: Color::Rgb(232, 233, 238),
-            scrim_bg: Color::Rgb(212, 215, 224),
-            key_bg: Color::Rgb(210, 218, 232),
-            key_bg_disabled: Color::Rgb(221, 225, 234),
-            key_bg_selected: Color::Rgb(203, 217, 224),
-            key_fg_selected: Color::Rgb(7, 113, 151),
-            row_highlight_bg: Color::Rgb(209, 214, 224),
-            toast_info_bg: Color::Rgb(203, 217, 224),
-            toast_info_icon: Color::Rgb(7, 135, 157),
-            toast_info_badge_bg: Color::Rgb(191, 209, 218),
-            toast_success_bg: Color::Rgb(214, 222, 204),
-            toast_success_icon: Color::Rgb(88, 117, 57),
-            toast_success_badge_bg: Color::Rgb(204, 214, 193),
-            toast_error_bg: Color::Rgb(222, 210, 215),
-            toast_error_icon: Color::Rgb(198, 67, 67),
-            toast_error_badge_bg: Color::Rgb(214, 198, 204),
-            shimmer_glow: Color::Rgb(248, 244, 232),
-            job_check_bg: Color::Rgb(203, 217, 224),
-            job_update_bg: Color::Rgb(226, 220, 209),
-            installed_text: Color::Rgb(72, 89, 143),
-            package_icon: Color::Rgb(177, 126, 0),
-            roles: ColorRoles::light(),
-        }
-    }
-
+    /// A theme on its own, with fancy symbols and motion.
+    #[cfg(test)]
     pub(crate) fn from_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Dark => Self::storm(),
-            ThemeMode::Light => Self::day(),
+        Self::build(mode)
+    }
+
+    /// The theme for `config` in this terminal. `follow_terminal` puts the
+    /// Terminal theme on screen without saving it.
+    pub(crate) fn for_config(
+        config: &AppConfig,
+        display: DisplayEnv,
+        follow_terminal: bool,
+    ) -> Self {
+        let mut theme = Self::build(effective_theme(config.theme, display, follow_terminal));
+        theme.no_color = display.no_color;
+        if config.simple_symbols || !display.utf8 {
+            theme.symbols = Symbols::SIMPLE;
+        }
+        theme.reduce_motion = config.reduce_motion;
+        theme
+    }
+
+    /// The last pass over a drawn frame. Under `NO_COLOR` every color goes;
+    /// in the Terminal theme any 24-bit color left goes; with simple symbols
+    /// every symbol becomes ASCII. Reverse video and bold stay.
+    pub(crate) fn finish_frame(&self, buffer: &mut Buffer) {
+        let terminal = self.mode == ThemeMode::Terminal;
+        if !self.no_color && !terminal && !self.symbols.simple {
+            return;
+        }
+        let area = buffer.area;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buffer[(x, y)];
+                if self.no_color {
+                    cell.fg = Color::Reset;
+                    cell.bg = Color::Reset;
+                } else if terminal {
+                    if matches!(cell.fg, Color::Rgb(..) | Color::Indexed(_)) {
+                        cell.fg = Color::Reset;
+                    }
+                    if matches!(cell.bg, Color::Rgb(..) | Color::Indexed(_)) {
+                        cell.bg = Color::Reset;
+                    }
+                }
+                if !self.symbols.simple {
+                    continue;
+                }
+                let symbol = cell.symbol();
+                if symbol == "…" && x + 3 < area.right() {
+                    // "..." when the two cells after it are free.
+                    let blank = (1..=3).all(|step| buffer[(x + step, y)].symbol() == " ");
+                    if blank {
+                        let fg = buffer[(x, y)].fg;
+                        for step in 0..3 {
+                            let cell = &mut buffer[(x + step, y)];
+                            cell.set_symbol(".");
+                            if step > 0 {
+                                cell.fg = fg;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if let Some(ascii) = ascii_symbol(buffer[(x, y)].symbol()) {
+                    buffer[(x, y)].set_symbol(ascii);
+                }
+            }
         }
     }
 }
 
 impl Default for UiTheme {
     fn default() -> Self {
-        Self::storm()
+        Self::build(ThemeMode::Dark)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("{color:?} is not a 24-bit color");
+        };
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    /// The WCAG contrast ratio between two colors.
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        let (light, dark) = if a > b { (a, b) } else { (b, a) };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    #[test]
+    fn every_text_role_reaches_4_5_to_1_on_its_background() {
+        for (name, roles) in [("dark", ColorRoles::dark()), ("light", ColorRoles::light())] {
+            for (role, color) in [
+                ("lemon", roles.lemon),
+                ("amber", roles.amber),
+                ("green", roles.green),
+                ("red", roles.red),
+                ("blue", roles.blue),
+                ("muted", roles.muted),
+                ("text", roles.text),
+            ] {
+                for (surface, background) in
+                    [("background", roles.background), ("sheet", roles.sheet)]
+                {
+                    let ratio = contrast(color, background);
+                    assert!(
+                        ratio >= 4.5,
+                        "{name} {role} on {surface} is {ratio:.2}:1, under 4.5:1"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_roles_use_only_the_16_colors_and_no_background() {
+        let roles = ColorRoles::terminal();
+        for color in [
+            roles.lemon,
+            roles.amber,
+            roles.green,
+            roles.red,
+            roles.blue,
+            roles.muted,
+            roles.dim,
+            roles.text,
+            roles.border,
+        ] {
+            assert!(!matches!(color, Color::Rgb(..) | Color::Indexed(_)));
+        }
+        assert_eq!(roles.background, Color::Reset);
+        assert_eq!(roles.sheet, Color::Reset);
+        assert!(
+            roles
+                .cursor_row_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn no_color_with_any_value_turns_colors_off() {
+        let env = DisplayEnv::from_vars(
+            vars(&[
+                ("NO_COLOR", "1"),
+                ("COLORTERM", "truecolor"),
+                ("LANG", "en_US.UTF-8"),
+            ]),
+            false,
+        );
+        assert!(env.no_color);
+        assert_eq!(
+            effective_theme(ThemeMode::Dark, env, false),
+            ThemeMode::Terminal
+        );
+        let empty = DisplayEnv::from_vars(vars(&[("NO_COLOR", ""), ("COLORTERM", "24bit")]), false);
+        assert!(!empty.no_color);
+        assert!(empty.truecolor);
+    }
+
+    #[test]
+    fn colorterm_decides_truecolor() {
+        for (value, truecolor) in [
+            ("truecolor", true),
+            ("24bit", true),
+            ("TrueColor", true),
+            ("256color", false),
+            ("", false),
+        ] {
+            let env = DisplayEnv::from_vars(vars(&[("COLORTERM", value)]), false);
+            assert_eq!(env.truecolor, truecolor, "COLORTERM={value}");
+        }
+        assert!(!DisplayEnv::from_vars(vars(&[]), false).truecolor);
+        assert!(DisplayEnv::from_vars(vars(&[("WT_SESSION", "abc")]), true).truecolor);
+    }
+
+    #[test]
+    fn locale_decides_utf8() {
+        for (pairs, utf8) in [
+            (vec![("LANG", "en_US.UTF-8")], true),
+            (vec![("LANG", "de_DE.utf8")], true),
+            (vec![("LANG", "C")], false),
+            (vec![("LANG", "POSIX")], false),
+            (vec![], false),
+            // LC_ALL wins over LANG, then LC_CTYPE.
+            (vec![("LC_ALL", "C"), ("LANG", "en_US.UTF-8")], false),
+            (vec![("LC_CTYPE", "en_US.UTF-8"), ("LANG", "C")], true),
+            (vec![("LC_ALL", ""), ("LANG", "en_US.UTF-8")], true),
+        ] {
+            let env = DisplayEnv::from_vars(vars(&pairs), false);
+            assert_eq!(env.utf8, utf8, "{pairs:?}");
+        }
+        assert!(DisplayEnv::from_vars(vars(&[("LANG", "C")]), true).utf8);
+    }
+
+    #[test]
+    fn colors_cycle_through_three_themes() {
+        assert_eq!(cycle_theme(ThemeMode::Dark, 1), ThemeMode::Light);
+        assert_eq!(cycle_theme(ThemeMode::Light, 1), ThemeMode::Terminal);
+        assert_eq!(cycle_theme(ThemeMode::Terminal, 1), ThemeMode::Dark);
+        assert_eq!(cycle_theme(ThemeMode::Dark, -1), ThemeMode::Terminal);
+    }
+
+    #[test]
+    fn simple_symbols_map_every_symbol_to_one_ascii_cell() {
+        for symbol in [
+            "↑", "✓", "·", "▸", "▾", "●", "▌", "→", "…", "‹", "›", "─", "│", "╭", "⠋",
+        ] {
+            let ascii = ascii_symbol(symbol).expect(symbol);
+            assert_eq!(ascii.len(), 1);
+            assert!(ascii.is_ascii());
+        }
+        assert_eq!(ascii_symbol("a"), None);
+        assert_eq!(ascii_symbol("é"), None);
     }
 }

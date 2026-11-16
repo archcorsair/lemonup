@@ -161,16 +161,19 @@ impl App {
         let text = Style::default().fg(roles.text);
         let muted = Style::default().fg(roles.muted);
         let status = self.dashboard_row_status(item);
-        let spinner = self.shell_ui.motion.spinner_frame();
+        let spinner = self.spinner_frame();
         let status_spans = match status {
             RowStatus::UpToDate | RowStatus::NewerThanSource => vec![
-                Span::styled(status.symbol(spinner), Style::default().fg(roles.green)),
+                Span::styled(
+                    status.symbol(spinner, self.ui_theme.symbols.done),
+                    Style::default().fg(roles.green),
+                ),
                 Span::styled(
                     format!(" {}", status.word()),
                     text.add_modifier(Modifier::BOLD),
                 ),
             ],
-            other => other.spans(spinner, roles),
+            other => other.spans(spinner, &self.ui_theme),
         };
 
         let installed = dashboard_item_installed_version(item);
@@ -179,7 +182,10 @@ impl App {
         let source_name = dashboard_source_name(item.source, true);
         let versions = if status == RowStatus::UpdateReady {
             vec![
-                Span::styled(format!("{installed} →"), muted),
+                Span::styled(
+                    format!("{installed} {}", self.ui_theme.symbols.arrow),
+                    muted,
+                ),
                 Span::raw(" "),
                 Span::styled(
                     remote.clone().unwrap_or_else(|| "newer".to_string()),
@@ -210,14 +216,21 @@ impl App {
                 "LemonUp found this addon in your AddOns folder but doesn't know where it came from, so it can't check it for updates.",
                 text,
             )],
-            RowStatus::CheckFailed => vec![
-                Span::styled(
-                    format!("LemonUp couldn't check {source_name} for a newer version. Press "),
-                    text,
-                ),
-                key("c"),
-                Span::styled(" to try again.", text),
-            ],
+            RowStatus::CheckFailed => check_failed_sentence(
+                self.dashboard
+                    .check_failure(&item.folder)
+                    .map(|failure| failure.kind),
+                item.source,
+            )
+            .into_iter()
+            .map(|(part, is_key)| {
+                if is_key {
+                    key("c")
+                } else {
+                    Span::styled(part, text)
+                }
+            })
+            .collect(),
             _ => Vec::new(),
         };
 
@@ -510,6 +523,62 @@ impl App {
 
 fn spans_text_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
+}
+
+/// The Details sentence for "Check failed", as text parts and the key `c`
+/// (`true`): the cause in plain words when LemonUp knows it, otherwise the
+/// plain fact.
+pub(super) fn check_failed_sentence(
+    kind: Option<SourceErrorKind>,
+    source: SourceKind,
+) -> Vec<(String, bool)> {
+    let name = dashboard_source_name(source, true);
+    let try_again = |before: String, after: &str| {
+        vec![
+            (before, false),
+            ("c".to_string(), true),
+            (after.to_string(), false),
+        ]
+    };
+    match kind {
+        Some(SourceErrorKind::NoConnection) => try_again(
+            format!("Couldn't reach {name}. Check your internet connection, then press "),
+            " to try again.",
+        ),
+        Some(SourceErrorKind::KeyRejected) if source == SourceKind::Wago => try_again(
+            "Wago.io turned down your Wago.io key. Check the key in Settings, then press "
+                .to_string(),
+            " to try again.",
+        ),
+        Some(SourceErrorKind::KeyRejected) if source == SourceKind::GitHub => try_again(
+            "GitHub turned down LemonUp's request. If you set a GitHub token, check it, then press "
+                .to_string(),
+            " to try again.",
+        ),
+        Some(SourceErrorKind::KeyRejected) => try_again(
+            format!("{name} turned down LemonUp's request. Press "),
+            " to try again later.",
+        ),
+        Some(SourceErrorKind::NotFound) => try_again(
+            format!(
+                "{name} doesn't list this addon anymore. It may have moved or been taken down. Press "
+            ),
+            " to check again.",
+        ),
+        Some(SourceErrorKind::SlowDown) => try_again(
+            format!("{name} asked LemonUp to slow down. Wait a few minutes, then press "),
+            " to try again.",
+        ),
+        Some(
+            SourceErrorKind::Other
+            | SourceErrorKind::FoldersInTheWay
+            | SourceErrorKind::FoldersOfLinkedAddon,
+        )
+        | None => try_again(
+            format!("LemonUp couldn't check {name} for a newer version. Press "),
+            " to try again.",
+        ),
+    }
 }
 
 #[cfg(test)]

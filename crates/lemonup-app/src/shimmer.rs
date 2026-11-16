@@ -62,6 +62,23 @@ pub(crate) fn shimmer_text_spans(
     spans
 }
 
+/// The words on the line that is working: shimmering, or still and bold
+/// under reduce motion and in a theme that cannot blend colors.
+pub(crate) fn working_text_spans(
+    text: &str,
+    base: Color,
+    highlight: Color,
+    still: bool,
+) -> Vec<Span<'static>> {
+    if still || !matches!(base, Color::Rgb(..)) {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(base).add_modifier(Modifier::BOLD),
+        )];
+    }
+    shimmer_text_spans(text, base, highlight, ShimmerConfig::action())
+}
+
 pub(crate) fn shimmer_levels(visible_count: usize, config: ShimmerConfig) -> Vec<f32> {
     if visible_count == 0 {
         return Vec::new();
@@ -130,7 +147,7 @@ fn color_to_rgb(color: Color) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShimmerConfig, shimmer_levels, shimmer_text_spans};
+    use super::{ShimmerConfig, shimmer_levels, shimmer_text_spans, working_text_spans};
     use ratatui::style::Color;
 
     #[test]
@@ -144,5 +161,21 @@ mod tests {
         let spans = shimmer_text_spans("A B", Color::Blue, Color::White, ShimmerConfig::action());
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[1].content.as_ref(), " ");
+    }
+
+    #[test]
+    fn reduce_motion_has_no_shimmer() {
+        let base = Color::Rgb(10, 20, 30);
+        let glow = Color::Rgb(250, 250, 250);
+        let still = working_text_spans("Installing Foo", base, glow, true);
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].content.as_ref(), "Installing Foo");
+        assert_eq!(still[0].style.fg, Some(base));
+        // The Terminal theme's 16 colors cannot blend, so no shimmer either.
+        assert_eq!(
+            working_text_spans("Installing Foo", Color::Reset, Color::Yellow, false).len(),
+            1
+        );
+        assert!(working_text_spans("Installing Foo", base, glow, false).len() > 1);
     }
 }

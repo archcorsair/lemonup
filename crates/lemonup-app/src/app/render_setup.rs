@@ -107,20 +107,21 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let (mut first, mut second) = if width >= WIDE_FRAME_MIN_WIDTH {
-            let mut first = vec![Span::raw(" ")];
-            first.extend(self.fruit_gradient_logo_line(LOGO_FULL[0]).spans);
-            first.push(Span::raw("    "));
-            let mut second = vec![Span::raw(" ")];
-            second.extend(self.fruit_gradient_logo_line(LOGO_FULL[1]).spans);
-            second.push(Span::raw("    "));
-            (first, second)
-        } else {
-            let mut first = vec![Span::raw(" ")];
-            first.extend(self.short_logo_spans());
-            first.push(Span::raw("  "));
-            (first, vec![Span::raw(" ")])
-        };
+        let (mut first, mut second) =
+            if width >= WIDE_FRAME_MIN_WIDTH && !self.ui_theme.symbols.simple {
+                let mut first = vec![Span::raw(" ")];
+                first.extend(self.fruit_gradient_logo_line(LOGO_FULL[0]).spans);
+                first.push(Span::raw("    "));
+                let mut second = vec![Span::raw(" ")];
+                second.extend(self.fruit_gradient_logo_line(LOGO_FULL[1]).spans);
+                second.push(Span::raw("    "));
+                (first, second)
+            } else {
+                let mut first = vec![Span::raw(" ")];
+                first.extend(self.short_logo_spans());
+                first.push(Span::raw("  "));
+                (first, vec![Span::raw(" ")])
+            };
         first.extend(welcome);
         second.extend(step);
         vec![Line::from(first), Line::from(second)]
@@ -136,7 +137,10 @@ impl App {
                 spans.push(Span::styled("  ───  ", Style::default().fg(roles.dim)));
             }
             if step.index() < current {
-                spans.push(Span::styled("✓ ", Style::default().fg(roles.green)));
+                spans.push(Span::styled(
+                    format!("{} ", self.ui_theme.symbols.done),
+                    Style::default().fg(roles.green),
+                ));
                 spans.push(Span::styled(step.label(), Style::default().fg(roles.muted)));
             } else if step.index() == current {
                 spans.push(Span::styled(
@@ -199,10 +203,7 @@ impl App {
         let title = match &self.onboarding.phase {
             OnboardingPhase::Bootstrapping | OnboardingPhase::QuickChecking => {
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        self.shell_ui.motion.spinner_frame(),
-                        Style::default().fg(roles.lemon),
-                    ),
+                    Span::styled(self.spinner_frame(), Style::default().fg(roles.lemon)),
                     Span::raw(" Checking the usual install places"),
                 ]));
                 lines.push(Line::from(""));
@@ -214,10 +215,7 @@ impl App {
             }
             OnboardingPhase::DeepScanning(progress) => {
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        self.shell_ui.motion.spinner_frame(),
-                        Style::default().fg(roles.lemon),
-                    ),
+                    Span::styled(self.spinner_frame(), Style::default().fg(roles.lemon)),
                     Span::raw(format!(
                         " Checked {} folder{} {}",
                         group_thousands(progress.dirs_scanned),
@@ -545,7 +543,7 @@ impl App {
             PreferenceField::BackupWtf => ConfigField::BackupWtf,
             PreferenceField::BackupRetention => ConfigField::BackupRetention,
         };
-        config_value_text(&self.onboarding.draft, field)
+        self.look_value_text(&self.onboarding.draft, field)
     }
 
     /// `▌ ` on the chosen row, two spaces on the others.

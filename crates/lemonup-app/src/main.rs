@@ -111,7 +111,8 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         cli.profile.clone(),
         cli.addon_dir.clone(),
         load_guarded_addon_dirs(&cli.profile)?,
-    );
+    )
+    .with_display(theme::DisplayEnv::detect());
     let paths = AppPaths::discover(cli.profile)?;
     paths.ensure()?;
 
@@ -1465,6 +1466,7 @@ mod tests {
             status,
             remote_version: None,
             message: None,
+            error_kind: None,
         }
     }
 
@@ -1853,6 +1855,7 @@ mod tests {
             status: UpdateStatus::RemoteOlder,
             remote_version: Some("v3.6.6".to_string()),
             message: None,
+            error_kind: None,
         }];
         assert_eq!(count_check_errors(&checks), 0);
         assert_eq!(

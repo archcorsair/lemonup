@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -40,16 +40,16 @@ use crate::onboarding::{
     FoundInstall, NotFoundChoice, OnboardingPhase, OnboardingState, OnboardingStep,
     OnboardingTaskEvent, not_found_choices,
 };
-use crate::shimmer::{ShimmerConfig, shimmer_text_spans};
+use crate::shimmer::working_text_spans;
 use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
-use crate::theme::UiTheme;
+use crate::theme::{DisplayEnv, UiTheme, cycle_theme, effective_theme, theme_name};
 use crate::transfer::{
     TransferInstallSummary, collect_existing_import_folders, install_transfer_addons,
 };
 use crate::tui::Backend;
 use crate::update::{
-    CheckResult, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates, build_update_checks,
-    refresh_live_update_checks,
+    CheckResult, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates,
+    build_update_checks, refresh_live_update_checks,
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
@@ -95,12 +95,15 @@ const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
 ];
-const MOTION_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
 const BACKUP_SPAM_GUARD_WINDOW: Duration = Duration::seconds(10);
 /// How long a done or note message stays on the status line.
 const MESSAGE_FADE: StdDuration = StdDuration::from_secs(4);
+/// How long a row that just updated says Updated before it settles.
+const UPDATED_HIGHLIGHT: StdDuration = StdDuration::from_secs(2);
+/// Two clicks on the same row this close together open Details.
+const DOUBLE_CLICK: StdDuration = StdDuration::from_millis(500);
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,10 +166,6 @@ impl MotionState {
             preset: self.preset,
             tick_count: self.tick_count.wrapping_add(1),
         }
-    }
-
-    fn spinner_frame(self) -> &'static str {
-        MOTION_SPINNER_FRAMES[self.tick_count % MOTION_SPINNER_FRAMES.len()]
     }
 }
 
@@ -263,6 +262,8 @@ pub struct AppRuntime {
     /// AddOns folders this profile must never target: the default profile's configured
     /// folder and the folder its state is bound to (they can differ or be set only one way).
     pub guarded_addon_dirs: Vec<PathBuf>,
+    /// What the terminal allows: colors, 24-bit color, UTF-8 symbols.
+    pub display: DisplayEnv,
 }
 
 impl AppRuntime {
@@ -275,7 +276,13 @@ impl AppRuntime {
             profile_name,
             addon_dir_override,
             guarded_addon_dirs,
+            display: DisplayEnv::FULL,
         }
+    }
+
+    pub fn with_display(mut self, display: DisplayEnv) -> Self {
+        self.display = display;
+        self
     }
 
     pub fn is_default_profile(&self) -> bool {
@@ -383,6 +390,12 @@ enum AppMessage {
         column: u16,
         row: u16,
     },
+    /// A click on the list: moves the cursor, and a second click on the
+    /// same row soon after opens Details.
+    DashboardPointerClick {
+        column: u16,
+        row: u16,
+    },
     DashboardRequestDelete,
     DashboardConfirmDelete,
     DashboardCancelPendingDelete,
@@ -485,6 +498,8 @@ enum AppTaskEvent {
     DashboardDeleteFinished(std::result::Result<DashboardDeleteOutcome, String>),
     DashboardUndoFinished(std::result::Result<DashboardUndoOutcome, String>),
     DashboardJobProgress(DashboardJobUiState),
+    /// What a running check or update has done for one addon.
+    DashboardJobStep(DashboardJobStep),
     DashboardCheckFinished(std::result::Result<DashboardCheckOutcome, String>),
     DashboardUpdateFinished(std::result::Result<DashboardUpdateOutcome, String>),
     BackupFinished(std::result::Result<BackupRunOutcome, String>),
@@ -523,6 +538,8 @@ struct DashboardCheckOutcome {
     live_checked: usize,
     cached: usize,
     errors: usize,
+    /// Why each failed live check failed.
+    failures: Vec<CheckFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,6 +595,10 @@ enum UpdateJobRowState {
     Updating,
     /// The job has moved past this row; its result is not known yet.
     Done,
+    /// The run reported this addon as already up to date.
+    UpToDate,
+    /// The run kept this addon: the source lists an older version.
+    NewerThanSource,
     /// The finished run reported this addon as updated.
     Updated,
     /// The finished run reported this addon as failed.
@@ -592,6 +613,35 @@ pub(crate) struct DashboardJobUiState {
     current_addon: String,
 }
 
+/// Why the last check of an addon failed. The row keeps "Check failed"
+/// until a check of it works again (for this session only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckFailure {
+    pub(crate) kind: SourceErrorKind,
+    pub(crate) source: SourceKind,
+    pub(crate) detail: String,
+}
+
+/// One step a running check or update reports, besides moving on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DashboardJobStep {
+    /// The addons a check is about to look at, in order.
+    CheckTargets(Vec<String>),
+    /// One addon's check came back: the version the source lists, or why
+    /// it failed.
+    Checked {
+        folder: String,
+        result: std::result::Result<Option<String>, CheckFailure>,
+    },
+    /// One addon's update came back.
+    Updated {
+        folder: String,
+        status: LiveUpdateStatus,
+    },
+    /// The game settings backup ran before the update; how it went.
+    BackedUp(String),
+}
+
 /// One row of Settings that the cursor can stop on: a setting, or an action
 /// row that runs on enter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,6 +653,8 @@ enum ConfigField {
     BackupWtf,
     BackupRetention,
     Theme,
+    SimpleSymbols,
+    ReduceMotion,
     ShowLibs,
     ChangeGameFolder,
     SaveAddonList,
@@ -628,7 +680,7 @@ const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 4
 
 impl ConfigField {
     /// Every row in the order Settings shows them.
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::WagoApiKey,
         Self::AutoCheckEnabled,
         Self::AutoCheckInterval,
@@ -636,6 +688,8 @@ impl ConfigField {
         Self::BackupWtf,
         Self::BackupRetention,
         Self::Theme,
+        Self::SimpleSymbols,
+        Self::ReduceMotion,
         Self::ShowLibs,
         Self::ChangeGameFolder,
         Self::SaveAddonList,
@@ -650,7 +704,9 @@ impl ConfigField {
             Self::CheckInterval => "Don't re-check an addon for",
             Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
-            Self::Theme => "Colors",
+            Self::Theme => "Theme",
+            Self::SimpleSymbols => "Simple symbols",
+            Self::ReduceMotion => "Reduce motion",
             Self::ShowLibs => "Show library folders",
             Self::ChangeGameFolder => "Change game folder…",
             Self::SaveAddonList => "Save my addon list to a file…",
@@ -661,9 +717,12 @@ impl ConfigField {
     fn kind(self) -> ConfigRowKind {
         match self {
             Self::WagoApiKey => ConfigRowKind::Text,
-            Self::AutoCheckEnabled | Self::BackupWtf | Self::Theme | Self::ShowLibs => {
-                ConfigRowKind::Toggle
-            }
+            Self::AutoCheckEnabled
+            | Self::BackupWtf
+            | Self::Theme
+            | Self::SimpleSymbols
+            | Self::ReduceMotion
+            | Self::ShowLibs => ConfigRowKind::Toggle,
             Self::AutoCheckInterval | Self::CheckInterval | Self::BackupRetention => {
                 ConfigRowKind::Stepped
             }
@@ -855,10 +914,13 @@ impl ConfigPaneState {
                 draft.backup_retention = adjust_u16(draft.backup_retention, delta, 1, 1);
             }
             ConfigField::Theme => {
-                draft.theme = match draft.theme {
-                    ThemeMode::Dark => ThemeMode::Light,
-                    ThemeMode::Light => ThemeMode::Dark,
-                };
+                draft.theme = cycle_theme(draft.theme, delta);
+            }
+            ConfigField::SimpleSymbols => {
+                draft.simple_symbols = !draft.simple_symbols;
+            }
+            ConfigField::ReduceMotion => {
+                draft.reduce_motion = !draft.reduce_motion;
             }
             ConfigField::ShowLibs => {
                 draft.show_libs = !draft.show_libs;
@@ -1184,6 +1246,8 @@ struct DashboardState {
     pending_delete_folders: Option<Vec<String>>,
     drift_report: Option<DriftReport>,
     update_in_progress: bool,
+    /// A check started from the list or Details is running.
+    check_in_progress: bool,
     job_ui: Option<DashboardJobUiState>,
     /// Folders the running update was started for, and the ones it has
     /// reached so far, so each row can show Waiting, Updating or Updated.
@@ -1194,6 +1258,16 @@ struct DashboardState {
     /// said so.
     updated_folders: Vec<String>,
     failed_folders: Vec<String>,
+    /// When the last run's results came in.
+    results_at: Option<Instant>,
+    /// What the running update has reported so far, per folder.
+    job_results: HashMap<String, UpdateJobRowState>,
+    /// The backup note of the running update.
+    job_note: Option<String>,
+    /// The running job is an update (its first phase may be a check).
+    job_is_update: bool,
+    /// Why the last check of each addon failed, until a check of it works.
+    check_failures: HashMap<String, CheckFailure>,
     last_update_summary: Option<DashboardUpdateRunSummary>,
     /// Live filter text applied to the visible rows; empty means no filter.
     filter_query: TextInput,
@@ -1247,11 +1321,17 @@ impl DashboardState {
             pending_delete_folders: None,
             drift_report: None,
             update_in_progress: false,
+            check_in_progress: false,
             job_ui: None,
             job_targets: Vec::new(),
             job_reached: Vec::new(),
             updated_folders: Vec::new(),
             failed_folders: Vec::new(),
+            results_at: None,
+            job_results: HashMap::new(),
+            job_note: None,
+            job_is_update: false,
+            check_failures: HashMap::new(),
             last_update_summary: None,
             filter_query: TextInput::default(),
             filter_editing: false,
@@ -1669,23 +1749,27 @@ impl DashboardState {
                     self.updated_folders.clear();
                     self.failed_folders.clear();
                 }
-                // Only the update phase counts; a preflight check reports
-                // progress too.
-                if job.kind == DashboardJobKind::Update
-                    && !self.job_reached.contains(&job.current_addon)
-                {
+                // Only the update phase counts in an update; its preflight
+                // check reports progress too.
+                let counts = job.kind == DashboardJobKind::Update || !self.job_is_update;
+                if counts && !self.job_reached.contains(&job.current_addon) {
                     self.job_reached.push(job.current_addon.clone());
                 }
             }
             None => {
                 self.job_targets.clear();
                 self.job_reached.clear();
+                self.job_results.clear();
+                self.job_note = None;
+                self.job_is_update = false;
+                self.check_in_progress = false;
             }
         }
         self.job_ui = job_ui;
     }
 
     fn begin_update_targets(&mut self, folders: &[String]) {
+        self.job_is_update = true;
         self.job_targets = folders.to_vec();
         self.job_reached.clear();
         self.updated_folders.clear();
@@ -1693,30 +1777,110 @@ impl DashboardState {
     }
 
     fn set_update_results(&mut self, updated: Vec<String>, failed: Vec<String>) {
+        // An update that worked reached the source.
+        for folder in &updated {
+            self.check_failures.remove(folder);
+        }
         self.updated_folders = updated;
         self.failed_folders = failed;
+        self.results_at = Some(Instant::now());
     }
 
-    /// What the last update run reported for `folder`, if anything.
+    /// What the last update run reported for `folder`, if anything. A
+    /// failure stays; Updated shows for `UPDATED_HIGHLIGHT`, then the row
+    /// settles to what the addon's own data says.
     fn update_result(&self, folder: &str) -> Option<UpdateJobRowState> {
+        self.update_result_at(folder, Instant::now())
+    }
+
+    fn update_result_at(&self, folder: &str, now: Instant) -> Option<UpdateJobRowState> {
+        let fresh = self
+            .results_at
+            .is_some_and(|at| now.saturating_duration_since(at) < UPDATED_HIGHLIGHT);
         if self.failed_folders.iter().any(|failed| failed == folder) {
             Some(UpdateJobRowState::Failed)
-        } else if self.updated_folders.iter().any(|updated| updated == folder) {
+        } else if fresh && self.updated_folders.iter().any(|updated| updated == folder) {
             Some(UpdateJobRowState::Updated)
         } else {
             None
         }
     }
 
-    /// Where a row stands in the running update, if it is part of it.
+    /// What a running job reports for one addon.
+    fn apply_job_step(&mut self, step: DashboardJobStep, now: OffsetDateTime) {
+        match step {
+            DashboardJobStep::CheckTargets(targets) => {
+                // An update's preflight keeps the update's own targets.
+                if !self.job_is_update {
+                    self.job_targets = targets;
+                    self.job_reached.clear();
+                }
+            }
+            DashboardJobStep::Checked { folder, result } => match result {
+                Ok(remote_version) => {
+                    self.check_failures.remove(&folder);
+                    if let Some(item) = self.items.iter_mut().find(|item| item.folder == folder) {
+                        item.remote_version = remote_version;
+                        item.last_checked_at = Some(now);
+                    }
+                }
+                Err(failure) => {
+                    self.check_failures.insert(folder, failure);
+                }
+            },
+            DashboardJobStep::Updated { folder, status } => {
+                let state = match status {
+                    LiveUpdateStatus::Updated => UpdateJobRowState::Updated,
+                    LiveUpdateStatus::UpToDate => UpdateJobRowState::UpToDate,
+                    LiveUpdateStatus::RemoteOlder => UpdateJobRowState::NewerThanSource,
+                    LiveUpdateStatus::Error => UpdateJobRowState::Failed,
+                    LiveUpdateStatus::SkippedManual | LiveUpdateStatus::SkippedNoApiKey => {
+                        UpdateJobRowState::Done
+                    }
+                };
+                if matches!(
+                    state,
+                    UpdateJobRowState::Updated
+                        | UpdateJobRowState::UpToDate
+                        | UpdateJobRowState::NewerThanSource
+                ) {
+                    self.check_failures.remove(&folder);
+                }
+                self.job_results.insert(folder, state);
+            }
+            DashboardJobStep::BackedUp(note) => self.job_note = Some(note),
+        }
+    }
+
+    /// Why the last check of `folder` failed, while no check since worked.
+    fn check_failure(&self, folder: &str) -> Option<&CheckFailure> {
+        self.check_failures.get(folder)
+    }
+
+    /// The backup note of the running update.
+    fn job_note(&self) -> Option<&str> {
+        self.job_note.as_deref()
+    }
+
+    /// Where a row stands in the running job, if it is part of it.
     fn update_job_row_state(&self, folder: &str) -> Option<UpdateJobRowState> {
         let job = self.job_ui.as_ref()?;
         if job.kind != DashboardJobKind::Update {
-            // An update's preflight check: its targets are still waiting,
-            // except the one being checked.
-            let waiting = job.current_addon != folder
+            if self.job_is_update {
+                // An update's preflight check: its targets are still
+                // waiting, except the one being checked.
+                let waiting = job.current_addon != folder
+                    && self.job_targets.iter().any(|target| target == folder);
+                return waiting.then_some(UpdateJobRowState::Waiting);
+            }
+            // A check: rows it has reached show what came back, the rest
+            // wait their turn.
+            let waiting = !self.job_reached.iter().any(|reached| reached == folder)
                 && self.job_targets.iter().any(|target| target == folder);
             return waiting.then_some(UpdateJobRowState::Waiting);
+        }
+        if let Some(state) = self.job_results.get(folder) {
+            return Some(*state);
         }
         if job.current_addon == folder {
             return Some(UpdateJobRowState::Updating);
@@ -2477,6 +2641,9 @@ pub struct App {
     quit_requested: bool,
     status_line: StatusMessage,
     ui_theme: UiTheme,
+    /// The terminal does not report 24-bit color, so the Terminal theme is
+    /// on screen (not saved) until a theme is chosen in Settings or setup.
+    follow_terminal: std::cell::Cell<bool>,
     shell_ui: ShellUiState,
     config_present: bool,
     config_pane: ConfigPaneState,
@@ -2510,6 +2677,10 @@ pub struct App {
     /// a question appeared never answers it.
     question_shown: Option<(dialog::Question, Instant)>,
     last_dashboard_list_area: Option<Rect>,
+    /// The key line at the last draw, so a click on a key runs it.
+    last_dashboard_keys_area: Option<Rect>,
+    /// The last click on a list row and when, to spot a double click.
+    last_list_click: std::cell::Cell<Option<(Instant, usize)>>,
     /// The window width at the last draw: Details docks beside the list at
     /// 120 columns and wider. `None` until the first draw.
     last_frame_width: Option<u16>,
@@ -2635,7 +2806,12 @@ impl App {
             shell_mode,
             quit_requested: false,
             status_line: StatusMessage::cleared(),
-            ui_theme: UiTheme::from_mode(loaded_config.theme),
+            ui_theme: UiTheme::for_config(
+                &loaded_config,
+                runtime.display,
+                !runtime.display.truecolor,
+            ),
+            follow_terminal: std::cell::Cell::new(!runtime.display.truecolor),
             shell_ui: ShellUiState::default(),
             config_present,
             config_pane: ConfigPaneState::new(loaded_config),
@@ -2670,6 +2846,8 @@ impl App {
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
+            last_dashboard_keys_area: None,
+            last_list_click: std::cell::Cell::new(None),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding,
@@ -2811,10 +2989,41 @@ impl App {
     }
 
     /// Starts a check of `targets`, or says why it cannot start.
+    /// The running check or update, if any: an update counts from the key
+    /// press, a check from its start, the automatic check included.
+    fn dashboard_job_running(&self) -> Option<DashboardJobKind> {
+        if self.dashboard.update_in_progress() || self.dashboard.job_is_update {
+            Some(DashboardJobKind::Update)
+        } else if self.dashboard.check_in_progress
+            || self.auto_check_in_progress
+            || self.dashboard.job_ui().is_some()
+        {
+            Some(DashboardJobKind::Check)
+        } else {
+            None
+        }
+    }
+
+    /// The note `c`, `C`, `u` and `U` give while a job runs.
+    fn dashboard_job_running_note(&self) -> Option<AppAction> {
+        let note = match self.dashboard_job_running()? {
+            DashboardJobKind::Update => "An update is already running",
+            DashboardJobKind::Check => "A check is already running",
+        };
+        Some(AppAction::SetStatus(self.dashboard_status_for(
+            StatusKind::Note,
+            self.dashboard.detail_mode,
+            note,
+        )))
+    }
+
     fn dashboard_check_actions(
         &self,
         targets: Result<Vec<String>, &'static str>,
     ) -> Vec<AppAction> {
+        if let Some(note) = self.dashboard_job_running_note() {
+            return vec![note];
+        }
         match targets {
             Err(message) => vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
@@ -2849,12 +3058,8 @@ impl App {
         &self,
         targets: Result<Vec<String>, &'static str>,
     ) -> Vec<AppAction> {
-        if self.dashboard.update_in_progress() {
-            vec![AppAction::SetStatus(self.dashboard_status_for(
-                StatusKind::Note,
-                self.dashboard.detail_mode,
-                "An update is already running",
-            ))]
+        if let Some(note) = self.dashboard_job_running_note() {
+            vec![note]
         } else if let Some(busy) = self.install_running_status() {
             vec![AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Note,
@@ -2964,7 +3169,7 @@ impl App {
         match offer {
             StatusOffer::UndoDelete => self.undo_delete.is_some(),
             StatusOffer::UpdateAll => {
-                !self.dashboard.update_in_progress()
+                self.dashboard_job_running().is_none()
                     && !self.dashboard.update_ready_folders().is_empty()
             }
         }
@@ -3056,25 +3261,41 @@ impl App {
             return vec![];
         }
 
-        // The list behind docked Details still takes the mouse; clicks in
-        // the panel fall outside the list area and do nothing.
-        if self.shell_ui.overlay.active.is_some() && !self.details_docked() {
+        // A question is answered from the keyboard only, so a stray click
+        // never says yes.
+        if self.active_question().is_some() {
             return vec![];
         }
 
-        if self.active_question().is_some() {
-            return vec![];
+        // A click on a key on the key line runs that key.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(code) = self.key_line_code_at(mouse.column, mouse.row)
+        {
+            return self.messages_for_key(KeyEvent::from(code));
+        }
+
+        // An open sheet takes the wheel; the list behind docked Details
+        // still takes the mouse, and clicks in the panel fall outside the
+        // list area and do nothing.
+        if self.shell_ui.overlay.active.is_some() && !self.details_docked() {
+            return match mouse.kind {
+                MouseEventKind::ScrollDown => vec![AppMessage::SheetScroll(SheetMove::LineDown)],
+                MouseEventKind::ScrollUp => vec![AppMessage::SheetScroll(SheetMove::LineUp)],
+                _ => vec![],
+            };
         }
 
         match mouse.kind {
             MouseEventKind::ScrollDown => vec![AppMessage::DashboardSelectionNext],
             MouseEventKind::ScrollUp => vec![AppMessage::DashboardSelectionPrevious],
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
-                vec![AppMessage::DashboardPointerSelect {
-                    column: mouse.column,
-                    row: mouse.row,
-                }]
-            }
+            MouseEventKind::Down(MouseButton::Left) => vec![AppMessage::DashboardPointerClick {
+                column: mouse.column,
+                row: mouse.row,
+            }],
+            MouseEventKind::Drag(MouseButton::Left) => vec![AppMessage::DashboardPointerSelect {
+                column: mouse.column,
+                row: mouse.row,
+            }],
             _ => vec![],
         }
     }
@@ -3789,6 +4010,9 @@ impl App {
                     "Move to an addon first",
                 ))],
             },
+            AppMessage::InspectRunCheck if self.dashboard_job_running().is_some() => {
+                self.dashboard_job_running_note().into_iter().collect()
+            }
             AppMessage::InspectRunCheck => match self.inspect_resolved_target() {
                 Some(target) => vec![
                     AppAction::StartDashboardCheckSelected {
@@ -3809,12 +4033,8 @@ impl App {
                 ))],
             },
             AppMessage::InspectRunUpdate => {
-                if self.dashboard.update_in_progress() {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Note,
-                        DetailMode::Overview,
-                        "An update is already running",
-                    ))]
+                if let Some(note) = self.dashboard_job_running_note() {
+                    vec![note]
                 } else if let Some(busy) = self.install_running_status() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
@@ -3868,6 +4088,26 @@ impl App {
                         ],
                     }
                 }
+            }
+            AppMessage::DashboardPointerClick { column, row } => {
+                let Some(selection) = self.dashboard_selection_for_pointer(column, row) else {
+                    return vec![];
+                };
+                let now = Instant::now();
+                let double = self.last_list_click.get().is_some_and(|(at, index)| {
+                    index == selection && now.saturating_duration_since(at) <= DOUBLE_CLICK
+                });
+                if double {
+                    self.last_list_click.set(None);
+                    // Docked Details already shows the row.
+                    return if self.shell_ui.overlay.active.is_none() {
+                        self.update(AppMessage::DashboardOpenInspect)
+                    } else {
+                        vec![]
+                    };
+                }
+                self.last_list_click.set(Some((now, selection)));
+                self.update(AppMessage::DashboardPointerSelect { column, row })
             }
             AppMessage::DashboardPointerSelect { column, row } => {
                 match self.dashboard_selection_for_pointer(column, row) {
@@ -4015,7 +4255,7 @@ impl App {
             }
             AppMessage::DashboardRunUpdateAll => {
                 let folders = self.dashboard.update_ready_folders();
-                if folders.is_empty() && !self.dashboard.update_in_progress() {
+                if folders.is_empty() && self.dashboard_job_running().is_none() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         self.dashboard.detail_mode,
@@ -4466,9 +4706,21 @@ impl App {
             }
             AppMessage::ConfigAdjustSelected(delta) => {
                 let field = self.config_pane.selected_field();
-                let next = self.config_pane.adjust_selected(delta);
-                // At the end of the steps nothing changes, and nothing is saved.
-                if next.draft == self.config_pane.draft {
+                let mut pane = self.config_pane.clone();
+                // While the Terminal theme is on screen without being saved,
+                // the next theme comes after Terminal, and the choice is
+                // saved even when it matches the saved one.
+                let following = field == ConfigField::Theme && self.follow_terminal.get();
+                if following {
+                    pane.draft.theme = ThemeMode::Terminal;
+                    self.follow_terminal.set(false);
+                }
+                let next = pane.adjust_selected(delta);
+                // At the end of the steps nothing changes, and nothing is
+                // saved. The terminal decides a forced Look setting.
+                if self.look_setting_forced(field)
+                    || (next.draft == self.config_pane.draft && !following)
+                {
                     vec![]
                 } else {
                     match self.persist_config_pane(next, field) {
@@ -4806,9 +5058,21 @@ impl App {
             AppMessage::OnboardingPreferencePrevious => vec![AppAction::SetOnboardingState(
                 self.onboarding.move_preference(false),
             )],
-            AppMessage::OnboardingPreferenceChange(delta) => vec![AppAction::SetOnboardingState(
-                self.onboarding.change_preference(delta),
-            )],
+            AppMessage::OnboardingPreferenceChange(delta) => {
+                let mut onboarding = self.onboarding.clone();
+                if onboarding.preference == crate::onboarding::PreferenceField::Theme {
+                    if self.runtime.display.no_color {
+                        return vec![];
+                    }
+                    if self.follow_terminal.get() {
+                        onboarding.draft.theme = ThemeMode::Terminal;
+                        self.follow_terminal.set(false);
+                    }
+                }
+                vec![AppAction::SetOnboardingState(
+                    onboarding.change_preference(delta),
+                )]
+            }
             AppMessage::OnboardingInputChar(character) => vec![AppAction::SetOnboardingState(
                 self.onboarding.insert_char(character),
             )],
@@ -4900,6 +5164,9 @@ impl App {
                         ),
                     )),
                 ],
+                AppTaskEvent::DashboardJobStep(step) => {
+                    vec![AppAction::ApplyDashboardJobStep(step.clone())]
+                }
                 AppTaskEvent::DashboardCheckFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
                     AppAction::SetDashboardAutoCheckInProgress(false),
@@ -4912,12 +5179,15 @@ impl App {
                                 StatusKind::Done
                             },
                             self.dashboard.detail_mode,
-                            &dashboard_check_status_message(
-                                &self.dashboard_names(&outcome.targets),
-                                outcome.total,
-                                outcome.live_checked,
-                                outcome.cached,
-                                outcome.errors,
+                            &dashboard_check_status_with_cause(
+                                dashboard_check_status_message(
+                                    &self.dashboard_names(&outcome.targets),
+                                    outcome.total,
+                                    outcome.live_checked,
+                                    outcome.cached,
+                                    outcome.errors,
+                                ),
+                                &outcome.failures,
                             ),
                         )
                         // Shown only while some addon has an update ready.
@@ -5328,6 +5598,10 @@ impl App {
             AppAction::SetDashboardJobUi(job_ui) => {
                 self.dashboard.set_job_ui(job_ui);
             }
+            AppAction::ApplyDashboardJobStep(step) => {
+                self.dashboard
+                    .apply_job_step(step, OffsetDateTime::now_utc());
+            }
             AppAction::SetDashboardUpdateSummary(summary) => {
                 self.dashboard.set_last_update_summary(summary);
             }
@@ -5349,7 +5623,7 @@ impl App {
             AppAction::SetPersistedConfig(config) => {
                 self.wago_api_key = config.wago_api_key.clone();
                 self.config_present = true;
-                self.ui_theme = UiTheme::from_mode(config.theme);
+                self.ui_theme = self.look_theme(&config);
             }
             AppAction::SetBackupPaneState(state) => {
                 self.backup_pane = state;
@@ -5474,11 +5748,11 @@ impl App {
             AppAction::LeaveOnboarding => {
                 // Back to the list as it was: nothing from setup is kept.
                 self.onboarding = self.onboarding.set_quit_question(false);
-                self.ui_theme = UiTheme::from_mode(self.config_pane.draft.theme);
+                self.ui_theme = self.look_theme(&self.config_pane.draft);
                 self.shell_mode = ShellMode::Dashboard;
             }
             AppAction::SetOnboardingState(state) => {
-                self.ui_theme = UiTheme::from_mode(state.draft.theme);
+                self.ui_theme = self.look_theme(&state.draft);
                 self.onboarding = state;
             }
             AppAction::StartOnboardingQuickCheck => {
@@ -5719,15 +5993,8 @@ impl App {
                         backup_settings,
                         {
                             let sender = sender.clone();
-                            move |kind, current_index, total, addon_name| {
-                                let _ = sender.send(AppTaskEvent::DashboardJobProgress(
-                                    DashboardJobUiState {
-                                        kind,
-                                        current_index,
-                                        total,
-                                        current_addon: addon_name,
-                                    },
-                                ));
+                            move |event| {
+                                let _ = sender.send(event);
                             }
                         },
                     )
@@ -5741,6 +6008,7 @@ impl App {
                 wago_api_key,
                 check_interval_secs,
             } => {
+                self.dashboard.check_in_progress = true;
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
                 let addon_dir = self.effective_addon_dir.clone();
@@ -5753,15 +6021,8 @@ impl App {
                         check_interval_secs,
                         {
                             let sender = sender.clone();
-                            move |kind, current_index, total, addon_name| {
-                                let _ = sender.send(AppTaskEvent::DashboardJobProgress(
-                                    DashboardJobUiState {
-                                        kind,
-                                        current_index,
-                                        total,
-                                        current_addon: addon_name,
-                                    },
-                                ));
+                            move |event| {
+                                let _ = sender.send(event);
                             }
                         },
                     )
@@ -5948,9 +6209,37 @@ impl App {
         self.note_question_shown(Instant::now());
         if self.shell_mode == ShellMode::Dashboard {
             self.draw_dashboard_frame(frame);
-            return;
+        } else {
+            self.draw_setup_frame(frame);
         }
-        self.draw_setup_frame(frame);
+        self.ui_theme.finish_frame(frame.buffer_mut());
+    }
+
+    /// The theme for `config` in this terminal.
+    fn look_theme(&self, config: &AppConfig) -> UiTheme {
+        UiTheme::for_config(config, self.runtime.display, self.follow_terminal.get())
+    }
+
+    /// The spinner on the line that is working; a still ellipsis under
+    /// reduce motion.
+    fn spinner_frame(&self) -> &'static str {
+        let symbols = self.ui_theme.symbols;
+        if self.ui_theme.reduce_motion {
+            symbols.ellipsis
+        } else {
+            symbols.spinner[self.shell_ui.motion.tick_count % symbols.spinner.len()]
+        }
+    }
+
+    /// A Look setting that the terminal decides right now: Theme while
+    /// `NO_COLOR` is set, Simple symbols while the locale is not UTF-8.
+    fn look_setting_forced(&self, field: ConfigField) -> bool {
+        let display = self.runtime.display;
+        match field {
+            ConfigField::Theme => display.no_color,
+            ConfigField::SimpleSymbols => !display.utf8,
+            _ => false,
+        }
     }
 
     fn task_overlay_lines(&self) -> Vec<Line<'static>> {
@@ -6558,7 +6847,23 @@ impl App {
 
     /// A setting's value in words. The Wago.io key itself is never shown.
     fn render_config_field_value(&self, field: ConfigField) -> String {
-        config_value_text(&self.config_pane.draft, field)
+        self.look_value_text(&self.config_pane.draft, field)
+    }
+
+    /// A setting's value as it is on screen: Theme and Simple symbols say
+    /// what the terminal makes them, which can differ from the saved value.
+    fn look_value_text(&self, draft: &AppConfig, field: ConfigField) -> String {
+        let display = self.runtime.display;
+        match field {
+            ConfigField::Theme => theme_name(effective_theme(
+                draft.theme,
+                display,
+                self.follow_terminal.get(),
+            ))
+            .to_string(),
+            ConfigField::SimpleSymbols => on_off(draft.simple_symbols || !display.utf8).to_string(),
+            _ => config_value_text(draft, field),
+        }
     }
 
     fn is_guarded_path(&self, candidate: &Path) -> bool {
@@ -6960,7 +7265,7 @@ async fn run_dashboard_update_task(
     wago_api_key: Option<String>,
     check_interval_secs: u64,
     backup_settings: PreUpdateBackupSettings,
-    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
+    mut on_event: impl FnMut(AppTaskEvent),
 ) -> std::result::Result<DashboardUpdateOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     preflight_stale_update_checks(
@@ -6969,7 +7274,7 @@ async fn run_dashboard_update_task(
         folders,
         wago_api_key.as_deref(),
         check_interval_secs,
-        &mut on_progress,
+        &mut on_event,
     )
     .await?;
     // Best-effort WTF backup before addons change; a failure only adds a status note.
@@ -6988,19 +7293,44 @@ async fn run_dashboard_update_task(
             "couldn't back up your game settings ({join_error}), the update went ahead"
         ))
     });
-    let run = apply_live_updates(
-        &mut database,
-        addon_dir,
-        folders,
-        wago_api_key.as_deref(),
-        false,
-        false,
-        |current_index, total, addon_name| {
-            on_progress(DashboardJobKind::Update, current_index, total, addon_name)
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    if let Some(note) = &backup_note {
+        on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::BackedUp(
+            note.clone(),
+        )));
+    }
+    // One addon at a time, so each row shows its result as it comes in.
+    let total = folders.len();
+    let mut run = LiveUpdateRun {
+        summary: LiveUpdateSummary::default(),
+        results: Vec::new(),
+    };
+    for (index, folder) in folders.iter().enumerate() {
+        on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+            kind: DashboardJobKind::Update,
+            current_index: index + 1,
+            total,
+            current_addon: folder.clone(),
+        }));
+        let one = apply_live_updates(
+            &mut database,
+            addon_dir,
+            std::slice::from_ref(folder),
+            wago_api_key.as_deref(),
+            false,
+            false,
+            |_, _, _| {},
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        for result in &one.results {
+            on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Updated {
+                folder: result.addon_name.clone(),
+                status: result.status,
+            }));
+        }
+        run.summary.add(&one.summary);
+        run.results.extend(one.results);
+    }
     let updated_addon_name = if run.summary.updated_addons == 1 {
         run.results
             .iter()
@@ -7091,43 +7421,40 @@ async fn run_dashboard_check_task(
     folders: &[String],
     wago_api_key: Option<String>,
     check_interval_secs: u64,
-    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
+    mut on_event: impl FnMut(AppTaskEvent),
 ) -> std::result::Result<DashboardCheckOutcome, String> {
     let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
     let installed = database.list_addons().map_err(|error| error.to_string())?;
     let stale = stale_target_selectors(&installed, folders, check_interval_secs);
-
-    for (index, folder) in stale.iter().enumerate() {
-        on_progress(
-            DashboardJobKind::Check,
-            index + 1,
-            stale.len(),
-            folder.clone(),
-        );
-        refresh_live_update_checks(
-            &mut database,
-            std::slice::from_ref(folder),
-            wago_api_key.as_deref(),
-            addon_dir,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    }
+    on_event(AppTaskEvent::DashboardJobStep(
+        DashboardJobStep::CheckTargets(stale.clone()),
+    ));
+    let failures = check_folders_live(
+        &mut database,
+        addon_dir,
+        &stale,
+        wago_api_key.as_deref(),
+        &mut on_event,
+    )
+    .await?;
 
     let refreshed = database.list_addons().map_err(|error| error.to_string())?;
     let results = build_update_checks(&refreshed, folders).map_err(|error| error.to_string())?;
-    let errors = results
-        .iter()
-        .filter(|result| result.status == UpdateStatus::Error)
-        .count();
+    let live_errors = failures.len();
+    let errors = live_errors
+        + results
+            .iter()
+            .filter(|result| result.status == UpdateStatus::Error)
+            .count();
 
     Ok(DashboardCheckOutcome {
         addons: refreshed,
         total: folders.len(),
         targets: folders.to_vec(),
-        live_checked: stale.len(),
+        live_checked: stale.len().saturating_sub(live_errors),
         cached: folders.len().saturating_sub(stale.len()),
         errors,
+        failures,
     })
 }
 
@@ -7137,19 +7464,38 @@ async fn preflight_stale_update_checks(
     folders: &[String],
     wago_api_key: Option<&str>,
     check_interval_secs: u64,
-    mut on_progress: impl FnMut(DashboardJobKind, usize, usize, String),
+    on_event: &mut impl FnMut(AppTaskEvent),
 ) -> std::result::Result<(), String> {
     let installed = database.list_addons().map_err(|error| error.to_string())?;
     let stale = stale_target_selectors(&installed, folders, check_interval_secs);
+    check_folders_live(database, addon_dir, &stale, wago_api_key, on_event).await?;
+    Ok(())
+}
 
-    for (index, folder) in stale.iter().enumerate() {
-        on_progress(
-            DashboardJobKind::Check,
-            index + 1,
-            stale.len(),
-            folder.clone(),
-        );
-        refresh_live_update_checks(
+/// Checks `folders` one at a time, reporting each as it starts and what
+/// came back. Returns why each failed check failed.
+async fn check_folders_live(
+    database: &mut StateDatabase,
+    addon_dir: Option<&Path>,
+    folders: &[String],
+    wago_api_key: Option<&str>,
+    on_event: &mut impl FnMut(AppTaskEvent),
+) -> std::result::Result<Vec<CheckFailure>, String> {
+    let sources: HashMap<String, SourceKind> = database
+        .list_addons()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|addon| (addon.folder, addon.source))
+        .collect();
+    let mut failures = Vec::new();
+    for (index, folder) in folders.iter().enumerate() {
+        on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+            kind: DashboardJobKind::Check,
+            current_index: index + 1,
+            total: folders.len(),
+            current_addon: folder.clone(),
+        }));
+        let results = refresh_live_update_checks(
             database,
             std::slice::from_ref(folder),
             wago_api_key,
@@ -7157,9 +7503,48 @@ async fn preflight_stale_update_checks(
         )
         .await
         .map_err(|error| error.to_string())?;
+        for result in results {
+            let Some(step) = check_step_for_result(&result, &sources) else {
+                continue;
+            };
+            if let DashboardJobStep::Checked {
+                result: Err(failure),
+                ..
+            } = &step
+            {
+                failures.push(failure.clone());
+            }
+            on_event(AppTaskEvent::DashboardJobStep(step));
+        }
     }
+    Ok(failures)
+}
 
-    Ok(())
+/// What one live check result means for its row: a version came back, the
+/// check failed, or nothing was asked (no Wago.io key, not linked).
+fn check_step_for_result(
+    result: &CheckResult,
+    sources: &HashMap<String, SourceKind>,
+) -> Option<DashboardJobStep> {
+    let folder = result.addon_name.clone();
+    if let Some(kind) = result.error_kind {
+        return Some(DashboardJobStep::Checked {
+            result: Err(CheckFailure {
+                kind,
+                source: sources.get(&folder).copied().unwrap_or(SourceKind::Manual),
+                detail: result.message.clone().unwrap_or_default(),
+            }),
+            folder,
+        });
+    }
+    matches!(
+        result.status,
+        UpdateStatus::UpToDate | UpdateStatus::UpdateAvailable | UpdateStatus::RemoteOlder
+    )
+    .then(|| DashboardJobStep::Checked {
+        folder,
+        result: Ok(result.remote_version.clone()),
+    })
 }
 
 fn stale_target_selectors(
@@ -7245,6 +7630,7 @@ fn build_update_checks_for_dashboard(items: &[&DashboardItem]) -> Vec<CheckResul
                 status,
                 remote_version: addon.remote_version,
                 message,
+                error_kind: None,
             }
         })
         .collect()
@@ -7424,6 +7810,48 @@ fn name_list(names: &[String], count: usize) -> String {
 }
 
 /// The message a check ends with. `names` are the checked addons' names.
+/// `message` with the cause of the failed checks after it, when they all
+/// failed the same way: "Couldn't check 8 addons: no internet connection?".
+/// Mixed or unknown causes leave `message` as it is.
+fn dashboard_check_status_with_cause(message: String, failures: &[CheckFailure]) -> String {
+    match check_failure_cause(failures) {
+        Some(cause) => format!("{message}: {cause}"),
+        None => message,
+    }
+}
+
+/// The shared cause of `failures` in plain words, if they share one.
+fn check_failure_cause(failures: &[CheckFailure]) -> Option<String> {
+    let first = failures.first()?;
+    if failures.iter().any(|failure| failure.kind != first.kind) {
+        return None;
+    }
+    // One source for all of them, so the cause can name it.
+    let source = failures
+        .iter()
+        .all(|failure| failure.source == first.source)
+        .then(|| render_dashboard::dashboard_source_name(first.source, true))
+        .filter(|name| !name.is_empty());
+    let them = if failures.len() == 1 { "it" } else { "them" };
+    match (first.kind, source) {
+        (SourceErrorKind::NoConnection, Some(name)) => Some(format!("couldn't reach {name}")),
+        (SourceErrorKind::NoConnection, None) => Some("no internet connection?".to_string()),
+        (SourceErrorKind::KeyRejected, Some("Wago.io")) => {
+            Some("Wago.io didn't accept your key. Check it in Settings".to_string())
+        }
+        (SourceErrorKind::KeyRejected, Some(name)) => {
+            Some(format!("{name} turned down LemonUp's request"))
+        }
+        (SourceErrorKind::NotFound, Some(name)) => {
+            Some(format!("{name} doesn't list {them} anymore"))
+        }
+        (SourceErrorKind::SlowDown, Some(name)) => {
+            Some(format!("{name} asked LemonUp to slow down"))
+        }
+        _ => None,
+    }
+}
+
 fn dashboard_check_status_message(
     names: &[String],
     total: usize,
@@ -7510,10 +7938,9 @@ fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
         ConfigField::AutoCheckInterval => human_duration(draft.auto_check_interval_secs),
         ConfigField::BackupWtf => on_off(draft.backup_wtf).to_string(),
         ConfigField::BackupRetention => draft.backup_retention.to_string(),
-        ConfigField::Theme => match draft.theme {
-            ThemeMode::Dark => "Dark".to_string(),
-            ThemeMode::Light => "Light".to_string(),
-        },
+        ConfigField::Theme => theme_name(draft.theme).to_string(),
+        ConfigField::SimpleSymbols => on_off(draft.simple_symbols).to_string(),
+        ConfigField::ReduceMotion => on_off(draft.reduce_motion).to_string(),
         ConfigField::ShowLibs => on_off(draft.show_libs).to_string(),
         ConfigField::ChangeGameFolder | ConfigField::SaveAddonList | ConfigField::LoadAddonList => {
             String::new()
@@ -7820,6 +8247,7 @@ mod tests {
                 format!("profile {} | q quit", DEFAULT_PROFILE),
             ),
             ui_theme: UiTheme::from_mode(config.theme),
+            follow_terminal: std::cell::Cell::new(false),
             shell_ui: ShellUiState::default(),
             config_present: true,
             config_pane: ConfigPaneState::new({
@@ -7851,6 +8279,8 @@ mod tests {
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
+            last_dashboard_keys_area: None,
+            last_list_click: std::cell::Cell::new(None),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             onboarding: OnboardingState::new(),
@@ -7975,7 +8405,7 @@ mod tests {
     }
 
     #[test]
-    fn left_click_emits_pointer_select_message() {
+    fn left_click_emits_pointer_click_message() {
         let app = app_for_tests(ShellMode::Dashboard);
 
         let messages = app.messages_for_event(&TerminalEvent::Mouse(MouseEvent {
@@ -7987,7 +8417,7 @@ mod tests {
 
         assert_eq!(
             messages,
-            vec![AppMessage::DashboardPointerSelect { column: 5, row: 4 }]
+            vec![AppMessage::DashboardPointerClick { column: 5, row: 4 }]
         );
     }
 
@@ -10102,8 +10532,7 @@ mod tests {
 
         app.apply(AppAction::SetPersistedConfig(config));
 
-        assert_eq!(app.ui_theme.panel_title, Color::Rgb(46, 125, 233));
-        assert_eq!(app.ui_theme.overlay_bg, Color::Rgb(232, 233, 238));
+        assert_eq!(app.ui_theme.roles, crate::theme::ColorRoles::light());
     }
 
     #[test]
@@ -11667,8 +12096,9 @@ mod tests {
     #[test]
     fn version_cell_shows_old_and_new_only_when_an_update_is_ready() {
         use super::render_dashboard::VersionCell;
-        let text =
-            |addon: AddonRecord, wide: bool| VersionCell::for_item(&item_for(addon), wide).text();
+        let text = |addon: AddonRecord, wide: bool| {
+            VersionCell::for_item(&item_for(addon), wide).text("→")
+        };
 
         assert_eq!(
             text(AddonRecord::new("Bug", "Bug", SourceKind::Manual), true),
@@ -12654,7 +13084,7 @@ mod tests {
 
         let rows = render_rows(&mut app, 80, 24);
         let text = rows.join("\n");
-        assert!(text.contains("▌ Colors"), "{text}");
+        assert!(text.contains("▌ Theme"), "{text}");
         assert!(text.contains("‹ Dark ›"), "{text}");
         assert!(
             text.contains("Back up my game settings before updates"),
@@ -13301,8 +13731,7 @@ mod tests {
         )
         .expect("bootstrap app");
 
-        assert_eq!(app.ui_theme.panel_title, Color::Rgb(46, 125, 233));
-        assert_eq!(app.ui_theme.overlay_bg, Color::Rgb(232, 233, 238));
+        assert_eq!(app.ui_theme.roles, crate::theme::ColorRoles::light());
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -14186,6 +14615,223 @@ mod tests {
             app.apply(AppAction::SetHelpOverlay(true));
         }
 
+        /// Colors, symbols and motion: Terminal, `NO_COLOR`, simple symbols
+        /// and reduce motion.
+        mod look {
+            use super::*;
+            use crate::app::{Modifier, UpdateJobRowState};
+            use crate::theme::DisplayEnv;
+            use ratatui::buffer::Buffer;
+
+            fn draw_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+                use ratatui::{Terminal, backend::TestBackend};
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal.draw(|frame| app.draw(frame)).expect("draw");
+                terminal.backend().buffer().clone()
+            }
+
+            /// The test app in a terminal that allows `display`, with
+            /// `change` made to its saved config.
+            fn app_in(display: DisplayEnv, follow: bool, change: fn(&mut AppConfig)) -> App {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.runtime.display = display;
+                app.follow_terminal.set(follow);
+                let mut config = app.config_pane.draft.clone();
+                change(&mut config);
+                app.config_pane = ConfigPaneState::new(config.clone());
+                app.apply(AppAction::SetPersistedConfig(config));
+                app
+            }
+
+            fn select_field(app: &mut App, field: ConfigField) {
+                app.config_pane.selected_field = ConfigField::ALL
+                    .iter()
+                    .position(|candidate| *candidate == field)
+                    .expect("field");
+            }
+
+            fn row_with(rows: &[String], needle: &str) -> String {
+                rows.iter()
+                    .find(|row| row.contains(needle))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("no row with {needle}:\n{}", rows.join("\n")))
+            }
+
+            #[test]
+            fn no_color_forces_terminal_with_no_colors_and_a_reverse_video_cursor() {
+                let no_color = DisplayEnv {
+                    no_color: true,
+                    ..DisplayEnv::FULL
+                };
+                let mut app = app_in(no_color, false, |_| {});
+                assert_eq!(app.ui_theme.mode, ThemeMode::Terminal);
+                assert_eq!(app.config_pane.draft.theme, ThemeMode::Dark);
+
+                let buffer = draw_buffer(&mut app, 120, 30);
+                for cell in buffer.content() {
+                    assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));
+                }
+                let width = usize::from(buffer.area.width);
+                let rows: Vec<&[ratatui::buffer::Cell]> = buffer.content().chunks(width).collect();
+                let cursor = rows
+                    .iter()
+                    .position(|row| row[0].symbol() == "▌")
+                    .expect("cursor row");
+                for cell in rows[cursor] {
+                    assert!(cell.modifier.contains(Modifier::REVERSED));
+                    assert!(cell.modifier.contains(Modifier::BOLD));
+                }
+                let reversed = rows
+                    .iter()
+                    .filter(|row| row[0].modifier.contains(Modifier::REVERSED))
+                    .count();
+                assert_eq!(reversed, 1, "only the cursor row is reverse video");
+
+                // Theme says Terminal and does not change while NO_COLOR is set.
+                open_config(&mut app);
+                select_field(&mut app, ConfigField::Theme);
+                press_key(&mut app, KeyCode::Right);
+                assert_eq!(app.config_pane.draft.theme, ThemeMode::Dark);
+                let rows = render_rows(&mut app, 138, 36);
+                assert!(row_with(&rows, "Theme").contains("Terminal"));
+                assert!(rows.join("\n").contains("NO_COLOR is set now."));
+            }
+
+            #[test]
+            fn without_truecolor_terminal_shows_until_a_theme_is_chosen() {
+                let ansi = DisplayEnv {
+                    truecolor: false,
+                    ..DisplayEnv::FULL
+                };
+                let mut app = app_in(ansi, true, |_| {});
+                assert_eq!(app.ui_theme.mode, ThemeMode::Terminal);
+                // Not saved: the saved choice is still Dark.
+                assert_eq!(app.config_pane.draft.theme, ThemeMode::Dark);
+                let buffer = draw_buffer(&mut app, 120, 30);
+                for cell in buffer.content() {
+                    assert!(!matches!(cell.fg, Color::Rgb(..) | Color::Indexed(_)));
+                    assert!(!matches!(cell.bg, Color::Rgb(..) | Color::Indexed(_)));
+                }
+
+                open_config(&mut app);
+                select_field(&mut app, ConfigField::Theme);
+                let rows = render_rows(&mut app, 138, 36);
+                assert!(row_with(&rows, "Theme").contains("Terminal"));
+                // The next theme after Terminal, saved even though it is
+                // the saved one.
+                press_key(&mut app, KeyCode::Right);
+                assert!(!app.follow_terminal.get());
+                assert_eq!(app.config_pane.draft.theme, ThemeMode::Dark);
+                assert_eq!(app.ui_theme.mode, ThemeMode::Dark);
+                press_key(&mut app, KeyCode::Right);
+                assert_eq!(app.ui_theme.mode, ThemeMode::Light);
+                press_key(&mut app, KeyCode::Right);
+                assert_eq!(app.ui_theme.mode, ThemeMode::Terminal);
+                assert_eq!(app.config_pane.draft.theme, ThemeMode::Terminal);
+            }
+
+            #[test]
+            fn simple_symbols_leave_only_ascii_on_every_main_screen() {
+                type Open = fn(&mut App);
+                let opens: [(&str, Open); 7] = [
+                    ("list", |_| {}),
+                    ("settings", open_config),
+                    ("help", open_help),
+                    ("details", open_inspect),
+                    ("backups", open_backups),
+                    ("install", open_install_results),
+                    ("filter", |app| press_key(app, KeyCode::Char('/'))),
+                ];
+                for (width, height) in SIZES {
+                    for (name, open) in opens {
+                        let mut app = app_in(DisplayEnv::FULL, false, |config| {
+                            config.simple_symbols = true;
+                        });
+                        open(&mut app);
+                        let rows = render_rows(&mut app, width, height);
+                        for row in &rows {
+                            assert!(
+                                row.is_ascii(),
+                                "{name} at {width}x{height}: {row}\n{}",
+                                rows.join("\n")
+                            );
+                        }
+                        if name == "list" {
+                            let text = rows.join("\n");
+                            assert!(text.contains("LEMONUP"), "{text}");
+                            assert!(text.contains("ok Up to date"), "{text}");
+                        }
+                    }
+                }
+                let mut setup = app_for_tests(ShellMode::Onboarding);
+                setup.config_pane.draft.simple_symbols = true;
+                setup.ui_theme = setup.look_theme(&setup.config_pane.draft.clone());
+                for row in render_rows(&mut setup, 120, 30) {
+                    assert!(row.is_ascii(), "setup: {row}");
+                }
+            }
+
+            #[test]
+            fn a_locale_without_utf8_turns_simple_symbols_on_without_saving() {
+                let c_locale = DisplayEnv {
+                    utf8: false,
+                    ..DisplayEnv::FULL
+                };
+                let mut app = app_in(c_locale, false, |_| {});
+                assert!(app.ui_theme.symbols.simple);
+                assert!(!app.config_pane.draft.simple_symbols);
+                open_config(&mut app);
+                select_field(&mut app, ConfigField::SimpleSymbols);
+                press_key(&mut app, KeyCode::Right);
+                assert!(!app.config_pane.draft.simple_symbols);
+                let rows = render_rows(&mut app, 138, 36);
+                assert!(row_with(&rows, "Simple symbols").contains("On"));
+                for row in &rows {
+                    assert!(row.is_ascii(), "{row}");
+                }
+            }
+
+            #[test]
+            fn reduce_motion_stills_the_spinner() {
+                let mut app = app_in(DisplayEnv::FULL, false, |_| {});
+                let mut frames = std::collections::HashSet::new();
+                for _ in 0..8 {
+                    frames.insert(app.spinner_frame());
+                    app.shell_ui.motion = app.shell_ui.motion.advance();
+                }
+                assert!(frames.len() > 1);
+
+                let mut app = app_in(DisplayEnv::FULL, false, |config| {
+                    config.reduce_motion = true;
+                });
+                let mut frames = std::collections::HashSet::new();
+                for _ in 0..8 {
+                    frames.insert(app.spinner_frame());
+                    app.shell_ui.motion = app.shell_ui.motion.advance();
+                }
+                assert_eq!(frames.into_iter().collect::<Vec<_>>(), ["…"]);
+                assert!(app.ui_theme.reduce_motion);
+            }
+
+            #[test]
+            fn an_updated_row_settles_after_two_seconds_and_a_failure_stays() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.dashboard
+                    .set_update_results(vec!["Second".to_string()], vec!["Third".to_string()]);
+                let later = Instant::now() + StdDuration::from_secs(3);
+                assert_eq!(
+                    app.dashboard.update_result("Second"),
+                    Some(UpdateJobRowState::Updated)
+                );
+                assert_eq!(app.dashboard.update_result_at("Second", later), None);
+                assert_eq!(
+                    app.dashboard.update_result_at("Third", later),
+                    Some(UpdateJobRowState::Failed)
+                );
+            }
+        }
+
         struct Case {
             name: &'static str,
             open: fn(&mut App),
@@ -14535,7 +15181,13 @@ mod tests {
             let line = key_line_at(&mut app, 80);
             assert_eq!(
                 entries(&line),
-                ["↑/↓ choose", "←/→ change", "esc close", "? help"],
+                [
+                    "↑/↓ choose",
+                    "←/→ change",
+                    "esc close",
+                    "pgup/pgdn scroll",
+                    "? help"
+                ],
                 "{line}"
             );
             // Tighter: the rest goes from the end; the main key, esc and ? stay.
@@ -15071,7 +15723,7 @@ mod tests {
             };
             assert_eq!(
                 app.messages_for_mouse(click(10)),
-                vec![AppMessage::DashboardPointerSelect {
+                vec![AppMessage::DashboardPointerClick {
                     column: 10,
                     row: area.y
                 }]
@@ -15238,7 +15890,7 @@ mod tests {
             match when {
                 HelpWhen::Always => {}
                 HelpWhen::NoWagoKey => app.wago_api_key = None,
-                HelpWhen::NotLinked => {}
+                HelpWhen::NotLinked | HelpWhen::NoJob => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),
@@ -16315,6 +16967,778 @@ mod tests {
                 .danger()
             );
             assert!(!Question::QuitWhileUpdating { progress: None }.danger());
+        }
+    }
+
+    /// Slice 18 (per-row progress) and slice 20 (mouse extras).
+    mod progress_and_mouse {
+        use super::*;
+        use crate::app::render_dashboard::RowStatus;
+        use crate::app::render_inspect::check_failed_sentence;
+        use crate::app::{
+            CheckFailure, DOUBLE_CLICK, DashboardCheckOutcome, DashboardJobStep,
+            check_failure_cause, check_step_for_result, dashboard_check_status_message,
+            dashboard_check_status_with_cause,
+        };
+        use crate::source_error::SourceErrorKind;
+        use crate::theme::Symbols;
+        use crate::update::{CheckResult, LiveUpdateStatus};
+        use lemonup_core::UpdateStatus;
+
+        fn send(app: &mut App, event: AppTaskEvent) {
+            apply_all(app, AppMessage::BackgroundTask(event));
+        }
+
+        fn progress(
+            kind: DashboardJobKind,
+            index: usize,
+            total: usize,
+            folder: &str,
+        ) -> AppTaskEvent {
+            AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+                kind,
+                current_index: index,
+                total,
+                current_addon: folder.to_string(),
+            })
+        }
+
+        fn step(step: DashboardJobStep) -> AppTaskEvent {
+            AppTaskEvent::DashboardJobStep(step)
+        }
+
+        fn failure(kind: SourceErrorKind) -> CheckFailure {
+            CheckFailure {
+                kind,
+                source: SourceKind::GitHub,
+                detail: "error sending request".to_string(),
+            }
+        }
+
+        fn status(app: &App, folder: &str) -> RowStatus {
+            let item = app
+                .dashboard
+                .items
+                .iter()
+                .find(|item| item.folder == folder)
+                .expect("item");
+            app.dashboard_row_status(item)
+        }
+
+        fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        fn click(column: u16, row: u16) -> MouseEvent {
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+        }
+
+        /// The column where `needle` starts on `row`, counted in cells.
+        fn column_of(row: &str, needle: &str) -> u16 {
+            let byte = row
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} in {row:?}"));
+            u16::try_from(row[..byte].chars().count()).expect("column")
+        }
+
+        #[test]
+        fn check_rows_wait_then_work_then_show_what_came_back() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let targets = vec!["Third".to_string(), "Second".to_string()];
+            send(&mut app, step(DashboardJobStep::CheckTargets(targets)));
+            send(&mut app, progress(DashboardJobKind::Check, 1, 2, "Third"));
+            assert_eq!(status(&app, "Third"), RowStatus::Checking);
+            assert_eq!(status(&app, "Second"), RowStatus::Waiting);
+            // Not part of the check: its own status.
+            assert_eq!(status(&app, "First"), RowStatus::NotLinked);
+
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Third".to_string(),
+                    result: Ok(Some("3.1.0".to_string())),
+                }),
+            );
+            send(&mut app, progress(DashboardJobKind::Check, 2, 2, "Second"));
+            assert_eq!(status(&app, "Third"), RowStatus::UpdateReady);
+            assert_eq!(status(&app, "Second"), RowStatus::Checking);
+            let line = line_text(&app.dashboard_status_line(120));
+            assert!(line.contains("Checking 2 of 2 · Second"), "{line}");
+            assert!(line.contains(&"█".repeat(28)), "{line}");
+
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Err(failure(SourceErrorKind::NoConnection)),
+                }),
+            );
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::DashboardCheckFinished(Ok(
+                    DashboardCheckOutcome {
+                        addons: Vec::new(),
+                        total: 2,
+                        targets: vec!["Third".to_string(), "Second".to_string()],
+                        live_checked: 1,
+                        cached: 0,
+                        errors: 1,
+                        failures: vec![failure(SourceErrorKind::NoConnection)],
+                    },
+                ))),
+            );
+            assert!(app.dashboard.job_ui().is_none());
+        }
+
+        #[test]
+        fn check_failed_stays_until_a_good_check_of_that_addon() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let addons = app_for_tests(ShellMode::Dashboard)
+                .dashboard
+                .items
+                .iter()
+                .map(|item| {
+                    let mut addon = AddonRecord::new(&item.name, &item.folder, item.source);
+                    addon.version = item.version.clone();
+                    addon.remote_version = item.remote_version.clone();
+                    addon.git_commit = item.git_commit.clone();
+                    addon
+                })
+                .collect::<Vec<_>>();
+            send(
+                &mut app,
+                step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
+            );
+            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Err(CheckFailure {
+                        source: SourceKind::GitHub,
+                        ..failure(SourceErrorKind::SlowDown)
+                    }),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            assert_eq!(status(&app, "Second"), RowStatus::CheckFailed);
+            assert_eq!(RowStatus::CheckFailed.label("⠋"), "! Check failed");
+
+            // A rescan does not clear it; neither does an unrelated check.
+            app.apply(AppAction::ReplaceDashboardAddons(addons));
+            assert_eq!(status(&app, "Second"), RowStatus::CheckFailed);
+            send(
+                &mut app,
+                step(DashboardJobStep::CheckTargets(vec!["Third".to_string()])),
+            );
+            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Third"));
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Third".to_string(),
+                    result: Ok(Some("3.0.0".to_string())),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            assert_eq!(status(&app, "Second"), RowStatus::CheckFailed);
+            // In Details, "c try again" is the main key on it.
+            let second = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Second");
+            app.apply(AppAction::SetDashboardSelection(second));
+            apply_all(&mut app, AppMessage::DashboardOpenInspect);
+            let keys = render_rows(&mut app, 100, 30)
+                .last()
+                .expect("key line")
+                .clone();
+            assert!(keys.contains("c try again"), "{keys}");
+            apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+
+            // The next good check of it clears it.
+            send(
+                &mut app,
+                step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
+            );
+            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Ok(Some("2.1.0".to_string())),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            assert!(app.dashboard.check_failure("Second").is_none());
+            assert_ne!(status(&app, "Second"), RowStatus::CheckFailed);
+        }
+
+        #[test]
+        fn check_results_become_steps_with_the_error_kind() {
+            let sources = HashMap::from([("Pawn".to_string(), SourceKind::WowInterface)]);
+            let result = |status, error_kind| CheckResult {
+                addon_name: "Pawn".to_string(),
+                status,
+                remote_version: Some("2.12.0".to_string()),
+                message: Some("timed out".to_string()),
+                error_kind,
+            };
+            assert_eq!(
+                check_step_for_result(
+                    &result(UpdateStatus::Error, Some(SourceErrorKind::NoConnection)),
+                    &sources
+                ),
+                Some(DashboardJobStep::Checked {
+                    folder: "Pawn".to_string(),
+                    result: Err(CheckFailure {
+                        kind: SourceErrorKind::NoConnection,
+                        source: SourceKind::WowInterface,
+                        detail: "timed out".to_string(),
+                    }),
+                })
+            );
+            assert_eq!(
+                check_step_for_result(&result(UpdateStatus::UpdateAvailable, None), &sources),
+                Some(DashboardJobStep::Checked {
+                    folder: "Pawn".to_string(),
+                    result: Ok(Some("2.12.0".to_string())),
+                })
+            );
+            // No Wago.io key: nothing was asked, so nothing is claimed.
+            assert_eq!(
+                check_step_for_result(&result(UpdateStatus::Unknown, None), &sources),
+                None
+            );
+        }
+
+        #[test]
+        fn details_names_the_cause_of_a_failed_check() {
+            let text = |kind, source| {
+                check_failed_sentence(kind, source)
+                    .into_iter()
+                    .map(|(part, _)| part)
+                    .collect::<String>()
+            };
+            assert_eq!(
+                text(
+                    Some(SourceErrorKind::NoConnection),
+                    SourceKind::WowInterface
+                ),
+                "Couldn't reach WoWInterface. Check your internet connection, then press c to try again."
+            );
+            assert_eq!(
+                text(Some(SourceErrorKind::KeyRejected), SourceKind::Wago),
+                "Wago.io turned down your Wago.io key. Check the key in Settings, then press c to try again."
+            );
+            assert!(
+                text(Some(SourceErrorKind::KeyRejected), SourceKind::GitHub)
+                    .contains("GitHub token")
+            );
+            assert!(
+                text(Some(SourceErrorKind::NotFound), SourceKind::Tukui)
+                    .starts_with("TukUI doesn't list this addon anymore.")
+            );
+            assert!(
+                text(Some(SourceErrorKind::SlowDown), SourceKind::GitHub)
+                    .starts_with("GitHub asked LemonUp to slow down.")
+            );
+            let generic =
+                "LemonUp couldn't check GitHub for a newer version. Press c to try again.";
+            assert_eq!(
+                text(Some(SourceErrorKind::Other), SourceKind::GitHub),
+                generic
+            );
+            assert_eq!(text(None, SourceKind::GitHub), generic);
+            // `c` is drawn as a key, and no sentence uses a dash.
+            for kind in [
+                SourceErrorKind::NoConnection,
+                SourceErrorKind::KeyRejected,
+                SourceErrorKind::NotFound,
+                SourceErrorKind::SlowDown,
+                SourceErrorKind::Other,
+            ] {
+                let parts = check_failed_sentence(Some(kind), SourceKind::GitHub);
+                assert!(parts.contains(&("c".to_string(), true)), "{kind:?}");
+                let joined = text(Some(kind), SourceKind::GitHub);
+                assert!(!joined.contains('—') && !joined.contains('–'), "{joined}");
+            }
+
+            // On screen: the Details sheet of a row whose check failed.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            send(
+                &mut app,
+                step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
+            );
+            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Err(failure(SourceErrorKind::NoConnection)),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            let second = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Second");
+            app.apply(AppAction::SetDashboardSelection(second));
+            apply_all(&mut app, AppMessage::DashboardOpenInspect);
+            let text = render_rows(&mut app, 100, 30).join("\n");
+            assert!(text.contains("! Check failed"), "{text}");
+            assert!(text.contains("Couldn't reach GitHub."), "{text}");
+        }
+
+        #[test]
+        fn update_rows_show_each_result_as_it_comes_in() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let folders = ["Second".to_string(), "Third".to_string()];
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            app.dashboard.begin_update_targets(&folders);
+            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
+            assert_eq!(status(&app, "Second"), RowStatus::Updating);
+            assert_eq!(status(&app, "Third"), RowStatus::Waiting);
+            send(
+                &mut app,
+                step(DashboardJobStep::BackedUp(
+                    "backed up your game settings first".to_string(),
+                )),
+            );
+            send(
+                &mut app,
+                step(DashboardJobStep::Updated {
+                    folder: "Second".to_string(),
+                    status: LiveUpdateStatus::Updated,
+                }),
+            );
+            send(&mut app, progress(DashboardJobKind::Update, 2, 2, "Third"));
+            assert_eq!(status(&app, "Second"), RowStatus::Updated);
+            assert_eq!(status(&app, "Third"), RowStatus::Updating);
+            let line = line_text(&app.dashboard_status_line(120));
+            assert!(line.contains("Updating 2 of 2 · Third"), "{line}");
+            assert!(
+                line.contains("backed up your game settings first"),
+                "{line}"
+            );
+            send(
+                &mut app,
+                step(DashboardJobStep::Updated {
+                    folder: "Third".to_string(),
+                    status: LiveUpdateStatus::UpToDate,
+                }),
+            );
+            assert_eq!(status(&app, "Third"), RowStatus::UpToDate);
+
+            // Half way through, the bar is half full.
+            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
+            let line = line_text(&app.dashboard_status_line(120));
+            assert!(
+                line.contains(&format!("{}{}", "█".repeat(14), "░".repeat(14))),
+                "{line}"
+            );
+        }
+
+        #[test]
+        fn the_bar_is_ascii_with_simple_symbols_and_the_spinner_stills() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.dashboard
+                .begin_update_targets(&["Second".to_string(), "Third".to_string()]);
+            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
+            app.ui_theme.symbols = Symbols::SIMPLE;
+            let rows = render_rows(&mut app, 120, 30);
+            let status_row = &rows[28];
+            assert!(status_row.contains(&"#".repeat(14)), "{status_row}");
+            assert!(status_row.contains("Updating 1 of 2"), "{status_row}");
+            assert!(rows.iter().all(|row| row.is_ascii()), "{}", rows.join("\n"));
+
+            app.ui_theme.symbols = Symbols::FANCY;
+            app.ui_theme.reduce_motion = true;
+            let first = line_text(&app.dashboard_status_line(120));
+            app.shell_ui.motion.tick_count += 1;
+            let second = line_text(&app.dashboard_status_line(120));
+            assert_eq!(first, second);
+            assert!(first.starts_with(" … Updating 1 of 2"), "{first}");
+            assert_eq!(RowStatus::Updating.symbol(app.spinner_frame(), "✓"), "…");
+        }
+
+        #[test]
+        fn the_list_keys_keep_working_during_a_job() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            app.dashboard.begin_update_targets(&["Second".to_string()]);
+            send(&mut app, progress(DashboardJobKind::Update, 1, 1, "Second"));
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+                vec![AppMessage::DashboardSelectionNext]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('/'))),
+                vec![AppMessage::DashboardFilterBegin]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![AppMessage::DashboardOpenInspect]
+            );
+            press_key(&mut app, KeyCode::Down);
+            assert_eq!(app.dashboard.list_state.selected(), Some(1));
+            press_key(&mut app, KeyCode::Enter);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+        }
+
+        #[test]
+        fn the_wheel_scrolls_an_open_sheet() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _ = render_rows(&mut app, 80, 24);
+            // Over the list it moves the cursor, as before.
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 6)),
+                vec![AppMessage::DashboardSelectionNext]
+            );
+            for open in [
+                AppMessage::DashboardOpenHelp,
+                AppMessage::DashboardOpenInspect,
+            ] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                apply_all(&mut app, open.clone());
+                let _ = render_rows(&mut app, 80, 24);
+                assert_eq!(
+                    app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                    vec![AppMessage::SheetScroll(SheetMove::LineDown)],
+                    "{open:?}"
+                );
+                assert_eq!(
+                    app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                    vec![AppMessage::SheetScroll(SheetMove::LineUp)],
+                    "{open:?}"
+                );
+                // A click inside the sheet does nothing.
+                assert!(app.messages_for_mouse(click(10, 10)).is_empty(), "{open:?}");
+            }
+
+            // Help at 80 x 20 overflows: the wheel moves it a line.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::DashboardOpenHelp);
+            let _ = render_rows(&mut app, 80, 20);
+            for message in app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)) {
+                apply_all(&mut app, message);
+            }
+            assert_eq!(app.sheet_scroll.get().offset, 1);
+        }
+
+        #[test]
+        fn a_double_click_on_a_row_opens_details() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let rows = render_rows(&mut app, 80, 24);
+            let area = app.last_dashboard_list_area.expect("list area");
+            let row = area.y + 1;
+            let run = |app: &mut App, event: MouseEvent| {
+                for message in app.messages_for_mouse(event) {
+                    apply_all(app, message);
+                }
+            };
+            run(&mut app, click(10, row));
+            assert_eq!(
+                app.dashboard.list_state.selected(),
+                Some(1),
+                "{}",
+                rows.join("\n")
+            );
+            assert_eq!(app.shell_ui.overlay.active, None);
+            run(&mut app, click(10, row));
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+
+            // Two clicks far apart in time, or on two rows, only move.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _ = render_rows(&mut app, 80, 24);
+            run(&mut app, click(10, row));
+            app.last_list_click.set(Some((
+                Instant::now() - DOUBLE_CLICK - StdDuration::from_millis(50),
+                1,
+            )));
+            run(&mut app, click(10, row));
+            assert_eq!(app.shell_ui.overlay.active, None);
+            run(&mut app, click(10, area.y));
+            assert_eq!(app.shell_ui.overlay.active, None);
+            assert_eq!(app.dashboard.list_state.selected(), Some(0));
+            // Outside the list: nothing.
+            assert!(
+                app.update(AppMessage::DashboardPointerClick { column: 10, row: 0 })
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn a_click_on_a_key_runs_it() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let rows = render_rows(&mut app, 120, 30);
+            let keys = rows.last().expect("key line").clone();
+            let y = 29;
+            let help = column_of(&keys, "? help");
+            assert_eq!(
+                app.messages_for_mouse(click(help, y)),
+                vec![AppMessage::DashboardOpenHelp],
+                "{keys}"
+            );
+            // The label is part of the key.
+            assert_eq!(
+                app.messages_for_mouse(click(help + 3, y)),
+                vec![AppMessage::DashboardOpenHelp]
+            );
+            // The gap before it, and the empty end of the line, do nothing.
+            let does_nothing = |app: &App, event: MouseEvent| {
+                app.messages_for_mouse(event)
+                    .into_iter()
+                    .all(|message| app.update(message).is_empty())
+            };
+            assert!(does_nothing(&app, click(help - 1, y)), "{keys}");
+            assert!(does_nothing(&app, click(119, y)), "{keys}");
+            // Neither does the status line or the header.
+            assert!(does_nothing(&app, click(help, y - 1)));
+            assert!(does_nothing(&app, click(2, 0)));
+
+            // A sheet's own keys work too: esc closes Help.
+            apply_all(&mut app, AppMessage::DashboardOpenHelp);
+            let keys = render_rows(&mut app, 120, 30)
+                .last()
+                .expect("key line")
+                .clone();
+            let close = column_of(&keys, "esc");
+            assert_eq!(
+                app.messages_for_mouse(click(close, y)),
+                vec![AppMessage::DashboardCloseOverlay],
+                "{keys}"
+            );
+        }
+
+        #[test]
+        fn a_click_never_answers_a_question() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::DashboardRequestDelete);
+            assert!(app.active_question().is_some());
+            let rows = render_rows(&mut app, 120, 30);
+            let keys = rows.last().expect("key line").clone();
+            let yes = column_of(&keys, "y ");
+            assert!(app.messages_for_mouse(click(yes, 29)).is_empty(), "{keys}");
+            assert!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10))
+                    .is_empty()
+            );
+            assert!(app.active_question().is_some());
+        }
+
+        #[test]
+        fn help_says_how_to_copy_text() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::DashboardOpenHelp);
+            let text = render_rows(&mut app, 120, 80).join("\n");
+            assert!(
+                text.contains("Hold Shift while dragging to copy text"),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn keys_that_start_a_job_hide_and_wait_while_one_runs() {
+            let starts = |actions: &[AppAction]| {
+                actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        AppAction::StartDashboardCheckSelected { .. }
+                            | AppAction::StartDashboardUpdateSelected { .. }
+                    )
+                })
+            };
+            let note = |actions: &[AppAction]| {
+                actions
+                    .iter()
+                    .find_map(|action| match action {
+                        AppAction::SetStatus(status) if status.kind == StatusKind::Note => {
+                            Some(status.text.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no note in {actions:?}"))
+            };
+            let run_keys = [
+                AppMessage::DashboardRunCheckAll,
+                AppMessage::DashboardRunCheckSelected,
+                AppMessage::DashboardRunUpdateAll,
+                AppMessage::DashboardRunUpdateSelected,
+                AppMessage::InspectRunCheck,
+                AppMessage::InspectRunUpdate,
+            ];
+            let job_keys = ["U update", "u update", "C check", "c check", "c try again"];
+
+            for kind in [DashboardJobKind::Check, DashboardJobKind::Update] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.effective_addon_dir = Some(PathBuf::from("/tmp/AddOns"));
+                // Before the job: the keys are there.
+                let keys = line_text(&app.dashboard_key_line(160));
+                assert!(keys.contains("C check"), "{keys}");
+                if kind == DashboardJobKind::Update {
+                    app.apply(AppAction::SetDashboardUpdateInProgress(true));
+                    app.dashboard.begin_update_targets(&["Second".to_string()]);
+                }
+                send(&mut app, progress(kind, 1, 1, "Second"));
+                let expected = match kind {
+                    DashboardJobKind::Check => "A check is already running",
+                    DashboardJobKind::Update => "An update is already running",
+                };
+
+                let keys = line_text(&app.dashboard_key_line(160));
+                for hint in job_keys {
+                    assert!(!keys.contains(hint), "{kind:?} {keys}");
+                }
+                assert!(keys.contains("You can keep browsing."), "{keys}");
+                for message in run_keys.clone() {
+                    let actions = app.update(message.clone());
+                    assert!(!starts(&actions), "{kind:?} {message:?}");
+                    let said = note(&actions);
+                    assert!(said.contains(expected), "{message:?} {said}");
+                }
+                // The keys still reach those messages, so they answer.
+                for code in ['C', 'c', 'U', 'u'] {
+                    assert!(
+                        !app.messages_for_key(KeyEvent::from(KeyCode::Char(code)))
+                            .is_empty(),
+                        "{code}"
+                    );
+                }
+
+                // Details leaves out `u` and `c`; Help leaves out their rows.
+                apply_all(&mut app, AppMessage::DashboardOpenInspect);
+                let keys = render_rows(&mut app, 100, 30).last().expect("keys").clone();
+                for hint in job_keys {
+                    assert!(!keys.contains(hint), "{kind:?} {keys}");
+                }
+                apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+                apply_all(&mut app, AppMessage::DashboardOpenHelp);
+                let help = render_rows(&mut app, 120, 80).join("\n");
+                assert!(!help.contains("check every addon for updates"), "{help}");
+                assert!(
+                    !help.contains("update every addon that has an update"),
+                    "{help}"
+                );
+                apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+
+                // Once it ends, they come back.
+                app.apply(AppAction::SetDashboardUpdateInProgress(false));
+                app.apply(AppAction::SetDashboardJobUi(None));
+                assert_eq!(app.dashboard_job_running(), None);
+                apply_all(&mut app, AppMessage::DashboardOpenHelp);
+                let help = render_rows(&mut app, 120, 80).join("\n");
+                assert!(help.contains("check every addon for updates"), "{help}");
+                apply_all(&mut app, AppMessage::DashboardCloseOverlay);
+                let keys = line_text(&app.dashboard_key_line(160));
+                assert!(keys.contains("C check"), "{keys}");
+            }
+
+            // A check counts from its start, before any progress, and the
+            // automatic check counts too.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.dashboard.check_in_progress = true;
+            assert_eq!(app.dashboard_job_running(), Some(DashboardJobKind::Check));
+            app.apply(AppAction::SetDashboardJobUi(None));
+            assert_eq!(app.dashboard_job_running(), None);
+            app.apply(AppAction::SetDashboardAutoCheckInProgress(true));
+            let actions = app.update(AppMessage::DashboardRunCheckAll);
+            assert!(!starts(&actions));
+            assert!(note(&actions).contains("A check is already running"));
+        }
+
+        #[test]
+        fn a_check_with_failures_names_their_shared_cause() {
+            let fail = |kind, source| CheckFailure {
+                kind,
+                source,
+                detail: String::new(),
+            };
+            let names: Vec<String> = (1..=8).map(|n| format!("Addon{n}")).collect();
+            let all_failed = dashboard_check_status_message(&names, 8, 0, 0, 8);
+            assert!(all_failed.starts_with("Couldn't check "), "{all_failed}");
+            let no_connection = [
+                fail(SourceErrorKind::NoConnection, SourceKind::GitHub),
+                fail(SourceErrorKind::NoConnection, SourceKind::Wago),
+            ];
+            assert_eq!(
+                dashboard_check_status_with_cause(all_failed.clone(), &no_connection),
+                format!("{all_failed}: no internet connection?")
+            );
+
+            // One source: it is named.
+            let pawn = dashboard_check_status_message(&["Pawn".to_string()], 1, 0, 0, 1);
+            assert_eq!(
+                dashboard_check_status_with_cause(
+                    pawn,
+                    &[fail(
+                        SourceErrorKind::NoConnection,
+                        SourceKind::WowInterface
+                    )]
+                ),
+                "Couldn't check Pawn: couldn't reach WoWInterface"
+            );
+            // Some worked: the count of failures carries the cause.
+            let partial = dashboard_check_status_message(&names, 8, 5, 0, 3);
+            let slow = fail(SourceErrorKind::SlowDown, SourceKind::GitHub);
+            assert_eq!(
+                dashboard_check_status_with_cause(partial, &[slow.clone(), slow.clone(), slow]),
+                "Checked 5 addons · couldn't check 3: GitHub asked LemonUp to slow down"
+            );
+            assert_eq!(
+                check_failure_cause(&[fail(SourceErrorKind::KeyRejected, SourceKind::Wago)]),
+                Some("Wago.io didn't accept your key. Check it in Settings".to_string())
+            );
+            let gone = fail(SourceErrorKind::NotFound, SourceKind::Tukui);
+            assert_eq!(
+                check_failure_cause(&[gone.clone(), gone]),
+                Some("TukUI doesn't list them anymore".to_string())
+            );
+
+            // Different causes, or none known: the wording stays as it was.
+            let mixed = [
+                fail(SourceErrorKind::NoConnection, SourceKind::GitHub),
+                fail(SourceErrorKind::NotFound, SourceKind::GitHub),
+            ];
+            assert_eq!(
+                dashboard_check_status_with_cause(all_failed.clone(), &mixed),
+                all_failed
+            );
+            assert_eq!(
+                dashboard_check_status_with_cause(
+                    all_failed.clone(),
+                    &[fail(SourceErrorKind::Other, SourceKind::GitHub)]
+                ),
+                all_failed
+            );
+            assert_eq!(
+                dashboard_check_status_with_cause(all_failed.clone(), &[]),
+                all_failed
+            );
+
+            // On the status line after the check.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            send(
+                &mut app,
+                AppTaskEvent::DashboardCheckFinished(Ok(DashboardCheckOutcome {
+                    addons: Vec::new(),
+                    total: 2,
+                    targets: vec!["Second".to_string(), "Third".to_string()],
+                    live_checked: 0,
+                    cached: 0,
+                    errors: 2,
+                    failures: no_connection.to_vec(),
+                })),
+            );
+            let (text, kind) = app.status_line_message().expect("status");
+            assert_eq!(kind, StatusKind::Problem);
+            assert!(text.ends_with(": no internet connection?"), "{text}");
         }
     }
 }

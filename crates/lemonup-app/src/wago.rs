@@ -368,7 +368,7 @@ pub(crate) async fn inspect_wago_install_target(
 pub(crate) async fn fetch_wago_remote_version(
     addon: &AddonRecord,
     api_key: &str,
-) -> Result<WagoRemoteVersion, String> {
+) -> Result<WagoRemoteVersion, SourceError> {
     let target = addon
         .source_url
         .as_deref()

@@ -15,6 +15,8 @@ pub(crate) struct CheckResult {
     pub(crate) status: UpdateStatus,
     pub(crate) remote_version: Option<String>,
     pub(crate) message: Option<String>,
+    /// What kind of trouble a failed live check ran into.
+    pub(crate) error_kind: Option<crate::source_error::SourceErrorKind>,
 }
 
 #[cfg(test)]
@@ -27,7 +29,7 @@ pub(crate) struct UpdateRefreshSummary {
     pub(crate) missing_on_disk: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct LiveUpdateSummary {
     pub(crate) target_addons: usize,
     pub(crate) updated_addons: usize,
@@ -37,6 +39,19 @@ pub(crate) struct LiveUpdateSummary {
     /// Remote version is older than the installed one; not updated without `--force`.
     pub(crate) remote_older: usize,
     pub(crate) errors: usize,
+}
+
+impl LiveUpdateSummary {
+    /// Adds the counts of another run, as if both ran together.
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.target_addons += other.target_addons;
+        self.updated_addons += other.updated_addons;
+        self.up_to_date += other.up_to_date;
+        self.skipped_manual += other.skipped_manual;
+        self.skipped_no_api_key += other.skipped_no_api_key;
+        self.remote_older += other.remote_older;
+        self.errors += other.errors;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +95,7 @@ pub(crate) fn build_update_checks(
                 status,
                 remote_version: addon.remote_version.clone(),
                 message,
+                error_kind: None,
             }
         })
         .collect())
@@ -112,7 +128,7 @@ async fn refresh_live_update_checks_with<F, Fut>(
 ) -> Result<Vec<CheckResult>, LemonupError>
 where
     F: Fn(AddonRecord, String) -> Fut,
-    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, String>>,
+    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError>>,
 {
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?
@@ -130,6 +146,7 @@ where
                     status,
                     remote_version: addon.remote_version.clone(),
                     message,
+                    error_kind: None,
                 });
             }
             SourceKind::Wago => {
@@ -139,6 +156,7 @@ where
                         status: UpdateStatus::Unknown,
                         remote_version: addon.remote_version.clone(),
                         message: Some("Wago API key not configured".to_string()),
+                        error_kind: None,
                     });
                     continue;
                 };
@@ -164,6 +182,7 @@ where
                             status,
                             remote_version: refreshed.remote_version.clone(),
                             message,
+                            error_kind: None,
                         });
                     }
                     Err(error) => {
@@ -171,7 +190,8 @@ where
                             addon_name: addon.folder.clone(),
                             status: UpdateStatus::Error,
                             remote_version: addon.remote_version.clone(),
-                            message: Some(error),
+                            error_kind: Some(error.kind),
+                            message: Some(error.detail),
                         });
                     }
                 }
@@ -190,6 +210,7 @@ where
                         status,
                         remote_version: refreshed.remote_version.clone(),
                         message,
+                        error_kind: None,
                     });
                 }
                 Err(error) => {
@@ -197,7 +218,8 @@ where
                         addon_name: addon.folder.clone(),
                         status: UpdateStatus::Error,
                         remote_version: addon.remote_version.clone(),
-                        message: Some(error),
+                        error_kind: Some(error.kind),
+                        message: Some(error.detail),
                     });
                 }
             },
@@ -216,6 +238,7 @@ where
                             status,
                             remote_version: refreshed.remote_version.clone(),
                             message,
+                            error_kind: None,
                         });
                     }
                     Err(error) => {
@@ -223,7 +246,8 @@ where
                             addon_name: addon.folder.clone(),
                             status: UpdateStatus::Error,
                             remote_version: addon.remote_version.clone(),
-                            message: Some(error),
+                            error_kind: Some(error.kind),
+                            message: Some(error.detail),
                         });
                     }
                 }
@@ -242,6 +266,7 @@ where
                         status,
                         remote_version: refreshed.remote_version.clone(),
                         message,
+                        error_kind: None,
                     });
                 }
                 Err(error) => {
@@ -249,7 +274,8 @@ where
                         addon_name: addon.folder.clone(),
                         status: UpdateStatus::Error,
                         remote_version: addon.remote_version.clone(),
-                        message: Some(error),
+                        error_kind: Some(error.kind),
+                        message: Some(error.detail),
                     });
                 }
             },

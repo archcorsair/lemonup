@@ -18,7 +18,15 @@ const CONFIG_SECTIONS: [(&str, &[ConfigField]); 5] = [
         "Backups",
         &[ConfigField::BackupWtf, ConfigField::BackupRetention],
     ),
-    ("Look", &[ConfigField::Theme, ConfigField::ShowLibs]),
+    (
+        "Look",
+        &[
+            ConfigField::Theme,
+            ConfigField::SimpleSymbols,
+            ConfigField::ReduceMotion,
+            ConfigField::ShowLibs,
+        ],
+    ),
     (
         "Your setup",
         &[
@@ -39,16 +47,34 @@ impl App {
     /// sections have a blank row between them and the explanation is in
     /// full; with less the blank rows go first, then the explanation is cut
     /// to one line.
-    pub(super) fn config_sheet_body(&self, width: u16, height: u16) -> SheetBody<'static> {
+    ///
+    /// A layout that fits under the header rows (`below_header`) comes
+    /// first, the explanation cut to one line if that is what it takes, so
+    /// the sheet only grows over the header when it has to.
+    pub(super) fn config_sheet_body(
+        &self,
+        width: u16,
+        height: u16,
+        below_header: u16,
+    ) -> SheetBody<'static> {
         let long = self.config_description(width, true);
         let long_rows = text_height(&long, width);
         let spaced_rows = self.config_list_rows(true);
-        let (spaced, footer) = if spaced_rows + long_rows <= height {
+        let tight_rows = self.config_list_rows(false);
+        let short = self.config_description(width, false);
+        let short_rows = text_height(&short, width);
+        let (spaced, footer) = if spaced_rows + long_rows <= below_header {
             (true, long)
-        } else if self.config_list_rows(false) + long_rows <= height {
+        } else if tight_rows + long_rows <= below_header {
+            (false, long)
+        } else if tight_rows + short_rows <= below_header {
+            (false, short)
+        } else if spaced_rows + long_rows <= height {
+            (true, long)
+        } else if tight_rows + long_rows <= height {
             (false, long)
         } else {
-            (false, self.config_description(width, false))
+            (false, short)
         };
 
         let mut body = SheetBody::new();
@@ -246,6 +272,8 @@ impl App {
         let link = Style::default().fg(roles.blue);
         let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
         let editing = self.config_pane.edit.is_some();
+        let display = self.runtime.display;
+        let following = self.follow_terminal.get();
         let transfer_path = || {
             default_transfer_path()
                 .map(|path| friendly_path(&path))
@@ -270,7 +298,22 @@ impl App {
                     "copies your keybinds, macros and addon setups before updates".to_string()
                 }
                 ConfigField::BackupRetention => "older backups past this number go".to_string(),
-                ConfigField::Theme => "dark or light colors".to_string(),
+                ConfigField::Theme if display.no_color => {
+                    "NO_COLOR is set, so colors are off".to_string()
+                }
+                ConfigField::Theme if following => {
+                    "your terminal does not report full color, so Terminal for now".to_string()
+                }
+                ConfigField::Theme => "dark, light, or your terminal's own colors".to_string(),
+                ConfigField::SimpleSymbols if !display.utf8 => {
+                    "on, because your locale is not UTF-8".to_string()
+                }
+                ConfigField::SimpleSymbols => {
+                    "plain ASCII symbols, and LEMONUP in place of the logo".to_string()
+                }
+                ConfigField::ReduceMotion => {
+                    "a still … in place of the spinner, and no shimmer".to_string()
+                }
                 ConfigField::ShowLibs => "kept from LemonUp 1, not used yet".to_string(),
                 ConfigField::ChangeGameFolder => {
                     "opens setup to choose a different game folder".to_string()
@@ -336,7 +379,39 @@ impl App {
             ConfigField::BackupRetention => plain(
                 "LemonUp keeps this many backups of your game settings and removes older ones.",
             ),
-            ConfigField::Theme => plain("Dark or light colors for LemonUp."),
+            ConfigField::Theme => {
+                let mut text = String::from(
+                    "Dark or Light colors, or Terminal: your terminal's own background and its \
+                     16 colors. When NO_COLOR is set, LemonUp uses Terminal with no colors at all.",
+                );
+                if display.no_color {
+                    text.push_str(" NO_COLOR is set now.");
+                } else if following {
+                    text.push_str(
+                        " Your terminal does not report full color, so LemonUp starts in \
+                         Terminal. You can still choose Dark or Light here.",
+                    );
+                }
+                plain(&text)
+            }
+            ConfigField::SimpleSymbols => {
+                let mut text = String::from(
+                    "Plain ASCII symbols, such as ^ for an update and ok for up to date, and the \
+                     word LEMONUP in place of the block logo. For terminals and fonts that show \
+                     boxes or question marks.",
+                );
+                if !display.utf8 {
+                    text.push_str(
+                        " It is on now because your locale (LC_ALL, LC_CTYPE or LANG) is not \
+                         UTF-8.",
+                    );
+                }
+                plain(&text)
+            }
+            ConfigField::ReduceMotion => plain(
+                "Shows a still … in place of the spinner on the line that is working, and \
+                 turns off the shimmer.",
+            ),
             // The list does not read this setting yet; say so, not what it
             // might do one day.
             ConfigField::ShowLibs => {

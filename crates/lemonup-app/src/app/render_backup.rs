@@ -161,7 +161,10 @@ impl App {
         let message = self.active_detail_status_message(DetailMode::Backup)?;
         let (text, color) = match self.status_line.kind {
             StatusKind::Problem => (message, roles.red),
-            StatusKind::Done => (format!("✓ {message}"), roles.green),
+            StatusKind::Done => (
+                format!("{} {message}", self.ui_theme.symbols.done),
+                roles.green,
+            ),
             _ => (message, roles.text),
         };
         Some(Line::from(Span::styled(

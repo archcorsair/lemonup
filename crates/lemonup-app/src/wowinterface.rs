@@ -149,7 +149,7 @@ pub(crate) async fn install_wowinterface_addon_checked(
 
 pub(crate) async fn fetch_wowinterface_remote_version(
     addon: &AddonRecord,
-) -> Result<WowinterfaceRemoteVersion, String> {
+) -> Result<WowinterfaceRemoteVersion, SourceError> {
     let addon_id = resolve_tracked_wowinterface_id(addon)?;
     let client = build_wowinterface_client()?;
     let remote = fetch_wowinterface_addon(&client, &addon_id).await?;

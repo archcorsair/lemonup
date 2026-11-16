@@ -105,7 +105,7 @@ impl App {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(self.ui_theme.border)),
+                            .border_style(Style::default().fg(self.ui_theme.roles.border)),
                     )
                     .wrap(Wrap { trim: false })
                     .render(card_area, buffer);
@@ -158,24 +158,24 @@ impl App {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(if focused {
-                Style::default().fg(self.ui_theme.highlight)
+                Style::default().fg(self.ui_theme.roles.lemon)
             } else {
-                Style::default().fg(self.ui_theme.border)
+                Style::default().fg(self.ui_theme.roles.border)
             })
             .title(" Addon name or link ");
         let room = usize::from(area.width.saturating_sub(2));
         // Dimmed while an install runs: the box takes no text then.
         let text_style = if self.install_running() {
-            Style::default().fg(self.ui_theme.muted)
+            Style::default().fg(self.ui_theme.roles.muted)
         } else {
             Style::default()
-                .fg(self.ui_theme.highlight)
+                .fg(self.ui_theme.roles.lemon)
                 .add_modifier(Modifier::BOLD)
         };
         let spans = self.search_pane.query.spans(
             room,
             text_style,
-            Style::default().fg(self.ui_theme.brand_gold),
+            Style::default().fg(self.ui_theme.roles.lemon),
             focused,
         );
         Paragraph::new(Line::from(spans))
@@ -188,20 +188,20 @@ impl App {
         let area = Rect::new(area.x, area.y, width, area.height);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.ui_theme.highlight))
+            .border_style(Style::default().fg(self.ui_theme.roles.lemon))
             .title(" Wago.io key ");
         let key = self.search_pane.key_box.clone().unwrap_or_default();
         let room = usize::from(area.width.saturating_sub(2));
         let mut spans = key.masked('•').spans(
             room,
-            Style::default().fg(self.ui_theme.highlight),
-            Style::default().fg(self.ui_theme.brand_gold),
+            Style::default().fg(self.ui_theme.roles.lemon),
+            Style::default().fg(self.ui_theme.roles.lemon),
             true,
         );
         if key.is_empty() {
             spans.push(Span::styled(
                 " paste your key here",
-                Style::default().fg(self.ui_theme.muted),
+                Style::default().fg(self.ui_theme.roles.muted),
             ));
         }
         Paragraph::new(Line::from(spans))
@@ -212,7 +212,7 @@ impl App {
     /// The line under the box: what enter will do with the text.
     pub(super) fn search_hint_line(&self) -> Line<'static> {
         let pane = &self.search_pane;
-        let muted = Style::default().fg(self.ui_theme.muted);
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
         let quiet = matches!(
             pane.install_state,
             SearchInstallState::Success { .. }
@@ -258,7 +258,7 @@ impl App {
             }
             SearchInputIntent::InvalidUrl(message) => Line::from(Span::styled(
                 message,
-                Style::default().fg(self.ui_theme.warning),
+                Style::default().fg(self.ui_theme.roles.amber),
             )),
         }
     }
@@ -280,7 +280,7 @@ impl App {
             Line::from(Span::styled(
                 headline,
                 Style::default()
-                    .fg(self.ui_theme.panel_title)
+                    .fg(self.ui_theme.roles.text)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -288,12 +288,12 @@ impl App {
                 Span::raw("Wago gives a key to its Patreon supporters: "),
                 Span::styled(
                     "addons.wago.io/patreon",
-                    Style::default().fg(self.ui_theme.info),
+                    Style::default().fg(self.ui_theme.roles.blue),
                 ),
             ]),
             Line::from(Span::styled(
                 "GitHub, WoWInterface and TukUI links work without one.",
-                Style::default().fg(self.ui_theme.muted),
+                Style::default().fg(self.ui_theme.roles.muted),
             )),
             Line::from(""),
         ]
@@ -310,9 +310,9 @@ impl App {
                 key.to_string(),
                 Style::default()
                     .fg(if *primary {
-                        self.ui_theme.brand_gold
+                        self.ui_theme.roles.lemon
                     } else {
-                        self.ui_theme.info
+                        self.ui_theme.roles.blue
                     })
                     .add_modifier(Modifier::BOLD),
             ));
@@ -320,9 +320,9 @@ impl App {
             spans.push(Span::styled(
                 label.to_string(),
                 if *primary {
-                    Style::default().fg(self.ui_theme.panel_title)
+                    Style::default().fg(self.ui_theme.roles.text)
                 } else {
-                    Style::default().fg(self.ui_theme.muted)
+                    Style::default().fg(self.ui_theme.roles.muted)
                 },
             ));
         }
@@ -345,13 +345,13 @@ impl App {
                     request.provider.label()
                 ),
                 Style::default()
-                    .fg(self.ui_theme.panel_title)
+                    .fg(self.ui_theme.roles.text)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 format!(" {link}"),
-                Style::default().fg(self.ui_theme.muted),
+                Style::default().fg(self.ui_theme.roles.muted),
             )),
             Line::from(""),
             {
@@ -369,18 +369,18 @@ impl App {
     pub(super) fn search_state_lines(&self, width: u16) -> Option<Vec<Line<'static>>> {
         let pane = &self.search_pane;
         let title = Style::default()
-            .fg(self.ui_theme.panel_title)
+            .fg(self.ui_theme.roles.text)
             .add_modifier(Modifier::BOLD);
         let working = |text: String| {
             let mut spans = vec![Span::styled(
-                format!("{} ", self.shell_ui.motion.spinner_frame()),
-                Style::default().fg(self.ui_theme.brand_gold),
+                format!("{} ", self.spinner_frame()),
+                Style::default().fg(self.ui_theme.roles.lemon),
             )];
-            spans.extend(shimmer_text_spans(
+            spans.extend(working_text_spans(
                 &text,
-                self.ui_theme.panel_title,
-                self.ui_theme.shimmer_glow,
-                ShimmerConfig::action(),
+                self.ui_theme.roles.text,
+                self.ui_theme.roles.lemon,
+                self.ui_theme.reduce_motion,
             ));
             vec![Line::from(spans)]
         };
@@ -399,7 +399,7 @@ impl App {
             SearchInstallState::ConfirmDirectReplace { name, .. } => {
                 return Some(vec![Line::from(Span::styled(
                     format!("{name}'s folders are already in your AddOns folder."),
-                    Style::default().fg(self.ui_theme.muted),
+                    Style::default().fg(self.ui_theme.roles.muted),
                 ))]);
             }
             SearchInstallState::Success {
@@ -409,9 +409,9 @@ impl App {
             } => {
                 let mut lines = vec![
                     Line::from(Span::styled(
-                        format!("✓ {addon_name} is installed."),
+                        format!("{} {addon_name} is installed.", self.ui_theme.symbols.done),
                         Style::default()
-                            .fg(self.ui_theme.success)
+                            .fg(self.ui_theme.roles.green)
                             .add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
@@ -424,7 +424,7 @@ impl App {
                 if let Some(warning) = warning {
                     lines.push(Line::from(Span::styled(
                         format!("  {warning}"),
-                        Style::default().fg(self.ui_theme.warning),
+                        Style::default().fg(self.ui_theme.roles.amber),
                     )));
                 }
                 lines.push(Line::from(""));
@@ -455,7 +455,7 @@ impl App {
                     Line::from(Span::styled(
                         headline,
                         Style::default()
-                            .fg(self.ui_theme.error)
+                            .fg(self.ui_theme.roles.red)
                             .add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
@@ -471,7 +471,7 @@ impl App {
                 lines.extend(wrap_lines_hanging(
                     &[Line::from(Span::styled(
                         format!("  Technical detail: {detail}"),
-                        Style::default().fg(self.ui_theme.muted),
+                        Style::default().fg(self.ui_theme.roles.muted),
                     ))],
                     width,
                     TECHNICAL_DETAIL_INDENT,
@@ -491,13 +491,13 @@ impl App {
 
     /// No results yet: the things you can type, or why a search found none.
     pub(super) fn search_empty_state_lines(&self) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(self.ui_theme.muted);
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
         if let Some(query) = &self.search_pane.last_query {
             return vec![
                 Line::from(Span::styled(
                     format!("No addons on Wago.io match \"{query}\"."),
                     Style::default()
-                        .fg(self.ui_theme.panel_title)
+                        .fg(self.ui_theme.roles.text)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -528,14 +528,14 @@ impl App {
                 Span::styled(
                     "  elvui",
                     Style::default()
-                        .fg(self.ui_theme.panel_title)
+                        .fg(self.ui_theme.roles.text)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  or  "),
                 Span::styled(
                     "tukui",
                     Style::default()
-                        .fg(self.ui_theme.panel_title)
+                        .fg(self.ui_theme.roles.text)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" ".repeat(22 - 16)),
@@ -579,7 +579,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
-        let muted = Style::default().fg(self.ui_theme.muted);
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
         let mut area_index = 0;
         if show_above {
             Widget::render(
@@ -620,16 +620,16 @@ impl App {
             let mut cells = vec![Cell::from(Line::from(vec![
                 Span::styled(
                     if selected { "▌ " } else { "  " },
-                    Style::default().fg(self.ui_theme.brand_gold),
+                    Style::default().fg(self.ui_theme.roles.lemon),
                 ),
                 Span::styled(
                     result.display_name.clone(),
                     if selected {
                         Style::default()
-                            .fg(self.ui_theme.highlight)
+                            .fg(self.ui_theme.roles.lemon)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(self.ui_theme.panel_title)
+                        Style::default().fg(self.ui_theme.roles.text)
                     },
                 ),
             ]))];
@@ -652,7 +652,10 @@ impl App {
             )));
             cells.push(Cell::from(if self.installed_copy(result).is_some() {
                 Line::from(vec![
-                    Span::styled("✓ ", Style::default().fg(self.ui_theme.success)),
+                    Span::styled(
+                        format!("{} ", self.ui_theme.symbols.done),
+                        Style::default().fg(self.ui_theme.roles.green),
+                    ),
                     Span::styled("Installed", muted),
                 ])
             } else {
@@ -702,17 +705,17 @@ impl App {
         let Some(result) = self.search_pane.selected_result() else {
             return Vec::new();
         };
-        let muted = Style::default().fg(self.ui_theme.muted);
+        let muted = Style::default().fg(self.ui_theme.roles.muted);
         let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
                 "─".repeat(usize::from(width.saturating_sub(2))),
-                Style::default().fg(self.ui_theme.border),
+                Style::default().fg(self.ui_theme.roles.border),
             )),
             Line::from(Span::styled(
                 result.display_name.clone(),
                 Style::default()
-                    .fg(self.ui_theme.panel_title)
+                    .fg(self.ui_theme.roles.text)
                     .add_modifier(Modifier::BOLD),
             )),
         ];

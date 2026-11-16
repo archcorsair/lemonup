@@ -211,7 +211,7 @@ pub(crate) async fn install_tukui_addon_checked(
 
 pub(crate) async fn fetch_tukui_remote_version(
     addon: &AddonRecord,
-) -> Result<TukuiRemoteVersion, String> {
+) -> Result<TukuiRemoteVersion, SourceError> {
     let slug = resolve_tracked_tukui_target(addon)?;
     let client = build_tukui_client()?;
     let entry = resolve_tukui_addon(&client, &slug, false).await?;

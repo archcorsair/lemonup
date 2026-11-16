@@ -49,7 +49,7 @@ impl App {
             }
             OverlayKind::Config => {
                 self.render_sheet(frame, region, header, kind, chrome, |width, height| {
-                    self.config_sheet_body(width, height)
+                    self.config_sheet_body(width, height, height.saturating_sub(header))
                 })
             }
             OverlayKind::Backup => {
@@ -68,11 +68,7 @@ impl App {
     }
 
     pub(super) fn fruit_gradient_logo_line(&self, text: &str) -> Line<'static> {
-        let anchors = [
-            self.ui_theme.brand_hot,
-            self.ui_theme.brand_warm,
-            self.ui_theme.brand_gold,
-        ];
+        let anchors = self.ui_theme.roles.logo_colors();
         let visible_count = text.chars().filter(|ch| !ch.is_whitespace()).count();
         if visible_count == 0 {
             return Line::from(text.to_string());
@@ -173,7 +169,7 @@ impl App {
         Line::from(Span::styled(
             title.to_string(),
             Style::default()
-                .fg(self.ui_theme.highlight)
+                .fg(self.ui_theme.roles.lemon)
                 .add_modifier(Modifier::BOLD),
         ))
     }
@@ -186,7 +182,7 @@ impl App {
         Line::from(vec![
             Span::styled(
                 format!("{}: ", label.into()),
-                Style::default().fg(self.ui_theme.muted),
+                Style::default().fg(self.ui_theme.roles.muted),
             ),
             Span::raw(value.into()),
         ])
@@ -195,7 +191,7 @@ impl App {
     pub(super) fn overlay_hint_line(&self, text: &str) -> Line<'static> {
         Line::from(Span::styled(
             text.to_string(),
-            Style::default().fg(self.ui_theme.muted),
+            Style::default().fg(self.ui_theme.roles.muted),
         ))
     }
 }

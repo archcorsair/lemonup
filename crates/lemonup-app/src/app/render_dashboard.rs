@@ -2,7 +2,7 @@ use super::keymap::fit_key_line;
 use super::render_inspect::docked_widths;
 use super::sheet::{SheetScroll, wrap_lines};
 use super::*;
-use crate::theme::ColorRoles;
+use crate::theme::UiTheme;
 
 /// Below this width the header uses the word LEMONUP and the list drops the
 /// Author column and shortens source names.
@@ -237,11 +237,12 @@ impl RowStatus {
         }
     }
 
-    /// The symbol in front of the word. Working states use the spinner frame.
-    pub(super) fn symbol(self, spinner: &'static str) -> &'static str {
+    /// The symbol in front of the word. Working states use the spinner
+    /// frame; `done` is the check mark (`ok` with simple symbols).
+    pub(super) fn symbol(self, spinner: &'static str, done: &'static str) -> &'static str {
         match self {
             Self::UpdateReady => "↑",
-            Self::UpToDate | Self::NewerThanSource | Self::Updated => "✓",
+            Self::UpToDate | Self::NewerThanSource | Self::Updated => done,
             Self::CheckFailed | Self::UpdateFailed => "!",
             Self::Checking | Self::Updating => spinner,
             Self::NotLinked | Self::NotChecked | Self::Waiting | Self::Done => "·",
@@ -251,11 +252,12 @@ impl RowStatus {
     /// The status word as plain text, for example `↑ Update ready`.
     #[cfg(test)]
     pub(super) fn label(self, spinner: &'static str) -> String {
-        format!("{} {}", self.symbol(spinner), self.word())
+        format!("{} {}", self.symbol(spinner, "✓"), self.word())
     }
 
-    pub(super) fn spans(self, spinner: &'static str, roles: ColorRoles) -> Vec<Span<'static>> {
-        let symbol = self.symbol(spinner);
+    pub(super) fn spans(self, spinner: &'static str, theme: &UiTheme) -> Vec<Span<'static>> {
+        let roles = theme.roles;
+        let symbol = self.symbol(spinner, theme.symbols.done);
         let word = self.word();
         let bold = Modifier::BOLD;
         match self {
@@ -328,27 +330,29 @@ impl VersionCell {
         }
     }
 
-    pub(super) fn text(&self) -> String {
+    pub(super) fn text(&self, arrow: &str) -> String {
         match &self.new {
-            Some(new) => format!("{} → {new}", self.installed),
+            Some(new) => format!("{} {arrow} {new}", self.installed),
             None => self.installed.clone(),
         }
     }
 
     /// The cell fitted to `max` characters, cutting the installed version
     /// first so the new version stays readable.
-    fn spans(&self, max: usize, roles: ColorRoles) -> Vec<Span<'static>> {
+    fn spans(&self, max: usize, theme: &UiTheme) -> Vec<Span<'static>> {
+        let roles = theme.roles;
+        let arrow = theme.symbols.arrow;
         let muted = Style::default().fg(roles.muted);
         match &self.new {
             None => vec![Span::styled(truncate_text(&self.installed, max), muted)],
             Some(new) => {
-                let suffix = new.chars().count() + 3;
+                let suffix = new.chars().count() + arrow.chars().count() + 2;
                 if max <= suffix + 1 {
-                    return vec![Span::styled(truncate_text(&self.text(), max), muted)];
+                    return vec![Span::styled(truncate_text(&self.text(arrow), max), muted)];
                 }
                 let installed = truncate_text(&self.installed, max - suffix);
                 vec![
-                    Span::styled(format!("{installed} →"), muted),
+                    Span::styled(format!("{installed} {arrow}"), muted),
                     Span::raw(" "),
                     Span::styled(
                         new.clone(),
@@ -580,6 +584,7 @@ impl App {
             Paragraph::new(self.dashboard_status_line(area.width)),
             layout.status,
         );
+        self.last_dashboard_keys_area = Some(layout.keys);
         frame.render_widget(
             Paragraph::new(self.dashboard_key_line(area.width)),
             layout.keys,
@@ -588,11 +593,7 @@ impl App {
 
     /// "LEMONUP" in the brand gradient, the logo below 110 columns.
     pub(super) fn short_logo_spans(&self) -> Vec<Span<'static>> {
-        let anchors = [
-            self.ui_theme.brand_hot,
-            self.ui_theme.brand_warm,
-            self.ui_theme.brand_gold,
-        ];
+        let anchors = self.ui_theme.roles.logo_colors();
         let part = |text: &'static str, t: f32| {
             Span::styled(
                 text,
@@ -616,7 +617,8 @@ impl App {
             self.game_client_label(),
             Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
         );
-        let (mut first, mut second) = if wide {
+        // Simple symbols show the word in place of the block logo.
+        let (mut first, mut second) = if wide && !self.ui_theme.symbols.simple {
             let mut first = vec![Span::raw(" ")];
             first.extend(self.fruit_gradient_logo_line(LOGO_FULL[0]).spans);
             first.push(Span::raw("    "));
@@ -681,10 +683,7 @@ impl App {
         if items.is_empty() {
             return match &self.scan_state {
                 ScanState::Pending | ScanState::Running(_) => vec![
-                    Span::styled(
-                        self.shell_ui.motion.spinner_frame(),
-                        Style::default().fg(roles.lemon),
-                    ),
+                    Span::styled(self.spinner_frame(), Style::default().fg(roles.lemon)),
                     Span::styled(
                         " Looking through your AddOns folder…",
                         Style::default().fg(roles.text),
@@ -1018,7 +1017,7 @@ impl App {
             .collect::<Vec<_>>();
         let table = Table::new(rows, columns.constraints())
             .column_spacing(0)
-            .row_highlight_style(Style::default().bg(roles.cursor_row));
+            .row_highlight_style(roles.cursor_row_style());
         frame.render_stateful_widget(table, area, &mut self.dashboard.list_state);
     }
 
@@ -1239,6 +1238,8 @@ impl App {
                 UpdateJobRowState::Waiting => RowStatus::Waiting,
                 UpdateJobRowState::Updating => RowStatus::Updating,
                 UpdateJobRowState::Done => RowStatus::Done,
+                UpdateJobRowState::UpToDate => RowStatus::UpToDate,
+                UpdateJobRowState::NewerThanSource => RowStatus::NewerThanSource,
                 UpdateJobRowState::Updated => RowStatus::Updated,
                 UpdateJobRowState::Failed => RowStatus::UpdateFailed,
             };
@@ -1247,6 +1248,11 @@ impl App {
             job.kind == DashboardJobKind::Check && job.current_addon == item.folder
         }) {
             return RowStatus::Checking;
+        }
+        // A failed check holds until a check of this addon works.
+        if item.source != SourceKind::Manual && self.dashboard.check_failure(&item.folder).is_some()
+        {
+            return RowStatus::CheckFailed;
         }
         dashboard_item_row_status(item)
     }
@@ -1295,8 +1301,17 @@ impl App {
             (false, _) => Span::raw(" "),
         };
         let gutter = Line::from(vec![bar, dot, Span::raw(" "), triangle, Span::raw(" ")]);
+        // Up to date rows are muted, so the rows that need you stand out.
+        let settled = item.is_some_and(|item| {
+            matches!(
+                self.dashboard_row_status(item),
+                RowStatus::UpToDate | RowStatus::NewerThanSource
+            )
+        });
         let name_style = if is_cursor {
             Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
+        } else if settled {
+            Style::default().fg(roles.muted)
         } else {
             Style::default().fg(roles.text)
         };
@@ -1308,13 +1323,16 @@ impl App {
             ))),
         ];
         if let Some(item) = item {
-            let spinner = self.shell_ui.motion.spinner_frame();
+            let spinner = self.spinner_frame();
             cells.push(Cell::from(Line::from(
-                self.dashboard_row_status(item).spans(spinner, roles),
+                self.dashboard_row_status(item)
+                    .spans(spinner, &self.ui_theme),
             )));
             cells.push(Cell::from(Line::from(
-                VersionCell::for_item(item, columns.wide)
-                    .spans(usize::from(columns.version.saturating_sub(1)), roles),
+                VersionCell::for_item(item, columns.wide).spans(
+                    usize::from(columns.version.saturating_sub(1)),
+                    &self.ui_theme,
+                ),
             )));
             if columns.author > 0 {
                 let author = item.author.as_deref().map(str::trim).unwrap_or_default();
@@ -1331,7 +1349,7 @@ impl App {
             }
         }
         let style = if selected {
-            Style::default().bg(roles.selected_row)
+            roles.selected_row_style()
         } else {
             Style::default()
         };
@@ -1397,10 +1415,7 @@ impl App {
             .find(|item| item.folder == job.current_addon)
             .map_or_else(|| job.current_addon.clone(), |item| item.name.clone());
         let mut spans = vec![
-            Span::styled(
-                self.shell_ui.motion.spinner_frame(),
-                Style::default().fg(roles.lemon),
-            ),
+            Span::styled(self.spinner_frame(), Style::default().fg(roles.lemon)),
             Span::styled(
                 format!(
                     " {} {} of {}",
@@ -1425,6 +1440,14 @@ impl App {
                 Style::default().fg(roles.dim),
             ));
         }
+        // "backed up your game settings first", once the backup ran.
+        if let Some(note) = self.dashboard.job_note() {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(
+                note.to_string(),
+                Style::default().fg(roles.muted),
+            ));
+        }
         Some(spans)
     }
 
@@ -1436,7 +1459,10 @@ impl App {
         let text = sentence_case(&flash.text);
         let mut spans = match flash.kind {
             StatusKind::Done => vec![
-                Span::styled("✓ ", Style::default().fg(roles.green)),
+                Span::styled(
+                    format!("{} ", self.ui_theme.symbols.done),
+                    Style::default().fg(roles.green),
+                ),
                 Span::styled(text, Style::default().fg(roles.text)),
             ],
             StatusKind::Problem => vec![
@@ -1448,7 +1474,7 @@ impl App {
             ],
             StatusKind::Working => vec![
                 Span::styled(
-                    format!("{} ", self.shell_ui.motion.spinner_frame()),
+                    format!("{} ", self.spinner_frame()),
                     Style::default().fg(roles.lemon),
                 ),
                 Span::styled(text, Style::default().fg(roles.text)),
@@ -1539,6 +1565,34 @@ impl App {
             spans.push(Span::styled(hint.label.clone(), label_style));
         }
         Line::from(fit_spans(spans, usize::from(width)))
+    }
+
+    /// The key a click at `column`, `row` lands on: a key the key line
+    /// draws right now and that does something.
+    pub(super) fn key_line_code_at(&self, column: u16, row: u16) -> Option<KeyCode> {
+        let area = self.last_dashboard_keys_area?;
+        if row != area.y || column < area.x || column >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        let (hints, separator) = fit_key_line(
+            self.key_table(area.width),
+            area.width,
+            area.width >= WIDE_FRAME_MIN_WIDTH,
+        );
+        // The line starts with one space, as `dashboard_key_line` draws it.
+        let mut x = usize::from(area.x) + 1;
+        let column = usize::from(column);
+        for hint in hints {
+            let width = hint.width();
+            let clickable = hint.id.is_some() && !hint.key.is_empty();
+            if clickable && (x..x + width).contains(&column) {
+                let code = *hint.codes.first()?;
+                let bound = !self.messages_for_key(KeyEvent::from(code)).is_empty();
+                return bound.then_some(code);
+            }
+            x += width + separator.len();
+        }
+        None
     }
 }
 
