@@ -707,7 +707,7 @@ impl ConfigField {
             Self::Theme => "Theme",
             Self::SimpleSymbols => "Simple symbols",
             Self::ReduceMotion => "Reduce motion",
-            Self::ShowLibs => "Show library folders",
+            Self::ShowLibs => "Start with folders shown",
             Self::ChangeGameFolder => "Change game folder…",
             Self::SaveAddonList => "Save my addon list to a file…",
             Self::LoadAddonList => "Load an addon list from a file…",
@@ -2659,6 +2659,9 @@ pub struct App {
     runtime: AppRuntime,
     effective_addon_dir: Option<PathBuf>,
     scan_state: ScanState,
+    /// False until the addon list has had its first scan or sync result, so
+    /// "Start with folders shown" applies once, not on every rescan.
+    list_opened: bool,
     dashboard: DashboardState,
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
@@ -2832,6 +2835,7 @@ impl App {
             runtime,
             effective_addon_dir,
             scan_state,
+            list_opened: false,
             dashboard: DashboardState::from_addons(addons),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
@@ -5624,6 +5628,13 @@ impl App {
                 self.wago_api_key = config.wago_api_key.clone();
                 self.config_present = true;
                 self.ui_theme = self.look_theme(&config);
+                if config.show_libs != self.config_pane.persisted.show_libs {
+                    if config.show_libs {
+                        self.dashboard.expand_all_relationships();
+                    } else {
+                        self.dashboard.collapse_all_relationships();
+                    }
+                }
             }
             AppAction::SetBackupPaneState(state) => {
                 self.backup_pane = state;
@@ -5894,6 +5905,7 @@ impl App {
                             });
                         }
                         self.shell_mode = ShellMode::Dashboard;
+                        self.list_opened = false;
                         if tokio::runtime::Handle::try_current().is_ok() {
                             self.apply(AppAction::StartAddonScan(path));
                         } else {
@@ -6170,7 +6182,15 @@ impl App {
                     let _ = sender.send(AppTaskEvent::DirectInstallFinished { request, result });
                 });
             }
-            AppAction::ReplaceDashboardAddons(addons) => self.dashboard.replace_addons(addons),
+            AppAction::ReplaceDashboardAddons(addons) => {
+                self.dashboard.replace_addons(addons);
+                if !self.list_opened {
+                    self.list_opened = true;
+                    if self.config_pane.persisted.show_libs {
+                        self.dashboard.expand_all_relationships();
+                    }
+                }
+            }
             AppAction::CompleteAddonScan { path, summary } => {
                 self.scan_state = ScanState::Succeeded {
                     path: path.clone(),
@@ -8265,6 +8285,7 @@ mod tests {
             runtime: AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
             effective_addon_dir: None,
             scan_state: ScanState::Idle,
+            list_opened: false,
             dashboard: DashboardState::from_addons(vec![first, second, third]),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
@@ -10632,6 +10653,103 @@ mod tests {
             ConfigLoad::Loaded(config) => assert!(config.show_libs),
             ConfigLoad::Missing(_) => panic!("config should have been written"),
         }
+    }
+
+    fn select_show_libs(app: &mut App) {
+        app.dashboard.detail_mode = DetailMode::Config;
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::ShowLibs)
+            .expect("show libs field index");
+    }
+
+    fn app_with_show_libs(show_libs: bool) -> App {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.show_libs = show_libs;
+        app.config_pane.persisted.show_libs = show_libs;
+        app
+    }
+
+    fn first_scan_result(app: &mut App) {
+        let first = AddonRecord::new("First", "First", SourceKind::Manual);
+        let mut second = AddonRecord::new("Second", "Second", SourceKind::GitHub);
+        second.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Second_Config".to_string(),
+        }]);
+        let third = AddonRecord::new("Third", "Third", SourceKind::Wago);
+        app.apply(AppAction::ReplaceDashboardAddons(vec![
+            first, second, third,
+        ]));
+    }
+
+    #[test]
+    fn list_opens_expanded_when_show_libs_is_on() {
+        let mut app = app_with_show_libs(true);
+        assert!(app.dashboard.expanded_folders.is_empty());
+
+        first_scan_result(&mut app);
+
+        assert!(app.dashboard.expanded_folders.contains("Second"));
+        assert_eq!(app.dashboard.rows.len(), 4);
+    }
+
+    #[test]
+    fn list_opens_collapsed_when_show_libs_is_off() {
+        let mut app = app_with_show_libs(false);
+
+        first_scan_result(&mut app);
+
+        assert!(app.dashboard.expanded_folders.is_empty());
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn rescan_after_collapse_all_keeps_list_collapsed_with_show_libs_on() {
+        let mut app = app_with_show_libs(true);
+        first_scan_result(&mut app);
+        assert!(!app.dashboard.expanded_folders.is_empty());
+
+        app.apply(AppAction::CollapseAllDashboardRelationships);
+        first_scan_result(&mut app);
+
+        assert!(app.dashboard.expanded_folders.is_empty());
+        assert_eq!(app.dashboard.rows.len(), 3);
+    }
+
+    #[test]
+    fn toggling_show_libs_row_expands_and_collapses_now_and_saves() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let mut app = app_with_show_libs(false);
+        app.config_store = ConfigStore::new(config_path);
+        first_scan_result(&mut app);
+        select_show_libs(&mut app);
+        assert!(app.dashboard.expanded_folders.is_empty());
+
+        for action in app.update(AppMessage::ConfigToggleSelected) {
+            app.apply(action);
+        }
+        assert!(app.dashboard.expanded_folders.contains("Second"));
+        assert_eq!(app.dashboard.rows.len(), 4);
+        match app.config_store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => assert!(config.show_libs),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+
+        for action in app.update(AppMessage::ConfigToggleSelected) {
+            app.apply(action);
+        }
+        assert!(app.dashboard.expanded_folders.is_empty());
+        assert_eq!(app.dashboard.rows.len(), 3);
+        match app.config_store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => assert!(!config.show_libs),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+    }
+
+    #[test]
+    fn settings_row_for_show_libs_uses_the_new_label() {
+        assert_eq!(ConfigField::ShowLibs.label(), "Start with folders shown");
     }
 
     #[test]

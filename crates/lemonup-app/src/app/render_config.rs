@@ -314,7 +314,7 @@ impl App {
                 ConfigField::ReduceMotion => {
                     "a still … in place of the spinner, and no shimmer".to_string()
                 }
-                ConfigField::ShowLibs => "kept from LemonUp 1, not used yet".to_string(),
+                ConfigField::ShowLibs => "each addon's folders open in the list".to_string(),
                 ConfigField::ChangeGameFolder => {
                     "opens setup to choose a different game folder".to_string()
                 }
@@ -412,11 +412,10 @@ impl App {
                 "Shows a still … in place of the spinner on the line that is working, and \
                  turns off the shimmer.",
             ),
-            // The list does not read this setting yet; say so, not what it
-            // might do one day.
-            ConfigField::ShowLibs => {
-                plain("Kept from LemonUp 1. The addon list does not use this setting yet.")
-            }
+            ConfigField::ShowLibs => plain(
+                "When this is on, the addon list opens with every addon's folders shown under \
+                 it. ] and [ still show or hide them all while LemonUp runs.",
+            ),
             ConfigField::ChangeGameFolder => {
                 plain("Opens setup, where you can choose a different game folder.")
             }
