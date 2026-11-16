@@ -2724,6 +2724,9 @@ pub struct App {
     last_dashboard_keys_area: Option<Rect>,
     /// The last click on a list row and when, to spot a double click.
     last_list_click: std::cell::Cell<Option<(Instant, usize)>>,
+    /// A `g` was pressed and the very next key may be a second one: `gg`
+    /// goes to the top. Any other key press clears it.
+    go_top_pending: std::cell::Cell<bool>,
     /// The window width at the last draw: Details docks beside the list at
     /// 120 columns and wider. `None` until the first draw.
     last_frame_width: Option<u16>,
@@ -2894,6 +2897,7 @@ impl App {
             last_dashboard_list_area: None,
             last_dashboard_keys_area: None,
             last_list_click: std::cell::Cell::new(None),
+            go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             docked_scroll: std::cell::RefCell::default(),
@@ -3281,6 +3285,9 @@ impl App {
             return vec![];
         }
 
+        // A `g` waits for one more key: this one is it, or it clears the wait.
+        let go_top_pending = self.go_top_pending.replace(false);
+
         // Ctrl+C quits from every screen and state, text boxes included.
         if is_ctrl_c(key) {
             return vec![AppMessage::QuitRequested];
@@ -3299,8 +3306,53 @@ impl App {
 
         match self.shell_mode {
             ShellMode::Onboarding => self.onboarding_messages_for_key(key),
-            ShellMode::Dashboard => self.dashboard_messages_for_key(key),
+            ShellMode::Dashboard => self
+                .vim_jump_messages_for_key(key, go_top_pending)
+                .unwrap_or_else(|| self.dashboard_messages_for_key(key)),
         }
+    }
+
+    /// `gg` and `G`: Home and End for the hand that stays on the letters.
+    /// They do whatever Home and End do now, and only where those do
+    /// something. `None` leaves the key to the normal routing, which is
+    /// where `g` and `G` stay letters: in a text box, in a question, and in
+    /// Install, where a letter in the results goes back to the box.
+    fn vim_jump_messages_for_key(
+        &self,
+        key: KeyEvent,
+        go_top_pending: bool,
+    ) -> Option<Vec<AppMessage>> {
+        let top = match key.code {
+            KeyCode::Char('g') => true,
+            KeyCode::Char('G') => false,
+            _ => return None,
+        };
+        if self.active_question().is_some() || self.focused_text_box().is_some() {
+            return None;
+        }
+        // Help and Details sheets take their keys before Install does.
+        let own_sheet = self.shell_ui.overlay.active == Some(OverlayKind::Help)
+            || (self.shell_ui.overlay.active == Some(OverlayKind::Inspect)
+                && !self.details_docked());
+        if self.dashboard.detail_mode == DetailMode::Search && !own_sheet {
+            return None;
+        }
+
+        let jump = |code: KeyCode| self.dashboard_messages_for_key(KeyEvent::from(code));
+        if !top {
+            let messages = jump(KeyCode::End);
+            return (!messages.is_empty()).then_some(messages);
+        }
+        if go_top_pending {
+            let messages = jump(KeyCode::Home);
+            return (!messages.is_empty()).then_some(messages);
+        }
+        // The first `g` shows nothing; the next key decides.
+        if jump(KeyCode::Home).is_empty() {
+            return None;
+        }
+        self.go_top_pending.set(true);
+        Some(vec![])
     }
 
     fn messages_for_mouse(&self, mouse: MouseEvent) -> Vec<AppMessage> {
@@ -8428,6 +8480,7 @@ mod tests {
             last_dashboard_list_area: None,
             last_dashboard_keys_area: None,
             last_list_click: std::cell::Cell::new(None),
+            go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
             docked_scroll: std::cell::RefCell::default(),
@@ -15067,6 +15120,181 @@ mod tests {
             app.apply(AppAction::SetHelpOverlay(true));
         }
 
+        /// `gg` and `G` are Home and End for the hand on the letters.
+        mod vim_jump {
+            use super::*;
+
+            fn press_char(app: &mut App, character: char) {
+                press(app, KeyCode::Char(character));
+            }
+
+            fn press_shift_g(app: &mut App) {
+                let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+                for message in app.messages_for_key(key) {
+                    apply_all(app, message);
+                }
+            }
+
+            fn selected(app: &App) -> usize {
+                app.dashboard.list_state.selected().expect("a selection")
+            }
+
+            #[test]
+            fn gg_and_capital_g_go_to_the_first_and_last_addon() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let last = app.dashboard.rows.len() - 1;
+                assert!(last >= 2, "fixture needs at least three rows");
+                app.dashboard.list_state.select(Some(1));
+
+                press_char(&mut app, 'G');
+                assert_eq!(selected(&app), last);
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'g');
+                assert_eq!(selected(&app), 0);
+
+                // Shift may arrive as a modifier on the capital letter.
+                press_shift_g(&mut app);
+                assert_eq!(selected(&app), last);
+            }
+
+            #[test]
+            fn g_then_another_key_is_just_that_key() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.dashboard.list_state.select(Some(1));
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'j');
+                assert_eq!(selected(&app), 2);
+
+                // The wait is over: the next g starts a new one, and a
+                // third key between two g's breaks the pair.
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'k');
+                press_char(&mut app, 'g');
+                assert_eq!(selected(&app), 1);
+            }
+
+            #[test]
+            fn a_lone_g_changes_nothing() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.dashboard.list_state.select(Some(2));
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(KeyCode::Char('g'))),
+                    vec![]
+                );
+                assert_eq!(selected(&app), 2);
+                // Another key clears the wait, so this g is a first one again.
+                press(&mut app, KeyCode::Esc);
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(KeyCode::Char('g'))),
+                    vec![]
+                );
+                assert_eq!(selected(&app), 2);
+            }
+
+            #[test]
+            fn docked_details_moves_the_list() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.last_frame_width = Some(160);
+                open_inspect(&mut app);
+                assert!(app.details_docked());
+                let last = app.dashboard.rows.len() - 1;
+                press_char(&mut app, 'G');
+                assert_eq!(selected(&app), last);
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'g');
+                assert_eq!(selected(&app), 0);
+            }
+
+            fn assert_sheet_goes_to_the_ends(app: &mut App) {
+                render_rows(app, 80, 12);
+                let max = app.sheet_scroll.get().max_offset;
+                assert!(max > 0, "the sheet needs more than fits");
+                press_char(app, 'G');
+                assert_eq!(app.sheet_scroll.get().offset, max);
+                press_char(app, 'g');
+                assert_eq!(app.sheet_scroll.get().offset, max, "one g waits");
+                press_char(app, 'g');
+                assert_eq!(app.sheet_scroll.get().offset, 0);
+            }
+
+            #[test]
+            fn help_scrolls_to_the_bottom_and_top() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_help(&mut app);
+                assert_sheet_goes_to_the_ends(&mut app);
+            }
+
+            #[test]
+            fn details_scrolls_to_the_bottom_and_top() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_inspect(&mut app);
+                assert_sheet_goes_to_the_ends(&mut app);
+            }
+
+            #[test]
+            fn settings_and_backups_scroll_to_the_bottom_and_top() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                assert_sheet_goes_to_the_ends(&mut app);
+
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_backups(&mut app);
+                assert_sheet_goes_to_the_ends(&mut app);
+            }
+
+            #[test]
+            fn they_are_letters_in_every_text_box() {
+                // The filter while typing.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                press_char(&mut app, '/');
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'G');
+                assert_eq!(app.dashboard.filter_query(), "ggG");
+
+                // The Install box.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                apply_all(
+                    &mut app,
+                    AppMessage::OpenSearch(SearchPresentationMode::ComposeFirst),
+                );
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'G');
+                assert_eq!(app.search_pane.query.value(), "gG");
+
+                // The Install results: a letter goes back to the box.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_install_results(&mut app);
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'G');
+                assert_eq!(app.search_pane.query.value(), "gG");
+
+                // A Settings value being edited.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                app.config_pane.selected_field = 0;
+                apply_all(&mut app, AppMessage::ConfigToggleSelected);
+                let before = config_edit_value(&app);
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'g');
+                press_char(&mut app, 'G');
+                assert_eq!(config_edit_value(&app), format!("{before}ggG"));
+            }
+
+            #[test]
+            fn a_question_takes_neither() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.pending_wago_install_confirmation = Some(pending_wago_confirmation());
+                app.note_question_shown(Instant::now());
+                for character in ['g', 'G'] {
+                    assert_eq!(
+                        app.messages_for_key(KeyEvent::from(KeyCode::Char(character))),
+                        vec![]
+                    );
+                }
+            }
+        }
+
         /// Colors, symbols and motion: Terminal, `NO_COLOR`, simple symbols
         /// and reduce motion.
         mod look {
@@ -16476,6 +16704,10 @@ mod tests {
                                 assert!(!row.keys.is_empty(), "{context:?} {label}");
                                 for key in row.keys {
                                     let app = help_test_app(context, section.title, row.when);
+                                    // `g` is the first half of `gg`: press it twice.
+                                    if key.code == KeyCode::Char('g') {
+                                        assert_eq!(app.messages_for_key(*key), vec![]);
+                                    }
                                     assert!(
                                         !app.messages_for_key(*key).is_empty(),
                                         "{context:?} / {}: {label} ({key:?}) does nothing",
