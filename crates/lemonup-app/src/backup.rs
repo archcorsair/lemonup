@@ -427,19 +427,29 @@ fn prune_backups(root: &Path, retention: usize) -> Result<Vec<String>, String> {
     Ok(deleted)
 }
 
-fn create_unique_archive_file(backup_dir: &Path) -> Result<(String, PathBuf, File), String> {
+/// Reserves a unique `WTF-<timestamp>.zip` name by creating its `.part` file.
+/// The archive is written there and only renamed to its final name once it is
+/// complete, so a failed or interrupted backup never looks like a finished one.
+fn create_unique_archive_file(
+    backup_dir: &Path,
+) -> Result<(String, PathBuf, PathBuf, File), String> {
     for _ in 0..MAX_ARCHIVE_NAME_ATTEMPTS {
         let timestamp = OffsetDateTime::now_utc()
             .format(BACKUP_TIMESTAMP_FORMAT)
             .map_err(|error| error.to_string())?;
         let file_name = format!("WTF-{timestamp}.zip");
         let archive_path = backup_dir.join(&file_name);
+        let part_path = backup_dir.join(format!("{file_name}.part"));
+        if archive_path.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
         match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&archive_path)
+            .open(&part_path)
         {
-            Ok(file) => return Ok((file_name, archive_path, file)),
+            Ok(file) => return Ok((file_name, archive_path, part_path, file)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -456,7 +466,17 @@ fn write_wtf_archive(
     backup_dir: &Path,
     client: &str,
 ) -> Result<(String, PathBuf), String> {
-    let (file_name, archive_path, file) = create_unique_archive_file(backup_dir)?;
+    let (file_name, archive_path, part_path, file) = create_unique_archive_file(backup_dir)?;
+    let written = write_wtf_zip(file, wtf_dir, client)
+        .and_then(|()| fs::rename(&part_path, &archive_path).map_err(|error| error.to_string()));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&part_path);
+        return Err(error);
+    }
+    Ok((file_name, archive_path))
+}
+
+fn write_wtf_zip(file: File, wtf_dir: &Path, client: &str) -> Result<(), String> {
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -468,8 +488,8 @@ fn write_wtf_archive(
         .map_err(|error| error.to_string())?;
     zip.write_all(format!("client={client}\n").as_bytes())
         .map_err(|error| error.to_string())?;
-    zip.finish().map_err(|error| error.to_string())?;
-    Ok((file_name, archive_path))
+    let file = zip.finish().map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
 }
 
 fn extract_wtf_archive(archive_path: &Path, destination_root: &Path) -> Result<(), String> {
@@ -649,10 +669,10 @@ mod tests {
     #[test]
     fn create_unique_archive_file_skips_existing_names() {
         let temp = tempdir().expect("tempdir");
-        let (first_name, first_path, _file) =
+        let (first_name, first_path, _first_part, _file) =
             create_unique_archive_file(temp.path()).expect("first");
         fs::write(&first_path, "sentinel").expect("write sentinel");
-        let (second_name, _, _file2) = create_unique_archive_file(temp.path()).expect("second");
+        let (second_name, _, _, _file2) = create_unique_archive_file(temp.path()).expect("second");
         assert_ne!(first_name, second_name);
         assert_eq!(fs::read_to_string(&first_path).expect("read"), "sentinel");
     }
@@ -1103,5 +1123,47 @@ mod tests {
                 .expect("again")
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_backup_leaves_no_archive_and_does_not_throttle() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("WoW")
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let wtf_dir = temp.path().join("WoW").join("_retail_").join("WTF");
+        let backup_dir = temp.path().join("data").join("backups").join("wtf");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::create_dir_all(&wtf_dir).expect("create wtf dir");
+        let locked = wtf_dir.join("Config.wtf");
+        fs::write(&locked, "SET test \"1\"\n").expect("write config");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock config");
+        if File::open(&locked).is_ok() {
+            // Running as root: permissions can't make the file unreadable.
+            return;
+        }
+
+        let result = create_wtf_backup(&addon_dir, &backup_dir, 5);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("unlock config");
+
+        assert!(
+            result.is_err(),
+            "the backup should fail on an unreadable file"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&backup_dir)
+            .expect("read backup dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+        let backups = list_backups(&backup_dir).expect("list backups");
+        assert!(super::recent_backup_minutes(&backups, OffsetDateTime::now_utc()).is_none());
+
+        create_wtf_backup(&addon_dir, &backup_dir, 5).expect("backup once the file is readable");
     }
 }
