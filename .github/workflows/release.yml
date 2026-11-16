@@ -123,6 +123,10 @@ jobs:
     if: github.event_name == 'push' && !contains(github.ref_name, '-')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # One AUR update at a time across all tags, so runs can't race each other.
+    concurrency:
+      group: aur
+      cancel-in-progress: false
     permissions:
       contents: read
     env:
@@ -147,9 +151,30 @@ jobs:
           for pkgbuild in packaging/aur/lemonup/PKGBUILD packaging/aur/lemonup-bin/PKGBUILD; do
             sed -i -e "s/^pkgver=.*/pkgver=$version/" -e 's/^pkgrel=.*/pkgrel=1/' "$pkgbuild"
           done
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # Never replace a newer AUR package with an older release (a late or rerun job).
+      - name: Check published AUR versions
+        id: aur_versions
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          info="$(curl -fsSL --retry 3 'https://aur.archlinux.org/rpc/v5/info?arg[]=lemonup-bin&arg[]=lemonup')"
+          for pkg in lemonup-bin lemonup; do
+            published="$(jq -r --arg name "$pkg" '.results[] | select(.Name == $name) | .Version' <<<"$info")"
+            published="${published%-*}"
+            push=true
+            if [ -n "$published" ]; then
+              newest="$(printf '%s\n%s\n' "$published" "$VERSION" | sort -V | tail -n1)"
+              if [ "$published" = "$VERSION" ] || [ "$newest" != "$VERSION" ]; then
+                push=false
+                echo "::notice::$pkg is $published on the AUR; not replacing it with $VERSION"
+              fi
+            fi
+            echo "${pkg//-/_}=$push" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Update lemonup-bin
-        if: env.AUR_SSH_PRIVATE_KEY != ''
+        if: env.AUR_SSH_PRIVATE_KEY != '' && steps.aur_versions.outputs.lemonup_bin == 'true'
         uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: lemonup-bin
@@ -161,7 +186,7 @@ jobs:
           commit_message: Update to ${{ github.ref_name }}
 
       - name: Update lemonup
-        if: env.AUR_SSH_PRIVATE_KEY != ''
+        if: env.AUR_SSH_PRIVATE_KEY != '' && steps.aur_versions.outputs.lemonup == 'true'
         uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: lemonup
