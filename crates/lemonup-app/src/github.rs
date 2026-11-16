@@ -228,8 +228,7 @@ fn build_github_client() -> Result<Client, String> {
 }
 
 fn build_github_client_with_token(token: Option<&str>) -> Result<Client, String> {
-    let mut builder =
-        Client::builder().user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)");
+    let mut builder = crate::http::client_builder();
 
     if let Some(token) = token {
         // Never include the token in the error: it is not a valid header value.

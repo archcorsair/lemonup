@@ -299,8 +299,7 @@ fn plan_tukui_update(
 }
 
 fn build_tukui_client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent("LemonUp/2 (+https://github.com/archcorsair/lemonup)")
+    crate::http::client_builder()
         .build()
         .map_err(|error| error.to_string())
 }
