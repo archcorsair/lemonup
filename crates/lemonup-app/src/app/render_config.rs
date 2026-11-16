@@ -319,7 +319,7 @@ impl App {
                     "opens setup to choose a different game folder".to_string()
                 }
                 ConfigField::SaveAddonList => {
-                    format!("saves your addon list to {}", transfer_path())
+                    format!("exports your addon list to {}", transfer_path())
                 }
                 ConfigField::LoadAddonList => {
                     format!("installs the addons listed in {}", transfer_path())

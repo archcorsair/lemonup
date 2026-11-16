@@ -83,12 +83,12 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Save your addon list to a JSON file
+    /// Export your addon list to a JSON file
     ExportAddons {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Load an addon list from a JSON file and install what's missing
+    /// Import an addon list from a JSON file and install what's missing
     ImportAddons {
         #[arg(long)]
         input: Option<PathBuf>,
