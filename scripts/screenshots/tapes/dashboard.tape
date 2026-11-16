@@ -1,12 +1,12 @@
 Source tapes/common.tape
 Output shots/dashboard.txt
 
-# Launch hidden; the dashboard scans the fixture on start.
+# Launch hidden; the addon list scans the fixture on start.
 Hide
 Type "clear && ./lemonup"
 Enter
 Sleep 4s
-# Cursor on Deadly Boss Mods: update pending, owned modules.
+# Cursor on Deadly Boss Mods: Update ready, with folders that belong to it.
 Down
 Show
 Sleep 1500ms

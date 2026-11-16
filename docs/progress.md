@@ -11,11 +11,54 @@ Current progress ledger for the Rust LemonUp workspace.
 - Default seeded manual-smoke profile: `--profile manual-smoke`
 - Production AddOns path: do not use for manual testing
 - Legacy v1 app: retired and removed from the runnable tree
-- Activity: last product work landed 2026-04-09; the project was on hold until 2026-11
+- Branch: `feat/2.0-release-blockers`
+- Activity: the 2.0 TUI redesign is complete (2026-11); before that, last product work landed 2026-04-09
 - Releases: 2.0.0 is prepared (workspace version set to `2.0.0` in `Cargo.toml`, `lemonup
   --version` prints `lemonup 2.0.0`) but not yet tagged or published. The latest GitHub release
   (`v0.1.16`, 2026-01-10) and the Scoop/Homebrew manifests still ship the retired v1 Bun binary
   until the 2.0.0 release goes out
+
+## 2.0 TUI Redesign (complete)
+
+The approved redesign (slices 1-20) is implemented on `feat/2.0-release-blockers`. Slice 21, "find
+all my addons in one go", is deferred until after 2.0.
+
+- `3e23c2b` release candidate: version 2.0.0, install from a pasted URL, safer updates with
+  rollback, per client WTF backups, plain header
+- `26d0280` key safety: Ctrl+C quits anywhere, `q` goes back in sheets and quits only from the
+  list, `y` is the only yes, PgUp/PgDn/Home/End in the list
+- `86e0cdb` new frame: two row header, status line, key line that shows only working keys, `U`
+  updates all, `C` checks all, plain status words
+- `465242e` sheets: Details, Install, Settings, Backups and Help open as scrolling sheets with
+  key lines that fit the width
+- `ba08a68` Details: flat view, up and down change addon, docks beside the list at 120 columns
+- `27198af` one centered question style, plain wording (Not linked, Newer than source), complete
+  Help, welcome card and empty states, `z` undo delete
+- `19b767d` filter box: `/` opens a box in the header, the list never moves
+- `d372d56` one text box everywhere, Install without edit mode, `f` finds a Not linked addon
+  online, clearer errors
+- `47c28ee` Settings and Backups sheets: `s` or `,` opens Settings, `b` backs up now, game folder
+  and addon list save/load are rows, the Wago.io key is never shown
+- `b26866d` setup in three steps: Find your game, Wago.io, Preferences
+- `c85c4ab` theme and symbols (Terminal theme, Simple symbols, Reduce motion), per row progress,
+  click key hints, wheel scrolling, double click opens Details
+- `130d011` Start with folders shown works and takes effect right away
+
+## Verification
+
+- Each wave was smoke tested by the owner in a sandbox.
+- `cargo test --workspace` passes: 535 app tests and 100 core tests.
+
+## Before Release
+
+Each step needs the owner's approval.
+
+1. Website screenshots and pages (in progress)
+2. Full smoke run
+3. Push the branch and open the PR
+4. Tag `v2.0.0`
+5. Update the Homebrew formula (still says version "0.0.8") and the Scoop manifest
+6. Deploy the website
 
 ## Completed Through 2026-04-09
 
@@ -77,8 +120,8 @@ Default validation remains:
 
 ## Next Up
 
-1. continue product polish and post-parity UX work
-2. keep tightening modal/overlay polish and action discoverability
+1. finish the steps in Before Release
+2. after 2.0: slice 21, find all my addons in one go
 3. keep expanding provider and workflow parity only when product scope demands it
 
 ## Related Docs

@@ -22,9 +22,10 @@
 
 ## Highlights
 
-- Terminal-native overview with inspect, sorting, multi-select, bulk update/delete, and undo
-- Unified install/search flow for addon discovery and direct installs
-- Guided setup with strict addon-path safety rails
+- Terminal-native addon list with Details, sorting, a `/` filter, multi-select, bulk update/delete, and `z` undo delete
+- Not linked addons can be matched to a source with `f` (find online)
+- Install by search or from a pasted URL
+- Guided setup in three steps with strict addon-path safety rails
 - Portable addon import/export format
 - Wago search and install support with your own API key
 
@@ -44,6 +45,10 @@ Use a separate profile when you want isolated config/state, for example:
 ```powershell
 lemonup --profile manual-smoke tui
 ```
+
+Main keys in the TUI: `U` updates every addon with an update ready, `C` checks every addon,
+`s` or `,` opens Settings, `b` opens Backups, `?` shows Help for the current screen. `q` goes
+back and quits only from the list.
 
 Check for updates:
 

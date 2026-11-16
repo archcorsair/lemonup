@@ -3,7 +3,7 @@ Source tapes/common.tape
 Set Theme "tokyonight-day"
 Output shots/light.txt
 
-# Launch hidden; the dashboard scans the fixture on start.
+# Launch hidden; the addon list scans the fixture on start.
 Hide
 Type "clear && ./lemonup"
 Enter

@@ -27,8 +27,10 @@ Read in this order:
 ## Current Status
 
 - default branch: `main`
-- latest verified milestone: Rust-only cutover complete and v1 retired (2026-04-05), followed by the help overlay, backup overlay polish, and Version default sort (through 2026-04-09)
-- no Rust release published yet; see Releases in `docs/progress.md`
+- current branch: `feat/2.0-release-blockers`
+- latest milestone: the 2.0 TUI redesign is complete (slices 1-20, one commit per wave, through `130d011`); each wave was smoke tested by the owner in a sandbox; `cargo test --workspace` passes (535 app, 100 core)
+- slice 21 (find all my addons in one go) is deferred until after 2.0
+- no 2.0 release published yet; see Before Release in `docs/progress.md`
 
 ## Current Product State
 
@@ -38,8 +40,8 @@ Implemented and validated:
 - dashboard default sort now starts on Version and prioritizes update-available rows, then recent update/install activity
 - unified install/search overlay for name search and direct Wago URL install
 - overview sort, inspect, multi-select, bulk update/delete, soft-delete undo
-- contextual `?` help overlay for dashboard, inspect, install/search, config, and backup
-- redesigned backup overlay with create/restore/delete flows and short backup spam guard
+- sheets for Details, Install, Settings, Backups, and Help; Help lists every working key per screen
+- Backups sheet with create (`b`), restore, and delete flows and a short backup spam guard
 - import/export addon list
 - background auto-check / dashboard status
 - WTF backup and restore
@@ -86,9 +88,24 @@ mise which cargo
 
 ## Recommended Next Work
 
-- product polish and overlay/layout tightening
-- future source/provider work only if product scope expands
-- keep docs current when checkpointing
+Before release, in order (each step needs the owner's approval):
+
+1. website screenshots and pages (in progress; another thread owns `scripts/screenshots`)
+2. full smoke run in a sandbox
+3. push the branch and open the PR
+4. tag `v2.0.0`
+5. update the Homebrew formula (still says version "0.0.8") and the Scoop manifest
+6. deploy the website
+
+After 2.0: slice 21, find all my addons in one go. Keep docs current when checkpointing.
+
+## Safety Rules
+
+- never let a Setup search start above the sandbox HOME: a search from the parent of a fake HOME (or from the real home folder, or "Search the whole computer") finds the real WoW install
+- use `--profile manual-smoke` and a sandbox AddOns folder for every manual run
+- in the TUI, `q` goes back in sheets and quits only from the list
+- Ctrl+C quits from every screen and asks first during an update
+- only `y` confirms a delete or restore; Enter does not
 
 ## Historical Design Context
 

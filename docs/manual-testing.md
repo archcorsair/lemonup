@@ -49,9 +49,9 @@ pwsh -Command "& 'target/debug/lemonup.exe' --profile manual-smoke --addon-dir '
 
 Quick checklist:
 - run one provider-backed selected update
-- verify one manual addon reports a skip path cleanly
+- verify one Not linked addon reports a skip path cleanly
 - confirm selection remains stable
-- confirm list/detail text stays readable
+- confirm list and Details text stays readable (Details docks at 120 columns and wider)
 - verify backup restore round-trips against the smoke profile when that flow changes
 
 ## Screenshots

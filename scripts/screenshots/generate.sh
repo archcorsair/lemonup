@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUT_DIR=""
 BIN=""
-# Short, neutral path: it is shown in the dashboard header. VHS cannot parse
+# Short, neutral path: it is shown in the addon list header. VHS cannot parse
 # absolute Output/Screenshot paths with '-' segments, so tapes use relative
 # paths and vhs runs from inside the sandbox.
 SANDBOX="${LEMONUP_SCREENSHOT_SANDBOX:-/tmp/lemonup-demo}"
@@ -70,24 +70,31 @@ ADDONS_DIR="$SANDBOX/World of Warcraft/_retail_/Interface/AddOns"
 STATE_DB="$SANDBOX/xdg/data/lemonup/state.sqlite"
 CONFIG_TOML="$SANDBOX/home/.config/lemonup/config.toml"
 
-# Every LemonUp run goes through this wrapper: isolated HOME and XDG dirs, and
-# a dead proxy so any accidental HTTP request fails instead of leaving the box.
-cat > "$SANDBOX/lemonup" <<EOF
+# Every LemonUp run goes through a wrapper: isolated HOME and XDG dirs, and a
+# dead proxy so any accidental HTTP request fails instead of leaving the box.
+# ./lemonup uses the migrated fixture; ./lemonup-fresh uses the empty HOME in
+# fresh/ for the first-run setup screen.
+write_wrapper() {
+    local wrapper="$1" base="$2"
+    cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
-export HOME="$SANDBOX/home"
-export XDG_CONFIG_HOME="$SANDBOX/home/.config"
-export XDG_DATA_HOME="$SANDBOX/xdg/data"
-export XDG_CACHE_HOME="$SANDBOX/xdg/cache"
-export XDG_STATE_HOME="$SANDBOX/xdg/state"
+export HOME="$base/home"
+export XDG_CONFIG_HOME="$base/home/.config"
+export XDG_DATA_HOME="$base/xdg/data"
+export XDG_CACHE_HOME="$base/xdg/cache"
+export XDG_STATE_HOME="$base/xdg/state"
 for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
     export "\$var=http://127.0.0.1:9"
 done
 export NO_PROXY= no_proxy=
-unset LEMONUP_WAGO_API_KEY WAGO_API_KEY GITHUB_TOKEN GH_TOKEN
+unset LEMONUP_WAGO_API_KEY WAGO_API_KEY GITHUB_TOKEN GH_TOKEN NO_COLOR
 export RUST_LOG=off LANG=C.UTF-8 COLORTERM=truecolor
 exec "$BIN" "\$@"
 EOF
-chmod +x "$SANDBOX/lemonup"
+    chmod +x "$wrapper"
+}
+write_wrapper "$SANDBOX/lemonup" "$SANDBOX"
+write_wrapper "$SANDBOX/lemonup-fresh" "$SANDBOX/fresh"
 
 log "migrating the v1 fixture (lemonup sync, local only)"
 sync_out="$(cd "$SANDBOX" && ./lemonup sync 2>&1)"
@@ -106,7 +113,7 @@ check "addons in state"            "SELECT count(*) FROM addons;" "18"
 check "tracked by source"          "SELECT group_concat(source || '=' || n, ' ') FROM (SELECT source, count(*) n FROM addons GROUP BY source ORDER BY source);" \
                                    "github=3 manual=4 tukui=1 wago=6 wowinterface=4"
 # Remote differs from installed: four updates plus HandyNotes, whose stored
-# remote is older than the installed version ("older remote" on the dashboard).
+# remote is older than the installed version ("Newer than source" on the addon list).
 check "remote differs"             "SELECT group_concat(folder, ' ') FROM (SELECT folder FROM addons WHERE source <> 'manual' AND remote_version <> coalesce(git_commit, version) ORDER BY folder);" \
                                    "Auctionator DBM-Core HandyNotes Pawn WeakAuras"
 check "remote older (HandyNotes)"  "SELECT version || ' > ' || remote_version FROM addons WHERE folder = 'HandyNotes';" "v1.6.15 > v1.6.14"
@@ -119,6 +126,9 @@ grep -q '^auto_check_enabled = false' "$CONFIG_TOML" || die "auto-check must be 
 grep -q '^wago_api_key' "$CONFIG_TOML" && die "fixture must not carry a Wago API key"
 backups=$(find "$SANDBOX/xdg/data/lemonup/backups/wtf" -name 'WTF-*.zip' | wc -l)
 [[ "$backups" -eq 3 ]] || die "expected 3 WTF backups, found $backups"
+[[ -d "$SANDBOX/fresh/home/Games/World of Warcraft/_forever_/Interface/AddOns" ]] \
+    || die "the fresh install for the setup screen is missing"
+[[ -e "$SANDBOX/fresh/home/.config" ]] && die "the fresh HOME must start without LemonUp files"
 
 log "recording tapes"
 mkdir -p "$SANDBOX/tapes" "$SANDBOX/shots"

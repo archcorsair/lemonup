@@ -13,6 +13,10 @@ Creates, inside SANDBOX_DIR (which must already exist and be empty):
   home/.config/lemonup/config.json  LemonUp v1 config (migrated on first run)
   home/.config/lemonup/lemonup.db   LemonUp v1 tracked-addon database
   xdg/data/lemonup/backups/wtf/     pre-made WTF backup archives
+  fresh/home/Games/World of Warcraft/
+                                    a second fake install, with _retail_ and _forever_
+                                    AddOns folders, for the first-run setup screen
+                                    (fresh/ is a separate HOME with no LemonUp files)
 
 Nothing here talks to the network. Database timestamps are relative to "now" and backup
 archive names are fixed, so reruns render the same images.
@@ -43,8 +47,8 @@ def hours(n: float) -> timedelta:
 
 # Tracked addons. `children` are owned folders that ship in the same package.
 # `remote` is the last remote version LemonUp saw; when it differs from the
-# installed version (or commit, for GitHub) the dashboard shows an update, or
-# "older remote" when the remote version is lower than the installed one.
+# installed version (or commit, for GitHub) the addon list shows "Update ready", or
+# "Newer than source" when the remote version is lower than the installed one.
 TRACKED = [
     {
         "folder": "WeakAuras",
@@ -214,7 +218,7 @@ TRACKED = [
         "version": "v1.6.15",
         "source": "wowinterface",
         "url": "https://www.wowinterface.com/downloads/info10305-HandyNotes.html",
-        # Provider lists an older build than the one installed: "older remote".
+        # Provider lists an older build than the one installed: "Newer than source".
         "remote": "v1.6.14",
         "children": [],
         "installed": days(240),
@@ -234,7 +238,7 @@ TRACKED = [
     },
 ]
 
-# Present on disk but never tracked: the dashboard picks these up as manual.
+# Present on disk but never tracked: the addon list shows these as "Not linked".
 UNTRACKED = [
     {"folder": "!BugGrabber", "title": "!BugGrabber", "author": "Funkydude", "version": "v12.0.1"},
     {"folder": "BugSack", "title": "BugSack", "author": "Funkydude", "version": "v12.0.0",
@@ -312,6 +316,30 @@ def build_wow(root: Path) -> Path:
         "\n".join(f"{a['folder']}: enabled" for a in TRACKED) + "\n", encoding="utf-8"
     )
     return addons
+
+
+def build_fresh_install(home: Path) -> None:
+    """A second install under a separate, empty HOME, found by setup's search."""
+    wow = home / "Games" / "World of Warcraft"
+    (wow / "Data").mkdir(parents=True)
+    (wow / ".build.info").write_text(
+        "Branch!STRING:0|Active!DEC:1|Version!STRING:0|Product!STRING:0\n"
+        "us|1|12.0.5.64012|wow\n",
+        encoding="utf-8",
+    )
+    retail = wow / "_retail_"
+    retail.mkdir()
+    (retail / "Wow.exe").write_bytes(b"MZ fixture\n")
+    addons = retail / "Interface" / "AddOns"
+    for addon in TRACKED + UNTRACKED:
+        write_toc(addons / addon["folder"], addon["title"], addon["author"], addon["version"])
+    forever = wow / "_forever_" / "Interface" / "AddOns"
+    for folder, title, author in (
+        ("Questie", "Questie", "Aero, Logon, Muehe"),
+        ("Details", "Details! Damage Meter", "Terciob"),
+        ("AtlasLootClassic", "AtlasLoot Classic", "Lag"),
+    ):
+        write_toc(forever / folder, title, author, "1.0.0")
 
 
 def build_v1_state(v1_dir: Path, addons_dir: Path) -> None:
@@ -419,6 +447,7 @@ def main() -> int:
         root / "xdg" / "data" / "lemonup" / "backups" / "wtf",
         addons.parent.parent / "WTF",
     )
+    build_fresh_install(root / "fresh" / "home")
     folders = sorted(p.name for p in addons.iterdir())
     print(f"fixture: {len(folders)} addon folders, {len(TRACKED)} tracked, "
           f"{sum(1 for a in TRACKED if a['remote'] != a.get('commit', a['version']))} "
