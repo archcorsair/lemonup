@@ -12467,11 +12467,23 @@ mod tests {
             .with_offset(third_index)
             .with_selected(Some(third_index));
 
-        let updated = vec![
-            AddonRecord::new("First", "First", SourceKind::Manual),
-            AddonRecord::new("Second", "Second", SourceKind::GitHub),
-            AddonRecord::new("Third", "Third", SourceKind::Wago),
-        ];
+        // Explicit, increasing times: the list puts the most recent activity first, and records
+        // made back to back can share a timestamp on platforms with a coarser clock (macOS).
+        let base = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("base timestamp");
+        let updated = [
+            ("First", SourceKind::Manual),
+            ("Second", SourceKind::GitHub),
+            ("Third", SourceKind::Wago),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(days, (name, source))| {
+            let mut record = AddonRecord::new(name, name, source);
+            record.installed_at = base + Duration::days(days as i64);
+            record.updated_at = record.installed_at;
+            record
+        })
+        .collect::<Vec<_>>();
 
         app.apply(AppAction::ReplaceDashboardAddons(updated));
 
