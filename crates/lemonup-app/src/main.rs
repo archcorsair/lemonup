@@ -296,7 +296,7 @@ fn run_v1_migration(paths: &AppPaths, v1: Option<V1Location>) -> Option<StartupN
             }
             if !report.already_tracked.is_empty() {
                 details.push(format!(
-                    "v1 addons already tracked in v2 (kept v2 data): {}",
+                    "v1 addons already in LemonUp (kept the existing data): {}",
                     report.already_tracked.join(", ")
                 ));
             }
@@ -1744,7 +1744,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("No tracked addon matches: Unknown")
+                .contains("No linked addon matches: Unknown")
         );
     }
 
@@ -1755,13 +1755,13 @@ mod tests {
         assert_eq!(status, UpdateStatus::Unknown);
         assert_eq!(
             message.as_deref(),
-            Some("manual addons cannot be checked yet")
+            Some("addons that are not linked cannot be checked yet")
         );
 
         let tracked = lemonup_core::AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
         let (status, message) = determine_update_status(&tracked);
         assert_eq!(status, UpdateStatus::Unknown);
-        assert_eq!(message.as_deref(), Some("no tracked remote version yet"));
+        assert_eq!(message.as_deref(), Some("not checked yet"));
     }
 
     #[test]

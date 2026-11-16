@@ -323,7 +323,7 @@ pub(crate) async fn apply_live_updates(
                     status: LiveUpdateStatus::SkippedManual,
                     previous_version: addon.version.clone(),
                     remote_version: addon.remote_version.clone(),
-                    message: Some("manual addons cannot be updated yet".to_string()),
+                    message: Some("addons that are not linked cannot be updated yet".to_string()),
                 });
             }
             SourceKind::Wago => {
@@ -699,7 +699,7 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
     if addon.source == lemonup_core::SourceKind::Manual {
         return (
             UpdateStatus::Unknown,
-            Some("manual addons cannot be checked yet".to_string()),
+            Some("addons that are not linked cannot be checked yet".to_string()),
         );
     }
 
@@ -718,15 +718,12 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
             }
             (Some(_), Some(_)) => (
                 UpdateStatus::UpdateAvailable,
-                Some("tracked remote commit differs from installed commit".to_string()),
+                Some("the source has a different commit than the installed one".to_string()),
             ),
-            (_, None) => (
-                UpdateStatus::Unknown,
-                Some("no tracked remote version yet".to_string()),
-            ),
+            (_, None) => (UpdateStatus::Unknown, Some("not checked yet".to_string())),
             (None, Some(_)) => (
                 UpdateStatus::Unknown,
-                Some("no installed Git commit metadata is tracked yet".to_string()),
+                Some("the installed commit is unknown".to_string()),
             ),
         };
     }
@@ -747,15 +744,12 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
         }
         (Some(_), Some(_)) => (
             UpdateStatus::UpdateAvailable,
-            Some("tracked remote version differs from installed version".to_string()),
+            Some("the source has a different version than the installed one".to_string()),
         ),
-        (_, None) => (
-            UpdateStatus::Unknown,
-            Some("no tracked remote version yet".to_string()),
-        ),
+        (_, None) => (UpdateStatus::Unknown, Some("not checked yet".to_string())),
         (None, Some(_)) => (
             UpdateStatus::Unknown,
-            Some("no installed version metadata is tracked yet".to_string()),
+            Some("the installed version is unknown".to_string()),
         ),
     }
 }
@@ -934,9 +928,9 @@ fn resolve_selected_addons<'a>(
 
     if !missing.is_empty() {
         let noun = if missing.len() == 1 {
-            "No tracked addon matches"
+            "No linked addon matches"
         } else {
-            "No tracked addons match"
+            "No linked addons match"
         };
         return Err(LemonupError::InvalidArgument(format!(
             "{noun}: {}. Use exact addon names or folder names, or run `lemonup check` to see the overall summary.",
@@ -1231,7 +1225,7 @@ mod tests {
         assert_eq!(checks[0].status, UpdateStatus::Error);
         assert_eq!(
             checks[0].message.as_deref(),
-            Some("tracked GitHub addon 'DBM-Core' is missing a source URL")
+            Some("linked GitHub addon 'DBM-Core' has no source URL")
         );
     }
 
@@ -1315,10 +1309,7 @@ mod tests {
         let (status, message) = determine_update_status(&addon);
 
         assert_eq!(status, UpdateStatus::Unknown);
-        assert_eq!(
-            message.as_deref(),
-            Some("no installed Git commit metadata is tracked yet")
-        );
+        assert_eq!(message.as_deref(), Some("the installed commit is unknown"));
     }
 
     #[test]

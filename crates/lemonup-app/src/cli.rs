@@ -28,16 +28,16 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
-    /// Launch the Ratatui interface
+    /// Open the LemonUp TUI (the default)
     Tui,
-    /// Reconcile the current AddOns directory into tracked state
+    /// Scan the AddOns folder and update LemonUp's list
     Sync,
-    /// Check tracked addons for updates without applying changes
+    /// Check linked addons for updates without changing anything
     Check {
         #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
         addons: Vec<String>,
     },
-    /// Update tracked addons by exact addon or folder name; omit targets to update all
+    /// Update linked addons by exact addon or folder name; omit names to update all
     Update {
         #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
         addons: Vec<String>,
@@ -46,7 +46,7 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Update all tracked addons
+    /// Update all linked addons
     UpdateAll {
         #[arg(long)]
         force: bool,
@@ -83,19 +83,19 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Export tracked addons to a portable JSON file
+    /// Save your addon list to a JSON file
     ExportAddons {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Import tracked addons from a portable JSON file
+    /// Load an addon list from a JSON file and install what's missing
     ImportAddons {
         #[arg(long)]
         input: Option<PathBuf>,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Restore a WTF backup archive
+    /// Restore a backup of your game settings
     RestoreBackup {
         #[arg(value_name = "BACKUP_ZIP")]
         archive: Option<PathBuf>,
