@@ -561,11 +561,17 @@ fn v1_row_to_record(
 }
 
 /// v1 `type` strings are the same ones v1 wrote to its export file, so reuse
-/// the transfer format's mapping. Unknown values fall back to manual.
+/// the transfer format's mapping. Unknown values fall back to manual (Not linked), like v1's
+/// own unlinked addons.
 fn parse_v1_source(raw: &str) -> SourceKind {
-    serde_json::from_value::<TransferSourceKind>(Value::String(raw.to_ascii_lowercase()))
-        .map(TransferSourceKind::as_source_kind)
-        .unwrap_or(SourceKind::Manual)
+    let source = TransferSourceKind::from_name(&raw.to_ascii_lowercase());
+    source.as_source_kind().unwrap_or_else(|| {
+        tracing::warn!(
+            source = raw,
+            "v1 addon linked to a source this version doesn't know; imported as Not linked"
+        );
+        SourceKind::Manual
+    })
 }
 
 fn parse_v1_timestamp(raw: Option<&str>) -> Option<OffsetDateTime> {
@@ -1580,5 +1586,14 @@ mod tests {
             Some(fixture.addon_dir.as_path())
         );
         assert_eq!(config.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn unknown_v1_source_imports_as_not_linked() {
+        assert_eq!(
+            super::parse_v1_source("CurseForge"),
+            crate::SourceKind::Manual
+        );
+        assert_eq!(super::parse_v1_source("Wago"), crate::SourceKind::Wago);
     }
 }

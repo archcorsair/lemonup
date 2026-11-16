@@ -4849,16 +4849,29 @@ impl App {
                         .and_then(|database| database.list_addons())
                         .and_then(|addons| export_addons(&addons, &output_path))
                     {
-                        Ok(exported) => vec![AppAction::SetStatus(self.dashboard_status_for(
-                            StatusKind::Done,
-                            DetailMode::Config,
-                            &format!(
+                        Ok(exported) => {
+                            let mut message = format!(
                                 "Saved {} addon{} to {}",
                                 exported.addons.len(),
                                 plural_suffix(exported.addons.len()),
                                 friendly_path(&output_path)
-                            ),
-                        ))],
+                            );
+                            let newer = exported
+                                .addons
+                                .iter()
+                                .filter(|addon| addon.unknown_source().is_some())
+                                .count();
+                            if newer > 0 {
+                                message.push_str(&format!(
+                                    " · {newer} linked by a newer LemonUp (only a newer version can reinstall)"
+                                ));
+                            }
+                            vec![AppAction::SetStatus(self.dashboard_status_for(
+                                StatusKind::Done,
+                                DetailMode::Config,
+                                &message,
+                            ))]
+                        }
                         Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,

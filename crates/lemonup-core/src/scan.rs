@@ -478,7 +478,8 @@ impl GroupingGuard {
         let mut guard = Self::default();
         for addon in tracked {
             let folder = addon.folder.to_ascii_lowercase();
-            if addon.source != SourceKind::Manual {
+            // A row from a newer LemonUp is linked there, so it stays standalone too.
+            if addon.source != SourceKind::Manual || addon.unrecognized.is_some() {
                 guard.standalone.insert(folder.clone());
             }
             if addon.has_authoritative_owned_folders() {

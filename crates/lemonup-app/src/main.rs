@@ -713,6 +713,14 @@ fn run_export_addons(
         output_path.display(),
         export.addons.len()
     );
+    for addon in &export.addons {
+        if let Some(source) = addon.unknown_source() {
+            println!(
+                "export warning: {}: linked to '{source}' by a newer version of LemonUp; saved, but only a newer version can reinstall it",
+                addon.name
+            );
+        }
+    }
     Ok(())
 }
 
@@ -882,6 +890,13 @@ fn print_import_analysis(input_path: &std::path::Path, analysis: &ImportAnalysis
         analysis.duplicate_addons.len(),
         analysis.unsupported_addons.len()
     );
+    for warning in analysis
+        .unsupported_addons
+        .iter()
+        .filter_map(lemonup_core::TransferAddon::unknown_source_warning)
+    {
+        println!("import warning: {warning}");
+    }
 }
 
 fn print_update_details(addons: &[String], results: &[LiveUpdateResult]) {

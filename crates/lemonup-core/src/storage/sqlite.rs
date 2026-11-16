@@ -1,12 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, params};
 use time::OffsetDateTime;
 
-use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, OwnershipSource, SourceKind};
+use crate::domain::{
+    AddonKind, AddonRecord, GameFlavor, OwnedFolder, OwnershipSource, SourceKind,
+    UnrecognizedValues,
+};
 use crate::error::{LemonupError, Result};
 use crate::scan::{GroupingGuard, ScanReport, ScanSummary, ScannedAddon};
 
@@ -258,11 +262,12 @@ impl StateDatabase {
             .chain(skipped.iter().cloned())
             .collect::<HashSet<_>>();
         // A tracked non-manual row whose folder is still on disk is never deleted here: at worst
-        // it is kept as its own top-level row.
+        // it is kept as its own top-level row. A row from a newer LemonUp counts as tracked.
         let protected_rows = existing_addons
             .iter()
             .filter(|addon| {
-                addon.source != SourceKind::Manual && on_disk_folders.contains(&addon.folder)
+                (addon.source != SourceKind::Manual || addon.unrecognized.is_some())
+                    && on_disk_folders.contains(&addon.folder)
             })
             .map(|addon| addon.folder.clone())
             .collect::<HashSet<_>>();
@@ -460,7 +465,22 @@ impl StateDatabase {
 
     fn upsert_addon_with_connection(connection: &Connection, addon: &AddonRecord) -> Result<()> {
         let owned_folders = serde_json::to_string(&addon.owned_folders)?;
-        let ownership_source = serialize_ownership_source(addon.effective_ownership_source());
+        // Values a newer LemonUp stored are written back unchanged while the addon stays not
+        // linked here; linking it to a source in this version replaces them.
+        let kept = addon
+            .unrecognized
+            .as_ref()
+            .filter(|_| addon.source == SourceKind::Manual);
+        let ownership_source = kept
+            .and_then(|kept| kept.ownership_source.as_deref())
+            .unwrap_or_else(|| serialize_ownership_source(addon.effective_ownership_source()));
+        let kind = kept
+            .and_then(|kept| kept.kind.as_deref())
+            .unwrap_or_else(|| serialize_addon_kind(addon.kind));
+        let flavor = kept
+            .and_then(|kept| kept.flavor.as_deref())
+            .unwrap_or_else(|| serialize_flavor(addon.flavor));
+        let source = kept.map_or_else(|| serialize_source(addon.source), |kept| &kept.source);
         let required_deps = serde_json::to_string(&addon.required_deps)?;
         let optional_deps = serde_json::to_string(&addon.optional_deps)?;
         let embedded_libs = serde_json::to_string(&addon.embedded_libs)?;
@@ -497,14 +517,14 @@ impl StateDatabase {
                 addon.folder,
                 owned_folders,
                 ownership_source,
-                serialize_addon_kind(addon.kind),
+                kind,
                 addon.kind_override,
-                serialize_flavor(addon.flavor),
+                flavor,
                 addon.version,
                 addon.git_commit,
                 addon.author,
                 addon.interface,
-                serialize_source(addon.source),
+                source,
                 addon.source_url,
                 required_deps,
                 optional_deps,
@@ -529,21 +549,50 @@ impl StateDatabase {
         let required_deps = parse_json::<Vec<String>>(row.get::<_, String>(14)?)?;
         let optional_deps = parse_json::<Vec<String>>(row.get::<_, String>(15)?)?;
         let embedded_libs = parse_json::<Vec<String>>(row.get::<_, String>(16)?)?;
+        let stored_ownership_source = row.get::<_, String>(4)?;
+        let stored_kind = row.get::<_, String>(5)?;
+        let stored_flavor = row.get::<_, String>(7)?;
+        let stored_source = row.get::<_, String>(12)?;
+        let ownership_source = parse_ownership_source(&stored_ownership_source);
+        let kind = parse_addon_kind(&stored_kind);
+        let flavor = parse_flavor(&stored_flavor);
+        let source = parse_source(&stored_source);
+        let unrecognized = UnrecognizedValues {
+            source: stored_source.clone(),
+            flavor: unrecognized_value("flavor", flavor, &stored_flavor),
+            kind: unrecognized_value("kind", kind, &stored_kind),
+            ownership_source: unrecognized_value(
+                "ownership_source",
+                ownership_source,
+                &stored_ownership_source,
+            ),
+        };
+        let any_unrecognized = unrecognized_value("source", source, &stored_source).is_some()
+            || unrecognized.flavor.is_some()
+            || unrecognized.kind.is_some()
+            || unrecognized.ownership_source.is_some();
 
+        // Fallbacks for values a newer LemonUp wrote: the addon is not linked (never checked or
+        // updated), listed as an addon rather than hidden as a library, and its owned folders are
+        // not authoritative, so nothing is grouped or deleted on the strength of them. The
+        // placeholder flavor is never acted on because the addon is not linked.
         Ok(AddonRecord {
             id: row.get(0)?,
             name: row.get(1)?,
             folder: row.get(2)?,
             owned_folders,
-            ownership_source: parse_ownership_source(&row.get::<_, String>(4)?)?,
-            kind: parse_addon_kind(&row.get::<_, String>(5)?)?,
+            ownership_source: ownership_source.unwrap_or(OwnershipSource::None),
+            kind: kind.unwrap_or(AddonKind::Addon),
             kind_override: row.get(6)?,
-            flavor: parse_flavor(&row.get::<_, String>(7)?)?,
+            flavor: flavor.unwrap_or(GameFlavor::Retail),
             version: row.get(8)?,
             git_commit: row.get(9)?,
             author: row.get(10)?,
             interface: row.get(11)?,
-            source: parse_source(&row.get::<_, String>(12)?)?,
+            source: match source {
+                Some(source) if !any_unrecognized => source,
+                _ => SourceKind::Manual,
+            },
             source_url: row.get(13)?,
             required_deps,
             optional_deps,
@@ -555,6 +604,7 @@ impl StateDatabase {
                 .map(parse_timestamp)
                 .transpose()?,
             remote_version: row.get(20)?,
+            unrecognized: any_unrecognized.then_some(unrecognized),
         })
     }
 }
@@ -615,6 +665,7 @@ fn merge_scanned_addon(
         updated_at: now,
         last_checked_at: existing.and_then(|addon| addon.last_checked_at),
         remote_version: existing.and_then(|addon| addon.remote_version.clone()),
+        unrecognized: existing.and_then(|addon| addon.unrecognized.clone()),
     }
 }
 
@@ -647,6 +698,9 @@ fn merge_scanned_source(
 /// missing. Overwriting it on every sync made such addons look permanently outdated or
 /// "remote older". The TOC version only fills in a row that has no recorded version.
 ///
+/// Rows from a newer LemonUp keep their recorded version too, so the link it restores on upgrade
+/// compares against the label it recorded.
+///
 /// Manual rows always take the TOC version. GitHub rows track by commit (`git_commit`, falling
 /// back to `version`), so they keep taking the scanned version, except for unexpanded packager
 /// placeholders such as `@project-version@`, which never replace a recorded one.
@@ -658,6 +712,9 @@ fn merge_scanned_version(
     let recorded = existing
         .and_then(|addon| addon.version.clone())
         .filter(|version| !version.trim().is_empty());
+    if existing.is_some_and(|addon| addon.unrecognized.is_some()) {
+        return recorded.or_else(|| scanned_addon.version.clone());
+    }
 
     match source {
         SourceKind::Tukui | SourceKind::WowInterface | SourceKind::Wago => {
@@ -721,6 +778,10 @@ fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -
             .remote_version
             .clone()
             .or_else(|| existing.and_then(|addon| addon.remote_version.clone())),
+        unrecognized: incoming
+            .unrecognized
+            .clone()
+            .or_else(|| existing.and_then(|addon| addon.unrecognized.clone())),
     };
 
     merged.ownership_source = OwnershipSource::Managed;
@@ -784,42 +845,65 @@ fn parse_timestamp(value: i64) -> rusqlite::Result<OffsetDateTime> {
     })
 }
 
-fn parse_source(value: &str) -> rusqlite::Result<SourceKind> {
+fn parse_source(value: &str) -> Option<SourceKind> {
     match value {
-        "github" => Ok(SourceKind::GitHub),
-        "tukui" => Ok(SourceKind::Tukui),
-        "wowinterface" => Ok(SourceKind::WowInterface),
-        "wago" => Ok(SourceKind::Wago),
-        "manual" => Ok(SourceKind::Manual),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        "github" => Some(SourceKind::GitHub),
+        "tukui" => Some(SourceKind::Tukui),
+        "wowinterface" => Some(SourceKind::WowInterface),
+        "wago" => Some(SourceKind::Wago),
+        "manual" => Some(SourceKind::Manual),
+        _ => None,
     }
 }
 
-fn parse_ownership_source(value: &str) -> rusqlite::Result<OwnershipSource> {
+fn parse_ownership_source(value: &str) -> Option<OwnershipSource> {
     match value {
-        "none" => Ok(OwnershipSource::None),
-        "scan_inferred" => Ok(OwnershipSource::ScanInferred),
-        "managed" => Ok(OwnershipSource::Managed),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        "none" => Some(OwnershipSource::None),
+        "scan_inferred" => Some(OwnershipSource::ScanInferred),
+        "managed" => Some(OwnershipSource::Managed),
+        _ => None,
     }
 }
 
-fn parse_flavor(value: &str) -> rusqlite::Result<GameFlavor> {
+fn parse_flavor(value: &str) -> Option<GameFlavor> {
     match value {
-        "retail" => Ok(GameFlavor::Retail),
-        "classic" => Ok(GameFlavor::Classic),
-        "cata" => Ok(GameFlavor::Cata),
-        "forever" => Ok(GameFlavor::Forever),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        "retail" => Some(GameFlavor::Retail),
+        "classic" => Some(GameFlavor::Classic),
+        "cata" => Some(GameFlavor::Cata),
+        "forever" => Some(GameFlavor::Forever),
+        _ => None,
     }
 }
 
-fn parse_addon_kind(value: &str) -> rusqlite::Result<AddonKind> {
+fn parse_addon_kind(value: &str) -> Option<AddonKind> {
     match value {
-        "addon" => Ok(AddonKind::Addon),
-        "library" => Ok(AddonKind::Library),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        "addon" => Some(AddonKind::Addon),
+        "library" => Some(AddonKind::Library),
+        _ => None,
     }
+}
+
+/// The stored value when this version could not parse it, warning once per column and value
+/// for the life of the process (the addon list is reloaded often).
+fn unrecognized_value<T>(column: &'static str, parsed: Option<T>, stored: &str) -> Option<String> {
+    if parsed.is_some() {
+        return None;
+    }
+    static WARNED: OnceLock<Mutex<HashSet<(&'static str, String)>>> = OnceLock::new();
+    let first_time = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut warned| warned.insert((column, stored.to_string())))
+        .unwrap_or(false);
+    if first_time {
+        tracing::warn!(
+            column,
+            value = stored,
+            "state database has a value this LemonUp version does not know (written by a newer \
+             version); the addon shows as Not linked and the value is kept"
+        );
+    }
+    Some(stored.to_string())
 }
 
 fn serialize_source(value: SourceKind) -> &'static str {
@@ -2131,5 +2215,164 @@ mod tests {
         assert_eq!(summary.skipped_folders, vec!["Kept".to_string()]);
         assert!(database.get_addon_by_folder("Gone").expect("get").is_none());
         assert!(database.get_addon_by_folder("Kept").expect("get").is_some());
+    }
+
+    fn stored_values(database: &StateDatabase, folder: &str) -> [String; 4] {
+        database
+            .connection
+            .query_row(
+                "SELECT source, flavor, kind, ownership_source FROM addons WHERE folder = ?1",
+                [folder],
+                |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?]),
+            )
+            .expect("stored row")
+    }
+
+    /// Stands in for a newer LemonUp writing a value this version does not know.
+    fn store_value(database: &StateDatabase, folder: &str, column: &str, value: &str) {
+        database
+            .connection
+            .execute(
+                &format!("UPDATE addons SET {column} = ?1 WHERE folder = ?2"),
+                [value, folder],
+            )
+            .expect("store value");
+    }
+
+    #[test]
+    fn unknown_source_loads_as_not_linked_and_is_kept_through_scans_and_writes() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut curse = AddonRecord::new("Curse", "CurseAddon", SourceKind::Wago);
+        curse.source_url = Some("https://www.curseforge.com/wow/addons/curse".to_string());
+        curse.version = Some("1.2.3".to_string());
+        database.upsert_addon(&curse).expect("seed curse");
+        database
+            .upsert_addon(&AddonRecord::new("Plain", "Plain", SourceKind::Manual))
+            .expect("seed plain");
+        store_value(&database, "CurseAddon", "source", "curseforge");
+
+        let addons = database.list_addons().expect("list loads");
+        assert_eq!(addons.len(), 2);
+        let loaded = addons
+            .iter()
+            .find(|addon| addon.folder == "CurseAddon")
+            .expect("curse row");
+        assert_eq!(loaded.source, SourceKind::Manual);
+        let unrecognized = loaded.unrecognized.as_ref().expect("unrecognized values");
+        assert_eq!(unrecognized.source, "curseforge");
+        assert_eq!(unrecognized.flavor, None);
+        assert_eq!(unrecognized.kind, None);
+        assert_eq!(unrecognized.ownership_source, None);
+
+        // A scan (sync) keeps the stored source and the version that source recorded.
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("CurseAddon", Some("9.9.9"), None),
+                scanned_with("Plain", None, None),
+            ])
+            .expect("reconcile");
+        assert_eq!(stored_values(&database, "CurseAddon")[0], "curseforge");
+        let rescanned = database
+            .get_addon_by_folder("CurseAddon")
+            .expect("get")
+            .expect("row kept");
+        assert_eq!(rescanned.version.as_deref(), Some("1.2.3"));
+
+        // Re-recording the loaded row keeps it too.
+        database.upsert_addon(&rescanned).expect("upsert again");
+        assert_eq!(stored_values(&database, "CurseAddon")[0], "curseforge");
+        database
+            .record_managed_addon(&rescanned)
+            .expect("record again");
+        assert_eq!(stored_values(&database, "CurseAddon")[0], "curseforge");
+
+        // Linking it to a source this version knows replaces the stored value.
+        let mut linked = AddonRecord::new("Curse", "CurseAddon", SourceKind::GitHub);
+        linked.source_url = Some("https://github.com/example/curse".to_string());
+        database.record_managed_addon(&linked).expect("link");
+        assert_eq!(stored_values(&database, "CurseAddon")[0], "github");
+        let relinked = database
+            .get_addon_by_folder("CurseAddon")
+            .expect("get")
+            .expect("row");
+        assert_eq!(relinked.source, SourceKind::GitHub);
+        assert_eq!(relinked.unrecognized, None);
+    }
+
+    #[test]
+    fn unknown_flavor_kind_and_ownership_load_without_breaking_the_list() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut flavored = AddonRecord::new("Flavored", "Flavored", SourceKind::GitHub);
+        flavored.source_url = Some("https://github.com/example/flavored".to_string());
+        database.upsert_addon(&flavored).expect("seed flavored");
+        database
+            .upsert_addon(&AddonRecord::new("Kinded", "Kinded", SourceKind::Manual))
+            .expect("seed kinded");
+        let mut owned = AddonRecord::new("Owned", "Owned", SourceKind::Manual);
+        owned.set_managed_owned_folders(vec![OwnedFolder {
+            name: "OwnedChild".to_string(),
+        }]);
+        database.upsert_addon(&owned).expect("seed owned");
+        let mut plain = AddonRecord::new("Plain", "Plain", SourceKind::Wago);
+        plain.source_url = Some("https://addons.wago.io/addons/plain".to_string());
+        database.upsert_addon(&plain).expect("seed plain");
+        store_value(&database, "Flavored", "flavor", "mists");
+        store_value(&database, "Kinded", "kind", "plugin");
+        store_value(&database, "Owned", "ownership_source", "exclusive");
+
+        let addons = database.list_addons().expect("list loads");
+        assert_eq!(addons.len(), 4);
+        let by_folder = |folder: &str| {
+            addons
+                .iter()
+                .find(|addon| addon.folder == folder)
+                .expect("row")
+                .clone()
+        };
+
+        // An unknown flavor leaves even a GitHub addon not linked, so nothing acts on it.
+        let flavored = by_folder("Flavored");
+        assert_eq!(flavored.source, SourceKind::Manual);
+        let values = flavored.unrecognized.expect("flavor kept");
+        assert_eq!(values.source, "github");
+        assert_eq!(values.flavor.as_deref(), Some("mists"));
+
+        let kinded = by_folder("Kinded");
+        assert_eq!(kinded.kind, AddonKind::Addon);
+        assert_eq!(
+            kinded.unrecognized.expect("kind kept").kind.as_deref(),
+            Some("plugin")
+        );
+
+        // Unknown ownership is not authoritative: removing the addon plans no child folders.
+        let owned = by_folder("Owned");
+        assert_eq!(owned.source, SourceKind::Manual);
+        assert!(!owned.has_authoritative_owned_folders());
+        assert_eq!(
+            database.planned_removal_folders("Owned").expect("plan"),
+            vec!["Owned".to_string()]
+        );
+
+        let plain = by_folder("Plain");
+        assert_eq!(plain.source, SourceKind::Wago);
+        assert_eq!(plain.unrecognized, None);
+
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("Flavored", None, None),
+                scanned_with("Kinded", None, None),
+                scanned_with("Owned", None, None),
+                scanned_with("Plain", None, None),
+            ])
+            .expect("reconcile");
+        assert_eq!(
+            stored_values(&database, "Flavored"),
+            ["github", "mists", "addon", "none"].map(str::to_string)
+        );
+        assert_eq!(stored_values(&database, "Kinded")[2], "plugin");
+        assert_eq!(stored_values(&database, "Owned")[3], "exclusive");
+        assert_eq!(stored_values(&database, "Plain")[0], "wago");
     }
 }
