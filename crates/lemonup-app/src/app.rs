@@ -11090,6 +11090,82 @@ mod tests {
         assert!(!text.contains("Saved 3 addons"), "{text}");
     }
 
+    /// Where the Settings sheet sits in `rows`: its top row, its bottom row
+    /// (the bottom border, or the last row of a full screen sheet) and the
+    /// row of the rule above the explanation, if it shows one.
+    fn settings_sheet_rows(rows: &[String]) -> (usize, usize, Option<usize>) {
+        let title = rows
+            .iter()
+            .position(|row| row.contains("Settings") && row.contains("esc close"))
+            .unwrap_or_else(|| panic!("no Settings title:\n{}", rows.join("\n")));
+        let floating = rows[title].contains('╭');
+        let bottom = if floating {
+            let column = rows[title].chars().position(|c| c == '╭').expect("corner");
+            (title + 1..rows.len())
+                .find(|row| rows[*row].chars().nth(column) == Some('╰'))
+                .unwrap_or_else(|| panic!("no bottom border:\n{}", rows.join("\n")))
+        } else {
+            rows.len() - 1
+        };
+        let rule = "─".repeat(40);
+        let rule_row = (title + 2..=bottom).find(|row| rows[*row].contains(&rule));
+        (title, bottom, rule_row)
+    }
+
+    #[test]
+    fn settings_keeps_its_size_and_place_while_the_cursor_moves() {
+        for (width, height) in [(138, 36), (120, 30), (80, 24)] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+            let mut seen = None;
+            for index in 0..ConfigField::ALL.len() {
+                app.config_pane.selected_field = index;
+                let rows = render_rows(&mut app, width, height);
+                let field = ConfigField::ALL[index];
+                assert!(
+                    rows.iter().any(|row| row.contains(field.label())),
+                    "{field:?} at {width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+                let place = settings_sheet_rows(&rows);
+                assert_eq!(
+                    *seen.get_or_insert(place),
+                    place,
+                    "{field:?} moved the sheet at {width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+            }
+            // The result of an action row shows without moving the sheet.
+            let seen = seen.expect("a row");
+            for field in ConfigField::ALL
+                .into_iter()
+                .filter(|field| field.kind() == super::ConfigRowKind::Action)
+            {
+                app.config_pane.selected_field = ConfigField::ALL
+                    .iter()
+                    .position(|candidate| *candidate == field)
+                    .expect("action row");
+                app.apply(AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Done,
+                    DetailMode::Config,
+                    "Saved 3 addons to ~/lemonup-addons.json",
+                )));
+                let rows = render_rows(&mut app, width, height);
+                assert!(
+                    rows.iter().any(|row| row.contains("Saved 3 addons")),
+                    "{field:?} at {width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+                assert_eq!(
+                    settings_sheet_rows(&rows),
+                    seen,
+                    "{field:?} result moved the sheet at {width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+    }
+
     #[test]
     fn settings_never_shows_the_wago_key() {
         let secret = "SECRETKEY1234567890";

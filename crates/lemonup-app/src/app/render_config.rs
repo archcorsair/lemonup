@@ -57,8 +57,12 @@ impl App {
         height: u16,
         below_header: u16,
     ) -> SheetBody<'static> {
-        let long = self.config_description(width, true);
-        let long_rows = text_height(&long, width);
+        // Room for the longest explanation, so moving the cursor never
+        // resizes or moves the sheet; shorter ones are padded below.
+        let long_rows = self.config_reserved_rows(width);
+        let mut long = self.config_description(width, true);
+        let own_rows = text_height(&long, width);
+        long.extend((own_rows..long_rows).map(|_| Line::default()));
         let spaced_rows = self.config_list_rows(true);
         let tight_rows = self.config_list_rows(false);
         let short = self.config_description(width, false);
@@ -260,18 +264,46 @@ impl App {
         if !long && let Some(status) = status {
             return vec![status];
         }
-        let mut lines = self.config_description_text(width, long);
+        let field = self.config_pane.selected_field();
+        let editing = self.config_pane.edit.is_some();
+        let mut lines = self.config_description_text(field, editing, width, long);
         lines.extend(status);
         lines
     }
 
-    fn config_description_text(&self, width: u16, long: bool) -> Vec<Line<'static>> {
+    /// Rows the long explanation reserves: the tallest one among all the
+    /// rows at `width`, with one more row for the result of an action row.
+    /// The explanation on screen counts too, so a message that does not fit
+    /// the others still has room.
+    fn config_reserved_rows(&self, width: u16) -> u16 {
+        let mut rows = text_height(&self.config_description(width, true), width);
+        for field in ConfigField::ALL {
+            // Only the key row reads differently while it is being edited.
+            let edits: &[bool] = if field == ConfigField::WagoApiKey {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            for editing in edits {
+                let text = self.config_description_text(field, *editing, width, true);
+                let result = u16::from(field.kind() == ConfigRowKind::Action);
+                rows = rows.max(text_height(&text, width).saturating_add(result));
+            }
+        }
+        rows
+    }
+
+    fn config_description_text(
+        &self,
+        field: ConfigField,
+        editing: bool,
+        width: u16,
+        long: bool,
+    ) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        let field = self.config_pane.selected_field();
         let muted = Style::default().fg(roles.muted);
         let link = Style::default().fg(roles.blue);
         let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
-        let editing = self.config_pane.edit.is_some();
         let display = self.runtime.display;
         let following = self.follow_terminal.get();
         let transfer_path = || {
