@@ -3325,11 +3325,16 @@ impl App {
         // still takes the mouse, and clicks in the panel fall outside the
         // list area and do nothing.
         if self.shell_ui.overlay.active.is_some() && !self.details_docked() {
-            return match mouse.kind {
-                MouseEventKind::ScrollDown => vec![AppMessage::SheetScroll(SheetMove::LineDown)],
-                MouseEventKind::ScrollUp => vec![AppMessage::SheetScroll(SheetMove::LineUp)],
-                _ => vec![],
+            let (down, line) = match mouse.kind {
+                MouseEventKind::ScrollDown => (KeyCode::Down, SheetMove::LineDown),
+                MouseEventKind::ScrollUp => (KeyCode::Up, SheetMove::LineUp),
+                _ => return vec![],
             };
+            // Where the sheet has a cursor list the wheel moves the cursor,
+            // as the arrow keys do; elsewhere it scrolls the text.
+            return self
+                .sheet_cursor_messages_for_wheel(KeyEvent::from(down))
+                .unwrap_or_else(|| vec![AppMessage::SheetScroll(line)]);
         }
 
         // The wheel over docked Details scrolls it.
@@ -3362,6 +3367,26 @@ impl App {
                 row: mouse.row,
             }],
             _ => vec![],
+        }
+    }
+
+    /// What the wheel does in a sheet with a cursor list: the messages the
+    /// arrow `key` gives there. `None` where the sheet scrolls its text.
+    /// While a Settings value is edited the wheel does nothing.
+    fn sheet_cursor_messages_for_wheel(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
+        match self.shell_ui.overlay.active? {
+            OverlayKind::Config if self.config_pane.edit.is_some() => Some(vec![]),
+            OverlayKind::Config => self.config_messages_for_key(key),
+            OverlayKind::Backup => self.backup_messages_for_key(key),
+            // Only a cursor in the results moves; with the box focused the
+            // arrow would change focus, so the sheet scrolls instead.
+            OverlayKind::Search => self.search_messages_for_key(key).filter(|messages| {
+                matches!(
+                    messages.as_slice(),
+                    [AppMessage::SearchResultNext | AppMessage::SearchResultPrevious]
+                )
+            }),
+            _ => None,
         }
     }
 
@@ -18026,6 +18051,161 @@ mod tests {
                 apply_all(&mut app, message);
             }
             assert_eq!(app.sheet_scroll.get().offset, 1);
+        }
+
+        fn wheel(app: &mut App, kind: MouseEventKind) {
+            for message in app.messages_for_mouse(mouse(kind, 10, 10)) {
+                apply_all(app, message);
+            }
+        }
+
+        #[test]
+        fn the_wheel_moves_the_cursor_in_settings() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::SetDetailMode(DetailMode::Config));
+            let _ = render_rows(&mut app, 80, 24);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Config));
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                app.messages_for_key(KeyEvent::from(KeyCode::Down)),
+            );
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                app.messages_for_key(KeyEvent::from(KeyCode::Up)),
+            );
+
+            assert_eq!(app.config_pane.selected_field, 0);
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            assert_eq!(app.config_pane.selected_field, 2);
+            wheel(&mut app, MouseEventKind::ScrollUp);
+            assert_eq!(app.config_pane.selected_field, 1);
+
+            // Down the wheel and down the key land on the same row, every
+            // time, around the whole list.
+            let mut keys = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut keys, AppMessage::SetDetailMode(DetailMode::Config));
+            wheel(&mut app, MouseEventKind::ScrollUp);
+            assert_eq!(app.config_pane.selected_field, 0);
+            for _ in 0..ConfigField::ALL.len() + 3 {
+                wheel(&mut app, MouseEventKind::ScrollDown);
+                press_key(&mut keys, KeyCode::Down);
+                assert_eq!(
+                    app.config_pane.selected_field,
+                    keys.config_pane.selected_field
+                );
+            }
+
+            // While a value is edited the wheel does nothing.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::SetDetailMode(DetailMode::Config));
+            app.config_pane.edit = Some(ConfigEditState {
+                field: ConfigField::WagoApiKey,
+                value: TextInput::default(),
+            });
+            assert!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10))
+                    .is_empty()
+            );
+            assert!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10))
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn the_wheel_moves_the_selected_backup() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            apply_all(&mut app, AppMessage::SetDetailMode(DetailMode::Backup));
+            app.backup_pane = app.backup_pane.with_backups(vec![
+                sample_backup(),
+                sample_backup(),
+                sample_backup(),
+            ]);
+            let _ = render_rows(&mut app, 80, 24);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Backup));
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                vec![AppMessage::BackupSelectionNext]
+            );
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                vec![AppMessage::BackupSelectionPrevious]
+            );
+
+            assert_eq!(app.backup_pane.selected_backup, 0);
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            assert_eq!(app.backup_pane.selected_backup, 2);
+            wheel(&mut app, MouseEventKind::ScrollUp);
+            assert_eq!(app.backup_pane.selected_backup, 1);
+        }
+
+        #[test]
+        fn the_wheel_moves_through_install_results_only_with_the_cursor_there() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::WagoSearchFinished(Ok(
+                    WagoSearchOutcome {
+                        query: "big".to_string(),
+                        results: vec![sample_result("a", "Alpha"), sample_result("b", "Beta")],
+                    },
+                ))),
+            );
+            let _ = render_rows(&mut app, 80, 24);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
+
+            // The box has focus: the wheel scrolls the sheet, as before.
+            assert_eq!(app.search_pane.focus, SearchFocus::Box);
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                vec![AppMessage::SheetScroll(SheetMove::LineDown)]
+            );
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                vec![AppMessage::SheetScroll(SheetMove::LineUp)]
+            );
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            assert_eq!(app.search_pane.focus, SearchFocus::Box);
+
+            // The cursor is in the results: the wheel moves it.
+            press_key(&mut app, KeyCode::Down);
+            assert_eq!(app.search_pane.selected_result, Some(0));
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                vec![AppMessage::SearchResultNext]
+            );
+            assert_eq!(
+                app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                vec![AppMessage::SearchResultPrevious]
+            );
+            wheel(&mut app, MouseEventKind::ScrollDown);
+            assert_eq!(app.search_pane.selected_result, Some(1));
+            wheel(&mut app, MouseEventKind::ScrollUp);
+            assert_eq!(app.search_pane.selected_result, Some(0));
+        }
+
+        #[test]
+        fn the_wheel_still_scrolls_help_over_a_cursor_list() {
+            for mode in [DetailMode::Config, DetailMode::Backup] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                apply_all(&mut app, AppMessage::SetDetailMode(mode));
+                apply_all(&mut app, AppMessage::DashboardOpenHelp);
+                let _ = render_rows(&mut app, 80, 24);
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+                assert_eq!(
+                    app.messages_for_mouse(mouse(MouseEventKind::ScrollDown, 10, 10)),
+                    vec![AppMessage::SheetScroll(SheetMove::LineDown)],
+                    "{mode:?}"
+                );
+                assert_eq!(
+                    app.messages_for_mouse(mouse(MouseEventKind::ScrollUp, 10, 10)),
+                    vec![AppMessage::SheetScroll(SheetMove::LineUp)],
+                    "{mode:?}"
+                );
+            }
         }
 
         #[test]
