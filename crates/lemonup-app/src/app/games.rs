@@ -228,8 +228,22 @@ impl App {
             Some("Wait for the undo to finish first.")
         } else if self.toc_apply_running {
             Some("Wait for the .toc change to finish first.")
+        } else if self.import_running {
+            Some("Wait for the import to finish first.")
         } else if self.backup_pane.in_progress {
             Some("Wait for the backup to finish first.")
+        } else {
+            None
+        }
+    }
+
+    /// Why `profile` can't be removed now: a check of it is running, or an import is
+    /// running in the game in use.
+    fn remove_busy_note(&self, profile: &str, name: &str) -> Option<String> {
+        if self.games.checking.as_deref() == Some(profile) {
+            Some(format!("Wait for the check of {name} to finish first."))
+        } else if self.import_running {
+            Some("Wait for the import to finish first.".to_string())
         } else {
             None
         }
@@ -309,11 +323,8 @@ impl App {
                             "{name} can't be removed: LemonUp commands without --profile use it."
                         ),
                     )]
-                } else if self.games.checking.as_deref() == Some(game.profile.as_str()) {
-                    vec![self.games_note(
-                        StatusKind::Note,
-                        &format!("Wait for the check of {name} to finish first."),
-                    )]
+                } else if let Some(note) = self.remove_busy_note(&game.profile, name) {
+                    vec![self.games_note(StatusKind::Note, &note)]
                 } else {
                     vec![AppAction::Games(GamesAction::SetPendingRemove(Some(
                         game.profile.clone(),
@@ -321,10 +332,19 @@ impl App {
                 }
             }
             GamesMessage::ConfirmRemove => match self.games.pending_remove.clone() {
-                Some(profile) => vec![
-                    AppAction::Games(GamesAction::SetPendingRemove(None)),
-                    AppAction::Games(GamesAction::Remove(profile)),
-                ],
+                // A check may have started while the question was open.
+                Some(profile) => {
+                    match self.remove_busy_note(&profile, &self.game_display_name(&profile)) {
+                        Some(note) => vec![
+                            AppAction::Games(GamesAction::SetPendingRemove(None)),
+                            self.games_note(StatusKind::Note, &note),
+                        ],
+                        None => vec![
+                            AppAction::Games(GamesAction::SetPendingRemove(None)),
+                            AppAction::Games(GamesAction::Remove(profile)),
+                        ],
+                    }
+                }
                 None => vec![],
             },
             GamesMessage::CancelRemove => {
@@ -632,6 +652,8 @@ impl App {
             .games
             .iter()
             .filter(|game| game.profile != self.runtime.profile_name && game.flavor.is_some())
+            // A game being removed is never checked: the removal waits for a check.
+            .filter(|game| self.games.pending_remove.as_deref() != Some(game.profile.as_str()))
             .find(|game| {
                 let last = game
                     .last_checked

@@ -62,6 +62,7 @@ pub enum AppAction {
     SetBackupPaneState(BackupPaneState),
     SetTocEditPane(TocEditPane),
     SetTocApplyInProgress(bool),
+    SetImportRunning(bool),
     /// Writes a .toc change into the addon's files in the background.
     StartTocApply {
         addon_dir: PathBuf,

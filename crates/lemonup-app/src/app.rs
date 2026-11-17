@@ -2777,6 +2777,8 @@ pub struct App {
     toc_pane: TocEditPane,
     /// A .toc change is being written.
     toc_apply_running: bool,
+    /// An addon list is being loaded into this game.
+    import_running: bool,
     /// When the key being handled was read from the terminal; `None` in tests.
     key_read_at: Option<Instant>,
     /// The question last drawn and when it first was, so a key typed before
@@ -2971,6 +2973,7 @@ impl App {
             delete_in_progress: false,
             toc_pane: TocEditPane::default(),
             toc_apply_running: false,
+            import_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -5081,7 +5084,13 @@ impl App {
             },
             AppMessage::ConfigImportAddons => match default_transfer_path() {
                 Ok(input_path) => {
-                    if self.effective_addon_dir.is_none() {
+                    if self.import_running {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
+                            DetailMode::Config,
+                            "Wait for the import to finish first.",
+                        ))]
+                    } else if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
@@ -5643,6 +5652,7 @@ impl App {
                     let status =
                         transfer_import_status_message(&outcome.analysis, &outcome.install_summary);
                     vec![
+                        AppAction::SetImportRunning(false),
                         AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                         AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
                         AppAction::CompleteAddonScan {
@@ -5661,11 +5671,14 @@ impl App {
                     ]
                 }
                 AppTaskEvent::TransferImportFinished(Err(error)) => {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Problem,
-                        DetailMode::Config,
-                        &format!("Couldn't import the addon list: {error}"),
-                    ))]
+                    vec![
+                        AppAction::SetImportRunning(false),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Config,
+                            &format!("Couldn't import the addon list: {error}"),
+                        )),
+                    ]
                 }
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
                     AppAction::SetSearchPaneState(
@@ -5997,6 +6010,7 @@ impl App {
             }
             AppAction::SetTocEditPane(pane) => self.toc_pane = pane,
             AppAction::SetTocApplyInProgress(running) => self.toc_apply_running = running,
+            AppAction::SetImportRunning(running) => self.import_running = running,
             AppAction::StartTocApply { addon_dir, request } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
@@ -6504,6 +6518,7 @@ impl App {
                 input_path,
                 wago_api_key,
             } => {
+                self.import_running = true;
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
@@ -8735,6 +8750,7 @@ mod tests {
             delete_in_progress: false,
             toc_pane: TocEditPane::default(),
             toc_apply_running: false,
+            import_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -20473,6 +20489,10 @@ mod tests {
                     |app: &mut App| app.toc_apply_running = true,
                     "Wait for the .toc change to finish first.",
                 ),
+                (
+                    |app: &mut App| app.import_running = true,
+                    "Wait for the import to finish first.",
+                ),
             ] {
                 let mut app = open_app(&games, DEFAULT_PROFILE);
                 busy(&mut app);
@@ -20536,6 +20556,57 @@ mod tests {
                 app.status_line
                     .text
                     .contains("Removed WoW Forever from LemonUp."),
+                "{}",
+                app.status_line.text
+            );
+        }
+
+        #[test]
+        fn removing_waits_for_an_import_and_the_import_finishing_frees_the_games() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            app.import_running = true;
+            press_key(&mut app, KeyCode::Char('x'));
+            assert!(app.active_question().is_none());
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Wait for the import to finish first."),
+                "{}",
+                app.status_line.text
+            );
+            assert!(profile_exists(&games.roots, "forever"));
+
+            // The result of the import frees the games, however it ended.
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::TransferImportFinished(Err(
+                    "the file is gone".to_string(),
+                ))),
+            );
+            assert!(!app.import_running);
+            assert_eq!(app.switch_busy_note(), None);
+        }
+
+        #[test]
+        fn a_check_that_starts_while_the_removal_is_asked_stops_the_removal() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Char('x'));
+            app.note_question_shown(Instant::now() - StdDuration::from_secs(1));
+            app.games.checking = Some("forever".to_string());
+            press_key(&mut app, KeyCode::Char('y'));
+
+            assert!(profile_exists(&games.roots, "forever"));
+            assert_eq!(app.games.pending_remove, None);
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Wait for the check of WoW Forever to finish first."),
                 "{}",
                 app.status_line.text
             );
@@ -21205,6 +21276,19 @@ mod tests {
                 app.other_game_check_due(now + Duration::hours(1)),
                 Some("forever".to_string())
             );
+        }
+
+        #[test]
+        fn a_game_being_removed_is_never_checked() {
+            let now = OffsetDateTime::now_utc();
+            let mut app = scheduling_app();
+            app.games.pending_remove = Some("forever".to_string());
+            assert_eq!(app.other_game_check_due(now), None);
+            assert!(!app.update(AppMessage::Tick).contains(&AppAction::Games(
+                GamesAction::StartCheck("forever".to_string())
+            )));
+            app.games.pending_remove = None;
+            assert_eq!(app.other_game_check_due(now), Some("forever".to_string()));
         }
 
         #[test]
