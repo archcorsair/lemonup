@@ -1,12 +1,15 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{LemonupError, Result};
 use crate::paths::AppPaths;
-use crate::shared::{OtherGamesCheck, SharedSettingsStore};
+use crate::shared::{
+    OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore, parse_profile_config,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,10 +84,52 @@ pub enum ConfigLoad {
 /// A profile's `config.toml`. Built with [`ConfigStore::for_profile`], it also reads the
 /// settings all games share from `shared.toml` (they win over the profile's copies) and
 /// writes them there; built with [`ConfigStore::new`], it is the bare file.
-#[derive(Debug, Clone)]
+///
+/// It remembers the shared values it last read or saved. A save writes to `shared.toml` only
+/// the shared values that differ from those: the ones changed in this game. Values another
+/// game (or another LemonUp window) saved since are kept, not replaced by the older copies
+/// this game still holds.
+#[derive(Debug)]
 pub struct ConfigStore {
     path: PathBuf,
-    shared: Option<SharedSettingsStore>,
+    shared: Option<SharedLink>,
+}
+
+#[derive(Debug)]
+struct SharedLink {
+    store: SharedSettingsStore,
+    profile: String,
+    /// The shared values the caller's config started from.
+    seen: Mutex<Option<SharedSettings>>,
+}
+
+impl SharedLink {
+    fn seen(&self) -> Option<SharedSettings> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn remember(&self, settings: SharedSettings) {
+        *self
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(settings);
+    }
+}
+
+impl Clone for ConfigStore {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            shared: self.shared.as_ref().map(|link| SharedLink {
+                store: link.store.clone(),
+                profile: link.profile.clone(),
+                seen: Mutex::new(link.seen()),
+            }),
+        }
+    }
 }
 
 impl ConfigStore {
@@ -96,7 +141,11 @@ impl ConfigStore {
     pub fn for_profile(paths: &AppPaths) -> Self {
         Self {
             path: paths.config_file.clone(),
-            shared: Some(SharedSettingsStore::for_roots(&paths.roots)),
+            shared: Some(SharedLink {
+                store: SharedSettingsStore::for_roots(&paths.roots),
+                profile: paths.profile.clone(),
+                seen: Mutex::new(None),
+            }),
         }
     }
 
@@ -105,20 +154,25 @@ impl ConfigStore {
     }
 
     pub fn shared_store(&self) -> Option<&SharedSettingsStore> {
-        self.shared.as_ref()
+        self.shared.as_ref().map(|link| &link.store)
     }
 
+    /// The profile's settings. A file that can't be read or parsed is an error naming it.
     pub fn load(&self) -> Result<ConfigLoad> {
         if !self.path.try_exists()? {
             return Ok(ConfigLoad::Missing(self.path.clone()));
         }
 
-        let raw = fs::read_to_string(&self.path)?;
-        let mut config = toml::from_str::<AppConfig>(&raw)?;
-        if let Some(shared) = &self.shared {
-            shared
-                .load_or_migrate(Some(&self.path))?
-                .apply_to(&mut config);
+        let raw =
+            fs::read_to_string(&self.path).map_err(|error| LemonupError::SettingsUnreadable {
+                path: self.path.clone(),
+                reason: error.to_string(),
+            })?;
+        let (mut config, in_file) = parse_profile_config(&self.path, &raw)?;
+        if let Some(link) = &self.shared {
+            let settings = link.store.load_for_profile(&link.profile, &in_file)?;
+            settings.apply_to(&mut config);
+            link.remember(settings);
         }
         Ok(ConfigLoad::Loaded(config))
     }
@@ -126,8 +180,10 @@ impl ConfigStore {
     /// The settings of a profile that isn't set up yet: the defaults, with the shared values.
     pub fn unconfigured(&self) -> Result<AppConfig> {
         let mut config = AppConfig::new_unconfigured();
-        if let Some(shared) = &self.shared {
-            shared.load_or_migrate(None)?.apply_to(&mut config);
+        if let Some(link) = &self.shared {
+            let settings = link.store.load_or_migrate()?;
+            settings.apply_to(&mut config);
+            link.remember(settings);
         }
         Ok(config)
     }
@@ -140,16 +196,46 @@ impl ConfigStore {
         }
     }
 
-    /// Saves `config`. The shared values go to `shared.toml` first; the profile's file still
-    /// gets every field, the shared ones included, so an older LemonUp can read it.
+    /// Saves `config`.
+    ///
+    /// `shared.toml` is read again and gets only the shared values changed in this game
+    /// since this store last read or saved them (all of them when it hasn't). The profile's
+    /// file gets every field, the shared ones as `shared.toml` now holds them, so an older
+    /// LemonUp can read it.
+    ///
+    /// `shared.toml` is written first. When the profile's file then can't be written, the
+    /// old `shared.toml` is put back and the save fails, so nothing reports a save that
+    /// didn't happen. A crash between the two writes, or a failed put back, can still leave
+    /// the new shared values with the old profile file; the next load then keeps the shared
+    /// ones.
     pub fn write_config(&self, config: &AppConfig) -> Result<()> {
-        if let Some(shared) = &self.shared {
-            let mut settings = shared.load_or_migrate(Some(&self.path))?;
-            settings.update_from(config);
-            shared.write(&settings)?;
+        let Some(link) = &self.shared else {
+            let rendered = toml::to_string_pretty(config)?;
+            return write_private_file(&self.path, &rendered);
+        };
+
+        let current = link.store.current()?;
+        let mut merged = current.settings.clone();
+        merged.take_changes(config, link.seen().as_ref());
+        let mut file_config = config.clone();
+        merged.apply_to(&mut file_config);
+        let rendered = toml::to_string_pretty(&file_config)?;
+
+        if current.may_write {
+            merged
+                .profile_copies
+                .insert(link.profile.clone(), SharedFields::of(&merged));
+            link.store.write(&merged)?;
+            if let Err(error) = write_private_file(&self.path, &rendered) {
+                link.store
+                    .restore(current.on_disk.then_some(&current.settings));
+                return Err(error);
+            }
+        } else {
+            write_private_file(&self.path, &rendered)?;
         }
-        let rendered = toml::to_string_pretty(config)?;
-        write_private_file(&self.path, &rendered)
+        link.remember(SharedSettings::from_config(config));
+        Ok(())
     }
 
     pub fn write_new_config(&self, config: &AppConfig) -> Result<()> {

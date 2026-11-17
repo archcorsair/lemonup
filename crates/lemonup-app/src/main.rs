@@ -29,7 +29,7 @@ use clap::Parser;
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding};
 use lemonup_core::{
     AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    ProfileRoots, ProfileSummary, ScanSummary, StateDatabase, UpdateStatus, V1Location,
+    ProfileRoots, ProfileSummary, ScanSummary, StateDatabase, TuiProfile, UpdateStatus, V1Location,
     V1MigrationOutcome, analyze_import, default_transfer_path, export_addons, list_profiles,
     migrate_v1_if_needed, parse_import_file, remember_last_used, scan_addons_dir_report,
     tui_profile, validate_addons_path,
@@ -121,7 +121,10 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Commands::Tui);
     let roots = ProfileRoots::discover()?;
-    let profile = command_profile(&roots, cli.profile, &command)?;
+    let TuiProfile {
+        name: profile,
+        notice: profile_notice,
+    } = command_profile(&roots, cli.profile, &command)?;
     let runtime = AppRuntime::new(
         profile.clone(),
         cli.addon_dir.clone(),
@@ -133,7 +136,16 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
 
     configure_tracing(log_destination(&command, &paths));
 
-    let startup_notice = run_v1_migration(&paths, V1Location::discover());
+    if let Some(notice) = &profile_notice {
+        tracing::warn!(notice, "the last used game didn't open");
+    }
+    let startup_notice = run_v1_migration(&paths, V1Location::discover()).or_else(|| {
+        profile_notice.map(|text| StartupNotice {
+            text,
+            is_error: true,
+            details: Vec::new(),
+        })
+    });
     if let Some(notice) = startup_notice.as_ref()
         && !matches!(command, Commands::Tui)
     {
@@ -213,11 +225,12 @@ fn command_profile(
     roots: &ProfileRoots,
     requested: Option<String>,
     command: &Commands,
-) -> lemonup_core::Result<String> {
+) -> lemonup_core::Result<TuiProfile> {
+    let plain = |name: String| TuiProfile { name, notice: None };
     match requested {
-        Some(profile) => Ok(profile),
+        Some(profile) => Ok(plain(profile)),
         None if matches!(command, Commands::Tui) => tui_profile(roots, None),
-        None => Ok(DEFAULT_PROFILE.to_string()),
+        None => Ok(plain(DEFAULT_PROFILE.to_string())),
     }
 }
 
@@ -2991,7 +3004,9 @@ mod profile_tests {
         remember_last_used(&roots, "forever").expect("remember");
 
         let profile = |requested: Option<&str>, command: Commands| {
-            command_profile(&roots, requested.map(str::to_string), &command).expect("profile")
+            command_profile(&roots, requested.map(str::to_string), &command)
+                .expect("profile")
+                .name
         };
         assert_eq!(profile(None, Commands::Tui), "forever");
         assert_eq!(profile(None, Commands::Sync), DEFAULT_PROFILE);

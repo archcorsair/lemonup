@@ -20388,7 +20388,7 @@ mod tests {
             );
             assert_eq!(app.shell_ui.overlay.active, None);
             assert_eq!(
-                tui_profile(&games.roots, None).expect("last used"),
+                tui_profile(&games.roots, None).expect("last used").name,
                 "forever"
             );
             let shown = screen(&mut app, 120, 30);
@@ -20587,6 +20587,78 @@ mod tests {
             press_key(&mut app, KeyCode::Enter);
             assert_eq!(app.runtime.profile_name, "forever");
             assert_eq!(app.config_pane.draft.theme, changed);
+        }
+
+        fn shared_now(games: &Games) -> lemonup_core::SharedSettings {
+            lemonup_core::SharedSettingsStore::for_roots(&games.roots)
+                .read()
+                .expect("read shared")
+                .expect("shared exists")
+        }
+
+        fn change_setting(app: &mut App, field: ConfigField) {
+            press_key(app, KeyCode::Char('s'));
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|row| *row == field)
+                .expect("settings row");
+            press_key(app, KeyCode::Right);
+            press_key(app, KeyCode::Esc);
+        }
+
+        /// Two LemonUp windows, Retail and WoW Forever. The key saved in one is kept by
+        /// every save the other makes with the older settings it still holds.
+        #[test]
+        fn a_key_saved_in_one_open_game_survives_saves_in_another() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+            assert!(retail.config_pane.persisted.wago_api_key.is_none());
+
+            // d hides Retail's welcome card.
+            send(&mut retail, AppMessage::DashboardHideFirstRunCard);
+            assert!(retail.config_pane.persisted.hide_first_run_card);
+            assert!(shared_now(&games).wago_api_key.as_deref() == Some(KEY));
+
+            // Settings, for all games and for this game.
+            let before = shared_now(&games);
+            change_setting(&mut retail, ConfigField::CheckOtherGames);
+            change_setting(&mut retail, ConfigField::Theme);
+            change_setting(&mut retail, ConfigField::ShowLibs);
+            let after = shared_now(&games);
+            assert!(after.wago_api_key.as_deref() == Some(KEY));
+            assert_ne!(after.check_other_games, before.check_other_games);
+            assert_ne!(after.theme, before.theme);
+            assert!(retail.config_pane.persisted.show_libs);
+
+            // WoW Forever, still open, saves with the look it read before Retail changed it.
+            send(&mut forever, AppMessage::DashboardHideFirstRunCard);
+            let last = shared_now(&games);
+            assert_eq!(last.theme, after.theme);
+            assert_eq!(last.check_other_games, after.check_other_games);
+            assert!(last.wago_api_key.as_deref() == Some(KEY));
+
+            // Switching games in one window reads the shared settings again.
+            press_key(&mut retail, KeyCode::Char('p'));
+            press_key(&mut retail, KeyCode::Down);
+            press_key(&mut retail, KeyCode::Enter);
+            assert_eq!(retail.runtime.profile_name, "forever");
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert_eq!(retail.config_pane.draft.theme, after.theme);
+            assert!(
+                !retail.config_pane.draft.show_libs,
+                "show libraries is per game"
+            );
         }
 
         #[test]

@@ -156,7 +156,7 @@ pub fn list_profiles(roots: &ProfileRoots) -> crate::Result<Vec<ProfileSummary>>
 
 /// Names of the profiles under `profiles/` that have a config, sorted. Folders whose names
 /// `--profile` can't take are not profiles and are skipped.
-fn other_profile_names(roots: &ProfileRoots) -> crate::Result<Vec<String>> {
+pub(crate) fn other_profile_names(roots: &ProfileRoots) -> crate::Result<Vec<String>> {
     let entries = match fs::read_dir(roots.profiles_config_dir()) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
@@ -286,12 +286,13 @@ pub fn create_profile(
 
     let mut config = AppConfig::new_unconfigured();
     SharedSettingsStore::for_roots(roots)
-        .load_or_migrate(None)?
+        .load_or_migrate()?
         .apply_to(&mut config);
     config.addon_dir = Some(addon_dir.clone());
 
     paths.ensure()?;
-    let written = ConfigStore::new(paths.config_file.clone())
+    // Through the shared settings, so they record what this game's config now holds.
+    let written = ConfigStore::for_profile(&paths)
         .write_config(&config)
         .and_then(|()| StateDatabase::open(&paths.state_db_file)?.bind_addon_dir(&addon_dir));
     if let Err(error) = written {
@@ -325,7 +326,8 @@ pub fn remove_profile(
     if name == DEFAULT_PROFILE {
         return Err(ProfileError::DefaultProfile);
     }
-    if name == in_use {
+    // Without case, like Windows and macOS find its folder.
+    if name.eq_ignore_ascii_case(in_use) {
         return Err(ProfileError::InUse(name.to_string()));
     }
     let paths = roots.paths(name)?;
@@ -348,17 +350,41 @@ pub fn remove_profile(
     })
 }
 
+/// The profile the TUI opens, from [`tui_profile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiProfile {
+    pub name: String,
+    /// Why the game used last didn't open, to say once.
+    pub notice: Option<String>,
+}
+
 /// The profile plain `lemonup` opens: `requested` when given, else the last one the TUI
-/// opened, else (none yet, or it was removed) the default one. Never writes.
-pub fn tui_profile(roots: &ProfileRoots, requested: Option<&str>) -> crate::Result<String> {
+/// opened, else (none yet, or it was removed) the default one. When the last used game's
+/// settings can't be read, the default game opens and `notice` says why. Never writes.
+pub fn tui_profile(roots: &ProfileRoots, requested: Option<&str>) -> crate::Result<TuiProfile> {
+    let default = |notice| TuiProfile {
+        name: DEFAULT_PROFILE.to_string(),
+        notice,
+    };
     if let Some(requested) = requested {
-        return Ok(requested.to_string());
+        return Ok(TuiProfile {
+            name: requested.to_string(),
+            notice: None,
+        });
     }
     let last_used = SharedSettingsStore::for_roots(roots)
         .read()?
         .and_then(|settings| settings.last_used_profile)
-        .filter(|name| profile_exists(roots, name));
-    Ok(last_used.unwrap_or_else(|| DEFAULT_PROFILE.to_string()))
+        .filter(|name| name != DEFAULT_PROFILE && profile_exists(roots, name));
+    let Some(name) = last_used else {
+        return Ok(default(None));
+    };
+    match ConfigStore::new(roots.paths(&name)?.config_file).load() {
+        Ok(_) => Ok(TuiProfile { name, notice: None }),
+        Err(error) => Ok(default(Some(format!(
+            "Opened your default game: the game you used last ('{name}') couldn't be opened | {error}"
+        )))),
+    }
 }
 
 /// Remembers `profile` as the one the TUI opened last.
@@ -680,18 +706,82 @@ mod tests {
     fn plain_launch_opens_the_last_used_game_or_the_default_one() {
         let temp = tempdir().expect("tempdir");
         let roots = test_roots(temp.path());
-        assert_eq!(
-            tui_profile(&roots, None).expect("none yet"),
-            DEFAULT_PROFILE
-        );
+        let opened = |requested: Option<&str>| {
+            let profile = tui_profile(&roots, requested).expect("tui profile");
+            assert_eq!(profile.notice, None);
+            profile.name
+        };
+        assert_eq!(opened(None), DEFAULT_PROFILE);
 
         let forever = install(temp.path(), "_forever_");
         create_profile(&roots, &forever, None).expect("create");
         remember_last_used(&roots, "forever").expect("remember");
-        assert_eq!(tui_profile(&roots, None).expect("last used"), "forever");
-        assert_eq!(tui_profile(&roots, Some("other")).expect("flag"), "other");
+        assert_eq!(opened(None), "forever");
+        assert_eq!(opened(Some("other")), "other");
 
         remove_profile(&roots, "forever", DEFAULT_PROFILE).expect("remove");
-        assert_eq!(tui_profile(&roots, None).expect("gone"), DEFAULT_PROFILE);
+        assert_eq!(opened(None), DEFAULT_PROFILE);
+    }
+
+    #[test]
+    fn a_last_used_game_that_cannot_be_read_opens_the_default_one_and_says_why() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let forever = install(temp.path(), "_forever_");
+        let created = create_profile(&roots, &forever, None).expect("create");
+        remember_last_used(&roots, "forever").expect("remember");
+        fs::write(&created.paths.config_file, "addon_dir = [").expect("break it");
+
+        let profile = tui_profile(&roots, None).expect("still opens");
+        assert_eq!(profile.name, DEFAULT_PROFILE);
+        let notice = profile.notice.expect("says why");
+        assert!(notice.contains("Opened your default game"), "{notice}");
+        assert!(notice.contains("'forever'"), "{notice}");
+        assert!(
+            notice.contains(&created.paths.config_file.display().to_string()),
+            "{notice}"
+        );
+        // Asked for by name, it is opened, and its error says which file.
+        assert_eq!(
+            tui_profile(&roots, Some("forever")).expect("flag").name,
+            "forever"
+        );
+    }
+
+    #[test]
+    fn a_game_whose_settings_cannot_be_read_names_the_file() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let forever = install(temp.path(), "_forever_");
+        let created = create_profile(&roots, &forever, None).expect("create");
+        fs::write(&created.paths.config_file, "addon_dir = [").expect("break it");
+
+        let error = ConfigStore::for_profile(&created.paths)
+            .load()
+            .expect_err("unreadable");
+        let shown = error.to_string();
+        assert!(
+            shown.contains(&created.paths.config_file.display().to_string()),
+            "{shown}"
+        );
+        assert!(shown.contains("nothing was changed"), "{shown}");
+    }
+
+    #[test]
+    fn remove_refuses_the_game_in_use_written_in_another_case() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let forever = install(temp.path(), "_forever_");
+        let created = create_profile(&roots, &forever, None).expect("create");
+
+        assert!(matches!(
+            remove_profile(&roots, "Forever", "forever"),
+            Err(ProfileError::InUse(_))
+        ));
+        assert!(matches!(
+            remove_profile(&roots, "forever", "FOREVER"),
+            Err(ProfileError::InUse(_))
+        ));
+        assert!(created.paths.config_file.is_file());
     }
 }

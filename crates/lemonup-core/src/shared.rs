@@ -7,12 +7,20 @@
 //! config, and they win over the copies in each profile's config.
 //!
 //! Migration: the first time a profile's settings are read or written and `shared.toml` does
-//! not exist, it is created from the default profile's config (or, when there is none, from
-//! the config being opened, else from the defaults). Nothing is removed from any profile's
-//! config, and every later save still writes the shared values into the profile's own config
-//! too, so an older LemonUp that knows nothing of `shared.toml` keeps working with the values
-//! that profile last saved.
+//! not exist, it is created from the configs of every game. Each value comes from the default
+//! profile's config when that config has it; else from the first other profile's config that
+//! has it, by profile name (`profiles/<name>`, sorted). A value a config doesn't have, or a
+//! Wago.io key it doesn't have, never replaces one another config has. When no config exists
+//! yet, the defaults are used without writing `shared.toml`: it is never written from the
+//! defaults alone. Nothing is removed from any profile's config.
+//!
+//! Every save still writes the shared values into the profile's own config too, so an older
+//! LemonUp that knows nothing of `shared.toml` keeps working with the values that profile last
+//! saved. `shared.toml` also records, per profile, the shared values LemonUp last wrote into
+//! that profile's config. When the config holds other values later, an older LemonUp changed
+//! them there, and they are taken as the newer ones.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AppConfig, ThemeMode, write_private_file};
 use crate::error::{LemonupError, Result};
-use crate::paths::ProfileRoots;
+use crate::paths::{DEFAULT_PROFILE, ProfileRoots};
 
 /// How often the games you don't have open are checked for updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -84,6 +92,146 @@ impl OtherGamesCheck {
     }
 }
 
+/// The shared values as one profile's `config.toml` holds them. A value the file doesn't
+/// have is `None`, and so is a missing or empty Wago.io key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharedFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wago_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simple_symbols: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_check_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_check_interval_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_interval_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_other_games: Option<OtherGamesCheck>,
+}
+
+impl SharedFields {
+    /// The shared values in a profile's config file.
+    pub fn parse(raw: &str) -> std::result::Result<Self, toml::de::Error> {
+        let mut fields = toml::from_str::<Self>(raw)?;
+        fields.wago_api_key = fields.wago_api_key.filter(|key| !key.trim().is_empty());
+        Ok(fields)
+    }
+
+    /// Every shared value of `settings`, as a save writes them into a profile's config.
+    pub fn of(settings: &SharedSettings) -> Self {
+        Self {
+            wago_api_key: settings.wago_api_key.clone(),
+            theme: Some(settings.theme),
+            simple_symbols: Some(settings.simple_symbols),
+            reduce_motion: Some(settings.reduce_motion),
+            auto_check_enabled: Some(settings.auto_check_enabled),
+            auto_check_interval_secs: Some(settings.auto_check_interval_secs),
+            check_interval_secs: Some(settings.check_interval_secs),
+            check_other_games: Some(settings.check_other_games),
+        }
+    }
+
+    /// Takes each value `self` doesn't have from `other`.
+    fn fill_from(&mut self, other: &Self) {
+        fn fill<T: Clone>(mine: &mut Option<T>, theirs: &Option<T>) {
+            if mine.is_none() {
+                mine.clone_from(theirs);
+            }
+        }
+        fill(&mut self.wago_api_key, &other.wago_api_key);
+        fill(&mut self.theme, &other.theme);
+        fill(&mut self.simple_symbols, &other.simple_symbols);
+        fill(&mut self.reduce_motion, &other.reduce_motion);
+        fill(&mut self.auto_check_enabled, &other.auto_check_enabled);
+        fill(
+            &mut self.auto_check_interval_secs,
+            &other.auto_check_interval_secs,
+        );
+        fill(&mut self.check_interval_secs, &other.check_interval_secs);
+        fill(&mut self.check_other_games, &other.check_other_games);
+    }
+
+    /// The values `self` has that differ from `written`. A value `self` doesn't have is not
+    /// a change: an older LemonUp leaves out what it doesn't know, and a key is never
+    /// removed by guessing.
+    fn changed_since(&self, written: &Self) -> Self {
+        fn changed<T: Clone + PartialEq>(mine: &Option<T>, written: &Option<T>) -> Option<T> {
+            mine.clone().filter(|value| written.as_ref() != Some(value))
+        }
+        Self {
+            wago_api_key: changed(&self.wago_api_key, &written.wago_api_key),
+            theme: changed(&self.theme, &written.theme),
+            simple_symbols: changed(&self.simple_symbols, &written.simple_symbols),
+            reduce_motion: changed(&self.reduce_motion, &written.reduce_motion),
+            auto_check_enabled: changed(&self.auto_check_enabled, &written.auto_check_enabled),
+            auto_check_interval_secs: changed(
+                &self.auto_check_interval_secs,
+                &written.auto_check_interval_secs,
+            ),
+            check_interval_secs: changed(&self.check_interval_secs, &written.check_interval_secs),
+            check_other_games: changed(&self.check_other_games, &written.check_other_games),
+        }
+    }
+
+    /// Puts the values `self` has into `settings`.
+    fn apply_to(&self, settings: &mut SharedSettings) {
+        if let Some(key) = &self.wago_api_key {
+            settings.wago_api_key = Some(key.clone());
+        }
+        if let Some(theme) = self.theme {
+            settings.theme = theme;
+        }
+        if let Some(value) = self.simple_symbols {
+            settings.simple_symbols = value;
+        }
+        if let Some(value) = self.reduce_motion {
+            settings.reduce_motion = value;
+        }
+        if let Some(value) = self.auto_check_enabled {
+            settings.auto_check_enabled = value;
+        }
+        if let Some(value) = self.auto_check_interval_secs {
+            settings.auto_check_interval_secs = value;
+        }
+        if let Some(value) = self.check_interval_secs {
+            settings.check_interval_secs = value;
+        }
+        if let Some(value) = self.check_other_games {
+            settings.check_other_games = value;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Never prints the Wago.io key, only whether there is one.
+impl fmt::Debug for SharedFields {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedFields")
+            .field(
+                "wago_api_key",
+                &self.wago_api_key.as_ref().map(|_| "<hidden>"),
+            )
+            .field("theme", &self.theme)
+            .field("simple_symbols", &self.simple_symbols)
+            .field("reduce_motion", &self.reduce_motion)
+            .field("auto_check_enabled", &self.auto_check_enabled)
+            .field("auto_check_interval_secs", &self.auto_check_interval_secs)
+            .field("check_interval_secs", &self.check_interval_secs)
+            .field("check_other_games", &self.check_other_games)
+            .finish()
+    }
+}
+
 /// The contents of `shared.toml`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -100,6 +248,10 @@ pub struct SharedSettings {
     pub check_other_games: OtherGamesCheck,
     /// The profile the TUI opened last; plain `lemonup` opens it again.
     pub last_used_profile: Option<String>,
+    /// Per profile, the shared values LemonUp last wrote into its `config.toml`. Values
+    /// there that differ were changed by an older LemonUp.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_copies: BTreeMap<String, SharedFields>,
 }
 
 impl SharedSettings {
@@ -107,32 +259,53 @@ impl SharedSettings {
 
     /// The shared values of `config`, with no last used game.
     pub fn from_config(config: &AppConfig) -> Self {
-        let mut settings = Self {
+        Self {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
-            wago_api_key: None,
+            wago_api_key: config.wago_api_key.clone(),
             theme: config.theme,
-            simple_symbols: false,
-            reduce_motion: false,
-            auto_check_enabled: false,
-            auto_check_interval_secs: 0,
-            check_interval_secs: 0,
-            check_other_games: OtherGamesCheck::default(),
+            simple_symbols: config.simple_symbols,
+            reduce_motion: config.reduce_motion,
+            auto_check_enabled: config.auto_check_enabled,
+            auto_check_interval_secs: config.auto_check_interval_secs,
+            check_interval_secs: config.check_interval_secs,
+            check_other_games: config.check_other_games,
             last_used_profile: None,
-        };
-        settings.update_from(config);
-        settings
+            profile_copies: BTreeMap::new(),
+        }
     }
 
-    /// Takes the shared values from `config`; the last used game is kept.
-    pub fn update_from(&mut self, config: &AppConfig) {
-        self.wago_api_key = config.wago_api_key.clone();
-        self.theme = config.theme;
-        self.simple_symbols = config.simple_symbols;
-        self.reduce_motion = config.reduce_motion;
-        self.auto_check_enabled = config.auto_check_enabled;
-        self.auto_check_interval_secs = config.auto_check_interval_secs;
-        self.check_interval_secs = config.check_interval_secs;
-        self.check_other_games = config.check_other_games;
+    /// Takes from `config` each shared value that differs from `seen`, the values `config`
+    /// started from: those are the ones changed since. Without `seen`, takes them all. Every
+    /// other value stays as it is here, even when `config` still holds an older one.
+    pub fn take_changes(&mut self, config: &AppConfig, seen: Option<&SharedSettings>) {
+        let changed = |differs: fn(&SharedSettings, &AppConfig) -> bool| {
+            seen.is_none_or(|seen| differs(seen, config))
+        };
+        if changed(|seen, config| seen.wago_api_key != config.wago_api_key) {
+            self.wago_api_key = config.wago_api_key.clone();
+        }
+        if changed(|seen, config| seen.theme != config.theme) {
+            self.theme = config.theme;
+        }
+        if changed(|seen, config| seen.simple_symbols != config.simple_symbols) {
+            self.simple_symbols = config.simple_symbols;
+        }
+        if changed(|seen, config| seen.reduce_motion != config.reduce_motion) {
+            self.reduce_motion = config.reduce_motion;
+        }
+        if changed(|seen, config| seen.auto_check_enabled != config.auto_check_enabled) {
+            self.auto_check_enabled = config.auto_check_enabled;
+        }
+        if changed(|seen, config| seen.auto_check_interval_secs != config.auto_check_interval_secs)
+        {
+            self.auto_check_interval_secs = config.auto_check_interval_secs;
+        }
+        if changed(|seen, config| seen.check_interval_secs != config.check_interval_secs) {
+            self.check_interval_secs = config.check_interval_secs;
+        }
+        if changed(|seen, config| seen.check_other_games != config.check_other_games) {
+            self.check_other_games = config.check_other_games;
+        }
     }
 
     /// Puts the shared values into a profile's `config`.
@@ -172,28 +345,44 @@ impl fmt::Debug for SharedSettings {
             .field("check_interval_secs", &self.check_interval_secs)
             .field("check_other_games", &self.check_other_games)
             .field("last_used_profile", &self.last_used_profile)
+            .field("profile_copies", &self.profile_copies)
             .finish()
     }
+}
+
+/// The shared settings as they are now, and whether `shared.toml` holds them.
+#[derive(Debug, Clone)]
+pub(crate) struct CurrentShared {
+    pub(crate) settings: SharedSettings,
+    /// `shared.toml` exists and holds `settings`.
+    pub(crate) on_disk: bool,
+    /// A save may write `shared.toml`. Not while a game's config couldn't be read for the
+    /// migration: its values would be lost.
+    pub(crate) may_write: bool,
+}
+
+/// What the migration found in the configs of every game.
+struct Migration {
+    settings: SharedSettings,
+    /// At least one game has a config.
+    found_any: bool,
+    /// Configs of other games that couldn't be read.
+    skipped: Vec<PathBuf>,
 }
 
 /// Reads and writes `shared.toml`, creating it from the existing settings the first time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedSettingsStore {
     path: PathBuf,
-    /// The default profile's `config.toml`: the first source of the shared values.
-    default_config: PathBuf,
+    roots: ProfileRoots,
 }
 
 impl SharedSettingsStore {
-    pub fn new(path: PathBuf, default_config: PathBuf) -> Self {
-        Self {
-            path,
-            default_config,
-        }
-    }
-
     pub fn for_roots(roots: &ProfileRoots) -> Self {
-        Self::new(roots.shared_settings_file(), roots.default_config_file())
+        Self {
+            path: roots.shared_settings_file(),
+            roots: roots.clone(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -208,49 +397,201 @@ impl SharedSettingsStore {
         read_toml::<SharedSettings>(&self.path).map(Some)
     }
 
-    /// The shared settings, creating `shared.toml` first when it doesn't exist.
+    /// The shared settings, creating `shared.toml` first when it doesn't exist and a game has
+    /// a config to create it from (see the module docs for where each value comes from).
     ///
-    /// Its values come from the default profile's config; when that doesn't exist, from
-    /// `opening` (the config of the profile being opened) when it exists; else from the
-    /// defaults. A file that exists but can't be read is an error, and then nothing is
-    /// written: defaults never replace real values.
-    pub fn load_or_migrate(&self, opening: Option<&Path>) -> Result<SharedSettings> {
+    /// A file that exists but can't be read is an error, and then nothing is written:
+    /// defaults never replace real values. The default profile's config must be readable;
+    /// another game's config that can't be read is skipped, and then `shared.toml` isn't
+    /// written, so the next start tries again.
+    pub fn load_or_migrate(&self) -> Result<SharedSettings> {
+        Ok(self.current()?.settings)
+    }
+
+    pub(crate) fn current(&self) -> Result<CurrentShared> {
         if let Some(settings) = self.read()? {
-            return Ok(settings);
+            return Ok(CurrentShared {
+                settings,
+                on_disk: true,
+                may_write: true,
+            });
         }
 
-        let mut source = None;
-        for candidate in std::iter::once(self.default_config.as_path()).chain(opening) {
-            if candidate.try_exists()? {
-                source = Some(read_toml::<AppConfig>(candidate)?);
-                break;
+        let migration = self.migrate()?;
+        let complete = migration.skipped.is_empty();
+        if migration.found_any && complete {
+            self.write(&migration.settings)?;
+            tracing::info!(path = %self.path.display(), "created the settings shared by all games");
+        } else if !complete {
+            tracing::warn!(
+                skipped = ?migration.skipped,
+                "the settings shared by all games wait until every game's settings can be read"
+            );
+        }
+        Ok(CurrentShared {
+            settings: migration.settings,
+            on_disk: migration.found_any && complete,
+            may_write: complete,
+        })
+    }
+
+    fn migrate(&self) -> Result<Migration> {
+        let mut values = SharedFields::default();
+        let mut copies = BTreeMap::new();
+        let mut skipped = Vec::new();
+
+        let default_config = self.roots.default_config_file();
+        if default_config.try_exists()? {
+            let fields = read_profile_fields(&default_config).map_err(|error| match error {
+                LemonupError::SettingsUnreadable { path, reason } => {
+                    LemonupError::DefaultSettingsUnreadable { path, reason }
+                }
+                other => other,
+            })?;
+            values.fill_from(&fields);
+            copies.insert(DEFAULT_PROFILE.to_string(), fields);
+        }
+        // Sorted by name, so the same configs always give the same values.
+        for name in crate::profiles::other_profile_names(&self.roots)? {
+            let config_file = self.roots.paths(&name)?.config_file;
+            match read_profile_fields(&config_file) {
+                Ok(fields) => {
+                    values.fill_from(&fields);
+                    copies.insert(name, fields);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "couldn't read a game's settings for the shared settings");
+                    skipped.push(config_file);
+                }
             }
         }
-        let settings = source
-            .as_ref()
-            .map(SharedSettings::from_config)
+
+        let found_any = !copies.is_empty() || !skipped.is_empty();
+        let mut settings = SharedSettings::default();
+        values.apply_to(&mut settings);
+        settings.profile_copies = copies;
+        Ok(Migration {
+            settings,
+            found_any,
+            skipped,
+        })
+    }
+
+    /// The shared settings for opening `profile`, whose config holds `in_file`. Values there
+    /// that differ from what LemonUp last wrote into it were changed by an older LemonUp and
+    /// are taken as the newer ones.
+    pub(crate) fn load_for_profile(
+        &self,
+        profile: &str,
+        in_file: &SharedFields,
+    ) -> Result<SharedSettings> {
+        let current = self.current()?;
+        let mut settings = current.settings;
+        if !current.on_disk || settings.profile_copies.get(profile) == Some(in_file) {
+            return Ok(settings);
+        }
+        // With no record yet, what the file holds now becomes the record.
+        let newer = settings
+            .profile_copies
+            .get(profile)
+            .map(|written| in_file.changed_since(written))
             .unwrap_or_default();
-        self.write(&settings)?;
-        tracing::info!(path = %self.path.display(), "created the settings shared by all games");
+        newer.apply_to(&mut settings);
+        settings
+            .profile_copies
+            .insert(profile.to_string(), in_file.clone());
+        match self.write(&settings) {
+            Ok(()) if !newer.is_empty() => {
+                tracing::info!(profile, "kept the shared settings an older LemonUp changed");
+            }
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(%error, profile, "couldn't record this game's shared settings");
+            }
+        }
         Ok(settings)
     }
 
     /// Replaces `shared.toml` in one step (written beside it, then renamed), readable only by
-    /// its owner on Unix because it can hold the Wago.io key.
+    /// its owner on Unix because it can hold the Wago.io key. Refuses settings a newer
+    /// LemonUp saved: it could drop what this one doesn't know.
     pub fn write(&self, settings: &SharedSettings) -> Result<()> {
+        if settings.schema_version > SharedSettings::CURRENT_SCHEMA_VERSION {
+            return Err(LemonupError::SettingsTooNew {
+                path: self.path.clone(),
+            });
+        }
         let rendered = toml::to_string_pretty(settings)?;
         write_private_file(&self.path, &rendered)
     }
 
-    /// Remembers `profile` as the game the TUI opened last.
+    /// Puts back what `shared.toml` held before a save that couldn't finish: `previous`, or
+    /// no file. Best effort; the save already failed.
+    pub(crate) fn restore(&self, previous: Option<&SharedSettings>) {
+        let restored = match previous {
+            Some(settings) => self.write(settings),
+            None => std::fs::remove_file(&self.path).map_err(LemonupError::from),
+        };
+        if let Err(error) = restored {
+            tracing::warn!(%error, "couldn't put the shared settings back after a failed save");
+        }
+    }
+
+    /// Remembers `profile` as the game the TUI opened last. Writes nothing while no game has
+    /// settings yet: `shared.toml` is never made from the defaults alone.
     pub fn remember_last_used(&self, profile: &str) -> Result<()> {
-        let mut settings = self.load_or_migrate(None)?;
-        if settings.last_used_profile.as_deref() == Some(profile) {
+        let current = self.current()?;
+        let mut settings = current.settings;
+        if !current.on_disk || settings.last_used_profile.as_deref() == Some(profile) {
             return Ok(());
         }
         settings.last_used_profile = Some(profile.to_string());
         self.write(&settings)
     }
+
+    /// After the v1 migration wrote the default profile's config from `config`: when
+    /// `shared.toml` already exists, takes the key from `config` if it has none, and every
+    /// other value it doesn't have. The values it has stay.
+    pub fn adopt_v1_config(&self, config: &AppConfig) -> Result<()> {
+        let Some(mut settings) = self.read()? else {
+            return Ok(());
+        };
+        let raw = std::fs::read_to_string(&self.path)?;
+        let mut present =
+            SharedFields::parse(&raw).map_err(|error| LemonupError::SettingsUnreadable {
+                path: self.path.clone(),
+                reason: error.message().to_string(),
+            })?;
+        present.wago_api_key = settings.wago_api_key.clone();
+        let mut from_v1 = SharedFields::of(&SharedSettings::from_config(config));
+        from_v1.wago_api_key = from_v1.wago_api_key.filter(|key| !key.trim().is_empty());
+        present.fill_from(&from_v1);
+        present.apply_to(&mut settings);
+        settings
+            .profile_copies
+            .insert(DEFAULT_PROFILE.to_string(), from_v1);
+        self.write(&settings)
+    }
+}
+
+/// The shared values in the profile config at `path`, which must read as a whole config.
+fn read_profile_fields(path: &Path) -> Result<SharedFields> {
+    let raw = std::fs::read_to_string(path).map_err(|error| LemonupError::SettingsUnreadable {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    parse_profile_config(path, &raw).map(|(_, fields)| fields)
+}
+
+/// A profile's config and the shared values it holds, or why it can't be read.
+pub(crate) fn parse_profile_config(path: &Path, raw: &str) -> Result<(AppConfig, SharedFields)> {
+    let unreadable = |error: toml::de::Error| LemonupError::SettingsUnreadable {
+        path: path.to_path_buf(),
+        reason: error.message().to_string(),
+    };
+    let config = toml::from_str::<AppConfig>(raw).map_err(unreadable)?;
+    let fields = SharedFields::parse(raw).map_err(unreadable)?;
+    Ok((config, fields))
 }
 
 fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -269,9 +610,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{OtherGamesCheck, SharedSettings, SharedSettingsStore};
+    use super::{OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore};
     use crate::config::{AppConfig, ConfigLoad, ConfigStore, ThemeMode, temp_path_for};
-    use crate::paths::ProfileRoots;
+    use crate::paths::{DEFAULT_PROFILE, ProfileRoots};
 
     const SECRET: &str = "wago-secret-for-tests";
 
@@ -305,10 +646,16 @@ mod tests {
         let before = fs::read(roots.default_config_file()).expect("read default");
 
         let store = SharedSettingsStore::for_roots(&roots);
-        let settings = store.load_or_migrate(None).expect("migrate");
+        let settings = store.load_or_migrate().expect("migrate");
 
         let mut expected = SharedSettings::from_config(&default_config);
         expected.last_used_profile = None;
+        // It records what the default game's config holds, to notice an older LemonUp's
+        // changes there later.
+        expected.profile_copies.insert(
+            DEFAULT_PROFILE.to_string(),
+            SharedFields::of(&SharedSettings::from_config(&default_config)),
+        );
         // `assert!` rather than `assert_eq!`: a failure must not print the key.
         assert!(settings == expected, "{settings:?}");
         assert!(settings.wago_api_key.as_deref() == Some(SECRET));
@@ -325,20 +672,25 @@ mod tests {
     }
 
     #[test]
-    fn migration_without_a_default_config_uses_the_opened_config_then_the_defaults() {
+    fn with_no_config_anywhere_the_defaults_are_used_and_nothing_is_written() {
         let temp = tempdir().expect("tempdir");
         let roots = test_roots(temp.path());
         let store = SharedSettingsStore::for_roots(&roots);
-        assert!(store.load_or_migrate(None).expect("migrate") == SharedSettings::default());
-        assert_eq!(
-            store
-                .read()
-                .expect("read")
-                .expect("written")
-                .check_other_games,
-            OtherGamesCheck::OneDay
-        );
+        assert!(store.load_or_migrate().expect("migrate") == SharedSettings::default());
+        assert!(!store.path().exists());
+        // Remembering the last game doesn't make it from the defaults either.
+        store.remember_last_used("forever").expect("remember");
+        assert!(!store.path().exists());
+        // Nor does what plain `lemonup` and the Wago.io key lookup read for a game not
+        // set up yet.
+        let default = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("paths"));
+        let state = default.load().expect("load");
+        default.effective(&state).expect("effective");
+        assert!(!store.path().exists());
+    }
 
+    #[test]
+    fn migration_without_a_default_config_uses_another_games_config() {
         let temp = tempdir().expect("tempdir");
         let roots = test_roots(temp.path());
         let forever = roots.paths("forever").expect("paths");
@@ -349,11 +701,326 @@ mod tests {
             .write_config(&config)
             .expect("write forever config");
         let store = SharedSettingsStore::for_roots(&roots);
-        let settings = store
-            .load_or_migrate(Some(&forever.config_file))
-            .expect("migrate");
+        let settings = store.load_or_migrate().expect("migrate");
         assert_eq!(settings.theme, ThemeMode::Light);
         assert!(settings.wago_api_key.as_deref() == Some(SECRET));
+        assert!(
+            store.read().expect("read").expect("written").wago_api_key == settings.wago_api_key
+        );
+    }
+
+    /// Reviewer's scenario B: only a non-default game is set up, and plain `lemonup` opens
+    /// the default game (not set up) first.
+    #[test]
+    fn opening_the_unset_default_game_first_keeps_another_games_key_and_look() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let forever = roots.paths("forever").expect("paths");
+        let mut config = AppConfig::new_unconfigured();
+        config.addon_dir = Some("/g/_forever_/Interface/AddOns".into());
+        config.wago_api_key = Some(SECRET.to_string());
+        config.theme = ThemeMode::Light;
+        ConfigStore::new(forever.config_file.clone())
+            .write_config(&config)
+            .expect("write forever");
+
+        // What App::bootstrap and the Wago.io key lookup do for the default game.
+        let default = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("paths"));
+        let state = default.load().expect("load");
+        let seen = default.effective(&state).expect("effective");
+        assert!(seen.wago_api_key.as_deref() == Some(SECRET));
+        assert_eq!(seen.theme, ThemeMode::Light);
+
+        let loaded = loaded(&ConfigStore::for_profile(&forever));
+        assert!(loaded.wago_api_key.as_deref() == Some(SECRET));
+        assert_eq!(loaded.theme, ThemeMode::Light);
+    }
+
+    /// Reviewer's scenario A: the key was saved only in a non-default game.
+    #[test]
+    fn a_key_saved_only_in_another_game_is_kept_by_the_migration() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let mut retail = AppConfig::new_unconfigured();
+        retail.addon_dir = Some("/g/_retail_/Interface/AddOns".into());
+        retail.theme = ThemeMode::Terminal;
+        ConfigStore::new(roots.default_config_file())
+            .write_config(&retail)
+            .expect("write default");
+        let forever = roots.paths("forever").expect("paths");
+        let mut own = AppConfig::new_unconfigured();
+        own.addon_dir = Some("/g/_forever_/Interface/AddOns".into());
+        own.wago_api_key = Some(SECRET.to_string());
+        own.theme = ThemeMode::Light;
+        ConfigStore::new(forever.config_file.clone())
+            .write_config(&own)
+            .expect("write forever");
+
+        let store = ConfigStore::for_profile(&forever);
+        let mut config = loaded(&store);
+        assert!(config.wago_api_key.as_deref() == Some(SECRET));
+        // The default game's set values win.
+        assert_eq!(config.theme, ThemeMode::Terminal);
+        config.hide_first_run_card = true;
+        store.write_config(&config).expect("save");
+        assert!(own_key(&forever.config_file).as_deref() == Some(SECRET));
+        let shared = SharedSettingsStore::for_roots(&roots)
+            .read()
+            .expect("read")
+            .expect("exists");
+        assert!(shared.wago_api_key.as_deref() == Some(SECRET));
+    }
+
+    #[test]
+    fn migration_takes_a_missing_value_from_the_first_other_game_by_name() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        for (name, key) in [("zeta", "zeta-key"), ("alpha", "alpha-key")] {
+            let mut config = AppConfig::new_unconfigured();
+            config.wago_api_key = Some(key.to_string());
+            ConfigStore::new(roots.paths(name).expect("paths").config_file)
+                .write_config(&config)
+                .expect("write");
+        }
+        // The default game's file has only some of the values, and an empty key.
+        fs::create_dir_all(&roots.config_dir).expect("config dir");
+        fs::write(
+            roots.default_config_file(),
+            "wago_api_key = \"\"\ntheme = \"terminal\"\n",
+        )
+        .expect("write default");
+
+        let settings = SharedSettingsStore::for_roots(&roots)
+            .load_or_migrate()
+            .expect("migrate");
+        assert!(settings.wago_api_key.as_deref() == Some("alpha-key"));
+        assert_eq!(settings.theme, ThemeMode::Terminal);
+    }
+
+    #[test]
+    fn an_unreadable_other_game_skips_the_migration_until_it_can_be_read() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let mut retail = AppConfig::new_unconfigured();
+        retail.theme = ThemeMode::Light;
+        ConfigStore::new(roots.default_config_file())
+            .write_config(&retail)
+            .expect("write default");
+        let forever = roots.paths("forever").expect("paths");
+        fs::create_dir_all(&forever.config_dir).expect("dir");
+        fs::write(&forever.config_file, "wago_api_key = [").expect("broken");
+
+        let default = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("paths"));
+        let mut config = loaded(&default);
+        assert_eq!(config.theme, ThemeMode::Light);
+        config.show_libs = true;
+        default.write_config(&config).expect("save this game");
+        let store = SharedSettingsStore::for_roots(&roots);
+        assert!(!store.path().exists(), "it waits for WoW Forever");
+
+        let mut fixed = AppConfig::new_unconfigured();
+        fixed.wago_api_key = Some(SECRET.to_string());
+        ConfigStore::new(forever.config_file.clone())
+            .write_config(&fixed)
+            .expect("fix forever");
+        let settings = store.load_or_migrate().expect("migrate");
+        assert!(settings.wago_api_key.as_deref() == Some(SECRET));
+        assert!(store.path().exists());
+    }
+
+    #[test]
+    fn an_unreadable_default_config_says_it_is_the_default_games() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        fs::create_dir_all(&roots.config_dir).expect("config dir");
+        fs::write(roots.default_config_file(), "theme = [").expect("broken");
+        let forever = roots.paths("forever").expect("paths");
+        ConfigStore::new(forever.config_file.clone())
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("write forever");
+
+        let error = ConfigStore::for_profile(&forever)
+            .load()
+            .expect_err("must not migrate");
+        let shown = error.to_string();
+        assert!(
+            shown.starts_with(&format!(
+                "couldn't read the settings of your default game at {}",
+                roots.default_config_file().display()
+            )),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("fix that file, then run LemonUp again"),
+            "{shown}"
+        );
+    }
+
+    /// Reviewer's scenario C: two LemonUp windows, each holding the shared values it read.
+    #[test]
+    fn a_save_keeps_the_shared_values_another_game_saved_since() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let default_paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let forever_paths = roots.paths("forever").expect("paths");
+        let mut retail_own = AppConfig::new_unconfigured();
+        retail_own.addon_dir = Some("/g/_retail_/Interface/AddOns".into());
+        ConfigStore::new(default_paths.config_file.clone())
+            .write_config(&retail_own)
+            .expect("write default");
+        let mut forever_own = retail_own.clone();
+        forever_own.addon_dir = Some("/g/_forever_/Interface/AddOns".into());
+        ConfigStore::new(forever_paths.config_file.clone())
+            .write_config(&forever_own)
+            .expect("write forever");
+
+        let retail_store = ConfigStore::for_profile(&default_paths);
+        let forever_store = ConfigStore::for_profile(&forever_paths);
+        let mut retail = loaded(&retail_store);
+        let mut forever = loaded(&forever_store);
+        forever.wago_api_key = Some(SECRET.to_string());
+        forever.theme = ThemeMode::Light;
+        forever_store.write_config(&forever).expect("save forever");
+        retail.hide_first_run_card = true;
+        retail.reduce_motion = true;
+        retail_store.write_config(&retail).expect("save retail");
+
+        let shared = SharedSettingsStore::for_roots(&roots)
+            .read()
+            .expect("read")
+            .expect("exists");
+        assert!(shared.wago_api_key.as_deref() == Some(SECRET));
+        assert_eq!(shared.theme, ThemeMode::Light);
+        // Retail's own change still lands.
+        assert!(shared.reduce_motion);
+        // Retail's file holds the shared values as they are now, for an older LemonUp.
+        assert!(own_key(&default_paths.config_file).as_deref() == Some(SECRET));
+
+        // Removing the key in one game removes it for all.
+        let mut forever = loaded(&forever_store);
+        forever.wago_api_key = None;
+        forever_store.write_config(&forever).expect("remove key");
+        assert!(loaded(&retail_store).wago_api_key.is_none());
+    }
+
+    /// Reviewer's scenario D: LemonUp 2.2 changed the key in the profile's own file.
+    #[test]
+    fn a_shared_value_an_older_lemonup_changed_is_kept() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let mut config = AppConfig::new_unconfigured();
+        config.addon_dir = Some("/g/_retail_/Interface/AddOns".into());
+        config.wago_api_key = Some("old-key".to_string());
+        config.check_other_games = OtherGamesCheck::ThreeHours;
+        let store = ConfigStore::for_profile(&paths);
+        store.write_config(&config).expect("save");
+
+        // LemonUp 2.2 rewrites the file it read, without the settings it doesn't know.
+        let mut table = fs::read_to_string(&paths.config_file)
+            .expect("read")
+            .parse::<toml::Table>()
+            .expect("toml");
+        table.remove("check_other_games");
+        table.insert("wago_api_key".into(), "new-key".into());
+        table.insert("theme".into(), "light".into());
+        fs::write(&paths.config_file, toml::to_string(&table).expect("toml")).expect("write");
+
+        let store = ConfigStore::for_profile(&paths);
+        let mut config = loaded(&store);
+        assert!(config.wago_api_key.as_deref() == Some("new-key"));
+        assert_eq!(config.theme, ThemeMode::Light);
+        // What 2.2 left out is not a change.
+        assert_eq!(config.check_other_games, OtherGamesCheck::ThreeHours);
+        config.show_libs = true;
+        store.write_config(&config).expect("save again");
+        assert!(own_key(&paths.config_file).as_deref() == Some("new-key"));
+
+        // Read once, the change is not taken again over a newer one from another game.
+        let forever = ConfigStore::for_profile(&roots.paths("forever").expect("paths"));
+        let mut other = forever.unconfigured().expect("unconfigured");
+        other.wago_api_key = Some(SECRET.to_string());
+        forever.write_config(&other).expect("save forever");
+        assert!(
+            loaded(&ConfigStore::for_profile(&paths))
+                .wago_api_key
+                .as_deref()
+                == Some(SECRET)
+        );
+    }
+
+    #[test]
+    fn a_failed_profile_write_puts_the_shared_settings_back() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let store = ConfigStore::for_profile(&paths);
+        store
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("first save");
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let before = shared.read().expect("read");
+
+        let mut config = loaded(&store);
+        config.theme = ThemeMode::Light;
+        fs::create_dir_all(temp_path_for(&paths.config_file)).expect("block the profile file");
+        assert!(store.write_config(&config).is_err());
+        assert!(shared.read().expect("read") == before);
+        assert_eq!(loaded(&store).theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn shared_settings_from_a_newer_lemonup_are_never_rewritten() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        ConfigStore::new(paths.config_file.clone())
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("write default");
+        let shared = SharedSettingsStore::for_roots(&roots);
+        fs::create_dir_all(&roots.config_dir).expect("dir");
+        let newer = "schema_version = 2\ntheme = \"light\"\nsomething_new = 3\n";
+        fs::write(shared.path(), newer).expect("write newer");
+
+        let store = ConfigStore::for_profile(&paths);
+        let mut config = loaded(&store);
+        assert_eq!(config.theme, ThemeMode::Light);
+        config.theme = ThemeMode::Dark;
+        let error = store.write_config(&config).expect_err("refused");
+        assert!(error.to_string().contains("newer LemonUp"), "{error}");
+        assert!(shared.remember_last_used("forever").is_err());
+        assert_eq!(fs::read_to_string(shared.path()).expect("read"), newer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("paths"))
+            .write_config(&every_shared_field_set())
+            .expect("save");
+        let mode = fs::metadata(roots.shared_settings_file())
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    fn loaded(store: &ConfigStore) -> AppConfig {
+        match store.load().expect("load") {
+            ConfigLoad::Loaded(config) => config,
+            ConfigLoad::Missing(path) => panic!("no config at {}", path.display()),
+        }
+    }
+
+    /// The key in a profile's own file, as an older LemonUp reads it.
+    fn own_key(path: &Path) -> Option<String> {
+        let raw = fs::read_to_string(path).expect("read");
+        toml::from_str::<AppConfig>(&raw)
+            .expect("parse")
+            .wago_api_key
     }
 
     #[test]
@@ -366,7 +1033,7 @@ mod tests {
         ConfigStore::new(roots.default_config_file())
             .write_config(&config)
             .expect("write default");
-        store.load_or_migrate(None).expect("first");
+        store.load_or_migrate().expect("first");
         let first = fs::read(store.path()).expect("read shared");
 
         // A later change to the default profile's own file doesn't redo the migration.
@@ -374,7 +1041,7 @@ mod tests {
         ConfigStore::new(roots.default_config_file())
             .write_config(&config)
             .expect("rewrite default");
-        let settings = store.load_or_migrate(None).expect("second");
+        let settings = store.load_or_migrate().expect("second");
         assert_eq!(settings.theme, ThemeMode::Light);
         assert_eq!(fs::read(store.path()).expect("read shared"), first);
     }
@@ -388,7 +1055,7 @@ mod tests {
         fs::write(roots.default_config_file(), broken).expect("write broken");
         let store = SharedSettingsStore::for_roots(&roots);
 
-        let error = store.load_or_migrate(None).expect_err("must not migrate");
+        let error = store.load_or_migrate().expect_err("must not migrate");
         assert!(error.to_string().contains("couldn't read"), "{error}");
         assert!(!store.path().exists(), "no shared file over real values");
         assert_eq!(
@@ -399,7 +1066,7 @@ mod tests {
         // A broken shared file is never replaced either.
         fs::write(store.path(), "theme = [").expect("write broken shared");
         fs::write(roots.default_config_file(), "theme = \"light\"\n").expect("fix default");
-        assert!(store.load_or_migrate(None).is_err());
+        assert!(store.load_or_migrate().is_err());
         assert_eq!(fs::read_to_string(store.path()).expect("read"), "theme = [");
         let profile = ConfigStore::for_profile(&roots.paths("default").expect("paths"));
         assert!(profile.load().is_err());
@@ -439,9 +1106,13 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let roots = test_roots(temp.path());
         let store = SharedSettingsStore::for_roots(&roots);
-        store.remember_last_used("forever").expect("remember");
         let paths = roots.paths("forever").expect("paths");
-        ConfigStore::for_profile(&paths)
+        let config = ConfigStore::for_profile(&paths);
+        config
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("set up");
+        store.remember_last_used("forever").expect("remember");
+        config
             .write_config(&AppConfig::new_unconfigured())
             .expect("save");
         assert_eq!(

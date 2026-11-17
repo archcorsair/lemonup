@@ -11,6 +11,17 @@ pub enum LemonupError {
         path.display()
     )]
     SettingsUnreadable { path: PathBuf, reason: String },
+    /// Another game needed the default game's settings, for the settings all games share.
+    #[error(
+        "couldn't read the settings of your default game at {}: {reason} | nothing was changed | fix that file, then run LemonUp again",
+        path.display()
+    )]
+    DefaultSettingsUnreadable { path: PathBuf, reason: String },
+    #[error(
+        "{} was saved by a newer LemonUp | nothing was changed | update LemonUp to change these settings",
+        path.display()
+    )]
+    SettingsTooNew { path: PathBuf },
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// A command declined to act and changed nothing. The message says what happened and what

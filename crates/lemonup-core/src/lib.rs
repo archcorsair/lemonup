@@ -25,15 +25,15 @@ pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
 pub use paths::{AppPaths, DEFAULT_PROFILE, ProfileRoots, paths_match};
 pub use profiles::{
-    CreatedProfile, ProfileError, ProfileSummary, RemovedProfile, create_profile, game_name,
-    list_profiles, remember_last_used, remove_profile, tui_profile,
+    CreatedProfile, ProfileError, ProfileSummary, RemovedProfile, TuiProfile, create_profile,
+    game_name, list_profiles, remember_last_used, remove_profile, tui_profile,
 };
 pub use scan::{
     ScanReport, ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
     UPDATE_STAGING_PREFIX, parse_toc_content, read_addon_toc_fields, scan_addons_dir,
     scan_addons_dir_report, scan_addons_dir_with_tracked, select_toc_file,
 };
-pub use shared::{OtherGamesCheck, SharedSettings, SharedSettingsStore};
+pub use shared::{OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore};
 pub use storage::StateDatabase;
 pub use toc_edit::{TocField, TocFieldValues, TocValueSource};
 pub use transfer::{

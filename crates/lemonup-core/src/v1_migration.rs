@@ -22,6 +22,7 @@ use crate::config::{AppConfig, ConfigStore, ThemeMode};
 use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
 use crate::error::{LemonupError, Result};
 use crate::paths::{AppPaths, DEFAULT_PROFILE, same_addons_folder};
+use crate::shared::SharedSettingsStore;
 use crate::storage::StateDatabase;
 use crate::transfer::TransferSourceKind;
 use crate::wow::validate_addons_path;
@@ -170,6 +171,10 @@ pub fn migrate_v1_if_needed(paths: &AppPaths, v1: &V1Location) -> Result<V1Migra
         report.addons_not_imported = Some(error.to_string());
     }
 
+    // When another game already made the shared settings, they win over this config: give
+    // them v1's key (and anything else they lack) first. Done before the config is written,
+    // so a failure here leaves the migration to run again.
+    SharedSettingsStore::for_roots(&paths.roots).adopt_v1_config(&mapped.config)?;
     ConfigStore::new(paths.config_file.clone()).write_new_config(&mapped.config)?;
     Ok(V1MigrationOutcome::Migrated(report))
 }
@@ -1526,6 +1531,46 @@ mod tests {
         assert_eq!(outcome, V1MigrationOutcome::NotApplicable);
         assert_eq!(loaded_config(&fixture.paths), existing);
         assert!(!fixture.paths.state_db_file.exists());
+    }
+
+    #[test]
+    fn the_v1_key_is_kept_when_another_game_already_made_the_shared_settings() {
+        let fixture = fixture(DEFAULT_PROFILE);
+        write_v1_config_for_addon_dir(&fixture);
+        // WoW Forever was set up first, with no key, and made the shared settings.
+        let roots = &fixture.paths.roots;
+        let forever = roots.paths("forever").expect("paths");
+        ConfigStore::for_profile(&forever)
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("set up forever");
+        let shared = crate::shared::SharedSettingsStore::for_roots(roots);
+        assert!(
+            shared
+                .read()
+                .expect("read")
+                .expect("exists")
+                .wago_api_key
+                .is_none()
+        );
+
+        migrated(&fixture);
+
+        let ConfigLoad::Loaded(config) = ConfigStore::for_profile(&fixture.paths)
+            .load()
+            .expect("load")
+        else {
+            panic!("migrated");
+        };
+        assert_eq!(config.wago_api_key.as_deref(), Some("wago-key"));
+        // A value the shared settings already have stays.
+        assert_eq!(config.theme, ThemeMode::Dark);
+        let ConfigLoad::Loaded(forever) = ConfigStore::for_profile(&forever)
+            .load()
+            .expect("load forever")
+        else {
+            panic!("set up");
+        };
+        assert_eq!(forever.wago_api_key.as_deref(), Some("wago-key"));
     }
 
     #[test]
