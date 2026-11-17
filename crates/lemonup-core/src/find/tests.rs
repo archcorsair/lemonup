@@ -1552,6 +1552,18 @@ fn a_likely_match_says_what_was_checked_on_wago() {
         Some(LikelyReason::FilesMatchNoRelease)
     );
 
+    // Wago.io answered but returned nothing for it: its hashed files match no release there.
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(Vec::new())),
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::FilesMatchNoRelease)
+    );
+
     // Without a Wago.io answer nothing but the .toc names it.
     let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::Skipped));
     assert_eq!(

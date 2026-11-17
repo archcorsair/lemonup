@@ -1010,7 +1010,15 @@ pub fn match_addons(
             {
                 let mut found = empty_found(FindSource::Wago, id, wago_url(id), &name);
                 found.folders = current.clone();
-                found.likely_reason = Some(LikelyReason::TocNamesIt);
+                // Wago.io answered and its hashes of this folder matched nothing: say so, rather
+                // than claim the files weren't checked.
+                let checked_by_wago =
+                    matches!(lookups.wago, SourceAnswer::Found(_)) && local.hash().is_some();
+                found.likely_reason = Some(if checked_by_wago {
+                    LikelyReason::FilesMatchNoRelease
+                } else {
+                    LikelyReason::TocNamesIt
+                });
                 found.matched_version = local.version.clone();
                 claims.push(Claim {
                     found,
