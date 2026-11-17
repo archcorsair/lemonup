@@ -646,11 +646,20 @@ impl App {
                         let (kind, text) = linked_status(&outcome);
                         actions.push(self.find_note(kind, &text));
                     }
+                    // Replacements wait for the links; none runs after a failure.
                     Err(error) => {
-                        actions.push(self.find_note(
-                            StatusKind::Problem,
-                            &format!("Nothing was linked: {error}"),
-                        ))
+                        let what = if self.find.replacements.is_empty() {
+                            "Nothing was linked"
+                        } else {
+                            "Nothing was linked or replaced"
+                        };
+                        actions.extend([
+                            AppAction::Find(FindAction::StopReplacements),
+                            self.find_note(
+                                StatusKind::Problem,
+                                &format!("{what}: {}.", error.trim_end_matches('.')),
+                            ),
+                        ]);
                     }
                 }
                 actions
@@ -1317,8 +1326,8 @@ pub(crate) fn link_found(
     let flavor = GameFlavor::for_addons_dir(addon_dir);
     let linked = {
         let mut database = StateDatabase::open(state_db_file).map_err(|error| error.to_string())?;
-        crate::find::scan_before_linking(&mut database, addon_dir, flavor)
-            .map_err(|error| error.to_string())?;
+        crate::find::rescan_addons(&mut database, addon_dir, flavor)
+            .map_err(|error| format!("LemonUp couldn't read your AddOns folder ({error})"))?;
         lemonup_core::find::link_found_addons(&mut database, addon_dir, flavor, links)
             .map_err(|error| error.to_string())?
     };

@@ -926,3 +926,73 @@ fn a_failed_replacement_says_which_addon_and_stops_the_rest() {
     let shown = screen(&mut app, 80, 24);
     assert!(shown.contains("Questie wasn't replaced"), "{shown}");
 }
+
+#[test]
+fn a_failed_link_stops_the_replacements_and_says_so() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // Clique to link, Questie to replace.
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    assert_eq!(results(&app).counts(), (1, 1));
+    // As yes leaves it, without running the link.
+    app.apply(AppAction::Find(FindAction::Close));
+    app.find.linking = true;
+    app.find.replacements = vec![found(
+        FindLabel::Partial,
+        FindSource::Wago,
+        "Questie",
+        &["Questie"],
+    )]
+    .into();
+
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Linked(Err(
+            "LemonUp couldn't read your AddOns folder (boom)".to_string(),
+        )))),
+    );
+    assert!(!app.find.linking);
+    assert!(app.find.replacements.is_empty());
+    assert!(
+        !app.find_replacement_actions()
+            .iter()
+            .any(|action| matches!(action, AppAction::StartWagoInstall { .. }))
+    );
+    assert_eq!(app.status_line.kind, StatusKind::Problem);
+    assert!(
+        app.status_line.text.contains(
+            "| Nothing was linked or replaced: LemonUp couldn't read your AddOns folder (boom). |"
+        ),
+        "{}",
+        app.status_line.text
+    );
+}
+
+#[test]
+fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
+    let temp = tempdir().expect("tempdir");
+    let addons = temp
+        .path()
+        .join("_retail_")
+        .join("Interface")
+        .join("AddOns");
+    let db = temp.path().join("state.sqlite");
+    let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
+    let error = link_found(&db, &addons, &[clique]).expect_err("no AddOns folder");
+    assert!(
+        error.starts_with("LemonUp couldn't read your AddOns folder"),
+        "{error}"
+    );
+    assert!(!error.contains("nothing was linked"), "{error}");
+
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Linked(Err(error)))),
+    );
+    let text = app.status_line.text.to_lowercase();
+    assert_eq!(text.matches("nothing was linked").count(), 1, "{text}");
+}

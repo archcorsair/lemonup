@@ -459,6 +459,20 @@ pub(crate) fn scan_before_linking(
     addon_dir: &Path,
     flavor: GameFlavor,
 ) -> Result<(), LemonupError> {
+    rescan_addons(database, addon_dir, flavor).map_err(|error| {
+        LemonupError::InvalidArgument(format!(
+            "could not read the AddOns folder, so nothing was linked: {error}"
+        ))
+    })
+}
+
+/// `scan_before_linking` with the scan's own error, for callers that say
+/// what didn't happen themselves.
+pub(crate) fn rescan_addons(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    flavor: GameFlavor,
+) -> Result<(), LemonupError> {
     database
         .list_addons()
         .and_then(|tracked| {
@@ -466,11 +480,6 @@ pub(crate) fn scan_before_linking(
             database.reconcile_scan(&report)
         })
         .map(|_| ())
-        .map_err(|error| {
-            LemonupError::InvalidArgument(format!(
-                "could not read the AddOns folder, so nothing was linked: {error}"
-            ))
-        })
 }
 
 /// The candidates `lemonup find --link` links: every preselected (linkable `Exact`) one.
