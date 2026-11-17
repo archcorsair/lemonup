@@ -1562,3 +1562,80 @@ fn choose_one_lists_folders_with_a_short_reason_and_wraps() {
         "Pawn on WoWInterface (exact match) or Pawn on Wago.io (likely, same Wago.io project)"
     );
 }
+
+/// The report drawn for a terminal with `display`, in the theme `theme` names.
+fn report_in_theme(theme: lemonup_core::ThemeMode, display: crate::theme::DisplayEnv) -> String {
+    let mut config = lemonup_core::AppConfig::new_unconfigured();
+    config.theme = theme;
+    human_report(
+        &full_report(),
+        &wowinterface_down(),
+        &full_names(),
+        44,
+        Paint::for_stream(true, display, &config),
+    )
+    .join("\n")
+}
+
+#[test]
+fn the_report_uses_the_colors_of_the_chosen_theme() {
+    use crate::theme::{ColorRoles, DisplayEnv};
+    use lemonup_core::ThemeMode;
+
+    let rgb = |color: ratatui::style::Color| match color {
+        ratatui::style::Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
+        other => panic!("expected an RGB role, got {other:?}"),
+    };
+
+    let dark = report_in_theme(ThemeMode::Dark, DisplayEnv::FULL);
+    let roles = ColorRoles::dark();
+    assert!(
+        dark.contains(&rgb(roles.muted)),
+        "dark muted missing: {dark:?}"
+    );
+    assert!(
+        dark.contains(&rgb(roles.green)),
+        "dark green missing: {dark:?}"
+    );
+
+    let light = report_in_theme(ThemeMode::Light, DisplayEnv::FULL);
+    assert!(light.contains(&rgb(ColorRoles::light().muted)), "{light:?}");
+
+    let terminal = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL);
+    assert!(terminal.contains('\u{1b}'), "{terminal:?}");
+    assert!(
+        !terminal.contains("38;2;"),
+        "terminal theme used 24-bit: {terminal:?}"
+    );
+}
+
+#[test]
+fn without_24_bit_color_a_dark_theme_uses_the_16_colors() {
+    use crate::theme::DisplayEnv;
+    use lemonup_core::ThemeMode;
+
+    let no_truecolor = DisplayEnv::from_vars(|_| None, false);
+    assert!(!no_truecolor.truecolor);
+    let report = report_in_theme(ThemeMode::Dark, no_truecolor);
+    assert!(report.contains('\u{1b}'), "{report:?}");
+    assert!(!report.contains("38;2;"), "{report:?}");
+}
+
+#[test]
+fn no_color_draws_no_color_in_any_theme() {
+    use crate::theme::DisplayEnv;
+    use lemonup_core::ThemeMode;
+
+    let no_color = DisplayEnv::from_vars(
+        |name| match name {
+            "NO_COLOR" => Some("1".to_string()),
+            "COLORTERM" => Some("truecolor".to_string()),
+            _ => None,
+        },
+        false,
+    );
+    for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
+        let report = report_in_theme(theme, no_color);
+        assert!(!report.contains('\u{1b}'), "{theme:?}: {report:?}");
+    }
+}
