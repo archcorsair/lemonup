@@ -538,7 +538,13 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
                     let mut moves = pick
                         .joining
                         .iter()
-                        .map(|moved| format!("{} joins from {}", moved.folder, moved.from))
+                        .map(|moved| {
+                            if moved.is_own_addon() {
+                                format!("{} joins (now its own addon)", moved.folder)
+                            } else {
+                                format!("{} joins from {}", moved.folder, moved.from)
+                            }
+                        })
                         .collect::<Vec<_>>();
                     moves.extend(pick.leaving.iter().map(|folder| format!("{folder} leaves")));
                     format!("{} ({})", pick.name, moves.join(", "))

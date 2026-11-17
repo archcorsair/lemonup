@@ -291,9 +291,7 @@ fn find_link_refuses_without_yes_when_an_exact_match_takes_other_folders() {
 
     let message = error.to_string();
     assert!(
-        message.contains(
-            "GatherMate2 (GatherMate2Storage_Midnight joins from GatherMate2Storage_Midnight)"
-        ),
+        message.contains("GatherMate2 (GatherMate2Storage_Midnight joins (now its own addon))"),
         "{message}"
     );
     assert!(message.contains("--yes"), "{message}");
@@ -405,9 +403,7 @@ fn find_link_refuses_without_yes_even_before_the_addons_folder_was_scanned() {
 
     let message = error.to_string();
     assert!(
-        message.contains(
-            "GatherMate2 (GatherMate2Storage_Midnight joins from GatherMate2Storage_Midnight)"
-        ),
+        message.contains("GatherMate2 (GatherMate2Storage_Midnight joins (now its own addon))"),
         "{message}"
     );
     assert!(sandbox.database.list_addons().expect("rows").is_empty());
