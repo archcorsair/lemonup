@@ -509,11 +509,11 @@ impl App {
             42
         };
         let mut lines = Vec::new();
-        for field in PreferenceField::ALL {
+        for field in self.onboarding.preference_fields() {
             let selected = field == self.onboarding.preference;
             let mut spans = self.setup_choice_marker(selected);
             spans.push(Span::styled(
-                format!("{:<label_width$}", field.label()),
+                format!("{:<label_width$}", self.setup_preference_label(field)),
                 self.setup_choice_style(selected),
             ));
             let arrow = Style::default().fg(roles.dim);
@@ -540,6 +540,13 @@ impl App {
             roles.muted,
             width,
         ));
+        if self.onboarding.other_game.is_some() {
+            lines.extend(self.setup_prose(
+                "Each game has its own addon list and backups. Switch games any time with p.",
+                roles.muted,
+                width,
+            ));
+        }
         if let Some(problem) = &self.onboarding.problem {
             lines.push(Line::from(""));
             lines.extend(wrap_lines(
@@ -559,9 +566,30 @@ impl App {
         )
     }
 
+    /// A row's label: "Also set up" names the game it would set up.
+    fn setup_preference_label(&self, field: PreferenceField) -> String {
+        match (field, &self.onboarding.other_game) {
+            (PreferenceField::AlsoSetUp, Some(addon_dir)) => {
+                let name = GameFlavor::detect_from_path(addon_dir)
+                    .map(lemonup_core::profiles::game_name)
+                    .unwrap_or("my other game");
+                format!("Also set up {name}")
+            }
+            _ => field.label().to_string(),
+        }
+    }
+
     /// A preference's value, in the words the Settings sheet uses.
     fn setup_preference_value(&self, field: PreferenceField) -> String {
         let field = match field {
+            PreferenceField::AlsoSetUp => {
+                return if self.onboarding.set_up_other_game {
+                    "Yes"
+                } else {
+                    "No"
+                }
+                .to_string();
+            }
             PreferenceField::Theme => ConfigField::Theme,
             PreferenceField::BackupWtf => ConfigField::BackupWtf,
             PreferenceField::BackupRetention => ConfigField::BackupRetention,

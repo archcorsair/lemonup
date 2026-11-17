@@ -8,7 +8,7 @@
 
 use lemonup_core::ProfileRoots;
 use lemonup_core::profiles::{
-    ProfileError, create_profile, list_profiles, profile_name_for, remember_last_used,
+    ProfileError, create_profile, game_name, list_profiles, profile_name_for, remember_last_used,
     remove_profile,
 };
 
@@ -529,6 +529,76 @@ impl App {
                     .with_problem(format!("LemonUp couldn't add this game: {error}"));
             }
         }
+    }
+
+    /// The other game Setup's last step offers to set up with the one at
+    /// `chosen`: the Retail or WoW Forever install the search found next to
+    /// it, when no game uses it yet and this game may use it. Never when
+    /// Setup is only adding a game, which picks one game already.
+    pub(super) fn other_game_to_offer(&self, chosen: &Path) -> Option<PathBuf> {
+        if self.games.adding {
+            return None;
+        }
+        let OnboardingPhase::Found(found) = &self.onboarding.phase else {
+            return None;
+        };
+        let wanted = match GameFlavor::detect_from_path(chosen)? {
+            GameFlavor::Retail => GameFlavor::Forever,
+            GameFlavor::Forever => GameFlavor::Retail,
+            GameFlavor::Classic | GameFlavor::Cata => return None,
+        };
+        let set_up = self.set_up_addon_dirs();
+        found
+            .installs
+            .iter()
+            .map(|install| &install.addons_dir)
+            .find(|dir| {
+                GameFlavor::detect_from_path(dir) == Some(wanted)
+                    && !lemonup_core::paths::same_addons_folder(dir, chosen)
+                    && !self.is_guarded_path(dir)
+                    && !set_up
+                        .iter()
+                        .any(|used| lemonup_core::paths::same_addons_folder(used, dir))
+            })
+            .cloned()
+    }
+
+    /// After the first game's setup was saved: sets up the other game too
+    /// when step 3's "Also set up" was on, so it takes the shared settings
+    /// chosen in Setup. The first game stays as it is if this fails; the
+    /// screen says what happened either way.
+    pub(super) fn set_up_other_game_after_save(&mut self) {
+        let Some(addon_dir) = self
+            .onboarding
+            .other_game
+            .clone()
+            .filter(|_| self.onboarding.set_up_other_game && !self.games.adding)
+        else {
+            return;
+        };
+        // Once: a later save from this screen must not set it up again.
+        self.onboarding = self.onboarding.with_other_game(None);
+        let name = GameFlavor::detect_from_path(&addon_dir)
+            .map(game_name)
+            .unwrap_or("your other game");
+        let status: (StatusKind, String) = match create_numbered_profile(&self.roots, &addon_dir) {
+            Ok(_) => {
+                self.reload_games();
+                (
+                    StatusKind::Done,
+                    format!("Also set up {name}. Press p to switch between your games."),
+                )
+            }
+            // The error comes last: a long one is cut, the advice is not.
+            Err(error) => (
+                StatusKind::Problem,
+                format!(
+                    "Your game is ready. LemonUp couldn't set up {name} (add it later with p): {error}"
+                ),
+            ),
+        };
+        let status = self.dashboard_status_for(status.0, self.dashboard.detail_mode, &status.1);
+        self.apply(AppAction::SetStatus(status));
     }
 
     /// The question `x` asks, while it is open.

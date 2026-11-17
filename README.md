@@ -116,7 +116,9 @@ GitHub, WoWInterface and TukUI links work without one.
 ### Your games
 
 LemonUp looks after each game version you play, such as Retail and WoW Forever, with its own
-addon list, backups of your game settings and game folder. Press `p` on the addon list to switch
+addon list, backups of your game settings and game folder. If Setup finds both Retail and WoW
+Forever, its last step can set up the other one too ("Also set up", off until you turn it on).
+Press `p` on the addon list to switch
 games or to add another one; Add another game finds the installs you haven't set up yet. In the
 same sheet, `x` removes a game you're not using from LemonUp after asking. Its addons, game
 settings and backups stay on disk.

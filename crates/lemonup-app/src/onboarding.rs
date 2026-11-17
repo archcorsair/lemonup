@@ -51,45 +51,29 @@ impl OnboardingStep {
     }
 }
 
-/// The settings step 3 shows, worded as the Settings sheet words them.
+/// The rows step 3 shows: three settings worded as the Settings sheet
+/// words them, and, when two games were found, whether to set up the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferenceField {
     Theme,
     BackupWtf,
     BackupRetention,
+    /// "Also set up <other game>". Shown only when the other game was found
+    /// and no game uses it yet.
+    AlsoSetUp,
 }
 
 impl PreferenceField {
-    pub const ALL: [Self; 3] = [Self::Theme, Self::BackupWtf, Self::BackupRetention];
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Theme => 0,
-            Self::BackupWtf => 1,
-            Self::BackupRetention => 2,
-        }
-    }
+    /// The settings rows, which are always there.
+    pub const SETTINGS: [Self; 3] = [Self::Theme, Self::BackupWtf, Self::BackupRetention];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
             Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
+            Self::AlsoSetUp => "Also set up my other game",
         }
-    }
-
-    pub fn next(self) -> Self {
-        Self::ALL
-            .get(self.index() + 1)
-            .copied()
-            .unwrap_or(Self::BackupRetention)
-    }
-
-    pub fn previous(self) -> Self {
-        self.index()
-            .checked_sub(1)
-            .and_then(|index| Self::ALL.get(index).copied())
-            .unwrap_or(Self::Theme)
     }
 }
 
@@ -192,6 +176,13 @@ pub struct OnboardingState {
     /// The Wago.io key box on step 2; its text is the draft's key.
     pub key_box: TextInput,
     pub preference: PreferenceField,
+    /// The AddOns folder of the other game, when step 3 offers to set it up
+    /// too: Setup found both Retail and WoW Forever and no game uses the
+    /// other one yet.
+    pub other_game: Option<PathBuf>,
+    /// "Also set up" is on. It starts off: it creates a second game, which
+    /// someone who only plays one should not have to undo.
+    pub set_up_other_game: bool,
     /// "Quit setup?" is open.
     pub quit_question: bool,
     /// Why the last save failed, shown on step 3.
@@ -220,6 +211,8 @@ impl OnboardingState {
             folder_box: TextInput::default(),
             key_box,
             preference: PreferenceField::Theme,
+            other_game: None,
+            set_up_other_game: false,
             quit_question: false,
             problem: None,
             checked_usual_places: false,
@@ -329,12 +322,25 @@ impl OnboardingState {
         next
     }
 
-    /// Uses `addons_dir` for the game and moves on to step 2.
+    /// Uses `addons_dir` for the game and moves on to step 2. Step 3 offers
+    /// no other game until `with_other_game` says so.
     pub fn choose_install(&self, addons_dir: &Path) -> Self {
-        let mut next = self.clone();
+        let mut next = self.with_other_game(None);
         next.draft.addon_dir = Some(addons_dir.to_path_buf());
         next.step = OnboardingStep::Wago;
         next.key_box = TextInput::new(next.draft.wago_api_key.clone().unwrap_or_default());
+        next
+    }
+
+    /// Step 3 offers to set up the game at `other_game` too (off until the
+    /// person turns it on), or offers nothing when it is `None`.
+    pub fn with_other_game(&self, other_game: Option<PathBuf>) -> Self {
+        let mut next = self.clone();
+        next.other_game = other_game;
+        next.set_up_other_game = false;
+        if next.other_game.is_none() && next.preference == PreferenceField::AlsoSetUp {
+            next.preference = PreferenceField::Theme;
+        }
         next
     }
 
@@ -395,13 +401,29 @@ impl OnboardingState {
         self.edit_text(TextInput::backspace)
     }
 
+    /// The rows step 3 shows, top to bottom.
+    pub fn preference_fields(&self) -> Vec<PreferenceField> {
+        let mut fields = PreferenceField::SETTINGS.to_vec();
+        if self.other_game.is_some() {
+            fields.push(PreferenceField::AlsoSetUp);
+        }
+        fields
+    }
+
+    /// The row moves down (`forward`) or up and stops at the ends.
     pub fn move_preference(&self, forward: bool) -> Self {
         let mut next = self.clone();
-        next.preference = if forward {
-            next.preference.next()
+        let fields = next.preference_fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == next.preference)
+            .unwrap_or(0);
+        let index = if forward {
+            (index + 1).min(fields.len() - 1)
         } else {
-            next.preference.previous()
+            index.saturating_sub(1)
         };
+        next.preference = fields[index];
         next
     }
 
@@ -414,6 +436,7 @@ impl OnboardingState {
                 next.draft.theme = crate::theme::cycle_theme(next.draft.theme, delta);
             }
             PreferenceField::BackupWtf => next.draft.backup_wtf = !next.draft.backup_wtf,
+            PreferenceField::AlsoSetUp => next.set_up_other_game = !next.set_up_other_game,
             PreferenceField::BackupRetention => {
                 let current = i32::from(next.draft.backup_retention);
                 next.draft.backup_retention =
@@ -559,5 +582,32 @@ mod tests {
             wtf.change_preference(-1).draft.backup_wtf,
             !state.draft.backup_wtf
         );
+    }
+
+    #[test]
+    fn also_set_up_is_a_row_only_with_another_game_and_starts_off() {
+        let state = OnboardingState::new();
+        assert_eq!(state.preference_fields(), PreferenceField::SETTINGS);
+        let last = state.move_preference(true).move_preference(true);
+        assert_eq!(last.move_preference(true).preference, last.preference);
+
+        let offered = state.with_other_game(Some(PathBuf::from("/r/_forever_/Interface/AddOns")));
+        assert!(!offered.set_up_other_game);
+        assert_eq!(
+            offered.preference_fields().last(),
+            Some(&PreferenceField::AlsoSetUp)
+        );
+        let mut on = offered;
+        on.preference = PreferenceField::AlsoSetUp;
+        let on = on.change_preference(1);
+        assert!(on.set_up_other_game);
+        assert!(!on.change_preference(-1).set_up_other_game);
+        // Offering nothing again takes the row, the cursor and the choice away.
+        let gone = on.with_other_game(None);
+        assert_eq!(gone.preference, PreferenceField::Theme);
+        assert!(!gone.set_up_other_game);
+        // Choosing another install forgets the old offer.
+        let chosen = on.choose_install(std::path::Path::new("/r/_retail_/Interface/AddOns"));
+        assert_eq!(chosen.other_game, None);
     }
 }

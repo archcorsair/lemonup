@@ -5302,7 +5302,9 @@ impl App {
                     )],
                     Some(install) if self.is_guarded_path(&install.addons_dir) => vec![],
                     Some(install) => vec![AppAction::SetOnboardingState(
-                        self.onboarding.choose_install(&install.addons_dir),
+                        self.onboarding
+                            .choose_install(&install.addons_dir)
+                            .with_other_game(self.other_game_to_offer(&install.addons_dir)),
                     )],
                     None => vec![AppAction::SetOnboardingState(
                         self.onboarding.begin_typing(),
@@ -6309,6 +6311,7 @@ impl App {
                                 ),
                             );
                         }
+                        self.set_up_other_game_after_save();
                     }
                     Err(error) => {
                         // The config still names the old folder, so the binding must
@@ -20267,7 +20270,7 @@ mod tests {
         use super::*;
         use crate::app::games::{GameEntry, check_other_game};
         use crate::app::{GamesAction, GamesMessage};
-        use crate::onboarding::OnboardingTaskEvent;
+        use crate::onboarding::{OnboardingStep, OnboardingTaskEvent, PreferenceField};
         use crate::theme::Symbols;
         use lemonup_core::OtherGamesCheck;
         use lemonup_core::profiles::{list_profiles, profile_exists, tui_profile};
@@ -20586,6 +20589,289 @@ mod tests {
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Games));
             assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
             assert_eq!(list_profiles(&games.roots).expect("list").len(), 1);
+        }
+
+        /// Nothing set up yet, a Retail and a WoW Forever install on disk.
+        struct FirstRun {
+            _temp: tempfile::TempDir,
+            roots: lemonup_core::ProfileRoots,
+            retail: PathBuf,
+            forever: PathBuf,
+        }
+
+        fn first_run() -> FirstRun {
+            let temp = tempdir().expect("tempdir");
+            let roots = lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            );
+            let retail = install(temp.path(), "_retail_");
+            let forever = install(temp.path(), "_forever_");
+            FirstRun {
+                _temp: temp,
+                roots,
+                retail,
+                forever,
+            }
+        }
+
+        /// Setup on the first run, its search done: it found `found`, and
+        /// the first of them is chosen.
+        fn setup_that_found(first_run: &FirstRun, found: Vec<PathBuf>) -> App {
+            let mut app = App::bootstrap(
+                first_run.roots.paths(DEFAULT_PROFILE).expect("paths"),
+                AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+            )
+            .expect("bootstrap");
+            assert_eq!(app.shell_mode, ShellMode::Onboarding);
+            app.onboarding = app.onboarding.begin_quick_check();
+            send(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+                    OnboardingTaskEvent::QuickCheckFinished(found),
+                )),
+            );
+            app
+        }
+
+        /// From the list of installs to Setup's last step.
+        fn to_last_step(app: &mut App) {
+            press_key(app, KeyCode::Enter);
+            press_key(app, KeyCode::Enter);
+            assert_eq!(app.onboarding.step, OnboardingStep::Preferences);
+        }
+
+        /// On the last step: the cursor goes down to "Also set up" and
+        /// changes it.
+        fn turn_also_set_up(app: &mut App) {
+            for _ in 0..3 {
+                press_key(app, KeyCode::Down);
+            }
+            assert_eq!(app.onboarding.preference, PreferenceField::AlsoSetUp);
+            press_key(app, KeyCode::Right);
+        }
+
+        fn saved_config(roots: &lemonup_core::ProfileRoots, profile: &str) -> Option<AppConfig> {
+            match ConfigStore::for_profile(&roots.paths(profile).expect("paths"))
+                .load_without_writing()
+                .expect("load")
+            {
+                ConfigLoad::Loaded(config) => Some(config),
+                ConfigLoad::Missing(_) => None,
+            }
+        }
+
+        #[test]
+        fn setup_with_both_games_found_offers_the_other_one_and_starts_off() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(
+                app.onboarding.preference_fields().last(),
+                Some(&PreferenceField::AlsoSetUp)
+            );
+            assert!(!app.onboarding.set_up_other_game, "off until chosen");
+            let shown = screen(&mut app, 120, 30);
+            let row = shown
+                .lines()
+                .find(|line| line.contains("Also set up WoW Forever"))
+                .unwrap_or_else(|| panic!("no row:\n{shown}"));
+            assert!(row.contains("No"), "{row}");
+
+            // The same keys that change the other rows turn it on and off.
+            turn_also_set_up(&mut app);
+            assert!(app.onboarding.set_up_other_game);
+            let shown = screen(&mut app, 120, 30);
+            let row = shown
+                .lines()
+                .find(|line| line.contains("Also set up WoW Forever"))
+                .unwrap_or_else(|| panic!("no row:\n{shown}"));
+            assert!(row.contains("Yes"), "{row}");
+            press_key(&mut app, KeyCode::Left);
+            assert!(!app.onboarding.set_up_other_game);
+        }
+
+        #[test]
+        fn setup_offers_retail_when_forever_is_the_game_chosen() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.forever.clone(), run.retail.clone()]);
+            to_last_step(&mut app);
+            let shown = screen(&mut app, 120, 30);
+            assert!(shown.contains("Also set up Retail"), "{shown}");
+        }
+
+        #[test]
+        fn setup_with_one_game_found_offers_no_other_game() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(app.onboarding.other_game, None);
+            assert_eq!(app.onboarding.preference_fields().len(), 3);
+            let shown = screen(&mut app, 120, 30);
+            assert!(!shown.contains("Also set up"), "{shown}");
+            // The cursor stops at the last settings row.
+            for _ in 0..5 {
+                press_key(&mut app, KeyCode::Down);
+            }
+            assert_eq!(app.onboarding.preference, PreferenceField::BackupRetention);
+        }
+
+        #[test]
+        fn setup_does_not_offer_a_game_that_is_already_set_up() {
+            let run = first_run();
+            lemonup_core::profiles::create_profile(&run.roots, &run.forever, None)
+                .expect("forever is a game");
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(app.onboarding.other_game, None);
+            let shown = screen(&mut app, 120, 30);
+            assert!(!shown.contains("Also set up"), "{shown}");
+        }
+
+        #[test]
+        fn add_another_game_never_offers_a_second_one() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            assert!(app.other_game_to_offer(&run.retail).is_some());
+            app.games.adding = true;
+            assert_eq!(app.other_game_to_offer(&run.retail), None);
+        }
+
+        #[test]
+        fn finishing_setup_with_also_set_up_on_creates_both_games_and_opens_the_first() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            // A choice made in Setup is the other game's too.
+            let before = app.onboarding.draft.theme;
+            press_key(&mut app, KeyCode::Right);
+            let theme = app.onboarding.draft.theme;
+            assert_ne!(theme, before);
+            turn_also_set_up(&mut app);
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
+            assert_eq!(
+                app.effective_addon_dir.as_deref(),
+                Some(run.retail.as_path())
+            );
+            let first = saved_config(&run.roots, DEFAULT_PROFILE).expect("first game");
+            assert_eq!(first.addon_dir.as_deref(), Some(run.retail.as_path()));
+            let second = saved_config(&run.roots, "forever").expect("second game");
+            assert_eq!(second.addon_dir.as_deref(), Some(run.forever.as_path()));
+            assert_eq!(second.theme, theme, "the shared settings apply to both");
+            let names: Vec<_> = app
+                .games
+                .games
+                .iter()
+                .map(|game| game.display_name.as_str())
+                .collect();
+            assert_eq!(names, vec!["Retail", "WoW Forever"]);
+            let (message, kind) = app.status_line_message().expect("a message");
+            assert_eq!(kind, StatusKind::Done);
+            assert!(message.contains("Also set up WoW Forever"), "{message}");
+        }
+
+        #[test]
+        fn finishing_setup_with_also_set_up_off_creates_only_the_first_game() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert!(saved_config(&run.roots, DEFAULT_PROFILE).is_some());
+            assert!(!profile_exists(&run.roots, "forever"));
+            assert_eq!(app.games.games.len(), 1);
+        }
+
+        #[test]
+        fn a_failure_setting_up_the_second_game_leaves_the_first_working_and_says_so() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            turn_also_set_up(&mut app);
+            // The second install goes away before Setup finishes.
+            std::fs::remove_dir_all(&run.forever).expect("remove the install");
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
+            let first = saved_config(&run.roots, DEFAULT_PROFILE).expect("first game works");
+            assert_eq!(first.addon_dir.as_deref(), Some(run.retail.as_path()));
+            assert!(!profile_exists(&run.roots, "forever"));
+            assert_eq!(app.games.games.len(), 1);
+            let (message, kind) = app.status_line_message().expect("a message");
+            assert_eq!(kind, StatusKind::Problem);
+            assert!(
+                message.contains("Your game is ready. LemonUp couldn't set up WoW Forever"),
+                "{message}"
+            );
+            assert!(message.contains("add it later with p"), "{message}");
+            // Setup's save does not run again for it.
+            assert_eq!(app.onboarding.other_game, None);
+        }
+
+        #[test]
+        fn setups_last_step_fits_80x24_and_keeps_its_size_with_the_other_game_row() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            for (width, height) in [(80, 24), (120, 30)] {
+                let off = render_rows(&mut app, width, height);
+                assert_eq!(off.len(), usize::from(height));
+                let label = off
+                    .iter()
+                    .position(|row| row.contains("Also set up WoW Forever"))
+                    .unwrap_or_else(|| panic!("no row at {width}x{height}:\n{}", off.join("\n")));
+                let joined = off.join("\n");
+                for shown in ["Theme", "Backups to keep", "Switch games any time with p"] {
+                    assert!(joined.contains(shown), "no {shown:?}:\n{joined}");
+                }
+                assert!(
+                    off.last().is_some_and(|row| row.contains("finish")),
+                    "{joined}"
+                );
+
+                // Turning it on changes the value, not the layout.
+                app.onboarding.set_up_other_game = true;
+                let on = render_rows(&mut app, width, height);
+                app.onboarding.set_up_other_game = false;
+                assert_eq!(on.len(), off.len());
+                assert_eq!(
+                    on.iter()
+                        .position(|row| row.contains("Also set up WoW Forever")),
+                    Some(label)
+                );
+                for (index, (before, after)) in off.iter().zip(&on).enumerate() {
+                    if index != label {
+                        assert_eq!(before, after, "row {index} moved at {width}x{height}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_failed_save_keeps_its_message_on_the_last_step_at_80x24() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            app.onboarding = app
+                .onboarding
+                .with_problem("LemonUp couldn't save your setup: the disk is full.");
+            let rows = render_rows(&mut app, 80, 24);
+            let joined = rows.join("\n");
+            assert!(joined.contains("Also set up WoW Forever"), "{joined}");
+            assert!(joined.contains("the disk is full"), "{joined}");
+            assert!(
+                rows.last().is_some_and(|row| row.contains("finish")),
+                "{joined}"
+            );
         }
 
         #[test]
