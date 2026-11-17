@@ -6311,6 +6311,14 @@ impl App {
                                 ),
                             );
                         }
+                        // On a fresh install there was no `shared.toml` when the TUI
+                        // started, so the game it opened with wasn't remembered then.
+                        if let Err(error) = lemonup_core::remember_last_used(
+                            &self.roots,
+                            &self.runtime.profile_name,
+                        ) {
+                            tracing::warn!(%error, "couldn't remember the last used game");
+                        }
                         self.set_up_other_game_after_save();
                     }
                     Err(error) => {
@@ -14194,6 +14202,35 @@ mod tests {
                 .iter()
                 .any(|hint| hint.label == "continue")
         );
+    }
+
+    #[test]
+    fn the_game_set_up_first_is_remembered_as_the_last_one_used() {
+        let temp = tempdir().expect("tempdir");
+        let roots = lemonup_core::ProfileRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("cache"),
+        );
+        let addons = temp.path().join("wow/_classic_/Interface/AddOns");
+        std::fs::create_dir_all(&addons).expect("addons dir");
+        let paths = roots.paths("forever").expect("paths");
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new("forever".to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+        // `lemonup --profile forever` on a fresh install: nothing exists yet, so this saves
+        // nothing.
+        lemonup_core::remember_last_used(&roots, "forever").expect("remember");
+
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(addons);
+        app.apply(AppAction::SaveOnboardingConfig(config));
+
+        assert_eq!(app.shell_mode, ShellMode::Dashboard);
+        let next = lemonup_core::tui_profile(&roots, None).expect("profile");
+        assert_eq!(next.name, "forever");
     }
 
     #[test]
