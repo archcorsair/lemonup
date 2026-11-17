@@ -4,7 +4,8 @@
 use super::*;
 use crate::app::dialog::Question;
 use crate::app::find_sheet::{
-    FindFocus, FindLinkOutcome, FindOutcome, FindResults, FindStep, link_found, search_name,
+    FindFocus, FindLinkOutcome, FindOutcome, FindResults, FindStep, link_found, read_find_inputs,
+    search_name,
 };
 use crate::app::{FindAction, FindMessage, FindTaskEvent};
 use crate::find::{LocalNames, SourceProblem};
@@ -998,6 +999,21 @@ fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
 }
 
 #[test]
+fn start_names_only_the_sources_it_asks() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    let shown = screen(&mut app, 120, 30);
+    assert!(
+        shown.contains("on Wago.io, WoWInterface and TukUI"),
+        "{shown}"
+    );
+    app.wago_api_key = None;
+    let shown = screen(&mut app, 120, 30);
+    assert!(shown.contains("on WoWInterface and TukUI,"), "{shown}");
+    assert!(!shown.contains("Wago.io, WoWInterface"), "{shown}");
+}
+
+#[test]
 fn start_waits_for_a_job_that_changes_the_addons() {
     for (busy, note) in [
         (
@@ -1054,4 +1070,236 @@ fn auto_checks_wait_while_find_links_or_replaces() {
     let mut app = ready();
     app.find.replacements = vec![found(FindLabel::Partial, FindSource::Wago, "Q", &["Q"])].into();
     assert!(app.auto_check_due_targets().is_none());
+}
+
+#[test]
+fn no_to_a_replace_question_says_nothing_was_changed() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    key(&mut app, KeyCode::Char(' ')); // Clique off
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' ')); // Questie on
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    app.note_question_shown(Instant::now());
+    key(&mut app, KeyCode::Char('n'));
+    assert!(
+        app.status_line.text.contains("| Nothing was changed. |"),
+        "{}",
+        app.status_line.text
+    );
+
+    // Only links: nothing was linked.
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_question(&mut app);
+    app.note_question_shown(Instant::now());
+    key(&mut app, KeyCode::Char('n'));
+    assert!(
+        app.status_line.text.contains("| Nothing was linked. |"),
+        "{}",
+        app.status_line.text
+    );
+}
+
+#[test]
+fn a_failed_lookup_says_what_couldnt_be_read() {
+    let temp = tempdir().expect("tempdir");
+    let addons = temp.path().join("AddOns");
+    // The database file is no database: LemonUp's list can't be read.
+    let broken = temp.path().join("broken.sqlite");
+    std::fs::write(
+        &broken,
+        "not a database, just text that goes on for a while",
+    )
+    .expect("file");
+    let error = read_find_inputs(&broken, &addons).expect_err("no database");
+    assert!(
+        error.starts_with("LemonUp couldn't read its list of your addons"),
+        "{error}"
+    );
+    // The database reads; the AddOns folder doesn't exist.
+    let db = temp.path().join("state.sqlite");
+    StateDatabase::open(&db).expect("database");
+    let error = read_find_inputs(&db, &addons).expect_err("no AddOns folder");
+    assert!(
+        error.starts_with("LemonUp couldn't read your AddOns folder"),
+        "{error}"
+    );
+
+    // The sheet shows the reason as it is.
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    app.find.generation = 3;
+    app.find.step = Some(FindStep::Looking {
+        folders: 1,
+        asking: Vec::new(),
+    });
+    apply_all(
+        &mut app,
+        AppMessage::Find(FindMessage::Task(FindTaskEvent::Looked {
+            generation: 3,
+            result: Err("LemonUp couldn't read its list of your addons: locked".to_string()),
+        })),
+    );
+    let shown = screen(&mut app, 120, 30);
+    assert!(
+        shown.contains("LemonUp couldn't read its list of your addons: locked"),
+        "{shown}"
+    );
+    assert!(!shown.contains("AddOns folder"), "{shown}");
+}
+
+#[test]
+fn capital_f_says_why_there_is_nothing_to_look_up() {
+    let note = |app: &App| {
+        app.update(AppMessage::Find(FindMessage::Open))
+            .into_iter()
+            .find_map(|action| match action {
+                AppAction::SetStatus(status) => Some(status.text),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let says = |app: &App, text: &str| {
+        let note = note(app);
+        assert!(note.contains(&format!("| {text} |")), "{note}");
+    };
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.dashboard = DashboardState::from_addons(Vec::new());
+    app.scan_state = ScanState::Succeeded {
+        path: PathBuf::from("AddOns"),
+        summary: ScanSummary::default(),
+    };
+    says(&app, "Your AddOns folder has no addons to look up.");
+    app.scan_state = ScanState::Failed("denied".to_string());
+    says(
+        &app,
+        "LemonUp couldn't read your AddOns folder, so there is nothing to look up.",
+    );
+    app.scan_state = ScanState::Running(PathBuf::from("AddOns"));
+    says(&app, "Wait for LemonUp to read your AddOns folder first.");
+    app.scan_state = ScanState::Idle;
+    app.dashboard =
+        DashboardState::from_addons(vec![AddonRecord::new("Gamma", "Gamma", SourceKind::Wago)]);
+    says(&app, "Every addon is linked already.");
+}
+
+#[test]
+fn check_failed_comes_right_after_not_checked() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    let mut outcome = outcome(report());
+    // WoWInterface failed without leaving an addon Not checked.
+    outcome.problems.push(SourceProblem {
+        source: FindSource::WowInterface,
+        error: SourceError::new(SourceErrorKind::SlowDown, "429"),
+    });
+    app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
+        FindResults::new(outcome),
+    ))));
+    let shown = screen(&mut app, 138, 80);
+    let at = |heading: &str| {
+        shown
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading}:\n{shown}"))
+    };
+    assert!(at("Not checked (1)") < at("Check failed (1)"), "{shown}");
+    assert!(at("Check failed (1)") < at("On CurseForge only"), "{shown}");
+    assert!(
+        at("WoWInterface: WoWInterface asked LemonUp to slow down") < at("On CurseForge only"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_partial_choice_says_picking_it_replaces_your_copy() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let mut report = report();
+    let mut partial = found(
+        FindLabel::Partial,
+        FindSource::Wago,
+        "QuestieDev",
+        &["QuestieDev"],
+    );
+    partial.differing = vec!["QuestieDev".to_string()];
+    report.results[4].candidates[0] = partial;
+    open_find(&mut app);
+    set_results(&mut app, report);
+    let shown = screen(&mut app, 138, 80);
+    let line = |needle: &str| {
+        shown
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}:\n{shown}"))
+            .to_string()
+    };
+    assert!(
+        line("QuestieDev on Wago.io")
+            .contains("(QuestieDev differs from the release; picking it replaces your copy"),
+        "{shown}"
+    );
+    assert!(shown.contains("with the one from Wago.io)"), "{shown}");
+    assert!(
+        !line("QuestieDev on WoWInterface").contains("picking it replaces"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_question_lists_added_folders_apart_from_replaced_ones() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let mut report = report();
+    report.results[3].candidates[0].missing = vec!["QuestieLoc".to_string()];
+    open_find(&mut app);
+    set_results(&mut app, report);
+    key(&mut app, KeyCode::Char(' ')); // Clique off
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' ')); // Questie on
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let shown = screen(&mut app, 80, 24);
+    let replaced = shown
+        .find("These folders are replaced now with the copy from Wago.io:")
+        .unwrap_or_else(|| panic!("{shown}"));
+    let added = shown
+        .find("These folders are added from Wago.io:")
+        .unwrap_or_else(|| panic!("{shown}"));
+    let loc = shown
+        .find("QuestieLoc")
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(replaced < added && added < loc, "{shown}");
+}
+
+#[test]
+fn the_welcome_card_shows_capital_f_in_the_color_of_f() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.dashboard = DashboardState::from_addons(vec![
+        AddonRecord::new("Alpha", "Alpha", SourceKind::Manual),
+        AddonRecord::new("Beta", "Beta", SourceKind::Manual),
+    ]);
+    let roles = app.ui_theme.roles;
+    assert_ne!(roles.lemon, roles.blue);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    terminal.draw(|frame| app.draw(frame)).expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let key_color = |text: &str, offset: u16| {
+        (0..24)
+            .find_map(|y| {
+                let row = (0..80)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>();
+                let column = row[..row.find(text)?].chars().count();
+                Some(buffer[(u16::try_from(column).expect("column") + offset, y)].fg)
+            })
+            .unwrap_or_else(|| panic!("{text}"))
+    };
+    let small = key_color("press f to find it online", 6);
+    let capital = key_color("Press F to find your addons online", 6);
+    assert_eq!(small, roles.lemon);
+    assert_eq!(capital, small);
 }

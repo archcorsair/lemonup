@@ -72,13 +72,15 @@ pub(super) enum Question {
         backups: String,
     },
     /// Enter on "Link" in the Find sheet. `taken` are every folder the
-    /// linked addons take over, `replaced` every folder replaced now with
-    /// the source's copy. The list scrolls from `offset`.
+    /// linked addons take over, `replaced` every folder on disk replaced now
+    /// with the source's copy, and `added` the source's folders that aren't
+    /// on disk yet. The list scrolls from `offset`.
     LinkFound {
         links: usize,
         replaces: usize,
         taken: Vec<String>,
         replaced: Vec<String>,
+        added: Vec<String>,
         offset: u16,
     },
 }
@@ -393,6 +395,7 @@ impl Question {
                 links,
                 taken,
                 replaced,
+                added,
                 ..
             } => {
                 let mut lines = Vec::new();
@@ -424,6 +427,16 @@ impl Question {
                         text,
                     )));
                     for folder in replaced {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                }
+                if !added.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "These folders are added from Wago.io:",
+                        text,
+                    )));
+                    for folder in added {
                         lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
                     }
                 }

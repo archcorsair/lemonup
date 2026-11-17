@@ -20,6 +20,17 @@ use crate::find::{LocalNames, SourceProblem};
 const PAGE_ROWS: usize = 8;
 /// The widest the name column of the results gets.
 const NAME_WIDTH_MAX: usize = 28;
+/// The width of the source column of the results.
+const SOURCE_WIDTH: usize = 14;
+/// The index of "Not checked" in [`GROUPS`].
+const NOT_CHECKED_GROUP: usize = 5;
+
+/// `lines` word wrapped at `width`, each row after a line's first indented
+/// by `indent`, so a long row continues under its own text and never at the
+/// sheet's left edge.
+fn hanging(lines: Vec<Line<'static>>, width: u16, indent: usize) -> Vec<Line<'static>> {
+    super::sheet::wrap_lines_hanging(&lines, width, u16::try_from(indent).unwrap_or(0))
+}
 
 /// What the sheet shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +373,12 @@ impl App {
         }
         if self.dashboard.items.iter().any(|item| not_linked(&item)) {
             Ok(None)
+        } else if matches!(self.scan_state, ScanState::Failed(_)) {
+            Err("LemonUp couldn't read your AddOns folder, so there is nothing to look up.")
+        } else if matches!(self.scan_state, ScanState::Pending | ScanState::Running(_)) {
+            Err("Wait for LemonUp to read your AddOns folder first.")
+        } else if self.dashboard.items.is_empty() {
+            Err("Your AddOns folder has no addons to look up.")
         } else {
             Err("Every addon is linked already.")
         }
@@ -501,10 +518,23 @@ impl App {
             }
             FindMessage::Enter => self.find_enter_actions(),
             FindMessage::ConfirmLink => self.find_confirm_actions(),
-            FindMessage::CancelLink => vec![
-                AppAction::Find(FindAction::SetQuestion(false)),
-                self.find_note(StatusKind::Quiet, "Nothing was linked."),
-            ],
+            FindMessage::CancelLink => {
+                let replaces = self
+                    .find
+                    .results()
+                    .is_some_and(|results| results.counts().1 > 0);
+                vec![
+                    AppAction::Find(FindAction::SetQuestion(false)),
+                    self.find_note(
+                        StatusKind::Quiet,
+                        if replaces {
+                            "Nothing was changed."
+                        } else {
+                            "Nothing was linked."
+                        },
+                    ),
+                ]
+            }
             FindMessage::QuestionScroll(delta) => {
                 let max = self.find.question_max.get();
                 let offset = self
@@ -626,9 +656,7 @@ impl App {
             {
                 vec![self.set_find_step(match result {
                     Ok(outcome) => FindStep::Results(FindResults::new(*outcome)),
-                    Err(error) => FindStep::Failed(format!(
-                        "LemonUp couldn't read your AddOns folder: {error}"
-                    )),
+                    Err(error) => FindStep::Failed(error),
                 })]
             }
             // A lookup that was cancelled: its answer changes nothing.
@@ -851,16 +879,12 @@ impl App {
             let read_sender = sender.clone();
             let read_scope = scope.clone();
             let read_dir = addon_dir.clone();
-            let read = tokio::task::spawn_blocking(move || {
-                let rows = StateDatabase::read_addons(&state_db_file)
-                    .map_err(|error| error.to_string())?;
-                let flavor = GameFlavor::for_addons_dir(&read_dir);
-                let inputs =
-                    FindInputs::read(&read_dir, flavor).map_err(|error| error.to_string())?;
-                Ok::<_, String>((rows, inputs))
-            })
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
+            let read =
+                tokio::task::spawn_blocking(move || read_find_inputs(&state_db_file, &read_dir))
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(format!("The lookup stopped unexpectedly: {error}"))
+                    });
             let (rows, inputs) = match read {
                 Ok(read) => read,
                 Err(error) => {
@@ -907,6 +931,7 @@ impl App {
         let mut replaces = 0;
         let mut taken = Vec::new();
         let mut replaced = Vec::new();
+        let mut added = Vec::new();
         for (candidate, kind) in results.picked() {
             match kind {
                 PickKind::Link => {
@@ -916,6 +941,8 @@ impl App {
                 PickKind::Replace => {
                     replaces += 1;
                     replaced.extend(candidate.folders.iter().cloned());
+                    // The source's folders that aren't on disk are new.
+                    added.extend(candidate.missing.iter().cloned());
                 }
             }
         }
@@ -924,6 +951,7 @@ impl App {
             replaces,
             taken,
             replaced,
+            added,
             offset: self.find.question_offset,
         })
     }
@@ -951,9 +979,15 @@ impl App {
                         )
                     }
                 };
+                // Wago.io is asked only with a key.
+                let sources = if self.wago_api_key.is_some() {
+                    "Wago.io, WoWInterface and TukUI"
+                } else {
+                    "WoWInterface and TukUI"
+                };
                 body.text(vec![Line::from(Span::styled(
                     format!(
-                        "{what} on Wago.io, WoWInterface and TukUI, and shows what it finds. \
+                        "{what} on {sources}, and shows what it finds. \
                          Nothing changes until you say yes."
                     ),
                     text,
@@ -1060,13 +1094,17 @@ impl App {
             .flat_map(|result| result.not_checked_by.iter().copied())
             .collect::<Vec<_>>();
         for (group, (label, title)) in GROUPS.iter().enumerate() {
+            // A source that failed outright comes right after "Not checked", as in the CLI.
+            if group == NOT_CHECKED_GROUP + 1 {
+                self.find_check_failed_lines(body, results, &not_checked_by, width);
+            }
             let members = results.group(group);
             if members.is_empty() {
                 continue;
             }
             let tone = match group {
                 0 => roles.green,
-                5 => roles.red,
+                NOT_CHECKED_GROUP => roles.red,
                 6..=8 => roles.muted,
                 _ => roles.amber,
             };
@@ -1113,24 +1151,42 @@ impl App {
             }
             body.gap(1);
         }
+        body.footer(self.find_results_footer(results, width));
+    }
+
+    /// "Check failed": the sources that failed without leaving an addon
+    /// "Not checked".
+    fn find_check_failed_lines(
+        &self,
+        body: &mut SheetBody<'static>,
+        results: &FindResults,
+        not_checked_by: &[FindSource],
+        width: u16,
+    ) {
+        let roles = self.ui_theme.roles;
         let unexplained = results
             .problems
             .iter()
             .filter(|problem| !not_checked_by.contains(&problem.source))
             .collect::<Vec<_>>();
-        if !unexplained.is_empty() {
-            body.text(vec![Line::from(Span::styled(
-                format!("Check failed ({})", unexplained.len()),
-                Style::default().fg(roles.red).add_modifier(Modifier::BOLD),
-            ))]);
-            for problem in unexplained {
-                body.text(vec![Line::from(Span::styled(
-                    format!("  {}", crate::find::problem_text(problem)),
-                    muted,
-                ))]);
-            }
+        if unexplained.is_empty() {
+            return;
         }
-        body.footer(self.find_results_footer(results, width));
+        body.text(vec![Line::from(Span::styled(
+            format!("Check failed ({})", unexplained.len()),
+            Style::default().fg(roles.red).add_modifier(Modifier::BOLD),
+        ))]);
+        for problem in unexplained {
+            body.text(hanging(
+                vec![Line::from(Span::styled(
+                    format!("  {}", crate::find::problem_text(problem)),
+                    Style::default().fg(roles.muted),
+                ))],
+                width,
+                2,
+            ));
+        }
+        body.gap(1);
     }
 
     fn find_mark(&self, picked: bool, selectable: bool) -> &'static str {
@@ -1172,7 +1228,7 @@ impl App {
                 Style::default().fg(roles.lemon),
             ),
             Span::styled(format!("{name:<name_width$}  "), name_style),
-            Span::styled(format!("{:<14}", entry.source), muted),
+            Span::styled(format!("{:<SOURCE_WIDTH$}", entry.source), muted),
             Span::styled(entry.version.clone(), Style::default().fg(roles.text)),
         ];
         if let Some(update) = &entry.update {
@@ -1245,10 +1301,20 @@ impl App {
                 } else {
                     "○ "
                 };
+                let mut text = crate::find::choice_text(result, candidate);
+                // Picking a partial match installs the source's copy.
+                if pick_kind(candidate) == Some(PickKind::Replace) {
+                    const REPLACES: &str =
+                        "picking it replaces your copy with the one from Wago.io";
+                    text = match text.strip_suffix(')') {
+                        Some(open) => format!("{open}; {REPLACES})"),
+                        None => format!("{text} ({REPLACES})"),
+                    };
+                }
                 Line::from(vec![
                     Span::raw("    "),
                     Span::styled(mark, Style::default().fg(roles.lemon)),
-                    Span::styled(crate::find::choice_text(result, candidate), muted),
+                    Span::styled(text, muted),
                 ])
             })
             .collect();
@@ -1317,6 +1383,20 @@ pub(crate) fn find_outcome(
         problems: lookups.problems,
         names: LocalNames::new(rows, inputs),
     }
+}
+
+/// What the lookup reads first: LemonUp's rows and the AddOns folder. `Err`
+/// says which of the two couldn't be read.
+pub(crate) fn read_find_inputs(
+    state_db_file: &Path,
+    addon_dir: &Path,
+) -> std::result::Result<(Vec<AddonRecord>, FindInputs), String> {
+    let rows = StateDatabase::read_addons(state_db_file)
+        .map_err(|error| format!("LemonUp couldn't read its list of your addons: {error}"))?;
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+    let inputs = FindInputs::read(addon_dir, flavor)
+        .map_err(|error| format!("LemonUp couldn't read your AddOns folder: {error}"))?;
+    Ok((rows, inputs))
 }
 
 /// Links `links` the way `lemonup find --link` does: reads the AddOns folder

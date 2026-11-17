@@ -1105,10 +1105,8 @@ impl App {
             // `F` looks them all up at once.
             .chain(std::iter::once(Line::from(vec![
                 Span::styled("Press ", muted),
-                Span::styled(
-                    "F",
-                    Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
-                ),
+                // A way to link addons, like `f`.
+                key("F"),
                 Span::styled(" to find your addons online.", muted),
             ])))
             // With one game, how to add another.
