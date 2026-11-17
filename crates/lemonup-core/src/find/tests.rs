@@ -1601,7 +1601,7 @@ fn a_likely_match_says_which_versions_were_compared() {
         Some(LikelyReason::VersionDiffers {
             folder: "ElvUI".to_string(),
             installed: Some("v15.17".to_string()),
-            listed: "16.01".to_string(),
+            listed: Some("16.01".to_string()),
         })
     );
     assert_eq!(
@@ -1609,7 +1609,7 @@ fn a_likely_match_says_which_versions_were_compared() {
         Some(LikelyReason::VersionDiffers {
             folder: "Simulationcraft".to_string(),
             installed: Some("1.52.3".to_string()),
-            listed: "1.52.7".to_string(),
+            listed: Some("1.52.7".to_string()),
         })
     );
 }
@@ -1646,5 +1646,58 @@ fn an_exact_match_that_cannot_be_linked_keeps_the_other_sources_candidate() {
             .any(|candidate| candidate.source == FindSource::WowInterface),
         "the WoWInterface candidate must stay: {:#?}",
         found.candidates
+    );
+}
+
+#[test]
+fn a_library_both_sources_ship_never_hides_the_other_addon() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 3.0"]);
+    addon(&fixture.addons, "SharedLib", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "LIB",
+        "SharedLib",
+        vec![("SharedLib".to_string(), hash_of(&inputs, "SharedLib"))],
+    )]));
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "44",
+        "Pack",
+        "2.0",
+        &[("Pack", "2.0"), ("SharedLib", "1.0")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert!(
+        report.results.iter().any(|result| result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source == FindSource::WowInterface
+                && candidate.parent_folder == "Pack")),
+        "Pack's WoWInterface candidate must stay: {:#?}",
+        report.results
+    );
+}
+
+#[test]
+fn a_folder_the_source_lists_no_version_for_says_so() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Skipped);
+    let mut file = wowi_file("55", "Pack", "1.0", &[("Pack", "1.0")]);
+    file.folders[0].version = None;
+    lookups.wowinterface = SourceAnswer::Found(vec![file]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(
+        likely_reason_of(&report, "Pack"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "Pack".to_string(),
+            installed: Some("1.0".to_string()),
+            listed: None,
+        })
     );
 }

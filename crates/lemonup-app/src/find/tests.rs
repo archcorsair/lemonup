@@ -579,7 +579,7 @@ fn full_report() -> FindReport {
     likely.likely_reason = Some(lemonup_core::find::LikelyReason::VersionDiffers {
         folder: "Bartender4".to_string(),
         installed: Some("4.0".to_string()),
-        listed: "4.1".to_string(),
+        listed: Some("4.1".to_string()),
     });
 
     let mut partial = found(FindSource::Wago, "Plater", "Plater", "2.0", "2.1");
@@ -894,7 +894,7 @@ fn a_likely_match_says_what_was_checked() {
             Some(LikelyReason::VersionDiffers {
                 folder: "ElvUI".to_string(),
                 installed: Some("v15.17".to_string()),
-                listed: "16.01".to_string(),
+                listed: Some("16.01".to_string()),
             })
         ),
         "ElvUI Forever  TukUI  installed v15.17, TukUI has 16.01"
@@ -906,7 +906,7 @@ fn a_likely_match_says_what_was_checked() {
             Some(LikelyReason::VersionDiffers {
                 folder: "Simulationcraft".to_string(),
                 installed: Some("1.52.3".to_string()),
-                listed: "1.52.7".to_string(),
+                listed: Some("1.52.7".to_string()),
             })
         ),
         "Simulationcraft  WoWInterface  installed 1.52.3, WoWInterface has 1.52.7"
@@ -919,7 +919,7 @@ fn a_likely_match_says_what_was_checked() {
             Some(LikelyReason::VersionDiffers {
                 folder: "ElvUI_Options".to_string(),
                 installed: None,
-                listed: "16.01".to_string(),
+                listed: Some("16.01".to_string()),
             })
         ),
         "ElvUI Forever  TukUI  no installed version in ElvUI_Options, TukUI has 16.01"

@@ -470,8 +470,8 @@ pub enum LikelyReason {
         folder: String,
         /// The version in the folder's .toc, when it has one.
         installed: Option<String>,
-        /// The version the source lists.
-        listed: String,
+        /// The version the source lists for that folder, when it lists one.
+        listed: Option<String>,
     },
 }
 
@@ -905,10 +905,7 @@ pub fn match_addons(
                     LikelyReason::VersionDiffers {
                         folder: folder.folder.clone(),
                         installed: installed.map(str::to_string),
-                        listed: folder
-                            .version
-                            .clone()
-                            .unwrap_or_else(|| file.version.clone()),
+                        listed: folder.version.clone(),
                     }
                 })
             });
@@ -965,7 +962,7 @@ pub fn match_addons(
                     LikelyReason::VersionDiffers {
                         folder: folder.clone(),
                         installed: installed.map(str::to_string),
-                        listed: package.version.clone(),
+                        listed: Some(package.version.clone()),
                     }
                 })
             });
@@ -1059,7 +1056,7 @@ pub fn match_addons(
                         Some(listed) => LikelyReason::VersionDiffers {
                             folder: local.folder.clone(),
                             installed: local.version.clone(),
-                            listed: listed.to_string(),
+                            listed: Some(listed.to_string()),
                         },
                         None => LikelyReason::TocNamesIt,
                     },
@@ -1292,10 +1289,12 @@ fn drop_outweighed(placed: Vec<FoundAddon>) -> Vec<FoundAddon> {
                 other.label == FindLabel::Exact
                     && other.is_linkable()
                     && other.source != found.source
+                    // The same addon: the stronger match covers this one's main folder, not
+                    // only a library both happen to ship.
                     && other
                         .folders
                         .iter()
-                        .any(|folder| found.folders.iter().any(|known| key(known) == key(folder)))
+                        .any(|folder| key(folder) == key(&found.parent_folder))
             })
     };
     let dropped = placed.iter().map(outweighed).collect::<Vec<_>>();

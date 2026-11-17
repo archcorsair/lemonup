@@ -431,7 +431,10 @@ fn likely_reason(found: &FoundAddon) -> String {
             } else {
                 format!(" in {folder}")
             };
-            format!("{installed}{folder}, {source} has {listed}")
+            match listed {
+                Some(listed) => format!("{installed}{folder}, {source} has {listed}"),
+                None => format!("{installed}{folder}, {source} lists no version for it"),
+            }
         }
         Some(LikelyReason::TocNamesIt) => {
             "its .toc names it; its files weren't checked".to_string()
