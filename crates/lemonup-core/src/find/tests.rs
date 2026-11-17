@@ -562,6 +562,30 @@ fn tukui_directories_and_version_make_an_exact_match() {
 }
 
 #[test]
+fn a_tukui_package_with_an_older_folder_is_only_likely() {
+    let fixture = fixture();
+    addon(&fixture.addons, "ElvUI", &["## Version: 15.10"]);
+    addon(&fixture.addons, "ElvUI_Options", &["## Version: 15.02"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Skipped);
+    lookups.tukui = SourceAnswer::Found(vec![TukuiPackage {
+        id: "elvui".to_string(),
+        name: "ElvUI".to_string(),
+        version: "15.10".to_string(),
+        web_url: "https://tukui.org/elvui".to_string(),
+        author: Some("Elv".to_string()),
+        directories: vec!["ElvUI".to_string(), "ElvUI_Options".to_string()],
+    }]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    let found = result(&report, "ElvUI");
+    assert_eq!(found.label, FindLabel::Likely);
+    assert!(!found.preselected());
+    assert_eq!(found.found().expect("candidate").matched_version, None);
+}
+
+#[test]
 fn a_scope_looks_up_only_the_named_addons() {
     let fixture = fixture();
     addon(&fixture.addons, "One", &[]);

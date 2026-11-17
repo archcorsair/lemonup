@@ -872,16 +872,16 @@ pub fn match_addons(
         if !folders.iter().any(|folder| in_scope.contains(&key(folder))) {
             continue;
         }
-        let parent = folders
-            .iter()
-            .find(|folder| normalize_name(folder) == normalize_name(&package.name))
-            .unwrap_or(&folders[0]);
-        let versions_match = same_version(
-            inputs
-                .get(parent)
-                .and_then(|local| local.version.as_deref()),
-            Some(&package.version),
-        );
+        // Every folder of the package must carry the release's version: a current ElvUI with
+        // an older ElvUI_Options is not the release, so it is only likely.
+        let versions_match = folders.iter().all(|folder| {
+            same_version(
+                inputs
+                    .get(folder)
+                    .and_then(|local| local.version.as_deref()),
+                Some(&package.version),
+            )
+        });
         let mut found = empty_found(
             FindSource::Tukui,
             &package.id,
