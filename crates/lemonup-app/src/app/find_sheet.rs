@@ -758,17 +758,9 @@ impl App {
             error.clash.as_ref(),
         );
         let mut text = format!("{name} wasn't replaced: {advice} Its folders weren't changed.");
-        let rest = self
-            .find
-            .replacements
-            .iter()
-            .map(|replacement| replacement.name.as_str())
-            .collect::<Vec<_>>();
-        if !rest.is_empty() {
+        if let Some(rest) = self.replacements_left() {
             text.push_str(&format!(
-                " LemonUp stopped there, so {} {} replaced either.",
-                rest.join(", "),
-                if rest.len() == 1 { "wasn't" } else { "weren't" }
+                " LemonUp stopped there, so {rest} replaced either."
             ));
         }
         vec![
@@ -777,6 +769,40 @@ impl App {
             AppAction::Find(FindAction::StopReplacements),
             self.find_note(StatusKind::Problem, &text),
         ]
+    }
+
+    /// The replacement installed and is recorded, but LemonUp couldn't read
+    /// the list again. Says it was replaced, and stops: the next one would
+    /// run against a folder LemonUp can't read.
+    pub(super) fn find_replacement_unrefreshed_actions(&self, reason: &str) -> Vec<AppAction> {
+        let name = self.find.replacing.clone().unwrap_or_default();
+        let mut text = format!("{name} was replaced. {}", super::unrefreshed_text(reason));
+        if let Some(rest) = self.replacements_left() {
+            text.push_str(&format!(" LemonUp stopped there, so {rest} replaced yet."));
+        }
+        vec![
+            AppAction::SetWagoInstallInProgress(false),
+            AppAction::Find(FindAction::ReplacementFinished),
+            AppAction::Find(FindAction::StopReplacements),
+            self.find_note(StatusKind::Problem, &text),
+        ]
+    }
+
+    /// "Details wasn't" or "A, B weren't": the replacements still waiting.
+    fn replacements_left(&self) -> Option<String> {
+        let rest = self
+            .find
+            .replacements
+            .iter()
+            .map(|replacement| replacement.name.as_str())
+            .collect::<Vec<_>>();
+        (!rest.is_empty()).then(|| {
+            format!(
+                "{} {}",
+                rest.join(", "),
+                if rest.len() == 1 { "wasn't" } else { "weren't" }
+            )
+        })
     }
 
     pub(super) fn apply_find(&mut self, action: FindAction) {

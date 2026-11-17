@@ -1138,6 +1138,12 @@ enum WagoInstallTaskOutcome {
         inspection: WagoInstallInspection,
     },
     Installed(WagoInstallOutcome),
+    /// The install committed, but the AddOns folder or the database could not
+    /// be read again afterwards. `reason` says what failed.
+    InstalledNotRefreshed {
+        summary: WagoInstallSummary,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5770,6 +5776,32 @@ impl App {
                         )),
                     ]
                 }
+                // The install is done and recorded; only the list on screen is
+                // out of date. Never reported as a failed install.
+                AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::InstalledNotRefreshed { reason, .. },
+                )) if self.find.replacing.is_some() => {
+                    self.find_replacement_unrefreshed_actions(&reason)
+                }
+                AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::InstalledNotRefreshed { summary, reason },
+                )) => {
+                    let text = unrefreshed_text(&reason);
+                    let mut pane = self.search_pane.finish_install(&summary);
+                    if let SearchInstallState::Success { warning, .. } = &mut pane.install_state {
+                        *warning = Some(text.clone());
+                    }
+                    vec![
+                        AppAction::SetSearchPaneState(pane),
+                        AppAction::SetPendingWagoInstallConfirmation(None),
+                        AppAction::SetWagoInstallInProgress(false),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            self.dashboard.detail_mode,
+                            &format!("{} is installed. {text}", summary.addon_name),
+                        )),
+                    ]
+                }
                 // A replacement the Find sheet started: the error is its own,
                 // not the Search pane's.
                 AppTaskEvent::WagoInstallFinished(Err(error)) if self.find.replacing.is_some() => {
@@ -7668,6 +7700,16 @@ fn copy_dir_recursively(source: &Path, destination: &Path) -> std::result::Resul
     Ok(())
 }
 
+/// What to tell when an install is committed but the list could not be read
+/// again.
+fn unrefreshed_text(reason: &str) -> String {
+    format!(
+        "LemonUp couldn't read your addon list again: {}. \
+         The list on screen is out of date until you restart LemonUp.",
+        reason.trim_end_matches('.')
+    )
+}
+
 async fn run_wago_install_task(
     state_db_file: &Path,
     addon_dir: &Path,
@@ -7723,11 +7765,23 @@ async fn run_wago_install_task(
         }
         result => result?,
     };
-    let sync = sync_dashboard_state(state_db_file, addon_dir)?;
-    Ok(WagoInstallTaskOutcome::Installed(WagoInstallOutcome {
-        summary,
-        sync,
-    }))
+    Ok(finish_wago_install(summary, state_db_file, addon_dir))
+}
+
+/// What the install became once it committed: the list read again, or the
+/// reason it could not be. A failed read must not look like a failed install.
+fn finish_wago_install(
+    summary: WagoInstallSummary,
+    state_db_file: &Path,
+    addon_dir: &Path,
+) -> WagoInstallTaskOutcome {
+    match sync_dashboard_state(state_db_file, addon_dir) {
+        Ok(sync) => WagoInstallTaskOutcome::Installed(WagoInstallOutcome { summary, sync }),
+        Err(reason) => {
+            tracing::warn!(%reason, "could not read the AddOns folder after a Wago.io install");
+            WagoInstallTaskOutcome::InstalledNotRefreshed { summary, reason }
+        }
+    }
 }
 
 async fn run_transfer_import_task(

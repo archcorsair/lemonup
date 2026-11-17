@@ -1508,3 +1508,125 @@ fn f_opens_the_sheet_after_a_lookup_closed_with_nothing_picked() {
     assert_eq!(app.find.step, Some(FindStep::Start));
     assert_eq!(app.find.scope, Some(vec![under]));
 }
+
+fn questie_summary() -> WagoInstallSummary {
+    WagoInstallSummary {
+        addon_id: "Questie-id".to_string(),
+        addon_name: "Questie".to_string(),
+        parent_folder: "Questie".to_string(),
+        installed_folders: vec!["Questie".to_string()],
+        stability: crate::wago::WagoStability::Stable,
+        version: Some("1.0".to_string()),
+        dry_run: false,
+    }
+}
+
+#[test]
+fn a_replacement_that_installed_is_not_reported_as_failed() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    replace_questie(&mut app);
+    app.find.replacements.push_back(found(
+        FindLabel::Partial,
+        FindSource::Wago,
+        "Details",
+        &["Details"],
+    ));
+
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+            WagoInstallTaskOutcome::InstalledNotRefreshed {
+                summary: questie_summary(),
+                reason: "database is locked".to_string(),
+            },
+        ))),
+    );
+    let text = app.status_line.text.clone();
+    assert_eq!(app.status_line.kind, StatusKind::Problem, "{text}");
+    assert!(text.contains("Questie was replaced."), "{text}");
+    assert!(
+        text.contains("couldn't read your addon list again: database is locked."),
+        "{text}"
+    );
+    assert!(text.contains("restart LemonUp"), "{text}");
+    assert!(!text.contains("wasn't replaced:"), "{text}");
+    assert!(!text.contains("folders weren't changed"), "{text}");
+    // The next one waits: LemonUp can't read the folder it would change.
+    assert!(
+        text.contains("LemonUp stopped there, so Details wasn't replaced yet."),
+        "{text}"
+    );
+    assert!(!app.wago_install_in_progress);
+    assert!(app.find.replacing.is_none());
+    assert!(app.find.replacements.is_empty());
+    assert!(app.find_replacement_actions().is_empty());
+}
+
+#[test]
+fn an_install_that_committed_is_not_an_error_in_the_search_pane() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.dashboard.detail_mode = DetailMode::Search;
+    app.search_pane.install_state = SearchInstallState::Installing {
+        addon_id: "Questie-id".to_string(),
+        addon_name: "Questie".to_string(),
+    };
+    app.wago_install_in_progress = true;
+
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+            WagoInstallTaskOutcome::InstalledNotRefreshed {
+                summary: questie_summary(),
+                reason: "boom".to_string(),
+            },
+        ))),
+    );
+    match &app.search_pane.install_state {
+        SearchInstallState::Success {
+            addon_name,
+            warning,
+            ..
+        } => {
+            assert_eq!(addon_name, "Questie");
+            let warning = warning.as_deref().unwrap_or_default();
+            assert!(
+                warning.contains("couldn't read your addon list again: boom."),
+                "{warning}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!app.wago_install_in_progress);
+    assert_eq!(app.status_line.kind, StatusKind::Problem);
+    assert!(
+        app.status_line.text.contains("Questie is installed."),
+        "{}",
+        app.status_line.text
+    );
+}
+
+#[test]
+fn a_committed_install_whose_list_cannot_be_read_is_not_an_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let addons = dir.path().join("AddOns");
+    fs::create_dir_all(&addons).expect("AddOns");
+    // A database file that is really a directory can't be opened.
+    let broken = dir.path().join("state.db");
+    fs::create_dir_all(&broken).expect("directory");
+    let outcome = crate::app::finish_wago_install(questie_summary(), &broken, &addons);
+    assert!(
+        matches!(
+            outcome,
+            WagoInstallTaskOutcome::InstalledNotRefreshed { ref summary, .. }
+                if summary.addon_name == "Questie"
+        ),
+        "{outcome:?}"
+    );
+
+    let good = dir.path().join("good.db");
+    let outcome = crate::app::finish_wago_install(questie_summary(), &good, &addons);
+    assert!(
+        matches!(outcome, WagoInstallTaskOutcome::Installed(_)),
+        "{outcome:?}"
+    );
+}
