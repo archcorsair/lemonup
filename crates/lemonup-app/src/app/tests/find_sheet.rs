@@ -200,6 +200,17 @@ fn capital_f_opens_the_sheet_and_says_what_goes_to_wago() {
     );
     assert!(!shown.contains("Sends folder names"), "{shown}");
 
+    // Help lists F on the list and beside docked Details.
+    for context in [HelpContext::Overview, HelpContext::DetailsDocked] {
+        assert!(
+            crate::app::keymap::help_page(context)
+                .sections()
+                .flat_map(|section| section.rows.iter())
+                .any(|row| row.keys == [KeyEvent::from(KeyCode::Char('F'))]),
+            "{context:?}"
+        );
+    }
+
     // Esc closes it; nothing ran.
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.shell_ui.overlay.active, None);
@@ -296,6 +307,36 @@ fn esc_while_looking_changes_nothing_and_a_late_answer_is_dropped() {
     assert_eq!(app.find.step, None);
     assert_eq!(app.shell_ui.overlay.active, None);
     assert_eq!(app.dashboard.items, before);
+
+    // A new lookup started since: the old answer still lands nowhere.
+    open_find(&mut app);
+    app.find.generation += 1;
+    app.find.step = Some(FindStep::Looking {
+        folders: 3,
+        asking: Vec::new(),
+    });
+    apply_all(
+        &mut app,
+        AppMessage::Find(FindMessage::Task(FindTaskEvent::Looked {
+            generation: 1,
+            result: Ok(Box::new(outcome(report()))),
+        })),
+    );
+    apply_all(
+        &mut app,
+        AppMessage::Find(FindMessage::Task(FindTaskEvent::Read {
+            generation: 1,
+            folders: 9,
+            asking: vec![FindSource::Tukui],
+        })),
+    );
+    assert_eq!(
+        app.find.step,
+        Some(FindStep::Looking {
+            folders: 3,
+            asking: Vec::new(),
+        })
+    );
 }
 
 #[test]
