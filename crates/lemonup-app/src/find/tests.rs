@@ -405,3 +405,28 @@ fn find_link_scans_first_and_a_failed_scan_keeps_the_rows_and_links_nothing() {
         .collect::<Vec<_>>();
     assert_eq!(folders, ["Pawn"]);
 }
+
+#[test]
+fn a_wago_answer_with_unreadable_entries_is_incomplete_and_reported() {
+    let mut problems = Vec::new();
+    let complete = wago_answer(&mut problems, Ok(wire::WagoAnswer::default()));
+    assert_eq!(complete, SourceAnswer::Found(Vec::new()));
+    assert!(problems.is_empty());
+
+    let incomplete = wago_answer(
+        &mut problems,
+        Ok(wire::WagoAnswer {
+            matches: Vec::new(),
+            unreadable: 2,
+        }),
+    );
+
+    assert_eq!(incomplete, SourceAnswer::Incomplete(Vec::new()));
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].source, FindSource::Wago);
+    assert_eq!(problems[0].error.kind, SourceErrorKind::Other);
+    assert_eq!(
+        problems[0].error.detail,
+        "Wago.io sent 2 matches LemonUp can't read"
+    );
+}

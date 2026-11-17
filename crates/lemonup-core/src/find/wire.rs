@@ -115,11 +115,21 @@ struct RawModule {
     hash: String,
 }
 
+/// A Wago.io `_match` answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WagoAnswer {
+    pub matches: Vec<WagoMatch>,
+    /// Entries LemonUp couldn't read (an unexpected shape, or no folders). Which folders they
+    /// were for is unknown, so any of them makes the answer incomplete.
+    pub unreadable: usize,
+}
+
 /// Reads a Wago.io `_match` answer (`{"addons": [...]}`).
-pub fn parse_wago_match(bytes: &[u8]) -> Result<Vec<WagoMatch>, String> {
+pub fn parse_wago_match(bytes: &[u8]) -> Result<WagoAnswer, String> {
     let response = serde_json::from_slice::<MatchResponse>(bytes)
         .map_err(|error| format!("Wago.io sent an answer LemonUp can't read: {error}"))?;
-    Ok(response
+    let entries = response.addons.len();
+    let matches = response
         .addons
         .into_iter()
         .filter_map(Lenient::item)
@@ -153,7 +163,11 @@ pub fn parse_wago_match(bytes: &[u8]) -> Result<Vec<WagoMatch>, String> {
                 wowinterface_id: text(raw.wowi),
             })
         })
-        .collect())
+        .collect::<Vec<_>>();
+    Ok(WagoAnswer {
+        unreadable: entries - matches.len(),
+        matches,
+    })
 }
 
 #[derive(Deserialize)]
@@ -225,13 +239,17 @@ mod tests {
        "recent_releases":{"stable":{"label":"v7.8.0"},"alpha":{"label":"v7.5.2-3-g88b6dcd"}}},
       {"id":"Only","name":"Beta only","modules":{"Beta":{"hash":"00"}},
        "recent_releases":{"beta":{"label":"b2"},"alpha":{"label":"a3"}}},
-      {"unexpected":"entry"}
+      {"unexpected":"entry"},
+      {"id":"Null","name":"No folders","modules":null},
+      {"id":"Empty","name":"Empty folders","modules":{}}
     ]}"#;
 
     #[test]
-    fn a_wago_answer_becomes_matches() {
-        let matches = parse_wago_match(WAGO_ANSWER.as_bytes()).expect("parse");
+    fn a_wago_answer_becomes_matches_and_counts_what_it_cannot_read() {
+        let answer = parse_wago_match(WAGO_ANSWER.as_bytes()).expect("parse");
 
+        assert_eq!(answer.unreadable, 3);
+        let matches = answer.matches;
         assert_eq!(matches.len(), 3);
         let narcissus = &matches[0];
         assert_eq!(narcissus.id, "WL6JqQNv");

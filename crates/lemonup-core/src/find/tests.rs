@@ -1069,3 +1069,29 @@ fn every_folder_a_match_takes_over_joins_whether_or_not_it_has_a_row() {
         assert!(candidate.regroups());
     }
 }
+
+#[test]
+fn an_incomplete_wago_answer_leaves_what_it_did_not_match_not_checked() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pawn", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Spy", &["## Version: 3.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let pawn = wago(
+        "PAWN",
+        "Pawn",
+        vec![("Pawn".to_string(), hash_of(&inputs, "Pawn"))],
+    );
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Incomplete(vec![pawn])),
+    );
+
+    assert_eq!(result(&report, "Pawn").label, FindLabel::Exact);
+    let spy = result(&report, "Spy");
+    assert_eq!(spy.label, FindLabel::NotChecked);
+    assert_eq!(spy.not_checked_by, [FindSource::Wago]);
+    assert_eq!(report.failed, [FindSource::Wago]);
+}

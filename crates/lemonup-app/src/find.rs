@@ -51,7 +51,7 @@ pub(crate) async fn lookup_sources(
     let wago = async {
         match wago_api_key {
             None => None,
-            Some(_) if wago_lookups.is_empty() => Some(Ok(Vec::new())),
+            Some(_) if wago_lookups.is_empty() => Some(Ok(wire::WagoAnswer::default())),
             Some(key) => Some(fetch_wago_matches(key, flavor, wago_lookups).await),
         }
     };
@@ -62,7 +62,7 @@ pub(crate) async fn lookup_sources(
     let mut problems = Vec::new();
     let wago = match wago {
         None => SourceAnswer::Skipped,
-        Some(result) => answer(&mut problems, FindSource::Wago, result),
+        Some(result) => wago_answer(&mut problems, result),
     };
     let wowinterface = answer(&mut problems, FindSource::WowInterface, wowinterface);
     let tukui = answer(&mut problems, FindSource::Tukui, tukui);
@@ -91,6 +91,39 @@ fn answer<T>(
     }
 }
 
+/// Like [`answer`], but a Wago.io answer with entries LemonUp couldn't read is incomplete: the
+/// rest is used, and the problem is reported so the folders only Wago.io could find stay "Not
+/// checked".
+pub(crate) fn wago_answer(
+    problems: &mut Vec<SourceProblem>,
+    result: Result<wire::WagoAnswer, SourceError>,
+) -> SourceAnswer<WagoMatch> {
+    match result {
+        Ok(answer) if answer.unreadable > 0 => {
+            tracing::warn!(
+                unreadable = answer.unreadable,
+                "Wago.io sent unreadable matches"
+            );
+            problems.push(SourceProblem {
+                source: FindSource::Wago,
+                error: SourceError::new(
+                    SourceErrorKind::Other,
+                    format!(
+                        "Wago.io sent {} matches LemonUp can't read",
+                        answer.unreadable
+                    ),
+                ),
+            });
+            SourceAnswer::Incomplete(answer.matches)
+        }
+        result => answer(
+            problems,
+            FindSource::Wago,
+            result.map(|answer| answer.matches),
+        ),
+    }
+}
+
 fn build_client() -> Result<reqwest::Client, SourceError> {
     crate::http::client_builder()
         .build()
@@ -101,7 +134,7 @@ async fn fetch_wago_matches(
     api_key: &str,
     flavor: GameFlavor,
     lookups: &[WagoLookup],
-) -> Result<Vec<WagoMatch>, SourceError> {
+) -> Result<wire::WagoAnswer, SourceError> {
     let client = build_client()?;
     let game_version = crate::wago::wago_game_version(flavor);
     let url = reqwest::Url::parse_with_params(WAGO_MATCH_URL, [("game_version", game_version)])

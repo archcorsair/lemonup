@@ -270,14 +270,21 @@ pub enum SourceAnswer<T> {
     Skipped,
     /// Asked, but the answer never came or made no sense.
     Failed,
+    /// Answered, but part of the answer made no sense: what could be read is used, and what
+    /// only this source could find stays "Not checked", as for `Failed`.
+    Incomplete(Vec<T>),
 }
 
 impl<T> SourceAnswer<T> {
     fn items(&self) -> &[T] {
         match self {
-            Self::Found(items) => items,
+            Self::Found(items) | Self::Incomplete(items) => items,
             Self::Skipped | Self::Failed => &[],
         }
+    }
+
+    fn failed(&self) -> bool {
+        matches!(self, Self::Failed | Self::Incomplete(_))
     }
 }
 
@@ -291,13 +298,13 @@ pub struct SourceLookups {
 impl SourceLookups {
     fn failed(&self) -> Vec<FindSource> {
         let mut failed = Vec::new();
-        if matches!(self.wago, SourceAnswer::Failed) {
+        if self.wago.failed() {
             failed.push(FindSource::Wago);
         }
-        if matches!(self.wowinterface, SourceAnswer::Failed) {
+        if self.wowinterface.failed() {
             failed.push(FindSource::WowInterface);
         }
-        if matches!(self.tukui, SourceAnswer::Failed) {
+        if self.tukui.failed() {
             failed.push(FindSource::Tukui);
         }
         failed
