@@ -887,13 +887,14 @@ pub(crate) fn build_managed_update_record(
         updated_at: existing.updated_at,
         last_checked_at: existing.last_checked_at,
         remote_version: existing.remote_version.clone(),
+        toc_overrides: existing.toc_overrides.clone(),
         unrecognized: existing.unrecognized.clone(),
     };
     refreshed.set_managed_owned_folders(existing.owned_folders.clone());
     refreshed
 }
 
-fn resolve_selected_addons<'a>(
+pub(crate) fn resolve_selected_addons<'a>(
     installed: &'a [AddonRecord],
     selectors: &[String],
 ) -> Result<Vec<&'a AddonRecord>, LemonupError> {

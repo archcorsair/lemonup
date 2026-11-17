@@ -276,6 +276,9 @@ impl App {
         {
             rows.push(("Made for", DetailValue::Text(made_for)));
         }
+        if let Some(category) = self.details_category(item) {
+            rows.push(("Category", DetailValue::Text(category)));
+        }
         let missing = self.dashboard_parent_missing_owned_children(&item.folder);
         let mut folders = vec![item.folder.clone()];
         for folder in &item.owned_folders {

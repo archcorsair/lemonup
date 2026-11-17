@@ -15,7 +15,6 @@ use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
 use crate::source_error::SourceError;
-use crate::update_targets::folder_swap::FolderSwap;
 
 const API_BASE: &str = "https://addons.wago.io";
 const EXTERNAL_PATH: &str = "/api/external";
@@ -520,15 +519,17 @@ fn install_downloaded_wago_addon(
             replace,
             reinstalling.as_deref(),
         )?;
-        let swap = FolderSwap::apply(
+        let record =
+            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
             &extracted.folders,
             &replaced,
+            &toc_overrides,
         )?;
-
-        let record =
-            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
 
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()).into());
@@ -661,17 +662,20 @@ fn update_downloaded_wago_addon(
             });
         }
 
+        let record =
+            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
-        let swap = FolderSwap::apply(
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
             &extracted.folders,
             &managed_folders,
+            &toc_overrides,
         )?;
 
-        let record =
-            build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()));
         }

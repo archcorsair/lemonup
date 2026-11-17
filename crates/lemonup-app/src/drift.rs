@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lemonup_core::{AddonRecord, ScannedAddon};
+use lemonup_core::{AddonRecord, ScannedAddon, TocFieldValues};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DriftReport {
@@ -8,6 +8,10 @@ pub(crate) struct DriftReport {
     pub(crate) removed_missing_records: Vec<String>,
     pub(crate) orphaned_owned_children_on_disk: Vec<OwnedChildDrift>,
     pub(crate) parent_missing_owned_children: HashMap<String, Vec<String>>,
+    /// The Title, Notes and Category the game reads for each scanned addon, by parent folder.
+    /// Not drift itself: it lets Details and the TOC editor see a stored override the files
+    /// no longer have.
+    pub(crate) toc_fields: BTreeMap<String, TocFieldValues>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +27,7 @@ impl DriftReport {
             removed_missing_records: Vec::new(),
             orphaned_owned_children_on_disk: Vec::new(),
             parent_missing_owned_children: HashMap::new(),
+            toc_fields: BTreeMap::new(),
         }
     }
 
@@ -66,6 +71,10 @@ pub(crate) fn compute_drift_report(
         .collect::<HashSet<_>>();
 
     let mut report = DriftReport::empty();
+    report.toc_fields = scanned
+        .iter()
+        .map(|addon| (addon.folder.clone(), TocFieldValues::from_scanned(addon)))
+        .collect();
 
     report.imported_disk_only_folders = scanned
         .iter()
@@ -155,6 +164,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "WeakAuras".to_string(),
@@ -170,6 +182,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
         ];
 
@@ -206,6 +221,9 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
         }];
 
         let report = compute_drift_report(&[tracked], &scanned);
@@ -240,6 +258,9 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
         }];
 
         let report = compute_drift_report(&[tracked], &scanned);

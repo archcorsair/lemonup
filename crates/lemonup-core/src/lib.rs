@@ -6,6 +6,7 @@ pub mod events;
 pub mod paths;
 pub mod scan;
 pub mod storage;
+pub mod toc_edit;
 pub mod transfer;
 pub mod v1_migration;
 pub mod wow;
@@ -20,10 +21,11 @@ pub use events::{OperationKind, OperationProgress, OperationStage};
 pub use paths::{AppPaths, DEFAULT_PROFILE, paths_match};
 pub use scan::{
     ScanReport, ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
-    UPDATE_STAGING_PREFIX, parse_toc_content, scan_addons_dir, scan_addons_dir_report,
-    scan_addons_dir_with_tracked, select_toc_file,
+    UPDATE_STAGING_PREFIX, parse_toc_content, read_addon_toc_fields, scan_addons_dir,
+    scan_addons_dir_report, scan_addons_dir_with_tracked, select_toc_file,
 };
 pub use storage::StateDatabase;
+pub use toc_edit::{TocField, TocFieldValues, TocValueSource};
 pub use transfer::{
     DEFAULT_TRANSFER_FILE_NAME, ImportAnalysis, TransferAddon, TransferFile, TransferSourceKind,
     analyze_import, default_transfer_path, export_addons, parse_import_file,

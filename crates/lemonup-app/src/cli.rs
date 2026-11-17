@@ -5,7 +5,7 @@ use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
 use crate::wowinterface::parse_wowinterface_target;
 use clap::{Parser, Subcommand};
-use lemonup_core::DEFAULT_PROFILE;
+use lemonup_core::{DEFAULT_PROFILE, TocField};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -100,6 +100,29 @@ pub enum Commands {
         #[arg(value_name = "BACKUP_ZIP")]
         archive: Option<PathBuf>,
     },
+    /// Show an addon's Title, Notes and Category, or change one in its .toc files
+    Toc {
+        /// The addon's exact name or folder name
+        #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
+        addon: String,
+        /// The field to change: title, notes or category
+        #[arg(value_name = "FIELD", value_parser = parse_toc_field)]
+        field: Option<TocField>,
+        /// The new value
+        #[arg(
+            value_name = "VALUE",
+            requires = "field",
+            conflicts_with = "clear",
+            allow_hyphen_values = true
+        )]
+        value: Option<String>,
+        /// Give the field back the addon's own value
+        #[arg(long, requires = "field")]
+        clear: bool,
+        /// Change the files of an addon LemonUp didn't install (Not linked)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -126,6 +149,14 @@ fn parse_addon_selector(value: &str) -> Result<String, String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+/// `title`, `notes` or `category`, in any case.
+fn parse_toc_field(value: &str) -> Result<TocField, String> {
+    TocField::ALL
+        .into_iter()
+        .find(|field| field.name().eq_ignore_ascii_case(value.trim()))
+        .ok_or_else(|| format!("unknown field '{value}'; use title, notes or category"))
 }
 
 fn parse_wago_install_target(value: &str) -> Result<String, String> {
@@ -160,6 +191,8 @@ fn parse_github_install_target(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    use lemonup_core::TocField;
 
     use super::{
         Cli, Commands, parse_addon_selector, parse_github_install_target,
@@ -344,5 +377,47 @@ mod tests {
             }
             other => panic!("expected install-github command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn toc_command_shows_sets_and_clears_a_field() {
+        let show = Cli::try_parse_from(["lemonup", "toc", "AdiBags"]).expect("show");
+        assert!(matches!(
+            show.command.expect("subcommand"),
+            Commands::Toc { addon, field: None, value: None, clear: false, yes: false }
+                if addon == "AdiBags"
+        ));
+        let set =
+            Cli::try_parse_from(["lemonup", "toc", "AdiBags", "CATEGORY", "My Bags", "--yes"])
+                .expect("set");
+        assert!(matches!(
+            set.command.expect("subcommand"),
+            Commands::Toc { field: Some(TocField::Category), value: Some(value), clear: false, yes: true, .. }
+                if value == "My Bags"
+        ));
+        let clear =
+            Cli::try_parse_from(["lemonup", "toc", "AdiBags", "title", "--clear"]).expect("clear");
+        assert!(matches!(
+            clear.command.expect("subcommand"),
+            Commands::Toc {
+                field: Some(TocField::Title),
+                value: None,
+                clear: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn toc_command_rejects_an_unknown_field_and_a_value_with_clear() {
+        let error = Cli::try_parse_from(["lemonup", "toc", "AdiBags", "version", "2"])
+            .expect_err("unknown field");
+        assert!(
+            error.to_string().contains("use title, notes or category"),
+            "{error}"
+        );
+        assert!(
+            Cli::try_parse_from(["lemonup", "toc", "AdiBags", "notes", "x", "--clear"]).is_err()
+        );
     }
 }

@@ -14,7 +14,6 @@ use zip::ZipArchive;
 
 use crate::archive::safe_entry_relative_path;
 use crate::source_error::{SourceError, SourceErrorKind};
-use crate::update_targets::folder_swap::FolderSwap;
 
 const API_URL: &str = "https://api.tukui.org/v1/addons";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -427,9 +426,17 @@ fn install_downloaded_tukui_addon(
             replace,
             None,
         )?;
-        let swap = FolderSwap::apply(addon_dir, &layout.source_root, &layout.folders, &replaced)?;
-
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
+            addon_dir,
+            &layout.source_root,
+            &layout.folders,
+            &replaced,
+            &toc_overrides,
+        )?;
+
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()).into());
         }
@@ -509,16 +516,19 @@ fn update_downloaded_tukui_addon(
             });
         }
 
+        let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
-        let swap = FolderSwap::apply(
+        // The user's TOC overrides go into the staged copies before anything live moves.
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
+        let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &layout.source_root,
             &layout.folders,
             &managed_folders,
+            &toc_overrides,
         )?;
 
-        let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()));
         }
@@ -997,6 +1007,9 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
         };
         let addon = super::TukuiAddon {
             slug: "elvui".to_string(),
@@ -1079,6 +1092,68 @@ mod tests {
             .expect("addon exists");
         assert_eq!(stored.version.as_deref(), Some("20.463"));
         assert_eq!(stored.source, SourceKind::Tukui);
+    }
+
+    #[test]
+    fn update_downloaded_tukui_addon_writes_toc_overrides_and_skips_unusable_ones() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("Tukui")).expect("create addon dir");
+        std::fs::write(
+            addon_dir.join("Tukui").join("Tukui.toc"),
+            "## Title: Tukui\n## Version: 20.462\n## Interface: 110205\n",
+        )
+        .expect("write toc");
+
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked = AddonRecord::new("Tukui", "Tukui", SourceKind::Tukui);
+        tracked.version = Some("20.462".to_string());
+        tracked.source_url = Some("https://tukui.org/tukui".to_string());
+        tracked.set_managed_owned_folders(Vec::<OwnedFolder>::new());
+        // An empty Category is a value this version refuses; it must not block the update.
+        tracked.toc_overrides = [
+            ("Title", "|cff00ff00My|r Tukui"),
+            ("Notes", "Mine"),
+            ("Category", ""),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        database.upsert_addon(&tracked).expect("seed tracked addon");
+
+        let addon = super::TukuiAddon {
+            slug: "tukui".to_string(),
+            author: "Tukz".to_string(),
+            name: "Tukui".to_string(),
+            url: "https://api.tukui.org/v1/download/tukui/token".to_string(),
+            version: "20.463".to_string(),
+            web_url: "https://tukui.org/tukui".to_string(),
+            directories: canonical_install_folders("tukui"),
+            patch: Vec::new(),
+        };
+        let bytes = build_zip(&[(
+            "wrapper/Tukui/Tukui.toc",
+            "## Title: Tukui\n## Version: 20.463\n## Category: UI\n## Interface: 110205\n",
+        )]);
+
+        update_downloaded_tukui_addon(&mut database, &addon_dir, &tracked, &addon, &bytes, false)
+            .expect("update addon");
+
+        assert_eq!(
+            std::fs::read_to_string(addon_dir.join("Tukui").join("Tukui.toc")).expect("toc"),
+            "# LemonUp: ## Title: Tukui\n## Version: 20.463\n## Category: UI\n## Interface: 110205\n# LemonUp-managed\n## Title: |cff00ff00My|r Tukui\n# LemonUp-managed\n## Notes: Mine\n"
+        );
+        let stored = database
+            .get_addon_by_folder("Tukui")
+            .expect("get addon")
+            .expect("addon exists");
+        assert_eq!(stored.version.as_deref(), Some("20.463"));
+        assert_eq!(stored.name, "My Tukui");
+        assert_eq!(stored.toc_overrides, tracked.toc_overrides);
     }
 
     #[test]

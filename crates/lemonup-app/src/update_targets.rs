@@ -1,6 +1,11 @@
 //! Which on-disk folders a provider update replaces, shared by every provider.
 
 pub(crate) mod folder_swap;
+pub(crate) mod toc_overrides;
+
+pub(crate) use toc_overrides::{
+    TocApplyError, apply_toc_overrides_now, stored_toc_overrides, swap_with_toc_overrides,
+};
 
 use std::path::Path;
 

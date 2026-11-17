@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use time::OffsetDateTime;
 
 use crate::domain::{
@@ -13,12 +13,15 @@ use crate::domain::{
 };
 use crate::error::{LemonupError, Result};
 use crate::scan::{GroupingGuard, ScanReport, ScanSummary, ScannedAddon};
+use crate::toc_edit::{self, TocField};
 
 pub struct StateDatabase {
     connection: Connection,
 }
 
 const BOUND_ADDON_DIR_KEY: &str = "bound_addon_dir";
+/// The `addons` schema this version creates and migrates to (`PRAGMA user_version`).
+const SCHEMA_VERSION: i64 = 3;
 
 /// How long a connection waits for another process's write lock before failing, so a
 /// TUI session and a scheduled `lemonup sync` overlap instead of erroring with
@@ -127,7 +130,7 @@ impl StateDatabase {
                 id, name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
-                installed_at, updated_at, last_checked_at, remote_version
+                installed_at, updated_at, last_checked_at, remote_version, toc_overrides
              FROM addons
              WHERE folder = ?1",
         )?;
@@ -137,34 +140,82 @@ impl StateDatabase {
         Ok(maybe_row.map(Self::row_to_addon).transpose()?)
     }
 
+    /// Replaces the stored TOC overrides of the addon whose parent folder is `folder`. Values of
+    /// known fields must pass `toc_edit::validate_override_value`; unknown keys are stored as
+    /// they are. This changes only the database, not the addon's files.
+    pub fn set_toc_overrides(
+        &self,
+        folder: &str,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        toc_edit::validate_stored_overrides(overrides)?;
+        Self::write_toc_overrides_with_connection(&self.connection, folder, overrides)
+    }
+
+    /// The only write of the `toc_overrides` column on an existing row: upserts leave it alone,
+    /// so a stale copy of a row never overwrites what the user set.
+    fn write_toc_overrides_with_connection(
+        connection: &Connection,
+        folder: &str,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let changed = connection.execute(
+            "UPDATE addons SET toc_overrides = ?1 WHERE folder = ?2",
+            params![serialize_toc_overrides(overrides)?, folder],
+        )?;
+        if changed == 0 {
+            return Err(LemonupError::InvalidArgument(format!(
+                "no addon is stored for folder '{folder}'"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sets (`Some`) or clears (`None`) one TOC override of the addon whose parent folder is
+    /// `folder` and returns all of its overrides. The value is validated and stored trimmed.
+    /// This changes only the database, not the addon's files.
+    pub fn set_toc_override(
+        &self,
+        folder: &str,
+        field: TocField,
+        value: Option<&str>,
+    ) -> Result<BTreeMap<String, String>> {
+        let addon = self.get_addon_by_folder(folder)?.ok_or_else(|| {
+            LemonupError::InvalidArgument(format!("no addon is stored for folder '{folder}'"))
+        })?;
+        let mut overrides = addon.toc_overrides;
+        toc_edit::set_override(&mut overrides, field, value)?;
+        self.set_toc_overrides(folder, &overrides)?;
+        Ok(overrides)
+    }
+
     pub fn upsert_addon(&self, addon: &AddonRecord) -> Result<()> {
         Self::upsert_addon_with_connection(&self.connection, addon)
+    }
+
+    /// The TOC overrides [`Self::record_managed_addon`] would store for `addon` right now: the
+    /// stored row's (or, without one, `addon`'s own) plus those of the rows it absorbs. Installs
+    /// and updates write these into the staged files, so the files and the row agree.
+    pub fn managed_toc_overrides(&self, addon: &AddonRecord) -> Result<BTreeMap<String, String>> {
+        let existing_addons = Self::list_addons_from_connection(&self.connection)?;
+        let plan = ManagedRecordPlan::new(addon, &existing_addons);
+        Ok(merge_toc_overrides(
+            addon,
+            plan.existing_parent,
+            &plan.absorbed,
+        ))
     }
 
     pub fn record_managed_addon(&mut self, addon: &AddonRecord) -> Result<()> {
         let tx = self.connection.transaction()?;
         let existing_addons = Self::list_addons_from_connection(&tx)?;
-        let existing_parent = existing_addons
-            .iter()
-            .find(|existing| existing.folder == addon.folder);
-        let incoming_owned_folders = addon
-            .owned_folders
-            .iter()
-            .map(|owned_folder| owned_folder.name.clone())
-            .collect::<HashSet<_>>();
-        let prior_owned_folders = existing_parent
-            .iter()
-            .flat_map(|existing| {
-                existing
-                    .owned_folders
-                    .iter()
-                    .map(|owned_folder| owned_folder.name.clone())
-            })
-            .collect::<HashSet<_>>();
-        let represented_folders = incoming_owned_folders
-            .union(&prior_owned_folders)
-            .cloned()
-            .collect::<HashSet<_>>();
+        let ManagedRecordPlan {
+            existing_parent,
+            incoming_owned_folders,
+            represented_folders,
+            absorbed_folders,
+            absorbed,
+        } = ManagedRecordPlan::new(addon, &existing_addons);
 
         // Another addon linked by a newer LemonUp is never deleted or stripped here: its folders
         // are not this addon's to take (compared without case, like every ownership check).
@@ -206,14 +257,15 @@ impl StateDatabase {
             }
         }
 
-        for folder in represented_folders {
-            if folder != addon.folder {
-                Self::remove_addon_with_connection(&tx, &folder)?;
-            }
+        for folder in &absorbed_folders {
+            Self::remove_addon_with_connection(&tx, folder)?;
         }
 
-        let merged = merge_managed_addon(addon, existing_parent);
+        let merged = merge_managed_addon(addon, existing_parent, &absorbed);
         Self::upsert_addon_with_connection(&tx, &merged)?;
+        if existing_parent.is_some_and(|parent| parent.toc_overrides != merged.toc_overrides) {
+            Self::write_toc_overrides_with_connection(&tx, &merged.folder, &merged.toc_overrides)?;
+        }
 
         tx.commit()?;
         Ok(())
@@ -437,12 +489,27 @@ impl StateDatabase {
                 value TEXT NOT NULL
             );",
         )?;
-        let user_version = self
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        if Self::user_version(&self.connection)? >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        // One transaction for the whole schema change, so a crash or a failed step leaves the
+        // database as it was. IMMEDIATE takes the write lock before the version is read again,
+        // so two processes opening an old database never both migrate it.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        Self::migrate_with_connection(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn user_version(connection: &Connection) -> Result<i64> {
+        Ok(connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?)
+    }
+
+    fn migrate_with_connection(connection: &Connection) -> Result<()> {
+        let user_version = Self::user_version(connection)?;
 
         if user_version == 0 {
-            self.connection.execute_batch(
+            connection.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS addons (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -465,16 +532,17 @@ impl StateDatabase {
                     installed_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     last_checked_at INTEGER,
-                    remote_version TEXT
+                    remote_version TEXT,
+                    toc_overrides TEXT
                 );
-                PRAGMA user_version = 2;
+                PRAGMA user_version = 3;
                 ",
             )?;
             return Ok(());
         }
 
         if user_version == 1 {
-            self.connection.execute_batch(
+            connection.execute_batch(
                 "
                 ALTER TABLE addons ADD COLUMN ownership_source TEXT NOT NULL DEFAULT 'none';
                 UPDATE addons
@@ -487,6 +555,15 @@ impl StateDatabase {
                 ",
             )?;
         }
+
+        if user_version == 1 || user_version == 2 {
+            connection.execute_batch(
+                "
+                ALTER TABLE addons ADD COLUMN toc_overrides TEXT;
+                PRAGMA user_version = 3;
+                ",
+            )?;
+        }
         Ok(())
     }
 
@@ -496,7 +573,7 @@ impl StateDatabase {
                 id, name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
-                installed_at, updated_at, last_checked_at, remote_version
+                installed_at, updated_at, last_checked_at, remote_version, toc_overrides
              FROM addons
              ORDER BY name ASC",
         )?;
@@ -527,14 +604,15 @@ impl StateDatabase {
         let required_deps = serde_json::to_string(&addon.required_deps)?;
         let optional_deps = serde_json::to_string(&addon.optional_deps)?;
         let embedded_libs = serde_json::to_string(&addon.embedded_libs)?;
+        let toc_overrides = serialize_toc_overrides(&addon.toc_overrides)?;
 
         connection.execute(
             "INSERT INTO addons (
                 name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
-                installed_at, updated_at, last_checked_at, remote_version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                installed_at, updated_at, last_checked_at, remote_version, toc_overrides
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
              ON CONFLICT(folder) DO UPDATE SET
                 name = excluded.name,
                 owned_folders = excluded.owned_folders,
@@ -576,6 +654,7 @@ impl StateDatabase {
                 addon.updated_at.unix_timestamp(),
                 addon.last_checked_at.map(|value| value.unix_timestamp()),
                 addon.remote_version,
+                toc_overrides,
             ],
         )?;
 
@@ -647,6 +726,11 @@ impl StateDatabase {
                 .map(parse_timestamp)
                 .transpose()?,
             remote_version: row.get(20)?,
+            toc_overrides: row
+                .get::<_, Option<String>>(21)?
+                .map(parse_json::<BTreeMap<String, String>>)
+                .transpose()?
+                .unwrap_or_default(),
             unrecognized: any_unrecognized.then_some(unrecognized),
         })
     }
@@ -670,9 +754,14 @@ fn merge_scanned_addon(
         OwnershipSource::ScanInferred
     };
 
+    let toc_overrides = existing
+        .map(|addon| addon.toc_overrides.clone())
+        .unwrap_or_default();
     AddonRecord {
         id: existing.and_then(|addon| addon.id),
-        name: scanned_addon.name.clone(),
+        // An addon with a Title override is listed under it, the same as after an update.
+        name: toc_edit::title_override_name(&toc_overrides)
+            .unwrap_or_else(|| scanned_addon.name.clone()),
         folder: scanned_addon.folder.clone(),
         owned_folders: if preserve_existing_owned_folders {
             existing
@@ -708,6 +797,7 @@ fn merge_scanned_addon(
         updated_at: now,
         last_checked_at: existing.and_then(|addon| addon.last_checked_at),
         remote_version: existing.and_then(|addon| addon.remote_version.clone()),
+        toc_overrides,
         unrecognized: existing.and_then(|addon| addon.unrecognized.clone()),
     }
 }
@@ -780,12 +870,104 @@ fn is_placeholder_version(value: &str) -> bool {
     trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
-fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -> AddonRecord {
+/// What [`StateDatabase::record_managed_addon`] reads from the stored rows before it writes.
+struct ManagedRecordPlan<'a> {
+    existing_parent: Option<&'a AddonRecord>,
+    incoming_owned_folders: HashSet<String>,
+    represented_folders: HashSet<String>,
+    /// Folders the addon now owns whose own rows are removed, sorted so the result does not
+    /// depend on hash order.
+    absorbed_folders: Vec<String>,
+    /// The stored rows of `absorbed_folders`.
+    absorbed: Vec<&'a AddonRecord>,
+}
+
+impl<'a> ManagedRecordPlan<'a> {
+    fn new(addon: &AddonRecord, existing_addons: &'a [AddonRecord]) -> Self {
+        let existing_parent = existing_addons
+            .iter()
+            .find(|existing| existing.folder == addon.folder);
+        let incoming_owned_folders = addon
+            .owned_folders
+            .iter()
+            .map(|owned_folder| owned_folder.name.clone())
+            .collect::<HashSet<_>>();
+        let prior_owned_folders = existing_parent
+            .iter()
+            .flat_map(|existing| {
+                existing
+                    .owned_folders
+                    .iter()
+                    .map(|owned_folder| owned_folder.name.clone())
+            })
+            .collect::<HashSet<_>>();
+        let represented_folders = incoming_owned_folders
+            .union(&prior_owned_folders)
+            .cloned()
+            .collect::<HashSet<_>>();
+        // Rows of folders this addon now owns are absorbed into it.
+        let mut absorbed_folders = represented_folders
+            .iter()
+            .filter(|folder| **folder != addon.folder)
+            .cloned()
+            .collect::<Vec<_>>();
+        absorbed_folders.sort();
+        let absorbed = absorbed_folders
+            .iter()
+            .filter_map(|folder| {
+                existing_addons
+                    .iter()
+                    .find(|existing| existing.folder == *folder)
+            })
+            .collect::<Vec<_>>();
+        Self {
+            existing_parent,
+            incoming_owned_folders,
+            represented_folders,
+            absorbed_folders,
+            absorbed,
+        }
+    }
+}
+
+/// The TOC overrides a managed addon ends up with. A stored row keeps its overrides (the upsert
+/// never writes them); a new row starts with the incoming record's, which is how an undone
+/// removal gets them back. `absorbed` are the rows of folders this addon now owns, which are
+/// removed: their overrides carry over for fields the addon does not set itself.
+fn merge_toc_overrides(
+    incoming: &AddonRecord,
+    existing: Option<&AddonRecord>,
+    absorbed: &[&AddonRecord],
+) -> BTreeMap<String, String> {
+    let mut toc_overrides = existing.map_or_else(
+        || incoming.toc_overrides.clone(),
+        |addon| addon.toc_overrides.clone(),
+    );
+    for child in absorbed {
+        for (field, value) in &child.toc_overrides {
+            toc_overrides
+                .entry(field.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    toc_overrides
+}
+
+/// `absorbed` are the rows of folders this addon now owns, which are removed; see
+/// [`merge_toc_overrides`] for what happens to their TOC overrides.
+fn merge_managed_addon(
+    incoming: &AddonRecord,
+    existing: Option<&AddonRecord>,
+    absorbed: &[&AddonRecord],
+) -> AddonRecord {
     let now = OffsetDateTime::now_utc();
     let preserve_kind_override = existing.is_some_and(|addon| addon.kind_override);
+    let toc_overrides = merge_toc_overrides(incoming, existing, absorbed);
     let mut merged = AddonRecord {
         id: existing.and_then(|addon| addon.id),
-        name: incoming.name.clone(),
+        // An addon with a Title override is listed under it, the same as after a scan.
+        name: toc_edit::title_override_name(&toc_overrides)
+            .unwrap_or_else(|| incoming.name.clone()),
         folder: incoming.folder.clone(),
         owned_folders: incoming.owned_folders.clone(),
         ownership_source: incoming.effective_ownership_source(),
@@ -821,6 +1003,7 @@ fn merge_managed_addon(incoming: &AddonRecord, existing: Option<&AddonRecord>) -
             .remote_version
             .clone()
             .or_else(|| existing.and_then(|addon| addon.remote_version.clone())),
+        toc_overrides,
         unrecognized: incoming
             .unrecognized
             .clone()
@@ -866,6 +1049,15 @@ fn collect_owned_descendants(
     }
 
     descendants
+}
+
+/// No overrides are stored as NULL, so rows without any look the same as before the column.
+fn serialize_toc_overrides(overrides: &BTreeMap<String, String>) -> Result<Option<String>> {
+    if overrides.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(overrides)?))
+    }
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(value: String) -> rusqlite::Result<T> {
@@ -995,6 +1187,7 @@ mod tests {
 
     use super::StateDatabase;
     use crate::domain::{AddonKind, GameFlavor};
+    use crate::toc_edit::TocField;
 
     #[test]
     fn open_sets_a_busy_timeout_so_concurrent_writers_wait() {
@@ -1148,6 +1341,9 @@ mod tests {
                 required_deps: vec!["Ace3".to_string()],
                 optional_deps: vec!["ElvUI".to_string()],
                 embedded_libs: vec!["LibStub".to_string()],
+                notes: None,
+                category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "GitAddon".to_string(),
@@ -1163,6 +1359,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "CustomLib".to_string(),
@@ -1178,6 +1377,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
         ];
 
@@ -1275,6 +1477,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "DBM Naxx".to_string(),
@@ -1290,6 +1495,9 @@ mod tests {
                 required_deps: vec!["DBM-Core".to_string()],
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
         ];
 
@@ -1353,6 +1561,9 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
         }];
 
         database
@@ -1965,6 +2176,9 @@ mod tests {
             required_deps: Vec::new(),
             optional_deps: Vec::new(),
             embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
         }
     }
 
@@ -2557,5 +2771,406 @@ mod tests {
             .expect("get")
             .expect("row kept");
         assert_eq!(owned.owned_folders.len(), 1);
+    }
+
+    fn toc_overrides(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn user_version(path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(path)
+            .expect("open raw")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version")
+    }
+
+    /// The `addons` table as schema version 2 created it.
+    const V2_ADDONS_TABLE: &str = "
+        CREATE TABLE addons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            folder TEXT NOT NULL UNIQUE,
+            owned_folders TEXT NOT NULL,
+            ownership_source TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            kind_override INTEGER NOT NULL,
+            flavor TEXT NOT NULL,
+            version TEXT,
+            git_commit TEXT,
+            author TEXT,
+            interface TEXT,
+            source TEXT NOT NULL,
+            source_url TEXT,
+            required_deps TEXT NOT NULL,
+            optional_deps TEXT NOT NULL,
+            embedded_libs TEXT NOT NULL,
+            installed_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_checked_at INTEGER,
+            remote_version TEXT
+        );";
+
+    #[test]
+    fn fresh_database_is_schema_version_3() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let database = StateDatabase::open(&path).expect("open db");
+        let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        addon.toc_overrides = toc_overrides(&[("Title", "Bar")]);
+        database.upsert_addon(&addon).expect("upsert");
+        drop(database);
+        assert_eq!(user_version(&path), 3);
+    }
+
+    #[test]
+    fn version_2_and_version_1_databases_migrate_to_3_and_keep_their_rows() {
+        let temp = tempdir().expect("tempdir");
+        for (version, create) in [
+            (2, V2_ADDONS_TABLE.to_string()),
+            (
+                1,
+                V2_ADDONS_TABLE.replace("ownership_source TEXT NOT NULL,\n", ""),
+            ),
+        ] {
+            let path = temp.path().join(format!("v{version}.sqlite"));
+            let raw = rusqlite::Connection::open(&path).expect("open raw");
+            raw.execute_batch(&create).expect("create old table");
+            let columns = if version == 2 {
+                "name, folder, owned_folders, ownership_source, kind, kind_override, flavor, source, required_deps, optional_deps, embedded_libs, installed_at, updated_at"
+            } else {
+                "name, folder, owned_folders, kind, kind_override, flavor, source, required_deps, optional_deps, embedded_libs, installed_at, updated_at"
+            };
+            let values = if version == 2 {
+                "'Foo', 'Foo', '[]', 'none', 'addon', 0, 'retail', 'github', '[]', '[]', '[]', 1, 1"
+            } else {
+                "'Foo', 'Foo', '[]', 'addon', 0, 'retail', 'github', '[]', '[]', '[]', 1, 1"
+            };
+            raw.execute_batch(&format!(
+                "INSERT INTO addons ({columns}) VALUES ({values});
+                 PRAGMA user_version = {version};"
+            ))
+            .expect("seed old row");
+            drop(raw);
+
+            let database = StateDatabase::open(&path).expect("migrate");
+            let stored = database.list_addons().expect("list");
+            assert_eq!(stored.len(), 1, "v{version}");
+            assert_eq!(stored[0].folder, "Foo");
+            assert_eq!(stored[0].source, SourceKind::GitHub);
+            assert!(stored[0].toc_overrides.is_empty());
+            database
+                .set_toc_override("Foo", TocField::Title, Some("Bar"))
+                .expect("set after migration");
+            drop(database);
+            assert_eq!(user_version(&path), 3, "v{version}");
+
+            let reopened = StateDatabase::open(&path).expect("reopen");
+            assert_eq!(
+                reopened
+                    .get_addon_by_folder("Foo")
+                    .expect("get")
+                    .expect("row")
+                    .toc_overrides,
+                toc_overrides(&[("Title", "Bar")])
+            );
+        }
+    }
+
+    #[test]
+    fn toc_overrides_round_trip_and_keep_unknown_keys() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let database = StateDatabase::open(&path).expect("open db");
+        let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::Manual);
+        addon.toc_overrides = toc_overrides(&[("Title", "Bar"), ("X-Future", "kept")]);
+        database.upsert_addon(&addon).expect("upsert");
+        assert_eq!(
+            database.list_addons().expect("list")[0].toc_overrides,
+            addon.toc_overrides
+        );
+
+        let updated = database
+            .set_toc_override("Foo", TocField::Category, Some("  Mine "))
+            .expect("set category");
+        assert_eq!(
+            updated,
+            toc_overrides(&[("Category", "Mine"), ("Title", "Bar"), ("X-Future", "kept")])
+        );
+        assert!(
+            database
+                .set_toc_override("Foo", TocField::Notes, Some("two\nlines"))
+                .is_err()
+        );
+        assert!(
+            database
+                .set_toc_override("Missing", TocField::Notes, Some("x"))
+                .is_err()
+        );
+        database
+            .set_toc_override("Foo", TocField::Title, None)
+            .expect("clear title");
+        database
+            .set_toc_override("Foo", TocField::Category, None)
+            .expect("clear category");
+        assert_eq!(
+            database
+                .get_addon_by_folder("Foo")
+                .expect("get")
+                .expect("row")
+                .toc_overrides,
+            toc_overrides(&[("X-Future", "kept")])
+        );
+
+        database
+            .set_toc_overrides("Foo", &std::collections::BTreeMap::new())
+            .expect("clear all");
+        let raw: Option<String> = rusqlite::Connection::open(&path)
+            .expect("open raw")
+            .query_row(
+                "SELECT toc_overrides FROM addons WHERE folder = 'Foo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("raw value");
+        assert_eq!(raw, None);
+    }
+
+    #[test]
+    fn scans_and_managed_updates_keep_toc_overrides() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        tracked.source_url = Some("https://github.com/example/Foo".to_string());
+        database.upsert_addon(&tracked).expect("seed");
+        database
+            .upsert_addon(&AddonRecord::new("Bar", "Bar", SourceKind::Manual))
+            .expect("seed manual");
+        let expected = toc_overrides(&[("Notes", "Mine"), ("X-Future", "kept")]);
+        database
+            .set_toc_overrides("Foo", &expected)
+            .expect("set foo");
+        database
+            .set_toc_overrides("Bar", &toc_overrides(&[("Title", "Baz")]))
+            .expect("set bar");
+
+        database
+            .reconcile_scanned_addons(&[
+                scanned_with("Foo", Some("2.0"), None),
+                scanned_with("Bar", Some("1.0"), None),
+            ])
+            .expect("reconcile");
+        let get = |database: &StateDatabase, folder: &str| {
+            database
+                .get_addon_by_folder(folder)
+                .expect("get")
+                .expect("row")
+        };
+        assert_eq!(get(&database, "Foo").toc_overrides, expected);
+        assert_eq!(
+            get(&database, "Bar").toc_overrides,
+            toc_overrides(&[("Title", "Baz")])
+        );
+
+        // An install or update records a fresh record without overrides.
+        let mut refreshed = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        refreshed.version = Some("3.0".to_string());
+        database
+            .record_managed_addon(&refreshed)
+            .expect("record managed");
+        let stored = get(&database, "Foo");
+        assert_eq!(stored.version.as_deref(), Some("3.0"));
+        assert_eq!(stored.toc_overrides, expected);
+    }
+
+    #[test]
+    fn an_upsert_of_an_old_copy_of_a_row_keeps_the_stored_toc_overrides() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        addon.toc_overrides = toc_overrides(&[("Notes", "First")]);
+        database.upsert_addon(&addon).expect("insert");
+        let stale = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+
+        database
+            .set_toc_override("Foo", TocField::Title, Some("Mine"))
+            .expect("set title");
+        let mut changed = stale.clone();
+        changed.version = Some("2.0".to_string());
+        database.upsert_addon(&changed).expect("stale upsert");
+        let mut emptied = stale;
+        emptied.toc_overrides.clear();
+        database
+            .upsert_addon(&emptied)
+            .expect("stale upsert without overrides");
+
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            stored.toc_overrides,
+            toc_overrides(&[("Notes", "First"), ("Title", "Mine")])
+        );
+    }
+
+    #[test]
+    fn a_title_override_is_the_stored_name_after_scans_and_updates() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        tracked.source_url = Some("https://github.com/example/Foo".to_string());
+        database.upsert_addon(&tracked).expect("seed");
+        database
+            .upsert_addon(&AddonRecord::new("Bar", "Bar", SourceKind::Manual))
+            .expect("seed bar");
+        database
+            .set_toc_override("Foo", TocField::Title, Some("|cff00ff00My|r Foo"))
+            .expect("set title");
+        let name = |database: &StateDatabase, folder: &str| {
+            database
+                .get_addon_by_folder(folder)
+                .expect("get")
+                .expect("row")
+                .name
+        };
+
+        let mut scanned_foo = scanned_with("Foo", Some("2.0"), None);
+        scanned_foo.name = "Foo Original".to_string();
+        let mut scanned_bar = scanned_with("Bar", Some("1.0"), None);
+        scanned_bar.name = "Bar Original".to_string();
+        database
+            .reconcile_scanned_addons(&[scanned_foo, scanned_bar])
+            .expect("reconcile");
+        assert_eq!(name(&database, "Foo"), "My Foo");
+        assert_eq!(name(&database, "Bar"), "Bar Original");
+
+        let mut refreshed = AddonRecord::new("Foo Original", "Foo", SourceKind::GitHub);
+        refreshed.version = Some("3.0".to_string());
+        database
+            .record_managed_addon(&refreshed)
+            .expect("record managed");
+        assert_eq!(name(&database, "Foo"), "My Foo");
+
+        // Without a usable Title override the scanned name is used.
+        database
+            .set_toc_override("Foo", TocField::Title, None)
+            .expect("clear title");
+        database
+            .record_managed_addon(&refreshed)
+            .expect("record managed again");
+        assert_eq!(name(&database, "Foo"), "Foo Original");
+    }
+
+    #[test]
+    fn absorbed_child_rows_carry_their_toc_overrides_into_the_parent() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&AddonRecord::new("DBM", "DBM-Core", SourceKind::Manual))
+            .expect("seed parent");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "DBM Naxx",
+                "DBM-Naxx",
+                SourceKind::Manual,
+            ))
+            .expect("seed child");
+        database
+            .set_toc_overrides("DBM-Core", &toc_overrides(&[("Notes", "Parent notes")]))
+            .expect("parent overrides");
+        database
+            .set_toc_overrides(
+                "DBM-Naxx",
+                &toc_overrides(&[("Notes", "Child notes"), ("Category", "Raids")]),
+            )
+            .expect("child overrides");
+
+        let mut managed = AddonRecord::new("DBM", "DBM-Core", SourceKind::Wago);
+        managed.set_managed_owned_folders(vec![OwnedFolder {
+            name: "DBM-Naxx".to_string(),
+        }]);
+        let planned = database
+            .managed_toc_overrides(&managed)
+            .expect("planned overrides");
+        database
+            .record_managed_addon(&managed)
+            .expect("record managed");
+
+        assert!(
+            database
+                .get_addon_by_folder("DBM-Naxx")
+                .expect("get child")
+                .is_none()
+        );
+        assert_eq!(
+            database
+                .get_addon_by_folder("DBM-Core")
+                .expect("get parent")
+                .expect("parent")
+                .toc_overrides,
+            toc_overrides(&[("Category", "Raids"), ("Notes", "Parent notes")])
+        );
+        assert_eq!(
+            planned,
+            toc_overrides(&[("Category", "Raids"), ("Notes", "Parent notes")])
+        );
+
+        // A parent without a row yet gets them on insert.
+        database
+            .upsert_addon(&AddonRecord::new("Bags", "Bags_Config", SourceKind::Manual))
+            .expect("seed lone child");
+        database
+            .set_toc_overrides("Bags_Config", &toc_overrides(&[("Title", "My Bags")]))
+            .expect("lone child overrides");
+        let mut bags = AddonRecord::new("Bags", "Bags", SourceKind::GitHub);
+        bags.set_managed_owned_folders(vec![OwnedFolder {
+            name: "Bags_Config".to_string(),
+        }]);
+        let planned = database
+            .managed_toc_overrides(&bags)
+            .expect("planned overrides");
+        database.record_managed_addon(&bags).expect("record bags");
+        let stored = database
+            .get_addon_by_folder("Bags")
+            .expect("get bags")
+            .expect("bags");
+        assert_eq!(stored.toc_overrides, toc_overrides(&[("Title", "My Bags")]));
+        assert_eq!(planned, stored.toc_overrides);
+        assert_eq!(stored.name, "My Bags");
+    }
+
+    #[test]
+    fn a_failed_migration_leaves_the_database_as_it_was() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("v1.sqlite");
+        // A version 1 table that already has the version 3 column makes the last step fail
+        // after the version 2 step ran.
+        let raw = rusqlite::Connection::open(&path).expect("open raw");
+        raw.execute_batch(&format!(
+            "{}
+             ALTER TABLE addons ADD COLUMN toc_overrides TEXT;
+             PRAGMA user_version = 1;",
+            V2_ADDONS_TABLE.replace("ownership_source TEXT NOT NULL,\n", "")
+        ))
+        .expect("create v1 table");
+        drop(raw);
+
+        assert!(StateDatabase::open(&path).is_err());
+        assert_eq!(user_version(&path), 1);
+        let has_ownership_source: i64 = rusqlite::Connection::open(&path)
+            .expect("open raw")
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'ownership_source'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table info");
+        assert_eq!(has_ownership_source, 0);
     }
 }

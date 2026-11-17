@@ -20,7 +20,15 @@ pub struct TocSelectionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocMetadata {
+    /// The addon's name: the first `## Title:` line (indented ones included) with color codes
+    /// removed, or the fallback.
     pub title: String,
+    /// `## Title:` as the game reads it (the last base line wins), without color codes removed.
+    pub toc_title: Option<String>,
+    /// `## Notes:` as the game reads it (the last base line wins), without color codes removed.
+    pub notes: Option<String>,
+    /// `## Category:` as the game reads it (the last base line wins).
+    pub category: Option<String>,
     pub version: Option<String>,
     pub author: Option<String>,
     pub interface: Option<String>,
@@ -44,6 +52,12 @@ pub struct ScannedAddon {
     pub required_deps: Vec<String>,
     pub optional_deps: Vec<String>,
     pub embedded_libs: Vec<String>,
+    /// The selected TOC's `Notes` (see [`TocMetadata::notes`]).
+    pub notes: Option<String>,
+    /// The selected TOC's `Category` (see [`TocMetadata::category`]).
+    pub category: Option<String>,
+    /// The selected TOC's `Title` as the game reads it (see [`TocMetadata::toc_title`]).
+    pub toc_title: Option<String>,
 }
 
 /// Result of a scan that also reports what it could not read.
@@ -195,6 +209,17 @@ pub fn scan_addons_dir_report(
     })
 }
 
+/// The Title, Notes and Category the game reads for the addon in `folder` of `addons_dir`, from
+/// the TOC a scan selects for `flavor`. `Ok(None)` when the folder has no TOC for `flavor`.
+pub fn read_addon_toc_fields(
+    addons_dir: &Path,
+    folder: &str,
+    flavor: GameFlavor,
+) -> Result<Option<crate::toc_edit::TocFieldValues>> {
+    Ok(scan_addon_folder(&addons_dir.join(folder), folder, flavor)?
+        .map(|addon| crate::toc_edit::TocFieldValues::from_scanned(&addon)))
+}
+
 /// Scans one addon folder. `Ok(None)` means the folder has no TOC loadable by `flavor`.
 fn scan_addon_folder(
     addon_path: &Path,
@@ -236,6 +261,9 @@ fn scan_addon_folder(
         required_deps: toc.required_deps,
         optional_deps: toc.optional_deps,
         embedded_libs: detect_embedded_libs(addon_path)?,
+        notes: toc.notes,
+        category: toc.category,
+        toc_title: toc.toc_title,
     }))
 }
 
@@ -322,6 +350,9 @@ pub fn parse_toc_content(content: &str, fallback_title: &str) -> TocMetadata {
 
     TocMetadata {
         title,
+        toc_title: directive_value(content, "Title"),
+        notes: directive_value(content, "Notes"),
+        category: directive_value(content, "Category"),
         version: field_value(content, &["Version"]),
         author: field_value(content, &["Author"]),
         interface: field_value(content, &["Interface"]),
@@ -636,6 +667,28 @@ fn field_value(content: &str, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// The value the game uses for a display directive: the last `## <key>:` line that starts in
+/// column 0 and has no locale suffix wins. Lines LemonUp commented out (`# LemonUp: ...`) are not
+/// directives, so an override LemonUp wrote is what this returns.
+fn directive_value(content: &str, key: &str) -> Option<String> {
+    let mut found = None;
+    for line in content.lines() {
+        let Some(remainder) = line.strip_prefix("##") else {
+            continue;
+        };
+        let Some((raw_key, raw_value)) = remainder.split_once(':') else {
+            continue;
+        };
+        if raw_key.trim().eq_ignore_ascii_case(key) {
+            let value = raw_value.trim();
+            if !value.is_empty() {
+                found = Some(value.to_string());
+            }
+        }
+    }
+    found
+}
+
 fn parse_dependency_list(raw: Option<String>) -> Vec<String> {
     let Some(raw) = raw else {
         return Vec::new();
@@ -647,7 +700,7 @@ fn parse_dependency_list(raw: Option<String>) -> Vec<String> {
         .collect()
 }
 
-fn strip_wow_color_codes(value: String) -> String {
+pub(crate) fn strip_wow_color_codes(value: String) -> String {
     let mut result = String::with_capacity(value.len());
     let chars = value.chars().collect::<Vec<_>>();
     let mut index = 0usize;
@@ -682,8 +735,8 @@ mod tests {
 
     use super::{
         GroupingGuard, ScannedAddon, TocSelectionConfidence, UPDATE_STAGING_PREFIX,
-        collapse_owned_folders, parse_toc_content, scan_addons_dir, scan_addons_dir_report,
-        scan_addons_dir_with_tracked, select_toc_file,
+        collapse_owned_folders, parse_toc_content, read_addon_toc_fields, scan_addons_dir,
+        scan_addons_dir_report, scan_addons_dir_with_tracked, select_toc_file,
     };
     use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
 
@@ -740,6 +793,76 @@ mod tests {
         );
         assert_eq!(parsed.optional_deps, vec!["ElvUI", "Masque"]);
         assert!(parsed.x_library);
+    }
+
+    #[test]
+    fn display_fields_follow_the_game_last_line_wins_and_skip_lemonup_comments() {
+        let parsed = parse_toc_content(
+            "## Title: First\r\n## Notes: Old notes\r\n## Category: Combat\r\n## Title-deDE: Erster\r\n## Notes-frFR: Notes\r\n# LemonUp: ## Category: Commented\r\n  ## Title: Indented\r\n## Title: |cff00ff00Last|r\r\n## Notes: New notes\r\n",
+            "Fallback",
+        );
+        // The name keeps the first Title line, indented or not, as before overrides existed.
+        assert_eq!(parsed.title, "First");
+        assert_eq!(parsed.toc_title.as_deref(), Some("|cff00ff00Last|r"));
+        assert_eq!(parsed.notes.as_deref(), Some("New notes"));
+        assert_eq!(parsed.category.as_deref(), Some("Combat"));
+
+        let overridden = parse_toc_content(
+            "## Interface: 110002\n# LemonUp: ## Title: Original\n# LemonUp: ## Category: Combat\n# LemonUp-managed\n## Title: Mine\n",
+            "Fallback",
+        );
+        assert_eq!(overridden.title, "Mine");
+        assert_eq!(overridden.toc_title.as_deref(), Some("Mine"));
+        assert_eq!(overridden.category, None);
+        assert_eq!(overridden.notes, None);
+    }
+
+    #[test]
+    fn the_name_still_comes_from_the_first_title_line_even_when_indented() {
+        let parsed = parse_toc_content(
+            "## Interface: 110002\n  ## Title: |cffff0000Indented|r\n## Title: Later\n",
+            "Fallback",
+        );
+        assert_eq!(parsed.title, "Indented");
+        assert_eq!(parsed.toc_title.as_deref(), Some("Later"));
+        assert_eq!(
+            parse_toc_content("## Notes: x\n", "Fallback").title,
+            "Fallback"
+        );
+    }
+
+    #[test]
+    fn scan_reports_notes_and_category_of_the_selected_toc() {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join("AddOns");
+        fs::create_dir_all(addons.join("Foo")).expect("dir");
+        fs::write(
+            addons.join("Foo").join("Foo.toc"),
+            "## Title: Foo\n## Notes: Does things\n## Category: Bags\n",
+        )
+        .expect("toc");
+        let scanned = scan_addons_dir(&addons, GameFlavor::Retail).expect("scan");
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].notes.as_deref(), Some("Does things"));
+        assert_eq!(scanned[0].category.as_deref(), Some("Bags"));
+    }
+
+    #[test]
+    fn read_addon_toc_fields_reads_what_the_game_reads() {
+        let temp = tempdir().expect("temp dir");
+        let folder = temp.path().join("Foo");
+        fs::create_dir_all(&folder).expect("folder");
+        fs::write(
+            folder.join("Foo.toc"),
+            "## Interface: 110005\n## Title: Foo\n## Category: Bags\n# LemonUp: ## Notes: Old\n",
+        )
+        .expect("toc");
+        let fields = read_addon_toc_fields(temp.path(), "Foo", GameFlavor::Retail)
+            .expect("read")
+            .expect("fields");
+        assert_eq!(fields.title.as_deref(), Some("Foo"));
+        assert_eq!(fields.category.as_deref(), Some("Bags"));
+        assert_eq!(fields.notes, None);
     }
 
     #[test]
@@ -1063,6 +1186,9 @@ mod tests {
                 required_deps: Vec::new(),
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
             ScannedAddon {
                 name: "DBM Naxx".to_string(),
@@ -1078,6 +1204,9 @@ mod tests {
                 required_deps: vec!["DBM-Core".to_string()],
                 optional_deps: Vec::new(),
                 embedded_libs: Vec::new(),
+                notes: None,
+                category: None,
+                toc_title: None,
             },
         ];
 

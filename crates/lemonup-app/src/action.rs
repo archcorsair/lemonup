@@ -7,7 +7,7 @@ use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
     FooterKeyPulse, HelpContext, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
-    StatusMessage, WagoInstallConfirmation,
+    StatusMessage, TocApplyRequest, TocEditPane, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -55,6 +55,13 @@ pub enum AppAction {
     SetConfigPaneState(ConfigPaneState),
     SetPersistedConfig(AppConfig),
     SetBackupPaneState(BackupPaneState),
+    SetTocEditPane(TocEditPane),
+    SetTocApplyInProgress(bool),
+    /// Writes a .toc change into the addon's files in the background.
+    StartTocApply {
+        addon_dir: PathBuf,
+        request: TocApplyRequest,
+    },
     /// Reads the backup folder again, for backups made outside the Backups sheet.
     ReloadBackups,
     SetPendingWagoInstallConfirmation(Option<WagoInstallConfirmation>),
