@@ -1390,7 +1390,8 @@ fn the_plain_key_value_output_is_never_colored() {
 #[test]
 fn color_is_for_a_terminal_without_no_color() {
     use super::human::color_wanted;
-    use crate::theme::DisplayEnv;
+    use crate::theme::{ColorRoles, DisplayEnv};
+    use lemonup_core::AppConfig;
 
     let with = |no_color: &'static str| {
         DisplayEnv::from_vars(
@@ -1404,9 +1405,13 @@ fn color_is_for_a_terminal_without_no_color() {
     assert!(!color_wanted(false, with("")));
     assert!(!color_wanted(false, DisplayEnv::FULL));
 
-    assert_eq!(Paint::for_stream(true, with("")), Paint::terminal());
-    assert_eq!(Paint::for_stream(true, with("1")), Paint::PLAIN);
-    assert_eq!(Paint::for_stream(false, with("")), Paint::PLAIN);
+    let config = AppConfig::new_unconfigured();
+    assert_eq!(
+        Paint::for_stream(true, DisplayEnv::FULL, &config),
+        Paint::with_roles(ColorRoles::dark())
+    );
+    assert_eq!(Paint::for_stream(true, with("1"), &config), Paint::PLAIN);
+    assert_eq!(Paint::for_stream(false, with(""), &config), Paint::PLAIN);
     assert_ne!(Paint::terminal(), Paint::PLAIN);
 }
 

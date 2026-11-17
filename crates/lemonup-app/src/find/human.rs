@@ -10,13 +10,13 @@ use crossterm::style::{Attribute, Colored, SetAttribute, SetForegroundColor};
 use lemonup_core::find::{
     FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon,
 };
-use lemonup_core::{AddonRecord, LemonupError, UpdateStatus, toc_edit};
+use lemonup_core::{AddonRecord, AppConfig, LemonupError, UpdateStatus, toc_edit};
 use ratatui::backend::IntoCrossterm;
 use ratatui::style::Color;
 
 use super::{LinkOutcome, SourceProblem, exact_picks};
 use crate::source_error::SourceErrorKind;
-use crate::theme::{ColorRoles, DisplayEnv};
+use crate::theme::{ColorRoles, DisplayEnv, UiTheme};
 
 /// Longest line of a wrapped list or sentence when the terminal's width is unknown. Addon lines
 /// are never wrapped or cut.
@@ -68,7 +68,7 @@ pub(crate) fn report_width(is_terminal: bool, columns: Option<u16>) -> usize {
 }
 
 /// How the readable report is drawn: its color and the columns it wraps to. Colors are the
-/// Terminal theme's color roles, so they follow the person's own terminal palette. It is a
+/// color roles of the person's theme, as the TUI shows them. It is a
 /// value, not a look at the environment, so tests render both ways and at any width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Paint(Option<ColorRoles>, usize);
@@ -83,33 +83,42 @@ impl Paint {
     }
 
     /// The Terminal theme's colors.
+    #[cfg(test)]
     pub(crate) fn terminal() -> Self {
+        Self::with_roles(ColorRoles::terminal())
+    }
+
+    /// Drawn with `roles`.
+    pub(crate) fn with_roles(roles: ColorRoles) -> Self {
         // The decision to use color was made by the caller. Without this, crossterm would drop
         // every color again whenever `NO_COLOR` is set in the environment it runs in.
         Colored::set_ansi_color_disabled(false);
-        Self(Some(ColorRoles::terminal()), WIDTH)
+        Self(Some(roles), WIDTH)
     }
 
-    /// Colored for a stream that `is_terminal` (and that `display` allows), else plain.
-    pub(crate) fn for_stream(is_terminal: bool, display: DisplayEnv) -> Self {
+    /// Colored for a stream that `is_terminal` (and that `display` allows), else plain. The
+    /// colors are the ones the TUI shows for `config`, including its fall back to the
+    /// terminal's own 16 colors when `display` has no 24-bit color.
+    pub(crate) fn for_stream(is_terminal: bool, display: DisplayEnv, config: &AppConfig) -> Self {
         if color_wanted(is_terminal, display) {
-            Self::terminal()
+            let theme = UiTheme::for_config(config, display, !display.truecolor);
+            Self::with_roles(theme.roles)
         } else {
             Self::PLAIN
         }
     }
 
-    pub(crate) fn for_stdout() -> Self {
+    pub(crate) fn for_stdout(config: &AppConfig) -> Self {
         let is_terminal = std::io::stdout().is_terminal();
         let colors = is_terminal && ansi_supported();
         let columns = crossterm::terminal::size().ok().map(|(columns, _)| columns);
-        Self::for_stream(colors, DisplayEnv::detect())
+        Self::for_stream(colors, DisplayEnv::detect(), config)
             .with_width(report_width(is_terminal, columns))
     }
 
-    pub(crate) fn for_stderr() -> Self {
+    pub(crate) fn for_stderr(config: &AppConfig) -> Self {
         let colors = std::io::stderr().is_terminal() && ansi_supported();
-        Self::for_stream(colors, DisplayEnv::detect())
+        Self::for_stream(colors, DisplayEnv::detect(), config)
     }
 
     fn apply(self, text: &str, pick: fn(&ColorRoles) -> Color, bold: bool) -> String {

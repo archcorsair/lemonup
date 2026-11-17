@@ -337,7 +337,11 @@ async fn run_find(
         let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
         // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
         // about stderr.
-        let paint = crate::find::Paint::for_stdout();
+        let theme_config = match &config_state {
+            ConfigLoad::Loaded(config) => config.clone(),
+            ConfigLoad::Missing(_) => lemonup_core::AppConfig::new_unconfigured(),
+        };
+        let paint = crate::find::Paint::for_stdout(&theme_config);
         for line in
             crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
         {
@@ -346,7 +350,7 @@ async fn run_find(
         println!();
         let outcome = if link { Some(link_now()?) } else { None };
         // A refusal leaves the report on screen and ends the run with what happened.
-        let error_paint = crate::find::Paint::for_stderr();
+        let error_paint = crate::find::Paint::for_stderr(&theme_config);
         for line in crate::find::human_closing(&report, &names, outcome, paint, error_paint)? {
             println!("{line}");
         }
