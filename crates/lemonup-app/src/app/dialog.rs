@@ -65,6 +65,12 @@ pub(super) enum Question {
     QuitSetup {
         rerun: bool,
     },
+    /// `x` on a game in the Switch game sheet. `backups` is where its
+    /// backups of game settings stay.
+    RemoveGame {
+        game: String,
+        backups: String,
+    },
 }
 
 impl Question {
@@ -80,6 +86,7 @@ impl Question {
             Self::ChangeTocFiles { name, .. } => format!("Change the files of {name}?"),
             Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
             Self::QuitSetup { .. } => "Quit setup?".to_string(),
+            Self::RemoveGame { game, .. } => format!("Remove {game} from LemonUp?"),
         }
     }
 
@@ -87,7 +94,10 @@ impl Question {
     pub(super) fn danger(&self) -> bool {
         matches!(
             self,
-            Self::DeleteAddons(_) | Self::RestoreBackup { .. } | Self::DeleteBackup { .. }
+            Self::DeleteAddons(_)
+                | Self::RestoreBackup { .. }
+                | Self::DeleteBackup { .. }
+                | Self::RemoveGame { .. }
         )
     }
 
@@ -103,6 +113,7 @@ impl Question {
             Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
             Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
             Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
+            Self::RemoveGame { .. } => ("remove it", "keep it"),
         }
     }
 
@@ -139,6 +150,10 @@ impl Question {
             Self::QuitSetup { .. } => (
                 AppMessage::OnboardingQuitConfirmed,
                 AppMessage::OnboardingQuitCancelled,
+            ),
+            Self::RemoveGame { .. } => (
+                AppMessage::Games(GamesMessage::ConfirmRemove),
+                AppMessage::Games(GamesMessage::CancelRemove),
             ),
         }
     }
@@ -335,6 +350,19 @@ impl Question {
                 "Nothing you chose here is saved. Your game folder and settings stay as they were.",
                 text,
             ))],
+            Self::RemoveGame { game, backups } => vec![
+                Line::from(Span::styled(
+                    format!(
+                        "LemonUp forgets the addon list and settings it keeps for {game}. Its addons and game settings stay as they are."
+                    ),
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("Its backups of your game settings stay in ", muted),
+                    Span::styled(backups.clone(), text),
+                    Span::styled(".", muted),
+                ]),
+            ],
         }
     }
 
@@ -481,6 +509,9 @@ impl App {
                 when: self.backup_when_phrase(backup),
                 ago: self.backup_age_phrase(backup),
             });
+        }
+        if let Some(question) = self.remove_game_question() {
+            return Some(question);
         }
         None
     }

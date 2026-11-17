@@ -614,7 +614,7 @@ impl App {
         let roles = self.ui_theme.roles;
         let wide = width >= WIDE_FRAME_MIN_WIDTH;
         let client = Span::styled(
-            self.game_client_label(),
+            self.current_game_name(),
             Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
         );
         // Simple symbols show the word in place of the block logo.
@@ -633,20 +633,10 @@ impl App {
             (first, vec![Span::raw(" ")])
         };
         first.push(client);
-        let mut profile = Vec::new();
-        if !self.runtime.is_default_profile() {
-            profile.push(Span::styled(
-                "   Profile: ",
-                Style::default().fg(roles.muted),
-            ));
-            profile.push(Span::styled(
-                self.runtime.profile_name.clone(),
-                Style::default()
-                    .fg(roles.amber)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let used = spans_width(&first) + spans_width(&profile) + 3;
+        // Another game with updates shows next to this one; the folder
+        // gets what room is left.
+        first.extend(self.other_games_badge(wide));
+        let used = spans_width(&first) + 3;
         let path = self.friendly_addon_dir();
         if !path.is_empty() {
             let room = usize::from(width).saturating_sub(used);
@@ -656,7 +646,6 @@ impl App {
                 Style::default().fg(roles.muted),
             ));
         }
-        first.extend(profile);
         second.extend(self.dashboard_answer_spans(now));
         if let Some(warning) = self.profile_warning() {
             second.push(Span::styled(" · ", Style::default().fg(roles.dim)));
@@ -1111,7 +1100,20 @@ impl App {
                     "Your addon settings are never touched.",
                     muted,
                 )),
-            ],
+            ]
+            .into_iter()
+            // With one game, how to add another.
+            .chain((self.games.games.len() == 1).then(|| {
+                Line::from(vec![
+                    Span::styled("Press ", muted),
+                    Span::styled(
+                        "p",
+                        Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" to add another game.", muted),
+                ])
+            }))
+            .collect::<Vec<_>>(),
             width,
         );
         let keys = vec![

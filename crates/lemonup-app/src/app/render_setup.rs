@@ -81,25 +81,42 @@ impl App {
     /// the logo (the short one below 110 columns).
     fn setup_header_lines(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        let welcome = [
-            Span::styled(
-                "Welcome.",
-                Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " Let's get your addons set up.",
+        // Adding a game is only the game step, with no welcome.
+        let welcome = if self.games.adding {
+            [
+                Span::styled(
+                    "Add another game.",
+                    Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " Pick the install LemonUp should look after too.",
+                    Style::default().fg(roles.muted),
+                ),
+            ]
+        } else {
+            [
+                Span::styled(
+                    "Welcome.",
+                    Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " Let's get your addons set up.",
+                    Style::default().fg(roles.muted),
+                ),
+            ]
+        };
+        let mut step = Vec::new();
+        if !self.games.adding {
+            step.push(Span::styled(
+                format!(
+                    "Step {} of {}",
+                    self.onboarding.step.index() + 1,
+                    OnboardingStep::ALL.len()
+                ),
                 Style::default().fg(roles.muted),
-            ),
-        ];
-        let mut step = vec![Span::styled(
-            format!(
-                "Step {} of {}",
-                self.onboarding.step.index() + 1,
-                OnboardingStep::ALL.len()
-            ),
-            Style::default().fg(roles.muted),
-        )];
-        if !self.runtime.is_default_profile() {
+            ));
+        }
+        if !self.runtime.is_default_profile() && !self.games.adding {
             step.push(Span::styled(
                 "   Profile: ",
                 Style::default().fg(roles.muted),
@@ -136,7 +153,9 @@ impl App {
         let roles = self.ui_theme.roles;
         let current = self.onboarding.step.index();
         let mut spans = vec![Span::raw(INDENT)];
-        for step in OnboardingStep::ALL {
+        // Adding a game has only the game step.
+        let steps = if self.games.adding { 1 } else { usize::MAX };
+        for step in OnboardingStep::ALL.into_iter().take(steps) {
             if step.index() > 0 {
                 spans.push(Span::styled("  ───  ", Style::default().fg(roles.dim)));
             }

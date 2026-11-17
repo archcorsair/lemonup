@@ -25,6 +25,7 @@ impl App {
             OverlayKind::Backup => "Backups of your game settings".to_string(),
             OverlayKind::TocEdit => "Edit .toc fields".to_string(),
             OverlayKind::Confirm => "Confirm".to_string(),
+            OverlayKind::Games => "Switch game".to_string(),
         };
         let chrome = SheetChrome {
             title,
@@ -51,6 +52,9 @@ impl App {
             }),
             OverlayKind::Backup => self.render_sheet(frame, region, header, kind, chrome, |room| {
                 self.backup_sheet_body(room)
+            }),
+            OverlayKind::Games => self.render_sheet(frame, region, header, kind, chrome, |room| {
+                self.games_sheet_body(room)
             }),
             OverlayKind::TocEdit => {
                 self.render_sheet(frame, region, header, kind, chrome, |room| {

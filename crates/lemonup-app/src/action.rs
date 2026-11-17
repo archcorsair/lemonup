@@ -6,8 +6,8 @@ use crate::app::text_input::TextInput;
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
-    FooterKeyPulse, HelpContext, InstallPaneState, PendingWagoInstallRequest, SearchPaneState,
-    StatusMessage, TocApplyRequest, TocEditPane, WagoInstallConfirmation,
+    FooterKeyPulse, GamesAction, HelpContext, InstallPaneState, PendingWagoInstallRequest,
+    SearchPaneState, StatusMessage, TocApplyRequest, TocEditPane, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -15,6 +15,11 @@ use crate::onboarding::OnboardingState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     Quit,
+    /// What the Switch game sheet, adding a game and the background checks
+    /// of other games do.
+    Games(GamesAction),
+    /// Leaves setup that was adding a game, back to the Switch game sheet.
+    CancelAddingGame,
     /// Opens or closes the "quit while updating?" question.
     SetQuitQuestion(bool),
     AdvanceMotionTick,

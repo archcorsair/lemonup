@@ -392,6 +392,7 @@ static LIST_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("i", "install an addon", &[ch('i')]),
                 HelpRow::key("b", "backups of your game settings", &[ch('b')]),
+                HelpRow::key("p", "switch game", &[ch('p')]),
                 HelpRow::key("s  or  ,", "settings", &[ch('s'), ch(',')]),
                 THIS_HELP,
             ],
@@ -518,6 +519,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
             rows: &[
                 HelpRow::key("i", "install an addon", &[ch('i')]),
                 HelpRow::key("b", "backups of your game settings", &[ch('b')]),
+                HelpRow::key("p", "switch game", &[ch('p')]),
                 HelpRow::key("s  or  ,", "settings", &[ch('s'), ch(',')]),
                 THIS_HELP,
             ],
@@ -732,6 +734,33 @@ static TOC_EDIT_HELP: HelpPage = HelpPage {
     ],
 };
 
+static GAMES_HELP: HelpPage = HelpPage {
+    title: "Help: Switch game",
+    left: &[HelpSection {
+        title: "Switch game",
+        rows: &[
+            HelpRow::key("↑ ↓  or  j k", "choose a game", K_MOVE),
+            HelpRow::key("enter", "open this game, or add another game", K_ENTER),
+            HelpRow::key(
+                "x",
+                "remove this game from LemonUp (asks first)",
+                &[ch('x')],
+            ),
+        ],
+    }],
+    right: &[
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc  q", "close Switch game", K_CLOSE),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
 /// What Help shows for each context.
 pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
     match context {
@@ -742,6 +771,7 @@ pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
         HelpContext::Config => &SETTINGS_HELP,
         HelpContext::Backup => &BACKUPS_HELP,
         HelpContext::TocEdit => &TOC_EDIT_HELP,
+        HelpContext::Games => &GAMES_HELP,
     }
 }
 
@@ -1082,6 +1112,31 @@ impl App {
                 hints
             }
             DetailMode::TocEdit => self.toc_edit_key_table(),
+            DetailMode::Games => {
+                let mut hints = vec![KeyHint::key(Id::Nav, "↑/↓", "choose", UP_DOWN)];
+                let selected = self.games.selected.min(self.games.games.len());
+                match self.games.games.get(selected) {
+                    None => hints.push(KeyHint::key(Id::Run, "enter", "add game", ENTER).main()),
+                    Some(game) if game.profile == self.runtime.profile_name => {
+                        hints.push(KeyHint::key(Id::Close, "enter", "keep this game", ENTER))
+                    }
+                    Some(_) => hints.push(KeyHint::key(Id::Run, "enter", "switch", ENTER).main()),
+                }
+                if self.games.games.get(selected).is_some_and(|game| {
+                    game.profile != self.runtime.profile_name && game.profile != DEFAULT_PROFILE
+                }) {
+                    hints.push(KeyHint::key(
+                        Id::Delete,
+                        "x",
+                        "remove",
+                        &[KeyCode::Char('x')],
+                    ));
+                }
+                hints.push(self.close_hint());
+                hints.extend(self.sheet_scroll_hint(false));
+                hints.push(self.help_hint());
+                hints
+            }
             DetailMode::Overview => vec![KeyHint::key(Id::Close, "esc", "close", CLOSE)],
         }
     }
@@ -1207,7 +1262,35 @@ impl App {
     }
 
     /// The addon list: the keys for exactly what is on screen.
+    /// The list's keys, with `p switch game` once there are two games or
+    /// more, while it does something: no job runs, nothing is selected and
+    /// no filter is being typed.
     fn dashboard_key_table(&self, width: u16) -> Vec<KeyHint> {
+        let mut hints = self.dashboard_list_key_table(width);
+        if self.games.games.len() >= 2
+            && !self.dashboard.filter_editing()
+            && self.dashboard.selected_parent_count() == 0
+            && self.switch_busy_note().is_none()
+        {
+            let switch = KeyHint::key(
+                FooterHintId::SwitchGame,
+                "p",
+                "switch game",
+                &[KeyCode::Char('p')],
+            )
+            .short("games");
+            match hints
+                .iter()
+                .position(|hint| hint.id == Some(FooterHintId::Help))
+            {
+                Some(index) => hints.insert(index, switch),
+                None => hints.push(switch),
+            }
+        }
+        hints
+    }
+
+    fn dashboard_list_key_table(&self, width: u16) -> Vec<KeyHint> {
         use FooterHintId as Id;
         let wide = width >= WIDE_FRAME_MIN_WIDTH;
         let help = self.help_hint();
