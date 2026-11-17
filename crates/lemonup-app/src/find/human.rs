@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 use crossterm::Command;
 use crossterm::style::{Attribute, Colored, SetAttribute, SetForegroundColor};
 use lemonup_core::find::{
-    FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon,
+    FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon, LikelyReason,
 };
 use lemonup_core::{AddonRecord, AppConfig, LemonupError, UpdateStatus, toc_edit};
 use ratatui::backend::IntoCrossterm;
@@ -187,9 +187,9 @@ impl LocalNames {
             }
         }
         for row in rows {
-            let name = row.name.trim();
+            let name = collapse_spaces(&row.name);
             if !name.is_empty() {
-                names.insert(row.folder.to_lowercase(), name.to_string());
+                names.insert(row.folder.to_lowercase(), name);
             }
         }
         Self(names)
@@ -200,8 +200,13 @@ impl LocalNames {
         self.0
             .get(&folder.to_lowercase())
             .cloned()
-            .unwrap_or_else(|| fallback.to_string())
+            .unwrap_or_else(|| collapse_spaces(fallback))
     }
+}
+
+/// A name with runs of whitespace as one space, so a name never shows doubled spaces.
+fn collapse_spaces(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One addon line: name, source and version in columns, then lines under it.
@@ -381,15 +386,16 @@ fn notes_for_missing(found: &FoundAddon) -> Vec<String> {
 fn ready_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
     let version = found
         .matched_version
-        .clone()
-        .unwrap_or_else(|| "unknown version".to_string());
+        .as_deref()
+        .map_or_else(|| "unknown version".to_string(), collapse_spaces);
     let mut notes = notes_for_moves(found, names);
     notes.extend(notes_for_missing(found));
     Entry {
         name: names.name(&found.parent_folder, &found.name),
         source: found.source.name().to_string(),
         version,
-        update: update_ready(found).map(|latest| format!("update ready ({latest})")),
+        update: update_ready(found)
+            .map(|latest| format!("update ready ({})", collapse_spaces(latest))),
         notes,
     }
 }
@@ -404,17 +410,36 @@ fn cant_link_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
     entry
 }
 
-/// Why a `Likely` candidate is only likely.
+/// Why a `Likely` candidate is only likely: what was checked, from the facts core carries.
 fn likely_reason(found: &FoundAddon) -> String {
-    if !found.differing.is_empty() {
-        "its files differ from the release".to_string()
-    } else if found.matched_version.is_none() {
-        match found.latest_version.as_deref() {
-            Some(latest) => format!("the installed version differs from the release ({latest})"),
-            None => "the installed version differs from the release".to_string(),
+    let source = found.source.name();
+    match &found.likely_reason {
+        Some(LikelyReason::FilesMatchNoRelease) => {
+            format!("its .toc names it; its files match no release on {source}")
         }
-    } else {
-        "its .toc names it, but its files were not checked".to_string()
+        Some(LikelyReason::VersionDiffers {
+            folder,
+            installed,
+            listed,
+        }) => {
+            let installed = match installed {
+                Some(installed) => format!("installed {installed}"),
+                None => "no installed version".to_string(),
+            };
+            let folder = if folder.eq_ignore_ascii_case(&found.parent_folder) {
+                String::new()
+            } else {
+                format!(" in {folder}")
+            };
+            match listed {
+                Some(listed) => format!("{installed}{folder}, {source} has {listed}"),
+                None => format!("{installed}{folder}, {source} lists no version for it"),
+            }
+        }
+        Some(LikelyReason::TocNamesIt) => {
+            "its .toc names it; its files weren't checked".to_string()
+        }
+        None => "it is not confirmed".to_string(),
     }
 }
 
@@ -429,9 +454,10 @@ fn likely_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
     Entry {
         name: names.name(&found.parent_folder, &found.name),
         source: found.source.name().to_string(),
-        version: match found.matched_version.as_deref() {
-            Some(installed) => format!("{installed}, {reason}"),
-            None => reason,
+        // A version difference already names the installed version.
+        version: match (&found.likely_reason, found.matched_version.as_deref()) {
+            (Some(LikelyReason::VersionDiffers { .. }), _) | (_, None) => reason,
+            (_, Some(installed)) => format!("{installed}, {reason}"),
         },
         update: None,
         notes,

@@ -137,6 +137,25 @@ fn inputs_skip_files_and_mark_symlinks_and_git_checkouts_as_developer_copies() {
 }
 
 #[test]
+fn a_title_with_a_color_code_in_the_middle_has_one_space() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Decursive",
+        &["## Title: Decursive |cff00ff00|r -Ace3-"],
+    );
+
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+
+    assert_eq!(
+        inputs
+            .get("Decursive")
+            .and_then(|local| local.title.as_deref()),
+        Some("Decursive -Ace3-")
+    );
+}
+
+#[test]
 fn toc_ids_and_version_follow_the_game_version() {
     let fixture = fixture();
     addon(
@@ -256,17 +275,23 @@ fn two_folders_naming_one_project_are_choose_one() {
 }
 
 #[test]
-fn two_sources_for_one_folder_are_choose_one() {
+fn two_exact_matches_on_one_folder_are_choose_one() {
     let fixture = fixture();
     addon(&fixture.addons, "Spy", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Spy_Extra", &["## Version: 1.0"]);
     let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
     let mut lookups = lookups(SourceAnswer::Found(vec![wago(
         "SPY",
         "Spy",
         vec![("Spy".to_string(), hash_of(&inputs, "Spy"))],
     )]));
-    lookups.wowinterface =
-        SourceAnswer::Found(vec![wowi_file("99", "Spy fork", "2.0", &[("Spy", "2.0")])]);
+    // Both match exactly, but not the same folders: the files can't tell them apart.
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "99",
+        "Spy fork",
+        "1.0",
+        &[("Spy", "1.0"), ("Spy_Extra", "1.0")],
+    )]);
 
     let report = match_addons(&inputs, &[], None, &lookups);
 
@@ -1278,5 +1303,401 @@ fn a_folder_that_moves_out_keeps_the_toc_overrides_of_the_addon_it_leaves() {
     assert_eq!(
         group.toc_overrides,
         BTreeMap::from([("Category".to_string(), "Mine".to_string())])
+    );
+}
+
+/// Deadly Boss Mods as one Wago.io package: DBM-Core is the folder the others require, though
+/// DBM-GUI has the shortest name.
+fn dbm_package(fixture: &Fixture) -> (FindInputs, Vec<AddonRecord>, WagoMatch) {
+    addon(
+        &fixture.addons,
+        "DBM-Core",
+        &["## Title: |cffffe00a<|r|cffff7d0aDBM Core|r|cffffe00a>|r |cff69ccf0Main Core|r"],
+    );
+    addon(
+        &fixture.addons,
+        "DBM-GUI",
+        &["## Title: <DBM Core> Options GUI"],
+    );
+    for folder in [
+        "DBM-Brawlers",
+        "DBM-Raids-Midnight",
+        "DBM-StatusBarTimers",
+        "DBM-VPVEM",
+    ] {
+        addon(&fixture.addons, folder, &["## Dependencies: DBM-Core"]);
+    }
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let folders = [
+        "DBM-Brawlers",
+        "DBM-Core",
+        "DBM-GUI",
+        "DBM-Raids-Midnight",
+        "DBM-StatusBarTimers",
+        "DBM-VPVEM",
+    ];
+    let rows = folders
+        .iter()
+        .map(|folder| manual_row(folder, &[]))
+        .collect();
+    let modules = folders
+        .iter()
+        .map(|folder| (folder.to_string(), hash_of(&inputs, folder)))
+        .collect();
+    (inputs, rows, wago("DBM", "Deadly Boss Mods", modules))
+}
+
+#[test]
+fn a_packages_main_folder_is_the_one_the_others_require() {
+    let fixture = fixture();
+    let (inputs, rows, project) = dbm_package(&fixture);
+
+    let report = match_addons(
+        &inputs,
+        &rows,
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = &report.results[0];
+    assert_eq!(found.label, FindLabel::Exact);
+    assert_eq!(found.folder, "DBM-Core");
+    let candidate = found.found().expect("candidate");
+    assert_eq!(candidate.parent_folder, "DBM-Core");
+    assert_eq!(candidate.folders[0], "DBM-Core");
+}
+
+#[test]
+fn linking_a_package_lists_it_under_the_folder_the_others_require() {
+    let mut fixture = fixture();
+    let (inputs, rows, project) = dbm_package(&fixture);
+    let report = match_addons(
+        &inputs,
+        &rows,
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+    let pick = report.results[0].found().expect("pick").clone();
+
+    let linked = link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Retail,
+        &[pick],
+    )
+    .expect("link");
+
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].folder, "DBM-Core");
+    assert_eq!(
+        linked[0]
+            .owned_folders
+            .iter()
+            .map(|owned| owned.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "DBM-Brawlers",
+            "DBM-GUI",
+            "DBM-Raids-Midnight",
+            "DBM-StatusBarTimers",
+            "DBM-VPVEM"
+        ]
+    );
+}
+
+#[test]
+fn a_folder_named_like_the_project_is_the_parent_before_any_requirement() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Bar", &["## Dependencies: Foo"]);
+    addon(&fixture.addons, "Foo", &[]);
+    addon(&fixture.addons, "FooBar", &["## Dependencies: Bar"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = ["Bar", "Foo", "FooBar"]
+        .iter()
+        .map(|folder| (folder.to_string(), hash_of(&inputs, folder)))
+        .collect();
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("FB", "Foo Bar", modules)])),
+    );
+
+    assert_eq!(report.results[0].folder, "FooBar");
+}
+
+#[test]
+fn an_exact_match_outweighs_a_version_mismatch_on_another_source() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Pawn",
+        &["## Version: 3.0", "## X-WoWI-ID: 11"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "PWN",
+        "Pawn",
+        vec![("Pawn".to_string(), hash_of(&inputs, "Pawn"))],
+    )]));
+    lookups.wowinterface =
+        SourceAnswer::Found(vec![wowi_file("11", "Pawn", "2.0", &[("Pawn", "2.0")])]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = result(&report, "Pawn");
+    assert_eq!(found.label, FindLabel::Exact);
+    assert!(found.preselected());
+    assert_eq!(found.candidates.len(), 1);
+    assert_eq!(found.found().expect("candidate").source, FindSource::Wago);
+}
+
+#[test]
+fn an_exact_match_outweighs_a_toc_id_on_another_source() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "HandyNotes",
+        &["## Version: 1.0", "## X-WoWI-ID: 22"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "HN",
+        "HandyNotes",
+        vec![("HandyNotes".to_string(), hash_of(&inputs, "HandyNotes"))],
+    )]));
+    // The WoWInterface file lists a folder that is not here, so only the .toc's ID links them.
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "22",
+        "HandyNotes",
+        "1.0",
+        &[("HandyNotes", "1.0"), ("HandyNotes_Extra", "1.0")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = result(&report, "HandyNotes");
+    assert_eq!(found.label, FindLabel::Exact);
+    assert_eq!(found.candidates.len(), 1);
+    assert_eq!(found.found().expect("candidate").source, FindSource::Wago);
+}
+
+#[test]
+fn a_likely_match_beside_a_partial_one_is_still_a_choice() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Questie", &["## X-Wago-ID: QID"]);
+    addon(&fixture.addons, "QuestieDB", &["## X-Wago-ID: QID"]);
+    addon(&fixture.addons, "QuestieDev", &["## X-Wago-ID: QID"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = vec![
+        ("Questie".to_string(), hash_of(&inputs, "Questie")),
+        ("QuestieDB".to_string(), "0".repeat(32)),
+    ];
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("QID", "Questie", modules)])),
+    );
+
+    let choose = report
+        .results
+        .iter()
+        .find(|result| result.label == FindLabel::ChooseOne)
+        .unwrap_or_else(|| panic!("{:#?}", report.results));
+    let parents = choose
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.parent_folder.as_str(), candidate.label))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parents,
+        [
+            ("QuestieDev", FindLabel::Likely),
+            ("Questie", FindLabel::Partial)
+        ]
+    );
+}
+
+fn likely_reason_of(report: &FindReport, folder: &str) -> Option<LikelyReason> {
+    let found = result(report, folder);
+    assert_eq!(found.label, FindLabel::Likely, "{:#?}", report.results);
+    found.found().expect("candidate").likely_reason.clone()
+}
+
+#[test]
+fn a_likely_match_says_what_was_checked_on_wago() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Hekili",
+        &["## Version: 1.0", "## X-Wago-ID: HK"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = vec![("Hekili".to_string(), "0".repeat(32))];
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("HK", "Hekili", modules)])),
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::FilesMatchNoRelease)
+    );
+
+    // Wago.io answered but returned nothing for it: its hashed files match no release there.
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(Vec::new())),
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::FilesMatchNoRelease)
+    );
+
+    // Without a Wago.io answer nothing but the .toc names it.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::Skipped));
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::TocNamesIt)
+    );
+}
+
+#[test]
+fn a_likely_match_says_which_versions_were_compared() {
+    let fixture = fixture();
+    addon(&fixture.addons, "ElvUI", &["## Version: v15.17"]);
+    addon(&fixture.addons, "Simulationcraft", &["## Version: 1.52.3"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Skipped);
+    lookups.tukui = SourceAnswer::Found(vec![TukuiPackage {
+        id: "elvui".to_string(),
+        name: "ElvUI".to_string(),
+        version: "16.01".to_string(),
+        web_url: "https://tukui.org/elvui".to_string(),
+        author: None,
+        directories: vec!["ElvUI".to_string()],
+    }]);
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "7",
+        "Simulationcraft",
+        "1.52.7",
+        &[("Simulationcraft", "1.52.7")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(
+        likely_reason_of(&report, "ElvUI"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "ElvUI".to_string(),
+            installed: Some("v15.17".to_string()),
+            listed: Some("16.01".to_string()),
+        })
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Simulationcraft"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "Simulationcraft".to_string(),
+            installed: Some("1.52.3".to_string()),
+            listed: Some("1.52.7".to_string()),
+        })
+    );
+}
+
+#[test]
+fn an_exact_match_that_cannot_be_linked_keeps_the_other_sources_candidate() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 3.0"]);
+    addon(&fixture.addons, "SharedLib", &[]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut linked = AddonRecord::new("Other", "Other", SourceKind::Wago);
+    linked.set_managed_owned_folders(vec![OwnedFolder {
+        name: "SharedLib".to_string(),
+    }]);
+    let rows = vec![linked, manual_row("Pack", &[])];
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "PCK",
+        "Pack",
+        vec![
+            ("Pack".to_string(), hash_of(&inputs, "Pack")),
+            ("SharedLib".to_string(), hash_of(&inputs, "SharedLib")),
+        ],
+    )]));
+    lookups.wowinterface =
+        SourceAnswer::Found(vec![wowi_file("33", "Pack", "2.0", &[("Pack", "2.0")])]);
+
+    let report = match_addons(&inputs, &rows, None, &lookups);
+
+    let found = result(&report, "Pack");
+    assert!(
+        found
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source == FindSource::WowInterface),
+        "the WoWInterface candidate must stay: {:#?}",
+        found.candidates
+    );
+}
+
+#[test]
+fn a_library_both_sources_ship_never_hides_the_other_addon() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 3.0"]);
+    addon(&fixture.addons, "SharedLib", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "LIB",
+        "SharedLib",
+        vec![("SharedLib".to_string(), hash_of(&inputs, "SharedLib"))],
+    )]));
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "44",
+        "Pack",
+        "2.0",
+        &[("Pack", "2.0"), ("SharedLib", "1.0")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert!(
+        report.results.iter().any(|result| result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source == FindSource::WowInterface
+                && candidate.parent_folder == "Pack")),
+        "Pack's WoWInterface candidate must stay: {:#?}",
+        report.results
+    );
+}
+
+#[test]
+fn a_folder_the_source_lists_no_version_for_says_so() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Skipped);
+    let mut file = wowi_file("55", "Pack", "1.0", &[("Pack", "1.0")]);
+    file.folders[0].version = None;
+    lookups.wowinterface = SourceAnswer::Found(vec![file]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(
+        likely_reason_of(&report, "Pack"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "Pack".to_string(),
+            installed: Some("1.0".to_string()),
+            listed: None,
+        })
     );
 }

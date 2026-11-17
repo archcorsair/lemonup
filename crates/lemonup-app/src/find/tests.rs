@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use lemonup_core::find::{FindInputs, match_addons};
+use lemonup_core::find::{FindInputs, LikelyReason, match_addons};
 use lemonup_core::{OwnedFolder, SourceKind, UpdateStatus};
 
 use super::*;
@@ -482,6 +482,7 @@ fn found(source: FindSource, name: &str, folder: &str, version: &str, latest: &s
         latest_version: Some(latest.to_string()),
         joining: Vec::new(),
         leaving: Vec::new(),
+        likely_reason: None,
         missing: Vec::new(),
         differing: Vec::new(),
         blocked: Vec::new(),
@@ -575,6 +576,11 @@ fn full_report() -> FindReport {
     );
     likely.label = FindLabel::Likely;
     likely.matched_version = None;
+    likely.likely_reason = Some(lemonup_core::find::LikelyReason::VersionDiffers {
+        folder: "Bartender4".to_string(),
+        installed: Some("4.0".to_string()),
+        listed: Some("4.1".to_string()),
+    });
 
     let mut partial = found(FindSource::Wago, "Plater", "Plater", "2.0", "2.1");
     partial.label = FindLabel::Partial;
@@ -837,7 +843,7 @@ fn likely_partial_and_choose_one_say_why_they_are_not_linked() {
 
     assert_eq!(
         section_lines(&lines, "Likely matches (1)"),
-        ["  Bartender4  WoWInterface  the installed version differs from the release (4.1)"]
+        ["  Bartender4  WoWInterface  installed 4.0, WoWInterface has 4.1"]
     );
     assert_eq!(
         section_lines(&lines, "Partial matches (1)"),
@@ -850,6 +856,121 @@ fn likely_partial_and_choose_one_say_why_they_are_not_linked() {
             "  the release)",
         ]
     );
+}
+
+/// A report with one Likely result, drawn plain and wide.
+fn likely_line(source: FindSource, folder: &str, reason: Option<LikelyReason>) -> String {
+    let mut likely = found(source, folder, folder, "1.0", "1.0");
+    likely.label = FindLabel::Likely;
+    likely.likely_reason = reason;
+    let report = FindReport {
+        results: vec![result_of(FindLabel::Likely, folder, folder, vec![likely])],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
+    section_lines(&lines, "Likely matches (1)")
+        .first()
+        .map(|line| line.trim().to_string())
+        .expect("a likely line")
+}
+
+#[test]
+fn a_likely_match_says_what_was_checked() {
+    // Wago.io hashed the files and none matched a release.
+    assert_eq!(
+        likely_line(
+            FindSource::Wago,
+            "Hekili",
+            Some(LikelyReason::FilesMatchNoRelease)
+        ),
+        "Hekili  Wago.io  1.0, its .toc names it; its files match no release on Wago.io"
+    );
+    // The versions were compared.
+    assert_eq!(
+        likely_line(
+            FindSource::Tukui,
+            "ElvUI",
+            Some(LikelyReason::VersionDiffers {
+                folder: "ElvUI".to_string(),
+                installed: Some("v15.17".to_string()),
+                listed: Some("16.01".to_string()),
+            })
+        ),
+        "ElvUI Forever  TukUI  installed v15.17, TukUI has 16.01"
+    );
+    assert_eq!(
+        likely_line(
+            FindSource::WowInterface,
+            "Simulationcraft",
+            Some(LikelyReason::VersionDiffers {
+                folder: "Simulationcraft".to_string(),
+                installed: Some("1.52.3".to_string()),
+                listed: Some("1.52.7".to_string()),
+            })
+        ),
+        "Simulationcraft  WoWInterface  installed 1.52.3, WoWInterface has 1.52.7"
+    );
+    // A folder other than the listed one is the one that differs.
+    assert_eq!(
+        likely_line(
+            FindSource::Tukui,
+            "ElvUI",
+            Some(LikelyReason::VersionDiffers {
+                folder: "ElvUI_Options".to_string(),
+                installed: None,
+                listed: Some("16.01".to_string()),
+            })
+        ),
+        "ElvUI Forever  TukUI  no installed version in ElvUI_Options, TukUI has 16.01"
+    );
+    // Nothing was checked.
+    assert_eq!(
+        likely_line(FindSource::Wago, "Plater", Some(LikelyReason::TocNamesIt)),
+        "Plater  Wago.io  1.0, its .toc names it; its files weren't checked"
+    );
+}
+
+#[test]
+fn names_never_show_doubled_spaces() {
+    // A stored name from before the title was cleaned up, and a source's own name.
+    let rows = [AddonRecord::new(
+        "Decursive  -Ace3-",
+        "Decursive",
+        SourceKind::Manual,
+    )];
+    let names = LocalNames::new(
+        &rows,
+        &FindInputs {
+            flavor: GameFlavor::Forever,
+            folders: Vec::new(),
+        },
+    );
+
+    let likely = |name: &str, folder: &str| {
+        let mut likely = found(FindSource::Wago, name, folder, "1.0", "1.0");
+        likely.label = FindLabel::Likely;
+        likely.likely_reason = Some(LikelyReason::TocNamesIt);
+        result_of(FindLabel::Likely, name, folder, vec![likely])
+    };
+    let report = FindReport {
+        results: vec![
+            likely("unused", "Decursive"),
+            likely(" Two   Words ", "Other"),
+        ],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+
+    let lines = human_report(&report, &[], &names, 0, Paint::PLAIN);
+
+    let shown = section_lines(&lines, "Likely matches (2)");
+    assert!(
+        shown[0].starts_with("  Decursive -Ace3-  Wago.io"),
+        "{shown:?}"
+    );
+    assert!(shown[1].starts_with("  Two Words  "), "{shown:?}");
+    assert!(!shown[1].contains("Two   Words"), "{shown:?}");
 }
 
 #[test]
@@ -1638,4 +1759,22 @@ fn no_color_draws_no_color_in_any_theme() {
         let report = report_in_theme(theme, no_color);
         assert!(!report.contains('\u{1b}'), "{theme:?}: {report:?}");
     }
+}
+
+#[test]
+fn versions_never_show_doubled_spaces() {
+    let mut report = full_report();
+    let found = report
+        .results
+        .iter_mut()
+        .find_map(|result| match &mut result.candidates[..] {
+            [only] if result.label == FindLabel::Exact => Some(only),
+            _ => None,
+        })
+        .expect("an exact result");
+    found.matched_version = Some("Pawn  2.13.17".to_string());
+    found.latest_version = Some("Pawn  2.14.3".to_string());
+    let text = human_report(&report, &[], &full_names(), 0, Paint::PLAIN).join("\n");
+    assert!(text.contains("Pawn 2.13.17"), "{text}");
+    assert!(!text.contains("Pawn  2."), "{text}");
 }

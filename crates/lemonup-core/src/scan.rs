@@ -763,6 +763,8 @@ fn parse_dependency_list(raw: Option<String>) -> Vec<String> {
         .collect()
 }
 
+/// `value` without WoW color codes, runs of whitespace collapsed to one space and the ends
+/// trimmed.
 pub(crate) fn strip_wow_color_codes(value: String) -> String {
     let mut result = String::with_capacity(value.len());
     let chars = value.chars().collect::<Vec<_>>();
@@ -787,7 +789,8 @@ pub(crate) fn strip_wow_color_codes(value: String) -> String {
         index += 1;
     }
 
-    result.trim().to_string()
+    // A removed code leaves its neighbors' spaces side by side.
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -837,6 +840,17 @@ mod tests {
             vec!["Foo"]
         );
         assert!(report.skipped_folders.is_empty());
+    }
+
+    #[test]
+    fn a_removed_color_code_leaves_no_doubled_spaces_in_the_name() {
+        let parsed = parse_toc_content(
+            "## Title:  Decursive |cff00ff00|r -Ace3-  \n## Version: 1",
+            "Decursive",
+            None,
+        );
+
+        assert_eq!(parsed.title, "Decursive -Ace3-");
     }
 
     #[test]
