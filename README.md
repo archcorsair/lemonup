@@ -59,12 +59,11 @@ docker run --rm -it \
   ghcr.io/archcorsair/lemonup
 ```
 
-With Podman, add `--userns=keep-id` so your user owns the files LemonUp writes:
+With Podman, `--userns=keep-id` makes the container run as your user, so your user owns the files LemonUp writes:
 
 ```sh
 podman run --rm -it \
   --userns=keep-id \
-  --user "$(id -u):$(id -g)" \
   -v "/path/to/World of Warcraft:/wow" \
   -v lemonup-state:/state \
   ghcr.io/archcorsair/lemonup
