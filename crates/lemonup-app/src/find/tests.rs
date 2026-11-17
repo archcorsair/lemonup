@@ -1760,3 +1760,21 @@ fn no_color_draws_no_color_in_any_theme() {
         assert!(!report.contains('\u{1b}'), "{theme:?}: {report:?}");
     }
 }
+
+#[test]
+fn versions_never_show_doubled_spaces() {
+    let mut report = full_report();
+    let found = report
+        .results
+        .iter_mut()
+        .find_map(|result| match &mut result.candidates[..] {
+            [only] if result.label == FindLabel::Exact => Some(only),
+            _ => None,
+        })
+        .expect("an exact result");
+    found.matched_version = Some("Pawn  2.13.17".to_string());
+    found.latest_version = Some("Pawn  2.14.3".to_string());
+    let text = human_report(&report, &[], &full_names(), 0, Paint::PLAIN).join("\n");
+    assert!(text.contains("Pawn 2.13.17"), "{text}");
+    assert!(!text.contains("Pawn  2."), "{text}");
+}

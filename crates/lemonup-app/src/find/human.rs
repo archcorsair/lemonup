@@ -386,15 +386,16 @@ fn notes_for_missing(found: &FoundAddon) -> Vec<String> {
 fn ready_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
     let version = found
         .matched_version
-        .clone()
-        .unwrap_or_else(|| "unknown version".to_string());
+        .as_deref()
+        .map_or_else(|| "unknown version".to_string(), collapse_spaces);
     let mut notes = notes_for_moves(found, names);
     notes.extend(notes_for_missing(found));
     Entry {
         name: names.name(&found.parent_folder, &found.name),
         source: found.source.name().to_string(),
         version,
-        update: update_ready(found).map(|latest| format!("update ready ({latest})")),
+        update: update_ready(found)
+            .map(|latest| format!("update ready ({})", collapse_spaces(latest))),
         notes,
     }
 }
