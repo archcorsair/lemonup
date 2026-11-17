@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use lemonup_core::toc_edit::{self, TocField, TocFieldValues, TocValueSource};
 
 use super::dialog::Question;
-use super::sheet::{SheetBody, text_height, wrap_lines};
+use super::sheet::{SheetBody, SheetRoom, text_height, wrap_lines};
 use super::*;
 use crate::update_targets::{TocApplyError, apply_toc_overrides_now};
 use lemonup_core::paths::same_addons_folder;
@@ -508,17 +508,11 @@ impl App {
     /// The sheet keeps its size and place while it is open: it reserves the
     /// rows of the longest explanation, a full list of suggestions and the
     /// result line, and pads shorter states with blank rows at the bottom of
-    /// each area. A layout that fits under the header rows (`below_header`)
-    /// comes first, so the sheet only grows over the header when it has to;
-    /// with little room the blank rows go first, then the explanation is cut
-    /// to one line. Which one is the same in every state.
-    pub(super) fn toc_edit_sheet_body(
-        &self,
-        width: u16,
-        height: u16,
-        below_header: u16,
-    ) -> SheetBody<'static> {
+    /// each area, so the result line stays put too. With little room the
+    /// blank rows go first, then the explanation is cut to one line.
+    pub(super) fn toc_edit_sheet_body(&self, room: &SheetRoom) -> SheetBody<'static> {
         let roles = self.ui_theme.roles;
+        let width = room.width;
         let mut body = SheetBody::new();
         let Some(item) = self.toc_edit_item() else {
             body.text(vec![Line::from(Span::styled(
@@ -528,7 +522,19 @@ impl App {
             return body;
         };
         let long_rows = self.toc_reserved_rows(item, width);
-        let (spaced, long) = Self::toc_layout(long_rows, height, below_header);
+        // The name, the three fields and the suggestions, then the
+        // explanation and the result line; spaced adds two blank rows.
+        let list = 1 + TocField::ALL.len() as u16 + SUGGESTION_LIMIT as u16;
+        let rows =
+            |spaced: bool, explanation: u16| list + explanation + 1 + if spaced { 2 } else { 0 };
+        let layouts = [
+            rows(true, long_rows),
+            rows(false, long_rows),
+            rows(false, 1),
+        ];
+        let layout = room.pick(&layouts);
+        body.reserve(layouts[layout]);
+        let (spaced, long) = (layout == 0, layout < 2);
         let linked = if item.source == SourceKind::Manual {
             " · Not linked"
         } else {
@@ -576,29 +582,6 @@ impl App {
         footer.push(self.toc_status_line(width).unwrap_or_default());
         body.footer(footer);
         body
-    }
-
-    /// Whether blank rows separate the parts and whether the explanation is
-    /// in full, for a sheet that reserves `long_rows` for the explanation.
-    fn toc_layout(long_rows: u16, height: u16, below_header: u16) -> (bool, bool) {
-        // The name, the three fields and the suggestions, then the
-        // explanation and the result line; spaced adds two blank rows.
-        let list = 1 + TocField::ALL.len() as u16 + SUGGESTION_LIMIT as u16;
-        let rows =
-            |spaced: bool, explanation: u16| list + explanation + 1 + if spaced { 2 } else { 0 };
-        if rows(true, long_rows) <= below_header {
-            (true, true)
-        } else if rows(false, long_rows) <= below_header {
-            (false, true)
-        } else if rows(false, 1) <= below_header {
-            (false, false)
-        } else if rows(true, long_rows) <= height {
-            (true, true)
-        } else if rows(false, long_rows) <= height {
-            (false, true)
-        } else {
-            (false, false)
-        }
     }
 
     /// Rows the long explanation reserves at `width`: the tallest one for

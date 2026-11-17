@@ -4,7 +4,7 @@ use time::UtcOffset;
 
 use super::render_dashboard::shorten_path_middle;
 use super::render_inspect::time_ago;
-use super::sheet::SheetBody;
+use super::sheet::{SheetBody, SheetRoom, text_height};
 use super::*;
 
 /// The "Made" column: the longest date ("Wed 11 Nov at 20:33", or
@@ -17,13 +17,26 @@ impl App {
     /// What a backup holds and when LemonUp makes one, the backups newest
     /// first with the cursor on one, and the folder they are kept in.
     /// Restoring and deleting ask in the question dialog, over this sheet.
-    pub(super) fn backup_sheet_body(&self, width: u16, _max_height: u16) -> SheetBody<'static> {
+    ///
+    /// The sheet keeps room for one more backup and for the result line, so
+    /// making, deleting or restoring a backup does not move it.
+    pub(super) fn backup_sheet_body(&self, room: &SheetRoom) -> SheetBody<'static> {
+        let width = room.width;
         let now = OffsetDateTime::now_utc();
         let offset = local_offset();
         let backups = &self.backup_pane.backups;
 
         let mut body = SheetBody::new();
-        body.text(self.backup_intro_lines()).gap(1);
+        let intro = self.backup_intro_lines();
+        // The intro, a blank row, the heading, the backups and one more, a
+        // blank row, the folder, then a blank row and the result.
+        let count = u16::try_from(backups.len()).unwrap_or(u16::MAX);
+        body.reserve(
+            text_height(&intro, width)
+                .saturating_add(count)
+                .saturating_add(7),
+        );
+        body.text(intro).gap(1);
         if backups.is_empty() {
             body.text(vec![self.backup_empty_line()]);
         } else {

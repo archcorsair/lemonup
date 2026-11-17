@@ -34,37 +34,31 @@ impl App {
         };
         match kind {
             OverlayKind::Inspect => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
-                    self.inspect_sheet_body(width)
+                self.render_sheet(frame, region, header, kind, chrome, |room| {
+                    self.inspect_sheet_body(room)
                 })
             }
-            OverlayKind::Help => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
-                    self.help_sheet_body(width)
-                })
-            }
+            OverlayKind::Help => self.render_sheet(frame, region, header, kind, chrome, |room| {
+                self.help_sheet_body(room.width)
+            }),
             OverlayKind::Install | OverlayKind::Search => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
-                    self.search_sheet_body(width, height)
+                self.render_sheet(frame, region, header, kind, chrome, |room| {
+                    self.search_sheet_body(room)
                 })
             }
-            OverlayKind::Config => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
-                    self.config_sheet_body(width, height, height.saturating_sub(header))
-                })
-            }
-            OverlayKind::Backup => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
-                    self.backup_sheet_body(width, height)
-                })
-            }
+            OverlayKind::Config => self.render_sheet(frame, region, header, kind, chrome, |room| {
+                self.config_sheet_body(room)
+            }),
+            OverlayKind::Backup => self.render_sheet(frame, region, header, kind, chrome, |room| {
+                self.backup_sheet_body(room)
+            }),
             OverlayKind::TocEdit => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
-                    self.toc_edit_sheet_body(width, height, height.saturating_sub(header))
+                self.render_sheet(frame, region, header, kind, chrome, |room| {
+                    self.toc_edit_sheet_body(room)
                 })
             }
             OverlayKind::Update | OverlayKind::Confirm => {
-                self.render_sheet(frame, region, header, kind, chrome, |_, _| {
+                self.render_sheet(frame, region, header, kind, chrome, |_| {
                     let mut body = SheetBody::new();
                     body.text(self.task_overlay_lines());
                     body

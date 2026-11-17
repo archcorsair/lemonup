@@ -5,6 +5,15 @@
 //! content, up to the window minus the status line and the key line; past
 //! that the body scrolls and says "↓ N more". Below 100 x 30 a sheet fills
 //! the whole body. The list behind a sheet is dimmed.
+//!
+//! A sheet whose content changes while it is open reserves the tallest body
+//! it can need (`SheetBody::reserve`), so it keeps its size and place: it
+//! sits where a body that tall would, and shorter states are padded at the
+//! bottom. A sheet with several layouts picks one with `SheetRoom::pick`.
+//! The pick and the reserve hold while the sheet stays open at one window
+//! size, so the layout never flips between states.
+
+use std::cell::Cell;
 
 use ratatui::buffer::Buffer;
 use ratatui::widgets::{StatefulWidget, Widget};
@@ -55,6 +64,8 @@ pub(super) struct SheetBody<'a> {
     focus: Option<usize>,
     /// Rows pinned under the body: they stay in place while it scrolls.
     footer: Vec<Line<'static>>,
+    /// The tallest the body gets while the sheet is open, footer included.
+    reserve: Option<u16>,
 }
 
 impl<'a> SheetBody<'a> {
@@ -63,7 +74,17 @@ impl<'a> SheetBody<'a> {
             parts: Vec::new(),
             focus: None,
             footer: Vec::new(),
+            reserve: None,
         }
+    }
+
+    /// The most rows, footer included, this body takes in any state while
+    /// the sheet is open. The sheet is placed for a body this tall, and a
+    /// shorter one is padded at the bottom, so it keeps its size and place
+    /// while its content changes.
+    pub(super) fn reserve(&mut self, rows: u16) -> &mut Self {
+        self.reserve = Some(rows);
+        self
     }
 
     /// Text pinned to the bottom of the sheet, wrapped at the body width,
@@ -207,6 +228,73 @@ pub(super) fn wrap_lines_hanging(
     out
 }
 
+/// The room a sheet body has, for the code that builds it.
+pub(super) struct SheetRoom {
+    /// Width of the text inside.
+    pub(super) width: u16,
+    /// The most body rows the sheet can show at once.
+    pub(super) height: u16,
+    /// Of those, the rows a floating sheet has under the header rows.
+    pub(super) below_header: u16,
+    /// Fills the body instead of floating over the list.
+    full: bool,
+    /// What the sheet decided when it opened at this window size.
+    kept: Option<SheetKept>,
+    /// The layout `pick` chose in this draw.
+    picked: Cell<Option<usize>>,
+}
+
+impl SheetRoom {
+    /// Picks one of a sheet's layouts, given the body rows each one
+    /// reserves, roomiest first: the first that fits under the header, so
+    /// the sheet only grows over the header when it has to, then the first
+    /// that fits at all, else the last. The pick holds while the sheet stays
+    /// open at this window size.
+    pub(super) fn pick(&self, layouts: &[u16]) -> usize {
+        let index = self
+            .kept
+            .and_then(|kept| kept.layout)
+            .filter(|index| *index < layouts.len())
+            .unwrap_or_else(|| {
+                layouts
+                    .iter()
+                    .position(|rows| *rows <= self.below_header)
+                    .or_else(|| layouts.iter().position(|rows| *rows <= self.height))
+                    .unwrap_or(layouts.len().saturating_sub(1))
+            });
+        self.picked.set(Some(index));
+        index
+    }
+
+    /// The rows the sheet reserved when it opened at this window size, so a
+    /// reserve that takes work to measure is only measured once.
+    pub(super) fn reserved(&self) -> Option<u16> {
+        self.kept.and_then(|kept| kept.reserve)
+    }
+
+    /// The most body rows that keep the header in view, for a sheet that
+    /// would rather scroll than cover it: all of them on a full screen
+    /// sheet, which covers the header anyway.
+    pub(super) fn clear_of_header(&self) -> u16 {
+        if self.full {
+            self.height
+        } else {
+            self.below_header.max(1)
+        }
+    }
+}
+
+/// What an open sheet decided at its first draw at one window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SheetKept {
+    /// The window, width and height.
+    window: (u16, u16),
+    /// The layout `SheetRoom::pick` chose.
+    layout: Option<usize>,
+    /// The body rows reserved.
+    reserve: Option<u16>,
+}
+
 /// What the last drawn sheet looked like, so keys can scroll it and the next
 /// draw can keep the cursor in view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -221,6 +309,8 @@ pub(crate) struct SheetScroll {
     pub(super) max_offset: u16,
     /// Body rows on screen.
     pub(super) viewport: u16,
+    /// The layout and reserve the sheet keeps while it is open.
+    pub(super) kept: Option<SheetKept>,
 }
 
 impl SheetScroll {
@@ -342,9 +432,23 @@ impl SheetFrame {
         }
     }
 
+    /// Body rows that fit under the header rows.
+    pub(super) fn below_header(self) -> u16 {
+        self.max_body_height.saturating_sub(self.header)
+    }
+
     /// The sheet's outline and body for a body `content` rows tall.
     pub(super) fn place(self, content: u16) -> SheetGeometry {
-        let viewport = content.clamp(1, self.max_body_height);
+        self.place_reserved(content, content)
+    }
+
+    /// The sheet's outline and body for a body `content` rows tall that
+    /// reserves `reserve` rows: it sits where a body `reserve` rows tall
+    /// would, with the rows the content leaves blank at the bottom. Taller
+    /// content grows the sheet down, never moving its top.
+    pub(super) fn place_reserved(self, content: u16, reserve: u16) -> SheetGeometry {
+        let reserved = reserve.clamp(1, self.max_body_height);
+        let viewport = content.max(reserve).clamp(1, self.max_body_height);
         if self.full {
             let outer = self.region;
             let body = Rect::new(
@@ -359,7 +463,7 @@ impl SheetFrame {
                 full: true,
             };
         }
-        let height = (viewport + FLOAT_CHROME_ROWS).min(self.region.height);
+        let height = (reserved + FLOAT_CHROME_ROWS).min(self.region.height);
         let x = self.region.x + (self.region.width.saturating_sub(self.width)) / 2;
         // Centered between the header and the status line; taller content
         // grows upward over the header rows, never over the status line.
@@ -370,6 +474,7 @@ impl SheetFrame {
         } else {
             self.region.bottom().saturating_sub(height)
         };
+        let height = (viewport + FLOAT_CHROME_ROWS).min(self.region.bottom() - y);
         let outer = Rect::new(x, y, self.width, height);
         let body = Rect::new(
             outer.x + FLOAT_CHROME_COLUMNS / 2,
@@ -426,8 +531,8 @@ pub(super) fn offset_for_focus(offset: u16, focus: (u16, u16), total: u16, viewp
 
 impl App {
     /// Draws `kind` as a sheet inside `region`, the space above the status
-    /// line and the key line. `build` gets the body width and the most rows
-    /// the body can show, and returns the content.
+    /// line and the key line. `build` gets the room the body has and returns
+    /// the content.
     pub(super) fn render_sheet<'a>(
         &self,
         frame: &mut Frame<'_>,
@@ -435,12 +540,32 @@ impl App {
         header: u16,
         kind: OverlayKind,
         chrome: SheetChrome,
-        build: impl FnOnce(u16, u16) -> SheetBody<'a>,
+        build: impl FnOnce(&SheetRoom) -> SheetBody<'a>,
     ) {
         let roles = self.ui_theme.roles;
         let window = frame.area();
         let sheet_frame = SheetFrame::new(window, region, header, sheet_width(kind));
-        let body = build(sheet_frame.body_width, sheet_frame.max_body_height);
+        let previous = self.sheet_scroll.get();
+        let size = (window.width, window.height);
+        // What the sheet decided when it opened at this size, if it did.
+        let kept = previous
+            .kept
+            .filter(|kept| previous.kind == Some(kind) && kept.window == size);
+        let room = SheetRoom {
+            width: sheet_frame.body_width,
+            height: sheet_frame.max_body_height,
+            below_header: sheet_frame.below_header(),
+            full: sheet_frame.full,
+            kept,
+            picked: Cell::new(None),
+        };
+        let body = build(&room);
+        let reserve = kept.and_then(|kept| kept.reserve).or(body.reserve);
+        let kept = SheetKept {
+            window: size,
+            layout: kept.and_then(|kept| kept.layout).or(room.picked.get()),
+            reserve,
+        };
         let heights = body.part_heights(sheet_frame.body_width);
         let total = heights.iter().copied().fold(0u16, u16::saturating_add);
         let footer = wrap_lines(&body.footer, sheet_frame.body_width);
@@ -452,7 +577,11 @@ impl App {
                 .fold(0u16, u16::saturating_add);
             (start, start.saturating_add(heights[index].max(1)))
         });
-        let geometry = sheet_frame.place(total.saturating_add(footer_rows));
+        let content = total.saturating_add(footer_rows);
+        let geometry = match reserve {
+            Some(reserve) => sheet_frame.place_reserved(content, reserve),
+            None => sheet_frame.place(content),
+        };
 
         if !geometry.full {
             dim_area(frame.buffer_mut(), region, roles);
@@ -467,10 +596,10 @@ impl App {
         // Scroll: a new overlay starts at the top, and a moved cursor is
         // brought back into view.
         // The footer keeps its rows; the body scrolls in what is left, and
-        // always keeps at least one.
+        // always keeps at least one. The footer sits right under the body;
+        // rows a reserve leaves stay blank below it.
         let footer_rows = footer_rows.min(geometry.body.height.saturating_sub(1));
-        let viewport = geometry.body.height - footer_rows;
-        let previous = self.sheet_scroll.get();
+        let viewport = (geometry.body.height - footer_rows).min(total.max(1));
         let mut offset = if previous.kind == Some(kind) {
             previous.offset
         } else {
@@ -489,6 +618,7 @@ impl App {
             focus,
             max_offset,
             viewport,
+            kept: Some(kept),
         });
 
         // Draw the whole body off screen, then copy the rows on screen.
