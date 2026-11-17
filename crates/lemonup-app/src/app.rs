@@ -54,12 +54,13 @@ use crate::update::{
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
     environment_wago_api_key, inspect_wago_install_target, install_wago_addon_with_replace,
-    process_env, resolve_wago_api_key, search_wago_addons, wago_api_key_in_use,
+    process_env, search_wago_addons, wago_api_key_in_use,
 };
 use time::{Duration, OffsetDateTime};
 
 mod dialog;
 mod direct_install;
+mod games;
 mod keymap;
 mod render_backup;
 mod render_config;
@@ -78,6 +79,7 @@ pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
     DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
 };
+pub(crate) use self::games::{GamesAction, GamesMessage, GamesState, OtherGameChecked};
 #[cfg(test)]
 use self::render_dashboard::{child_row_detail_prefix, child_row_prefix};
 use self::render_dashboard::{
@@ -121,6 +123,8 @@ enum OverlayKind {
     /// The .toc editor, opened from Details.
     TocEdit,
     Confirm,
+    /// The Switch game sheet.
+    Games,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -139,6 +143,7 @@ pub(crate) enum HelpContext {
     Config,
     Backup,
     TocEdit,
+    Games,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +245,8 @@ enum FooterHintId {
     ClearText,
     /// `f` on a "Not linked" addon.
     FindOnline,
+    /// `p`, the Switch game sheet.
+    SwitchGame,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +268,8 @@ pub enum DetailMode {
     Backup,
     /// The .toc editor of one addon.
     TocEdit,
+    /// The Switch game sheet.
+    Games,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +510,7 @@ enum AppMessage {
     OnboardingInputChar(char),
     OnboardingBackspace,
     TocEdit(TocEditMessage),
+    Games(GamesMessage),
     BackgroundTask(AppTaskEvent),
 }
 
@@ -671,6 +681,8 @@ enum ConfigField {
     AutoCheckEnabled,
     AutoCheckInterval,
     CheckInterval,
+    /// How often the other games are checked in the background.
+    CheckOtherGames,
     BackupWtf,
     BackupRetention,
     Theme,
@@ -700,17 +712,19 @@ enum ConfigRowKind {
 const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 43_200, 86_400];
 
 impl ConfigField {
-    /// Every row in the order Settings shows them.
-    const ALL: [Self; 13] = [
+    /// Every row in the order Settings shows them: first the ones all
+    /// games share, then the ones of the game in use.
+    const ALL: [Self; 14] = [
         Self::WagoApiKey,
-        Self::AutoCheckEnabled,
-        Self::AutoCheckInterval,
-        Self::CheckInterval,
-        Self::BackupWtf,
-        Self::BackupRetention,
         Self::Theme,
         Self::SimpleSymbols,
         Self::ReduceMotion,
+        Self::AutoCheckEnabled,
+        Self::AutoCheckInterval,
+        Self::CheckInterval,
+        Self::CheckOtherGames,
+        Self::BackupWtf,
+        Self::BackupRetention,
         Self::ShowLibs,
         Self::ChangeGameFolder,
         Self::SaveAddonList,
@@ -723,6 +737,7 @@ impl ConfigField {
             Self::AutoCheckEnabled => "Check for updates automatically",
             Self::AutoCheckInterval => "Check every",
             Self::CheckInterval => "Don't re-check an addon for",
+            Self::CheckOtherGames => "Check other games",
             Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
             Self::Theme => "Theme",
@@ -744,9 +759,10 @@ impl ConfigField {
             | Self::SimpleSymbols
             | Self::ReduceMotion
             | Self::ShowLibs => ConfigRowKind::Toggle,
-            Self::AutoCheckInterval | Self::CheckInterval | Self::BackupRetention => {
-                ConfigRowKind::Stepped
-            }
+            Self::AutoCheckInterval
+            | Self::CheckInterval
+            | Self::CheckOtherGames
+            | Self::BackupRetention => ConfigRowKind::Stepped,
             Self::ChangeGameFolder | Self::SaveAddonList | Self::LoadAddonList => {
                 ConfigRowKind::Action
             }
@@ -795,6 +811,22 @@ fn step_seconds(current: u64, delta: i16) -> u64 {
 
 /// Seconds in words, exactly: "5 minutes", "1 hour", "7 min 30 s",
 /// "1 h 30 min". Nothing is rounded, so any stored value reads true.
+/// The "Check other games" step after `current` (`delta` > 0) or before
+/// it, from Off to 3 days; past either end nothing changes.
+fn step_other_games_check(
+    current: lemonup_core::OtherGamesCheck,
+    delta: i16,
+) -> lemonup_core::OtherGamesCheck {
+    let all = lemonup_core::OtherGamesCheck::ALL;
+    let index = all.iter().position(|step| *step == current).unwrap_or(0);
+    let next = match delta.signum() {
+        1 => (index + 1).min(all.len() - 1),
+        -1 => index.saturating_sub(1),
+        _ => index,
+    };
+    all[next]
+}
+
 fn human_duration(secs: u64) -> String {
     let plural = |count: u64, unit: &str| {
         if count == 1 {
@@ -927,6 +959,9 @@ impl ConfigPaneState {
             ConfigField::AutoCheckInterval => {
                 draft.auto_check_interval_secs =
                     step_seconds(draft.auto_check_interval_secs, delta);
+            }
+            ConfigField::CheckOtherGames => {
+                draft.check_other_games = step_other_games_check(draft.check_other_games, delta);
             }
             ConfigField::BackupWtf => {
                 draft.backup_wtf = !draft.backup_wtf;
@@ -2742,6 +2777,8 @@ pub struct App {
     toc_pane: TocEditPane,
     /// A .toc change is being written.
     toc_apply_running: bool,
+    /// An addon list is being loaded into this game.
+    import_running: bool,
     /// When the key being handled was read from the terminal; `None` in tests.
     key_read_at: Option<Instant>,
     /// The question last drawn and when it first was, so a key typed before
@@ -2770,11 +2807,18 @@ pub struct App {
     startup_notice: Option<(String, bool)>,
     /// `q` or Ctrl+C during an update asked whether to quit.
     quit_question_open: bool,
+    /// Where every game's files live, to switch, add and remove games.
+    roots: lemonup_core::ProfileRoots,
+    games: GamesState,
+    /// Background checks of other games report here. It is kept when the
+    /// app switches games, so a check that is running still lands.
+    games_tx: mpsc::UnboundedSender<OtherGameChecked>,
+    games_rx: mpsc::UnboundedReceiver<OtherGameChecked>,
 }
 
 impl App {
     pub fn bootstrap(paths: AppPaths, runtime: AppRuntime) -> lemonup_core::Result<Self> {
-        let config_store = ConfigStore::new(paths.config_file);
+        let config_store = ConfigStore::for_profile(&paths);
         let config_state = config_store.load()?;
         let state_db_file = paths.state_db_file.clone();
         let trash_dir = paths.data_dir.join("trash");
@@ -2784,11 +2828,10 @@ impl App {
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
         let wago_env_key = environment_wago_api_key(process_env);
-        let wago_api_key = resolve_wago_api_key(&config_state);
-        let loaded_config = match &config_state {
-            ConfigLoad::Loaded(config) => config.clone(),
-            ConfigLoad::Missing(_) => AppConfig::new_unconfigured(),
-        };
+        // A game that isn't set up yet starts from the settings all games share.
+        let loaded_config = config_store.effective(&config_state)?;
+        let wago_api_key =
+            wago_api_key_in_use(loaded_config.wago_api_key.clone(), wago_env_key.clone());
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
             ConfigLoad::Missing(_) => None,
@@ -2878,6 +2921,12 @@ impl App {
             ScanState::Idle
         };
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
+        let (games_tx, games_rx) = mpsc::unbounded_channel();
+        let roots = paths.roots.clone();
+        let games = GamesState {
+            games: games::read_games(&roots, &runtime.profile_name).unwrap_or_default(),
+            ..GamesState::default()
+        };
 
         let mut app = Self {
             shell_mode,
@@ -2924,6 +2973,7 @@ impl App {
             delete_in_progress: false,
             toc_pane: TocEditPane::default(),
             toc_apply_running: false,
+            import_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -2939,6 +2989,10 @@ impl App {
             active_onboarding_cancel: None,
             startup_notice: None,
             quit_question_open: false,
+            roots,
+            games,
+            games_tx,
+            games_rx,
         };
         app.status_line = app.initial_status_line();
         if let Some(notice) = binding_notice {
@@ -3276,6 +3330,12 @@ impl App {
                 self.apply(action);
             }
         }
+        while let Ok(OtherGameChecked { profile, result }) = self.games_rx.try_recv() {
+            let actions = self.update(AppMessage::Games(GamesMessage::Checked { profile, result }));
+            for action in actions {
+                self.apply(action);
+            }
+        }
     }
 
     fn messages_for_event(&self, event: &TerminalEvent) -> Vec<AppMessage> {
@@ -3462,6 +3522,7 @@ impl App {
             OverlayKind::Config if self.config_pane.edit.is_some() => Some(vec![]),
             OverlayKind::Config => self.config_messages_for_key(key),
             OverlayKind::Backup => self.backup_messages_for_key(key),
+            OverlayKind::Games => self.games_messages_for_key(key),
             OverlayKind::TocEdit if self.toc_pane.edit.is_some() => Some(vec![]),
             OverlayKind::TocEdit => self.toc_edit_messages_for_key(key),
             // Only a cursor in the results moves; with the box focused the
@@ -3580,6 +3641,9 @@ impl App {
         if let Some(messages) = self.backup_messages_for_key(key) {
             return messages;
         }
+        if let Some(messages) = self.games_messages_for_key(key) {
+            return messages;
+        }
         if let Some(messages) = self.toc_edit_messages_for_key(key) {
             return messages;
         }
@@ -3660,6 +3724,7 @@ impl App {
                 vec![AppMessage::SetDetailMode(DetailMode::Config)]
             }
             KeyCode::Char('b') => vec![AppMessage::SetDetailMode(DetailMode::Backup)],
+            KeyCode::Char('p') => vec![AppMessage::Games(GamesMessage::Open)],
             KeyCode::Char('d') if self.first_run_card_visible() => {
                 vec![AppMessage::DashboardHideFirstRunCard]
             }
@@ -4054,6 +4119,9 @@ impl App {
                         },
                     ]);
                     actions
+                } else if let Some(profile) = self.other_game_check_due(OffsetDateTime::now_utc()) {
+                    actions.push(AppAction::Games(GamesAction::StartCheck(profile)));
+                    actions
                 } else {
                     actions
                 }
@@ -4143,10 +4211,8 @@ impl App {
                 let mut saved = self.config_pane.persisted.clone();
                 saved.hide_first_run_card = true;
                 match self.config_store.write_config(&saved) {
-                    Ok(()) => {
-                        let mut pane = self.config_pane.clone();
-                        pane.persisted = saved.clone();
-                        pane.draft.hide_first_run_card = true;
+                    Ok(saved) => {
+                        let pane = self.config_pane.mark_saved(saved.clone());
                         vec![
                             AppAction::SetPersistedConfig(saved),
                             AppAction::SetConfigPaneState(pane),
@@ -5018,7 +5084,13 @@ impl App {
             },
             AppMessage::ConfigImportAddons => match default_transfer_path() {
                 Ok(input_path) => {
-                    if self.effective_addon_dir.is_none() {
+                    if self.import_running {
+                        vec![AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Note,
+                            DetailMode::Config,
+                            "Wait for the import to finish first.",
+                        ))]
+                    } else if self.effective_addon_dir.is_none() {
                         vec![AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Problem,
                             DetailMode::Config,
@@ -5234,9 +5306,14 @@ impl App {
             )],
             AppMessage::OnboardingChoose => match &self.onboarding.phase {
                 OnboardingPhase::Found(found) => match found.selected_install() {
+                    Some(install) if self.games.adding => vec![AppAction::Games(
+                        GamesAction::Create(install.addons_dir.clone()),
+                    )],
                     Some(install) if self.is_guarded_path(&install.addons_dir) => vec![],
                     Some(install) => vec![AppAction::SetOnboardingState(
-                        self.onboarding.choose_install(&install.addons_dir),
+                        self.onboarding
+                            .choose_install(&install.addons_dir)
+                            .with_other_game(self.other_game_to_offer(&install.addons_dir)),
                     )],
                     None => vec![AppAction::SetOnboardingState(
                         self.onboarding.begin_typing(),
@@ -5275,7 +5352,9 @@ impl App {
                 self.onboarding.set_quit_question(false),
             )],
             AppMessage::OnboardingQuitConfirmed => {
-                if self.setup_is_rerun() {
+                if self.games.adding {
+                    vec![AppAction::CancelAddingGame]
+                } else if self.setup_is_rerun() {
                     vec![AppAction::LeaveOnboarding]
                 } else {
                     vec![AppAction::Quit]
@@ -5326,6 +5405,7 @@ impl App {
                 vec![AppAction::SetOnboardingState(self.onboarding.backspace())]
             }
             AppMessage::TocEdit(message) => self.toc_edit_actions(message),
+            AppMessage::Games(message) => self.games_actions(message),
             AppMessage::BackgroundTask(event) => match event {
                 AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
                 AppTaskEvent::TocApplyFinished {
@@ -5572,6 +5652,7 @@ impl App {
                     let status =
                         transfer_import_status_message(&outcome.analysis, &outcome.install_summary);
                     vec![
+                        AppAction::SetImportRunning(false),
                         AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                         AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
                         AppAction::CompleteAddonScan {
@@ -5590,11 +5671,14 @@ impl App {
                     ]
                 }
                 AppTaskEvent::TransferImportFinished(Err(error)) => {
-                    vec![AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Problem,
-                        DetailMode::Config,
-                        &format!("Couldn't import the addon list: {error}"),
-                    ))]
+                    vec![
+                        AppAction::SetImportRunning(false),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Problem,
+                            DetailMode::Config,
+                            &format!("Couldn't import the addon list: {error}"),
+                        )),
+                    ]
                 }
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
                     AppAction::SetSearchPaneState(
@@ -5753,6 +5837,25 @@ impl App {
         }
     }
 
+    /// Reads the settings all games share again, so Settings shows them as stored, and the
+    /// next change saves when it differs from them. When they can't be read, the values
+    /// shown stay as they were.
+    fn reload_shared_settings(&mut self) {
+        let mut persisted = self.config_pane.persisted.clone();
+        if let Err(error) = self.config_store.refresh_shared(&mut persisted) {
+            tracing::warn!(%error, "could not read the settings all games share");
+            return;
+        }
+        if persisted == self.config_pane.persisted {
+            return;
+        }
+        let mut pane = self.config_pane.clone();
+        lemonup_core::SharedSettings::from_config(&persisted).apply_to(&mut pane.draft);
+        pane.persisted = persisted.clone();
+        self.apply(AppAction::SetPersistedConfig(persisted));
+        self.config_pane = pane;
+    }
+
     fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.quit_requested = true,
@@ -5806,6 +5909,7 @@ impl App {
                         DetailMode::Config => Some(OverlayKind::Config),
                         DetailMode::Backup => Some(OverlayKind::Backup),
                         DetailMode::TocEdit => Some(OverlayKind::TocEdit),
+                        DetailMode::Games => Some(OverlayKind::Games),
                     };
                 }
             }
@@ -5906,6 +6010,7 @@ impl App {
             }
             AppAction::SetTocEditPane(pane) => self.toc_pane = pane,
             AppAction::SetTocApplyInProgress(running) => self.toc_apply_running = running,
+            AppAction::SetImportRunning(running) => self.import_running = running,
             AppAction::StartTocApply { addon_dir, request } => {
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
@@ -6018,10 +6123,15 @@ impl App {
                     DetailMode::Config => Some(OverlayKind::Config),
                     DetailMode::Backup => Some(OverlayKind::Backup),
                     DetailMode::TocEdit => Some(OverlayKind::TocEdit),
+                    DetailMode::Games => Some(OverlayKind::Games),
                 };
                 // Backups shows what is on disk, automatic backups included.
                 if detail_mode == DetailMode::Backup {
                     self.reload_backups();
+                }
+                // Settings shows the shared values as stored, another game's changes too.
+                if detail_mode == DetailMode::Config {
+                    self.reload_shared_settings();
                 }
             }
             AppAction::ReenterOnboarding => {
@@ -6047,6 +6157,8 @@ impl App {
                     }
                 }
             }
+            AppAction::CancelAddingGame => self.cancel_adding_game(),
+            AppAction::Games(action) => self.apply_games(action),
             AppAction::LeaveOnboarding => {
                 // Back to the list as it was: nothing from setup is kept.
                 self.onboarding = self.onboarding.set_quit_question(false);
@@ -6164,7 +6276,7 @@ impl App {
                 };
 
                 match self.config_store.write_new_config(&config) {
-                    Ok(()) => {
+                    Ok(config) => {
                         self.config_present = true;
                         self.config_pane = self.config_pane.mark_saved(config.clone());
                         self.wago_api_key = wago_api_key_in_use(
@@ -6213,6 +6325,15 @@ impl App {
                                 ),
                             );
                         }
+                        // On a fresh install there was no `shared.toml` when the TUI
+                        // started, so the game it opened with wasn't remembered then.
+                        if let Err(error) = lemonup_core::remember_last_used(
+                            &self.roots,
+                            &self.runtime.profile_name,
+                        ) {
+                            tracing::warn!(%error, "couldn't remember the last used game");
+                        }
+                        self.set_up_other_game_after_save();
                     }
                     Err(error) => {
                         // The config still names the old folder, so the binding must
@@ -6397,6 +6518,7 @@ impl App {
                 input_path,
                 wago_api_key,
             } => {
+                self.import_running = true;
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
@@ -6916,7 +7038,7 @@ impl App {
                 }
             }
             // Backups draws its own sheet (`render_backup.rs`).
-            DetailMode::Backup | DetailMode::TocEdit => {}
+            DetailMode::Backup | DetailMode::TocEdit | DetailMode::Games => {}
         }
 
         lines
@@ -7086,9 +7208,10 @@ impl App {
     /// Setup was opened again from Settings, so quitting it goes back to
     /// the list rather than closing LemonUp.
     fn setup_is_rerun(&self) -> bool {
-        self.effective_addon_dir
-            .as_deref()
-            .is_some_and(|path| validate_addons_path(path).is_ok() && !self.is_guarded_path(path))
+        self.games.adding
+            || self.effective_addon_dir.as_deref().is_some_and(|path| {
+                validate_addons_path(path).is_ok() && !self.is_guarded_path(path)
+            })
     }
 
     /// The game client the AddOns folder belongs to, for the header.
@@ -7117,6 +7240,7 @@ impl App {
             || self.shell_ui.overlay.active.is_some()
             || !self.config_pane.draft.auto_check_enabled
             || self.auto_check_in_progress
+            || self.games.checking.is_some()
             || self.dashboard.update_in_progress
             || self.dashboard.job_ui().is_some()
             || self.undo_delete_in_progress
@@ -7210,8 +7334,19 @@ impl App {
     /// The installs found, each with its addon count, the first one this
     /// profile may use chosen ("Somewhere else…" when it may use none).
     fn onboarding_found_state(&self, paths: Vec<PathBuf>) -> OnboardingState {
+        // Adding a game offers only the installs no game uses yet.
+        let set_up = if self.games.adding {
+            self.set_up_addon_dirs()
+        } else {
+            Vec::new()
+        };
         let installs = paths
             .into_iter()
+            .filter(|path| {
+                !set_up
+                    .iter()
+                    .any(|used| lemonup_core::paths::same_addons_folder(used, path))
+            })
             .map(|addons_dir| FoundInstall {
                 addons: addon_count(&addons_dir),
                 addons_dir,
@@ -7307,13 +7442,13 @@ impl App {
         field: ConfigField,
     ) -> std::result::Result<Vec<AppAction>, String> {
         match self.config_store.write_config(&next.draft) {
-            Ok(()) => Ok(vec![
-                AppAction::SetPersistedConfig(next.draft.clone()),
-                AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
+            Ok(saved) => Ok(vec![
+                AppAction::SetPersistedConfig(saved.clone()),
+                AppAction::SetConfigPaneState(next.mark_saved(saved.clone())),
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Done,
                     DetailMode::Config,
-                    &self.config_field_saved_message(field, &next.draft),
+                    &self.config_field_saved_message(field, &saved),
                 )),
             ]),
             Err(error) => Err(format!("failed to save {}: {error}", field.label())),
@@ -8268,6 +8403,7 @@ fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
         ConfigField::CheckInterval => human_duration(draft.check_interval_secs),
         ConfigField::AutoCheckEnabled => on_off(draft.auto_check_enabled).to_string(),
         ConfigField::AutoCheckInterval => human_duration(draft.auto_check_interval_secs),
+        ConfigField::CheckOtherGames => draft.check_other_games.label().to_string(),
         ConfigField::BackupWtf => on_off(draft.backup_wtf).to_string(),
         ConfigField::BackupRetention => draft.backup_retention.to_string(),
         ConfigField::Theme => theme_name(draft.theme).to_string(),
@@ -8427,6 +8563,7 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
         DetailMode::Config => "Settings",
         DetailMode::Backup => "Backups",
         DetailMode::TocEdit => "Edit .toc fields",
+        DetailMode::Games => "Switch game",
     }
 }
 
@@ -8613,6 +8750,7 @@ mod tests {
             delete_in_progress: false,
             toc_pane: TocEditPane::default(),
             toc_apply_running: false,
+            import_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -8628,6 +8766,14 @@ mod tests {
             active_onboarding_cancel: None,
             startup_notice: None,
             quit_question_open: false,
+            roots: lemonup_core::ProfileRoots::new(
+                std::env::temp_dir().join("lemonup-test-roots/config"),
+                std::env::temp_dir().join("lemonup-test-roots/data"),
+                std::env::temp_dir().join("lemonup-test-roots/cache"),
+            ),
+            games: crate::app::games::GamesState::default(),
+            games_tx: mpsc::unbounded_channel().0,
+            games_rx: mpsc::unbounded_channel().1,
         }
     }
 
@@ -14075,6 +14221,35 @@ mod tests {
     }
 
     #[test]
+    fn the_game_set_up_first_is_remembered_as_the_last_one_used() {
+        let temp = tempdir().expect("tempdir");
+        let roots = lemonup_core::ProfileRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("cache"),
+        );
+        let addons = temp.path().join("wow/_classic_/Interface/AddOns");
+        std::fs::create_dir_all(&addons).expect("addons dir");
+        let paths = roots.paths("forever").expect("paths");
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new("forever".to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+        // `lemonup --profile forever` on a fresh install: nothing exists yet, so this saves
+        // nothing.
+        lemonup_core::remember_last_used(&roots, "forever").expect("remember");
+
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(addons);
+        app.apply(AppAction::SaveOnboardingConfig(config));
+
+        assert_eq!(app.shell_mode, ShellMode::Dashboard);
+        let next = lemonup_core::tui_profile(&roots, None).expect("profile");
+        assert_eq!(next.name, "forever");
+    }
+
+    #[test]
     fn save_refuses_guarded_path_for_non_default_profile() {
         let mut app = app_for_tests(ShellMode::Onboarding);
         app.runtime = AppRuntime::new(
@@ -14101,6 +14276,45 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_uses_the_settings_all_games_share() {
+        let temp = tempdir().expect("tempdir");
+        let roots = lemonup_core::ProfileRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("cache"),
+        );
+        // The default game's own file says dark and no key; the shared file says otherwise.
+        let mut own = AppConfig::new_unconfigured();
+        own.theme = ThemeMode::Dark;
+        ConfigStore::new(roots.default_config_file())
+            .write_config(&own)
+            .expect("write own config");
+        let shared = lemonup_core::SharedSettings {
+            theme: ThemeMode::Light,
+            reduce_motion: true,
+            wago_api_key: Some("shared-test-key".to_string()),
+            ..lemonup_core::SharedSettings::default()
+        };
+        lemonup_core::SharedSettingsStore::for_roots(&roots)
+            .write(&shared)
+            .expect("write shared");
+
+        for profile in [DEFAULT_PROFILE, "forever"] {
+            let app = App::bootstrap(
+                roots.paths(profile).expect("paths"),
+                AppRuntime::new(profile.to_string(), None, Vec::new()),
+            )
+            .expect("bootstrap");
+            assert_eq!(app.config_pane.draft.theme, ThemeMode::Light, "{profile}");
+            assert!(app.config_pane.draft.reduce_motion, "{profile}");
+            assert!(
+                app.wago_api_key.as_deref() == Some("shared-test-key"),
+                "{profile}"
+            );
+        }
+    }
+
+    #[test]
     fn bootstrap_rejects_invalid_addon_dir_override() {
         let temp = tempdir().expect("tempdir");
         let paths = AppPaths {
@@ -14111,6 +14325,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let error = match App::bootstrap(
@@ -14143,6 +14362,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let guarded = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
@@ -14181,6 +14405,11 @@ mod tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         let mut config = AppConfig::new_unconfigured();
         config.addon_dir = Some(clients[0].clone());
@@ -14571,6 +14800,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let config_store = ConfigStore::new(paths.config_file.clone());
@@ -14620,6 +14854,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let config_store = ConfigStore::new(paths.config_file.clone());
@@ -15550,13 +15789,13 @@ mod tests {
         }
 
         /// A change to an open sheet, and text it then shows.
-        type SheetStep<'a> = (&'a str, &'a dyn Fn(&mut App));
+        pub(super) type SheetStep<'a> = (&'a str, &'a dyn Fn(&mut App));
 
         /// At each of `sizes`: opens a sheet with `open`, then takes it
         /// through `steps` in order, drawing after each. Every state must
         /// show its text, and the sheet's top and bottom rows must stay where
         /// they were when it opened.
-        fn assert_sheet_holds_still(
+        pub(super) fn assert_sheet_holds_still(
             sizes: &[(u16, u16)],
             open: &dyn Fn(&mut App),
             steps: &[SheetStep<'_>],
@@ -16133,11 +16372,8 @@ mod tests {
                 .map(|field| field.label().to_string())
                 .collect();
             config_labels.extend(strings(&[
-                "Addon sources",
-                "Updates",
-                "Backups",
-                "Look",
-                "Your setup",
+                "For all games",
+                "For this game",
                 "Game folder",
                 "changes save right away",
             ]));
@@ -16508,13 +16744,7 @@ mod tests {
             let line = key_line_at(&mut app, 80);
             assert_eq!(
                 entries(&line),
-                [
-                    "↑/↓ choose",
-                    "←/→ change",
-                    "esc close",
-                    "pgup/pgdn scroll",
-                    "? help"
-                ],
+                ["↑/↓ choose", "←/→ change", "esc close", "? help"],
                 "{line}"
             );
             // Tighter: the rest goes from the end; the main key, esc and ? stay.
@@ -17308,10 +17538,19 @@ mod tests {
                 (HelpContext::TocEdit, "While you edit a field") => toc_editing,
                 (HelpContext::TocEdit, "Questions") => |app| questions_in(toc_edit, app),
                 (HelpContext::TocEdit, _) => toc_edit,
+                (HelpContext::Games, "Questions") => |app| questions_in(open_games, app),
+                (HelpContext::Games, _) => open_games,
             }
         }
 
-        const HELP_CONTEXTS: [HelpContext; 7] = [
+        /// The Switch game sheet over two games, the cursor on the one not in use.
+        fn open_games(app: &mut App) {
+            app.games.games = two_test_games();
+            app.apply(AppAction::SetDetailMode(DetailMode::Games));
+            app.games.selected = 1;
+        }
+
+        const HELP_CONTEXTS: [HelpContext; 8] = [
             HelpContext::Overview,
             HelpContext::Inspect,
             HelpContext::DetailsDocked,
@@ -17319,6 +17558,7 @@ mod tests {
             HelpContext::Config,
             HelpContext::Backup,
             HelpContext::TocEdit,
+            HelpContext::Games,
         ];
 
         fn help_test_app(context: HelpContext, title: &str, when: HelpWhen) -> App {
@@ -20052,5 +20292,1204 @@ mod tests {
             assert_eq!(kind, StatusKind::Problem);
             assert!(text.ends_with(": no internet connection?"), "{text}");
         }
+    }
+
+    /// Two games for tests that need no files: Retail in use, with no
+    /// check yet, and WoW Forever, checked two days ago with nothing ready.
+    fn two_test_games() -> Vec<crate::app::games::GameEntry> {
+        use crate::app::games::GameEntry;
+        let checked = OffsetDateTime::now_utc() - Duration::days(2);
+        vec![
+            GameEntry {
+                profile: DEFAULT_PROFILE.to_string(),
+                display_name: "Retail".to_string(),
+                flavor: Some(lemonup_core::GameFlavor::Retail),
+                addon_count: Some(3),
+                update_ready: None,
+                last_checked: None,
+            },
+            GameEntry {
+                profile: "forever".to_string(),
+                display_name: "WoW Forever".to_string(),
+                flavor: Some(lemonup_core::GameFlavor::Forever),
+                addon_count: Some(4),
+                update_ready: Some(0),
+                last_checked: Some(checked),
+            },
+        ]
+    }
+
+    mod switch_games {
+        use super::*;
+        use crate::app::games::{GameEntry, check_other_game};
+        use crate::app::{GamesAction, GamesMessage};
+        use crate::onboarding::{OnboardingStep, OnboardingTaskEvent, PreferenceField};
+        use crate::theme::Symbols;
+        use lemonup_core::OtherGamesCheck;
+        use lemonup_core::profiles::{list_profiles, profile_exists, tui_profile};
+
+        fn send(app: &mut App, message: AppMessage) {
+            for action in app.update(message) {
+                app.apply(action);
+            }
+        }
+
+        fn screen(app: &mut App, width: u16, height: u16) -> String {
+            render_rows(app, width, height).join("\n")
+        }
+
+        /// A fake install at `root/World of Warcraft/<client>`; returns its
+        /// AddOns folder.
+        fn install(root: &Path, client: &str) -> PathBuf {
+            let wow = root.join("World of Warcraft");
+            let addons = wow.join(client).join("Interface").join("AddOns");
+            std::fs::create_dir_all(&addons).expect("addons dir");
+            std::fs::create_dir_all(wow.join("Data")).expect("data dir");
+            std::fs::write(wow.join(client).join("Wow.exe"), "").expect("exe");
+            addons
+        }
+
+        fn linked(folder: &str, version: &str, remote: &str, checked: bool) -> AddonRecord {
+            let mut addon = AddonRecord::new(folder, folder, SourceKind::Tukui);
+            addon.kind = AddonKind::Addon;
+            addon.version = Some(version.to_string());
+            addon.remote_version = Some(remote.to_string());
+            if checked {
+                addon.last_checked_at = Some(OffsetDateTime::now_utc() - Duration::days(3));
+            }
+            addon
+        }
+
+        struct Games {
+            _temp: tempfile::TempDir,
+            roots: lemonup_core::ProfileRoots,
+            retail: PathBuf,
+            forever: PathBuf,
+        }
+
+        /// Retail set up as the default game with one addon, the Forever
+        /// install found on disk; with `forever_set_up` it is a game too,
+        /// with one addon that has Update ready.
+        fn games(forever_set_up: bool) -> Games {
+            let temp = tempdir().expect("tempdir");
+            let roots = lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            );
+            let retail = install(temp.path(), "_retail_");
+            let forever = install(temp.path(), "_forever_");
+            let default_paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+            default_paths.ensure().expect("ensure");
+            let mut config = AppConfig::new_unconfigured();
+            config.addon_dir = Some(retail.clone());
+            ConfigStore::for_profile(&default_paths)
+                .write_config(&config)
+                .expect("write config");
+            let database = StateDatabase::open(&default_paths.state_db_file).expect("db");
+            database.bind_addon_dir(&retail).expect("bind");
+            database
+                .upsert_addon(&linked("RetailOnly", "1.0", "1.0", false))
+                .expect("upsert");
+            drop(database);
+            if forever_set_up {
+                let created = lemonup_core::profiles::create_profile(&roots, &forever, None)
+                    .expect("create forever");
+                let database = StateDatabase::open(&created.paths.state_db_file).expect("db");
+                database
+                    .upsert_addon(&linked("ForeverOnly", "1.0", "2.0", true))
+                    .expect("upsert");
+            }
+            Games {
+                _temp: temp,
+                roots,
+                retail,
+                forever,
+            }
+        }
+
+        fn open_app(games: &Games, profile: &str) -> App {
+            App::bootstrap(
+                games.roots.paths(profile).expect("paths"),
+                AppRuntime::new(profile.to_string(), None, Vec::new()),
+            )
+            .expect("bootstrap")
+        }
+
+        fn folders(app: &App) -> Vec<String> {
+            app.dashboard
+                .items
+                .iter()
+                .map(|item| item.folder.clone())
+                .collect()
+        }
+
+        #[test]
+        fn p_opens_switch_game_with_each_game_and_its_updates() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Games));
+            let shown = screen(&mut app, 120, 30);
+            assert!(shown.contains("Switch game"), "{shown}");
+            let retail = shown
+                .lines()
+                .find(|line| line.contains("Retail") && line.contains("1 addon"))
+                .unwrap_or_else(|| panic!("no Retail row:\n{shown}"));
+            assert!(retail.contains("Not checked yet"), "{retail}");
+            assert!(retail.contains("current"), "{retail}");
+            let forever = shown
+                .lines()
+                .find(|line| line.contains("WoW Forever") && line.contains("1 addon"))
+                .unwrap_or_else(|| panic!("no Forever row:\n{shown}"));
+            assert!(forever.contains("↑1 Update ready"), "{forever}");
+            assert!(!forever.contains("current"), "{forever}");
+            assert!(shown.contains("Add another game…"), "{shown}");
+        }
+
+        #[test]
+        fn enter_switches_to_the_other_game_and_remembers_it() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            assert_eq!(folders(&app), vec!["RetailOnly".to_string()]);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.runtime.profile_name, "forever");
+            assert_eq!(folders(&app), vec!["ForeverOnly".to_string()]);
+            assert_eq!(
+                app.effective_addon_dir.as_deref(),
+                Some(games.forever.as_path())
+            );
+            assert_eq!(app.shell_ui.overlay.active, None);
+            assert_eq!(
+                tui_profile(&games.roots, None).expect("last used").name,
+                "forever"
+            );
+            let shown = screen(&mut app, 120, 30);
+            assert!(shown.contains("WoW Forever"), "{shown}");
+            assert!(!shown.contains("Profile:"), "{shown}");
+        }
+
+        #[test]
+        fn switching_waits_while_a_job_runs() {
+            let games = games(true);
+            for (busy, note) in [
+                (
+                    (|app: &mut App| app.dashboard.check_in_progress = true) as fn(&mut App),
+                    "Wait for the check to finish first.",
+                ),
+                (
+                    |app: &mut App| app.delete_in_progress = true,
+                    "Wait for the delete to finish first.",
+                ),
+                (
+                    |app: &mut App| app.toc_apply_running = true,
+                    "Wait for the .toc change to finish first.",
+                ),
+                (
+                    |app: &mut App| app.import_running = true,
+                    "Wait for the import to finish first.",
+                ),
+            ] {
+                let mut app = open_app(&games, DEFAULT_PROFILE);
+                busy(&mut app);
+                press_key(&mut app, KeyCode::Char('p'));
+                assert_eq!(app.shell_ui.overlay.active, None, "{note}");
+                assert!(
+                    app.status_line.text.contains(note),
+                    "{}",
+                    app.status_line.text
+                );
+
+                // A job that starts with the sheet open blocks enter too.
+                let mut app = open_app(&games, DEFAULT_PROFILE);
+                press_key(&mut app, KeyCode::Char('p'));
+                press_key(&mut app, KeyCode::Down);
+                busy(&mut app);
+                press_key(&mut app, KeyCode::Enter);
+                assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE, "{note}");
+                assert!(
+                    app.status_line.text.contains(note),
+                    "{}",
+                    app.status_line.text
+                );
+            }
+        }
+
+        #[test]
+        fn remove_asks_and_only_y_removes_the_game() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Char('x'));
+
+            let question = app.active_question().expect("question");
+            assert_eq!(question.title(), "Remove WoW Forever from LemonUp?");
+            let shown = screen(&mut app, 120, 30);
+            assert!(shown.contains("addons and game settings stay"), "{shown}");
+            assert!(
+                shown.contains("backups of your game settings stay in"),
+                "{shown}"
+            );
+            app.note_question_shown(Instant::now() - StdDuration::from_secs(1));
+
+            for code in [KeyCode::Enter, KeyCode::Char('r'), KeyCode::Char(' ')] {
+                press_key(&mut app, code);
+                assert!(app.active_question().is_some(), "{code:?} answered");
+            }
+            assert!(profile_exists(&games.roots, "forever"));
+            press_key(&mut app, KeyCode::Char('n'));
+            assert!(app.active_question().is_none());
+            assert!(profile_exists(&games.roots, "forever"));
+
+            press_key(&mut app, KeyCode::Char('x'));
+            app.note_question_shown(Instant::now() - StdDuration::from_secs(1));
+            press_key(&mut app, KeyCode::Char('y'));
+            assert!(!profile_exists(&games.roots, "forever"));
+            assert!(games.forever.is_dir(), "the game's folder stays");
+            assert_eq!(app.games.games.len(), 1);
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Removed WoW Forever from LemonUp."),
+                "{}",
+                app.status_line.text
+            );
+        }
+
+        #[test]
+        fn removing_waits_for_an_import_and_the_import_finishing_frees_the_games() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            app.import_running = true;
+            press_key(&mut app, KeyCode::Char('x'));
+            assert!(app.active_question().is_none());
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Wait for the import to finish first."),
+                "{}",
+                app.status_line.text
+            );
+            assert!(profile_exists(&games.roots, "forever"));
+
+            // The result of the import frees the games, however it ended.
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::TransferImportFinished(Err(
+                    "the file is gone".to_string(),
+                ))),
+            );
+            assert!(!app.import_running);
+            assert_eq!(app.switch_busy_note(), None);
+        }
+
+        #[test]
+        fn a_check_that_starts_while_the_removal_is_asked_stops_the_removal() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Char('x'));
+            app.note_question_shown(Instant::now() - StdDuration::from_secs(1));
+            app.games.checking = Some("forever".to_string());
+            press_key(&mut app, KeyCode::Char('y'));
+
+            assert!(profile_exists(&games.roots, "forever"));
+            assert_eq!(app.games.pending_remove, None);
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Wait for the check of WoW Forever to finish first."),
+                "{}",
+                app.status_line.text
+            );
+        }
+
+        #[test]
+        fn remove_explains_why_not_for_the_game_in_use_and_the_default() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Char('x'));
+            assert!(app.active_question().is_none());
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Retail is the game in use. Switch to another game to remove it."),
+                "{}",
+                app.status_line.text
+            );
+
+            let mut app = open_app(&games, "forever");
+            press_key(&mut app, KeyCode::Char('p'));
+            app.apply(AppAction::Games(GamesAction::Select(0)));
+            press_key(&mut app, KeyCode::Char('x'));
+            assert!(app.active_question().is_none());
+            assert!(
+                app.status_line.text.contains(
+                    "Retail can't be removed: LemonUp commands without --profile use it."
+                ),
+                "{}",
+                app.status_line.text
+            );
+            assert_eq!(list_profiles(&games.roots).expect("list").len(), 2);
+        }
+
+        #[test]
+        fn add_another_game_offers_only_installs_not_set_up_and_opens_the_new_game() {
+            let games = games(false);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Enter);
+            assert_eq!(app.shell_mode, ShellMode::Onboarding);
+            let shown = screen(&mut app, 120, 30);
+            assert!(!shown.contains("Welcome."), "{shown}");
+
+            app.onboarding = app.onboarding.begin_quick_check();
+            send(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+                    OnboardingTaskEvent::QuickCheckFinished(vec![
+                        games.retail.clone(),
+                        games.forever.clone(),
+                    ]),
+                )),
+            );
+            let OnboardingPhase::Found(found) = &app.onboarding.phase else {
+                panic!("not found: {:?}", app.onboarding.phase);
+            };
+            let offered: Vec<&Path> = found
+                .installs
+                .iter()
+                .map(|install| install.addons_dir.as_path())
+                .collect();
+            assert_eq!(offered, vec![games.forever.as_path()]);
+
+            send(&mut app, AppMessage::OnboardingChoose);
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.runtime.profile_name, "forever");
+            assert!(profile_exists(&games.roots, "forever"));
+            assert_eq!(
+                app.effective_addon_dir.as_deref(),
+                Some(games.forever.as_path())
+            );
+        }
+
+        #[test]
+        fn cancelling_add_another_game_creates_nothing_and_goes_back_to_the_sheet() {
+            let games = games(false);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Enter);
+            send(&mut app, AppMessage::OnboardingAskQuit);
+            send(&mut app, AppMessage::OnboardingQuitConfirmed);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Games));
+            assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
+            assert_eq!(list_profiles(&games.roots).expect("list").len(), 1);
+        }
+
+        /// Nothing set up yet, a Retail and a WoW Forever install on disk.
+        struct FirstRun {
+            _temp: tempfile::TempDir,
+            roots: lemonup_core::ProfileRoots,
+            retail: PathBuf,
+            forever: PathBuf,
+        }
+
+        fn first_run() -> FirstRun {
+            let temp = tempdir().expect("tempdir");
+            let roots = lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            );
+            let retail = install(temp.path(), "_retail_");
+            let forever = install(temp.path(), "_forever_");
+            FirstRun {
+                _temp: temp,
+                roots,
+                retail,
+                forever,
+            }
+        }
+
+        /// Setup on the first run, its search done: it found `found`, and
+        /// the first of them is chosen.
+        fn setup_that_found(first_run: &FirstRun, found: Vec<PathBuf>) -> App {
+            let mut app = App::bootstrap(
+                first_run.roots.paths(DEFAULT_PROFILE).expect("paths"),
+                AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+            )
+            .expect("bootstrap");
+            assert_eq!(app.shell_mode, ShellMode::Onboarding);
+            app.onboarding = app.onboarding.begin_quick_check();
+            send(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::Onboarding(
+                    OnboardingTaskEvent::QuickCheckFinished(found),
+                )),
+            );
+            app
+        }
+
+        /// From the list of installs to Setup's last step.
+        fn to_last_step(app: &mut App) {
+            press_key(app, KeyCode::Enter);
+            press_key(app, KeyCode::Enter);
+            assert_eq!(app.onboarding.step, OnboardingStep::Preferences);
+        }
+
+        /// On the last step: the cursor goes down to "Also set up" and
+        /// changes it.
+        fn turn_also_set_up(app: &mut App) {
+            for _ in 0..3 {
+                press_key(app, KeyCode::Down);
+            }
+            assert_eq!(app.onboarding.preference, PreferenceField::AlsoSetUp);
+            press_key(app, KeyCode::Right);
+        }
+
+        fn saved_config(roots: &lemonup_core::ProfileRoots, profile: &str) -> Option<AppConfig> {
+            match ConfigStore::for_profile(&roots.paths(profile).expect("paths"))
+                .load_without_writing()
+                .expect("load")
+            {
+                ConfigLoad::Loaded(config) => Some(config),
+                ConfigLoad::Missing(_) => None,
+            }
+        }
+
+        #[test]
+        fn setup_with_both_games_found_offers_the_other_one_and_starts_off() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(
+                app.onboarding.preference_fields().last(),
+                Some(&PreferenceField::AlsoSetUp)
+            );
+            assert!(!app.onboarding.set_up_other_game, "off until chosen");
+            let shown = screen(&mut app, 120, 30);
+            let row = shown
+                .lines()
+                .find(|line| line.contains("Also set up WoW Forever"))
+                .unwrap_or_else(|| panic!("no row:\n{shown}"));
+            assert!(row.contains("No"), "{row}");
+
+            // The same keys that change the other rows turn it on and off.
+            turn_also_set_up(&mut app);
+            assert!(app.onboarding.set_up_other_game);
+            let shown = screen(&mut app, 120, 30);
+            let row = shown
+                .lines()
+                .find(|line| line.contains("Also set up WoW Forever"))
+                .unwrap_or_else(|| panic!("no row:\n{shown}"));
+            assert!(row.contains("Yes"), "{row}");
+            press_key(&mut app, KeyCode::Left);
+            assert!(!app.onboarding.set_up_other_game);
+        }
+
+        #[test]
+        fn setup_offers_retail_when_forever_is_the_game_chosen() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.forever.clone(), run.retail.clone()]);
+            to_last_step(&mut app);
+            let shown = screen(&mut app, 120, 30);
+            assert!(shown.contains("Also set up Retail"), "{shown}");
+        }
+
+        #[test]
+        fn setup_with_one_game_found_offers_no_other_game() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(app.onboarding.other_game, None);
+            assert_eq!(app.onboarding.preference_fields().len(), 3);
+            let shown = screen(&mut app, 120, 30);
+            assert!(!shown.contains("Also set up"), "{shown}");
+            // The cursor stops at the last settings row.
+            for _ in 0..5 {
+                press_key(&mut app, KeyCode::Down);
+            }
+            assert_eq!(app.onboarding.preference, PreferenceField::BackupRetention);
+        }
+
+        #[test]
+        fn setup_does_not_offer_a_game_that_is_already_set_up() {
+            let run = first_run();
+            lemonup_core::profiles::create_profile(&run.roots, &run.forever, None)
+                .expect("forever is a game");
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+
+            assert_eq!(app.onboarding.other_game, None);
+            let shown = screen(&mut app, 120, 30);
+            assert!(!shown.contains("Also set up"), "{shown}");
+        }
+
+        #[test]
+        fn add_another_game_never_offers_a_second_one() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            assert!(app.other_game_to_offer(&run.retail).is_some());
+            app.games.adding = true;
+            assert_eq!(app.other_game_to_offer(&run.retail), None);
+        }
+
+        #[test]
+        fn finishing_setup_with_also_set_up_on_creates_both_games_and_opens_the_first() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            // A choice made in Setup is the other game's too.
+            let before = app.onboarding.draft.theme;
+            press_key(&mut app, KeyCode::Right);
+            let theme = app.onboarding.draft.theme;
+            assert_ne!(theme, before);
+            turn_also_set_up(&mut app);
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
+            assert_eq!(
+                app.effective_addon_dir.as_deref(),
+                Some(run.retail.as_path())
+            );
+            let first = saved_config(&run.roots, DEFAULT_PROFILE).expect("first game");
+            assert_eq!(first.addon_dir.as_deref(), Some(run.retail.as_path()));
+            let second = saved_config(&run.roots, "forever").expect("second game");
+            assert_eq!(second.addon_dir.as_deref(), Some(run.forever.as_path()));
+            assert_eq!(second.theme, theme, "the shared settings apply to both");
+            let names: Vec<_> = app
+                .games
+                .games
+                .iter()
+                .map(|game| game.display_name.as_str())
+                .collect();
+            assert_eq!(names, vec!["Retail", "WoW Forever"]);
+            let (message, kind) = app.status_line_message().expect("a message");
+            assert_eq!(kind, StatusKind::Done);
+            assert!(message.contains("Also set up WoW Forever"), "{message}");
+        }
+
+        #[test]
+        fn finishing_setup_with_also_set_up_off_creates_only_the_first_game() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert!(saved_config(&run.roots, DEFAULT_PROFILE).is_some());
+            assert!(!profile_exists(&run.roots, "forever"));
+            assert_eq!(app.games.games.len(), 1);
+        }
+
+        #[test]
+        fn a_failure_setting_up_the_second_game_leaves_the_first_working_and_says_so() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            turn_also_set_up(&mut app);
+            // The second install goes away before Setup finishes.
+            std::fs::remove_dir_all(&run.forever).expect("remove the install");
+            press_key(&mut app, KeyCode::Enter);
+
+            assert_eq!(app.shell_mode, ShellMode::Dashboard);
+            assert_eq!(app.runtime.profile_name, DEFAULT_PROFILE);
+            let first = saved_config(&run.roots, DEFAULT_PROFILE).expect("first game works");
+            assert_eq!(first.addon_dir.as_deref(), Some(run.retail.as_path()));
+            assert!(!profile_exists(&run.roots, "forever"));
+            assert_eq!(app.games.games.len(), 1);
+            let (message, kind) = app.status_line_message().expect("a message");
+            assert_eq!(kind, StatusKind::Problem);
+            assert!(
+                message.contains("Your game is ready. LemonUp couldn't set up WoW Forever"),
+                "{message}"
+            );
+            assert!(message.contains("add it later with p"), "{message}");
+            // Setup's save does not run again for it.
+            assert_eq!(app.onboarding.other_game, None);
+        }
+
+        #[test]
+        fn setups_last_step_fits_80x24_and_keeps_its_size_with_the_other_game_row() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            for (width, height) in [(80, 24), (120, 30)] {
+                let off = render_rows(&mut app, width, height);
+                assert_eq!(off.len(), usize::from(height));
+                let label = off
+                    .iter()
+                    .position(|row| row.contains("Also set up WoW Forever"))
+                    .unwrap_or_else(|| panic!("no row at {width}x{height}:\n{}", off.join("\n")));
+                let joined = off.join("\n");
+                for shown in ["Theme", "Backups to keep", "Switch games any time with p"] {
+                    assert!(joined.contains(shown), "no {shown:?}:\n{joined}");
+                }
+                assert!(
+                    off.last().is_some_and(|row| row.contains("finish")),
+                    "{joined}"
+                );
+
+                // Turning it on changes the value, not the layout.
+                app.onboarding.set_up_other_game = true;
+                let on = render_rows(&mut app, width, height);
+                app.onboarding.set_up_other_game = false;
+                assert_eq!(on.len(), off.len());
+                assert_eq!(
+                    on.iter()
+                        .position(|row| row.contains("Also set up WoW Forever")),
+                    Some(label)
+                );
+                for (index, (before, after)) in off.iter().zip(&on).enumerate() {
+                    if index != label {
+                        assert_eq!(before, after, "row {index} moved at {width}x{height}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_failed_save_keeps_its_message_on_the_last_step_at_80x24() {
+            let run = first_run();
+            let mut app = setup_that_found(&run, vec![run.retail.clone(), run.forever.clone()]);
+            to_last_step(&mut app);
+            app.onboarding = app
+                .onboarding
+                .with_problem("LemonUp couldn't save your setup: the disk is full.");
+            let rows = render_rows(&mut app, 80, 24);
+            let joined = rows.join("\n");
+            assert!(joined.contains("Also set up WoW Forever"), "{joined}");
+            assert!(joined.contains("the disk is full"), "{joined}");
+            assert!(
+                rows.last().is_some_and(|row| row.contains("finish")),
+                "{joined}"
+            );
+        }
+
+        #[test]
+        fn a_look_changed_in_one_game_shows_in_the_other() {
+            let games = games(true);
+            let mut app = open_app(&games, DEFAULT_PROFILE);
+            let before = app.config_pane.draft.theme;
+            press_key(&mut app, KeyCode::Char('s'));
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|field| *field == ConfigField::Theme)
+                .expect("theme row");
+            press_key(&mut app, KeyCode::Right);
+            let changed = app.config_pane.persisted.theme;
+            assert_ne!(changed, before);
+            press_key(&mut app, KeyCode::Esc);
+
+            press_key(&mut app, KeyCode::Char('p'));
+            press_key(&mut app, KeyCode::Down);
+            press_key(&mut app, KeyCode::Enter);
+            assert_eq!(app.runtime.profile_name, "forever");
+            assert_eq!(app.config_pane.draft.theme, changed);
+        }
+
+        /// Reviewer's scenario F in the TUI: while another game's settings can't be read, a
+        /// change to a setting all games share isn't saved, and Settings says why.
+        #[test]
+        fn a_shared_change_waits_while_another_games_settings_cant_be_read() {
+            let games = games(true);
+            let shared = lemonup_core::SharedSettingsStore::for_roots(&games.roots);
+            std::fs::remove_file(shared.path()).expect("as before shared settings");
+            let broken = games.roots.paths("broken").expect("paths");
+            std::fs::create_dir_all(&broken.config_dir).expect("dir");
+            std::fs::write(&broken.config_file, "theme = [").expect("broken");
+            let mut app = open_app(&games, "forever");
+            let before = app.config_pane.persisted.theme;
+
+            press_key(&mut app, KeyCode::Char('s'));
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|field| *field == ConfigField::Theme)
+                .expect("theme row");
+            press_key(&mut app, KeyCode::Right);
+
+            let message = app
+                .active_detail_status_message(DetailMode::Config)
+                .expect("a message");
+            assert!(
+                message.contains(&format!(
+                    "this change waits until {} can be read",
+                    broken.config_file.display()
+                )),
+                "{message}"
+            );
+            assert!(!message.contains("Saved"), "{message}");
+            assert_eq!(app.config_pane.persisted.theme, before);
+            assert_eq!(app.config_pane.draft.theme, before, "shows the old value");
+            assert!(!shared.path().exists());
+            let ConfigLoad::Loaded(stored) =
+                ConfigStore::for_profile(&games.roots.paths("forever").expect("paths"))
+                    .load()
+                    .expect("load")
+            else {
+                panic!("forever is set up");
+            };
+            assert_eq!(stored.theme, before);
+        }
+
+        /// Reviewer's scenario J in the TUI: another window saved a key since this one read
+        /// the settings. Settings shows that key, and typing the old one saves it.
+        #[test]
+        fn settings_shows_the_shared_values_as_stored() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+            let old_theme = retail.config_pane.persisted.theme;
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+            change_setting(&mut forever, ConfigField::Theme);
+            let theme = shared_now(&games).theme;
+            assert_ne!(theme, old_theme);
+
+            press_key(&mut retail, KeyCode::Char('s'));
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert!(retail.config_pane.persisted.wago_api_key.as_deref() == Some(KEY));
+            assert_eq!(retail.config_pane.draft.theme, theme);
+            assert!(
+                retail.wago_api_key.as_deref() == Some(KEY),
+                "the key in use"
+            );
+            press_key(&mut retail, KeyCode::Esc);
+
+            // Typing back the key Retail started with saves it.
+            let mut next = retail.config_pane.clone();
+            next.draft.wago_api_key = None;
+            for action in retail
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("remove the key")
+            {
+                retail.apply(action);
+            }
+            assert!(shared_now(&games).wago_api_key.is_none());
+            assert_eq!(shared_now(&games).theme, theme);
+        }
+
+        /// After a save, Settings shows every shared value as stored, also the ones another
+        /// window changed.
+        #[test]
+        fn a_save_shows_the_shared_values_another_window_saved() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+
+            let mut next = retail.config_pane.clone();
+            next.draft.reduce_motion = !next.draft.reduce_motion;
+            for action in retail
+                .persist_config_pane(next, ConfigField::ReduceMotion)
+                .expect("save")
+            {
+                retail.apply(action);
+            }
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert!(
+                retail.wago_api_key.as_deref() == Some(KEY),
+                "the key in use"
+            );
+        }
+
+        fn shared_now(games: &Games) -> lemonup_core::SharedSettings {
+            lemonup_core::SharedSettingsStore::for_roots(&games.roots)
+                .read()
+                .expect("read shared")
+                .expect("shared exists")
+        }
+
+        fn change_setting(app: &mut App, field: ConfigField) {
+            press_key(app, KeyCode::Char('s'));
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|row| *row == field)
+                .expect("settings row");
+            press_key(app, KeyCode::Right);
+            press_key(app, KeyCode::Esc);
+        }
+
+        /// Two LemonUp windows, Retail and WoW Forever. The key saved in one is kept by
+        /// every save the other makes with the older settings it still holds.
+        #[test]
+        fn a_key_saved_in_one_open_game_survives_saves_in_another() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+            assert!(retail.config_pane.persisted.wago_api_key.is_none());
+
+            // d hides Retail's welcome card.
+            send(&mut retail, AppMessage::DashboardHideFirstRunCard);
+            assert!(retail.config_pane.persisted.hide_first_run_card);
+            assert!(shared_now(&games).wago_api_key.as_deref() == Some(KEY));
+
+            // Settings, for all games and for this game.
+            let before = shared_now(&games);
+            change_setting(&mut retail, ConfigField::CheckOtherGames);
+            change_setting(&mut retail, ConfigField::Theme);
+            change_setting(&mut retail, ConfigField::ShowLibs);
+            let after = shared_now(&games);
+            assert!(after.wago_api_key.as_deref() == Some(KEY));
+            assert_ne!(after.check_other_games, before.check_other_games);
+            assert_ne!(after.theme, before.theme);
+            assert!(retail.config_pane.persisted.show_libs);
+
+            // WoW Forever, still open, saves with the look it read before Retail changed it.
+            send(&mut forever, AppMessage::DashboardHideFirstRunCard);
+            let last = shared_now(&games);
+            assert_eq!(last.theme, after.theme);
+            assert_eq!(last.check_other_games, after.check_other_games);
+            assert!(last.wago_api_key.as_deref() == Some(KEY));
+
+            // Switching games in one window reads the shared settings again.
+            press_key(&mut retail, KeyCode::Char('p'));
+            press_key(&mut retail, KeyCode::Down);
+            press_key(&mut retail, KeyCode::Enter);
+            assert_eq!(retail.runtime.profile_name, "forever");
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert_eq!(retail.config_pane.draft.theme, after.theme);
+            assert!(
+                !retail.config_pane.draft.show_libs,
+                "show libraries is per game"
+            );
+        }
+
+        #[test]
+        fn settings_group_what_all_games_share_and_what_is_this_games() {
+            let games = games(true);
+            let mut app = open_app(&games, "forever");
+            press_key(&mut app, KeyCode::Char('s'));
+            let shown = screen(&mut app, 138, 36);
+            let all = shown.find("For all games").expect("For all games");
+            let this = shown.find("For WoW Forever").expect("For WoW Forever");
+            assert!(all < this, "{shown}");
+            for shared in ["Wago.io key", "Theme", "Reduce motion", "Check other games"] {
+                let at = shown.find(shared).unwrap_or_else(|| panic!("{shared}"));
+                assert!(all < at && at < this, "{shared}:\n{shown}");
+            }
+            for own in ["Backups to keep", "Start with folders shown", "Game folder"] {
+                let at = shown.find(own).unwrap_or_else(|| panic!("{own}"));
+                assert!(this < at, "{own}:\n{shown}");
+            }
+            let row = shown
+                .lines()
+                .find(|line| line.contains("Check other games"))
+                .expect("row");
+            assert!(row.contains("1 day"), "{row}");
+
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|field| *field == ConfigField::CheckOtherGames)
+                .expect("row");
+            for (step, label) in [
+                (KeyCode::Right, "3 days"),
+                (KeyCode::Right, "3 days"),
+                (KeyCode::Left, "1 day"),
+                (KeyCode::Left, "12 hours"),
+                (KeyCode::Left, "6 hours"),
+                (KeyCode::Left, "3 hours"),
+                (KeyCode::Left, "1 hour"),
+                (KeyCode::Left, "Off"),
+                (KeyCode::Left, "Off"),
+            ] {
+                press_key(&mut app, step);
+                let row = screen(&mut app, 138, 36)
+                    .lines()
+                    .find(|line| line.contains("Check other games"))
+                    .map(str::to_string)
+                    .expect("row");
+                assert!(row.contains(label), "{row}");
+            }
+            let shared = lemonup_core::SharedSettingsStore::for_roots(&games.roots)
+                .read()
+                .expect("read")
+                .expect("shared");
+            assert_eq!(shared.check_other_games, OtherGamesCheck::Off);
+        }
+
+        fn scheduling_app() -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.games.games = two_test_games();
+            app
+        }
+
+        #[test]
+        fn other_games_are_checked_at_their_interval_and_never_with_off() {
+            let now = OffsetDateTime::now_utc();
+            let mut app = scheduling_app();
+            // Forever was checked two days ago; the default is a day.
+            assert_eq!(app.other_game_check_due(now), Some("forever".to_string()));
+            app.config_pane.draft.check_other_games = OtherGamesCheck::ThreeDays;
+            assert_eq!(app.other_game_check_due(now), None);
+            app.config_pane.draft.check_other_games = OtherGamesCheck::Off;
+            assert_eq!(app.other_game_check_due(now), None);
+            app.config_pane.draft.check_other_games = OtherGamesCheck::OneHour;
+            assert_eq!(app.other_game_check_due(now), Some("forever".to_string()));
+            // A check that started lately, even one that failed, waits for the interval.
+            app.games
+                .attempted
+                .insert("forever".to_string(), now - Duration::minutes(10));
+            assert_eq!(app.other_game_check_due(now), None);
+            assert_eq!(
+                app.other_game_check_due(now + Duration::hours(1)),
+                Some("forever".to_string())
+            );
+        }
+
+        #[test]
+        fn a_game_being_removed_is_never_checked() {
+            let now = OffsetDateTime::now_utc();
+            let mut app = scheduling_app();
+            app.games.pending_remove = Some("forever".to_string());
+            assert_eq!(app.other_game_check_due(now), None);
+            assert!(!app.update(AppMessage::Tick).contains(&AppAction::Games(
+                GamesAction::StartCheck("forever".to_string())
+            )));
+            app.games.pending_remove = None;
+            assert_eq!(app.other_game_check_due(now), Some("forever".to_string()));
+        }
+
+        #[test]
+        fn other_games_are_checked_one_at_a_time_and_never_during_this_games_job() {
+            let now = OffsetDateTime::now_utc();
+            let mut app = scheduling_app();
+            app.games.checking = Some("forever".to_string());
+            assert_eq!(app.other_game_check_due(now), None);
+
+            for busy in [
+                (|app: &mut App| app.dashboard.check_in_progress = true) as fn(&mut App),
+                |app: &mut App| app.auto_check_in_progress = true,
+                |app: &mut App| app.dashboard.update_in_progress = true,
+                |app: &mut App| app.direct_install_in_progress = true,
+            ] {
+                let mut app = scheduling_app();
+                busy(&mut app);
+                assert_eq!(app.other_game_check_due(now), None);
+            }
+
+            // The tick starts a due check; this game's own check waits for it.
+            let app = scheduling_app();
+            assert!(app.update(AppMessage::Tick).contains(&AppAction::Games(
+                GamesAction::StartCheck("forever".to_string())
+            )));
+            let mut app = scheduling_app();
+            app.scan_state = ScanState::Succeeded {
+                path: PathBuf::from("AddOns"),
+                summary: ScanSummary::default(),
+            };
+            app.effective_addon_dir = Some(PathBuf::from("AddOns"));
+            app.config_pane.draft.auto_check_enabled = true;
+            app.games.checking = Some("forever".to_string());
+            assert!(app.auto_check_due_targets().is_none());
+            app.games.checking = None;
+            assert!(app.auto_check_due_targets().is_some());
+        }
+
+        #[test]
+        fn a_failed_background_check_keeps_that_games_counts() {
+            let mut app = scheduling_app();
+            app.games.games[1].update_ready = Some(2);
+            app.games.checking = Some("forever".to_string());
+            send(
+                &mut app,
+                AppMessage::Games(GamesMessage::Checked {
+                    profile: "forever".to_string(),
+                    result: Err("no internet connection".to_string()),
+                }),
+            );
+            assert_eq!(app.games.checking, None);
+            assert_eq!(app.games.games[1].update_ready, Some(2));
+        }
+
+        #[tokio::test]
+        async fn a_background_check_writes_only_to_a_game_tied_to_its_folder() {
+            let games = games(true);
+            let paths = games.roots.paths("forever").expect("paths");
+            // Only a "Not linked" addon, so nothing goes online.
+            let database = StateDatabase::open(&paths.state_db_file).expect("db");
+            database.remove_addon("ForeverOnly").expect("remove");
+            database
+                .upsert_addon(&AddonRecord::new("Local", "Local", SourceKind::Manual))
+                .expect("upsert");
+            drop(database);
+            check_other_game(paths.clone(), None)
+                .await
+                .expect("checked");
+
+            // Tied to another folder: nothing is checked or written.
+            let database = StateDatabase::open(&paths.state_db_file).expect("db");
+            database.bind_addon_dir(&games.retail).expect("rebind");
+            drop(database);
+            let before = std::fs::read(&paths.state_db_file).expect("read");
+            let error = check_other_game(paths.clone(), None)
+                .await
+                .expect_err("refused");
+            assert!(error.contains("is bound to"), "{error}");
+            assert_eq!(std::fs::read(&paths.state_db_file).expect("read"), before);
+        }
+
+        /// The game in use may be saving the settings all games share: a check of another
+        /// game never writes them, so neither undoes the other's change.
+        #[tokio::test]
+        async fn a_background_check_never_writes_the_shared_settings() {
+            let games = games(true);
+            // A game LemonUp hasn't opened yet: its first load would record its settings.
+            let classic = games.roots.paths("classic").expect("paths");
+            ConfigStore::new(classic.config_file.clone())
+                .write_config(&AppConfig::new_unconfigured())
+                .expect("write classic");
+            let shared = lemonup_core::SharedSettingsStore::for_roots(&games.roots);
+            let before = std::fs::read(shared.path()).expect("read");
+
+            let error = check_other_game(classic, None)
+                .await
+                .expect_err("no AddOns folder");
+            assert!(error.contains("no AddOns folder"), "{error}");
+            assert!(
+                std::fs::read(shared.path()).expect("read") == before,
+                "written"
+            );
+        }
+
+        fn badge_app(ready: usize) -> App {
+            let mut app = scheduling_app();
+            app.games.games[1].update_ready = Some(ready);
+            app
+        }
+
+        #[test]
+        fn the_header_shows_another_games_updates() {
+            let mut app = badge_app(3);
+            let header = render_rows(&mut app, 138, 36)[..3].join("\n");
+            assert!(header.contains("WoW Forever: ↑3 Update ready"), "{header}");
+
+            let header = render_rows(&mut app, 80, 24)[..3].join("\n");
+            assert!(header.contains("WoW Forever ↑3"), "{header}");
+            assert!(!header.contains("Update ready"), "{header}");
+
+            app.ui_theme.symbols = Symbols::SIMPLE;
+            let header = render_rows(&mut app, 80, 24)[..3].join("\n");
+            assert!(header.contains("WoW Forever ^3"), "{header}");
+
+            let mut app = badge_app(0);
+            let header = render_rows(&mut app, 138, 36)[..3].join("\n");
+            assert!(!header.contains("WoW Forever"), "{header}");
+        }
+
+        fn key_line(app: &mut App, width: u16) -> String {
+            render_rows(app, width, 30)
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        #[test]
+        fn the_key_line_offers_p_only_with_two_games_or_more() {
+            // Help lists it always, with one game too.
+            let listed = |context| {
+                crate::app::keymap::help_page(context)
+                    .sections()
+                    .flat_map(|section| section.rows.iter())
+                    .any(|row| row.text == "switch game")
+            };
+            assert!(listed(HelpContext::Overview));
+            assert!(listed(HelpContext::DetailsDocked));
+
+            let mut app = scheduling_app();
+            assert!(key_line(&mut app, 138).contains("p switch game"));
+            app.games.games.truncate(1);
+            assert!(!key_line(&mut app, 138).contains("switch game"));
+            app.games.games.clear();
+            assert!(!key_line(&mut app, 138).contains("switch game"));
+        }
+
+        #[test]
+        fn with_one_game_the_welcome_card_says_p_adds_another() {
+            let mut app = scheduling_app();
+            app.dashboard = DashboardState::from_addons(vec![
+                AddonRecord::new("First", "First", SourceKind::Manual),
+                AddonRecord::new("Other", "Other", SourceKind::Manual),
+            ]);
+            app.games.games.truncate(1);
+            let shown = screen(&mut app, 100, 30);
+            assert!(shown.contains("Press p to add another game"), "{shown}");
+            app.games.games = two_test_games();
+            let shown = screen(&mut app, 100, 30);
+            assert!(!shown.contains("Press p to add another game"), "{shown}");
+        }
+
+        #[test]
+        fn the_switch_game_sheet_holds_still() {
+            let open = |app: &mut App| {
+                app.games.games = two_test_games();
+                app.apply(AppAction::SetDetailMode(DetailMode::Games));
+                app.games.rows_reserved = 2;
+            };
+            let steps: [super::sheets::SheetStep<'_>; 4] = [
+                ("WoW Forever", &|app: &mut App| {
+                    app.apply(AppAction::Games(GamesAction::Select(1)))
+                }),
+                ("Add another game", &|app: &mut App| {
+                    app.apply(AppAction::Games(GamesAction::Select(2)))
+                }),
+                ("Retail", &|app: &mut App| {
+                    app.games.games.truncate(1);
+                    app.apply(AppAction::Games(GamesAction::Select(0)))
+                }),
+                ("This is your current game", &|app: &mut App| {
+                    app.apply(AppAction::Games(GamesAction::Select(0)))
+                }),
+            ];
+            super::sheets::assert_sheet_holds_still(
+                &[(138, 36), (120, 30), (80, 24)],
+                &open,
+                &steps,
+            );
+        }
+
+        #[allow(dead_code)]
+        fn _entry(_: GameEntry) {}
     }
 }

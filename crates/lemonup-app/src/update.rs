@@ -101,6 +101,36 @@ pub(crate) fn build_update_checks(
         .collect())
 }
 
+/// Records what a check found online for `addon` and says what it means for the row as it is
+/// stored now. Only the check's own fields are written, and only onto a row that still is
+/// `addon` (same folder, source and installed version): a row that was deleted, linked to
+/// another source or updated while the check waited for the network is left as it is, and
+/// has no result.
+fn record_check(
+    database: &StateDatabase,
+    addon: &AddonRecord,
+    remote_version: Option<String>,
+    source_url: Option<String>,
+) -> Result<Option<CheckResult>, LemonupError> {
+    let Some(stored) = database.record_check_result(
+        addon,
+        remote_version.as_deref(),
+        source_url.as_deref(),
+        OffsetDateTime::now_utc(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let (status, message) = determine_update_status(&stored);
+    Ok(Some(CheckResult {
+        addon_name: stored.folder.clone(),
+        status,
+        remote_version: stored.remote_version.clone(),
+        message,
+        error_kind: None,
+    }))
+}
+
 pub(crate) async fn refresh_live_update_checks(
     database: &mut StateDatabase,
     selectors: &[String],
@@ -170,20 +200,12 @@ where
 
                 match fetch_wago_remote_version(query_addon, api_key.to_string()).await {
                     Ok(remote) => {
-                        let mut refreshed = addon.clone();
-                        refreshed.remote_version = remote.version;
-                        refreshed.source_url = remote.source_url.or(refreshed.source_url);
-                        refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
-                        database.upsert_addon(&refreshed)?;
-
-                        let (status, message) = determine_update_status(&refreshed);
-                        results.push(CheckResult {
-                            addon_name: refreshed.folder.clone(),
-                            status,
-                            remote_version: refreshed.remote_version.clone(),
-                            message,
-                            error_kind: None,
-                        });
+                        results.extend(record_check(
+                            database,
+                            &addon,
+                            remote.version,
+                            remote.source_url,
+                        )?);
                     }
                     Err(error) => {
                         results.push(CheckResult {
@@ -198,20 +220,12 @@ where
             }
             SourceKind::Tukui => match crate::tukui::fetch_tukui_remote_version(&addon).await {
                 Ok(remote) => {
-                    let mut refreshed = addon.clone();
-                    refreshed.remote_version = remote.version;
-                    refreshed.source_url = remote.source_url.or(refreshed.source_url);
-                    refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
-                    database.upsert_addon(&refreshed)?;
-
-                    let (status, message) = determine_update_status(&refreshed);
-                    results.push(CheckResult {
-                        addon_name: refreshed.folder.clone(),
-                        status,
-                        remote_version: refreshed.remote_version.clone(),
-                        message,
-                        error_kind: None,
-                    });
+                    results.extend(record_check(
+                        database,
+                        &addon,
+                        remote.version,
+                        remote.source_url,
+                    )?);
                 }
                 Err(error) => {
                     results.push(CheckResult {
@@ -226,20 +240,12 @@ where
             SourceKind::WowInterface => {
                 match crate::wowinterface::fetch_wowinterface_remote_version(&addon).await {
                     Ok(remote) => {
-                        let mut refreshed = addon.clone();
-                        refreshed.remote_version = remote.version;
-                        refreshed.source_url = remote.source_url.or(refreshed.source_url);
-                        refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
-                        database.upsert_addon(&refreshed)?;
-
-                        let (status, message) = determine_update_status(&refreshed);
-                        results.push(CheckResult {
-                            addon_name: refreshed.folder.clone(),
-                            status,
-                            remote_version: refreshed.remote_version.clone(),
-                            message,
-                            error_kind: None,
-                        });
+                        results.extend(record_check(
+                            database,
+                            &addon,
+                            remote.version,
+                            remote.source_url,
+                        )?);
                     }
                     Err(error) => {
                         results.push(CheckResult {
@@ -254,20 +260,12 @@ where
             }
             SourceKind::GitHub => match crate::github::fetch_github_remote_version(&addon).await {
                 Ok(remote) => {
-                    let mut refreshed = addon.clone();
-                    refreshed.remote_version = remote.version;
-                    refreshed.source_url = remote.source_url.or(refreshed.source_url);
-                    refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
-                    database.upsert_addon(&refreshed)?;
-
-                    let (status, message) = determine_update_status(&refreshed);
-                    results.push(CheckResult {
-                        addon_name: refreshed.folder.clone(),
-                        status,
-                        remote_version: refreshed.remote_version.clone(),
-                        message,
-                        error_kind: None,
-                    });
+                    results.extend(record_check(
+                        database,
+                        &addon,
+                        remote.version,
+                        remote.source_url,
+                    )?);
                 }
                 Err(error) => {
                     results.push(CheckResult {
@@ -1091,6 +1089,88 @@ mod tests {
             .expect("addon exists");
         assert_eq!(refreshed.remote_version.as_deref(), Some("5.21.1"));
         assert!(refreshed.last_checked_at.is_some());
+    }
+
+    /// Checks `WeakAuras` while `during_the_check` changes the same database, like another
+    /// LemonUp would while this one waits for the network.
+    async fn check_while(
+        during_the_check: impl Fn(&StateDatabase) + Clone,
+    ) -> (Vec<crate::update::CheckResult>, Option<AddonRecord>) {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let mut database = StateDatabase::open(&path).expect("open db");
+        let mut addon = AddonRecord::new("WeakAuras", "WeakAuras", SourceKind::Wago);
+        addon.version = Some("5.20.0".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        let checks = refresh_live_update_checks_with(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            |_tracked, _api_key| {
+                let other = StateDatabase::open(&path).expect("another LemonUp");
+                during_the_check(&other);
+                async move {
+                    Ok(crate::wago::WagoRemoteVersion {
+                        source_url: None,
+                        version: Some("5.21.1".to_string()),
+                    })
+                }
+            },
+        )
+        .await
+        .expect("refresh checks");
+        let stored = database
+            .get_addon_by_folder("WeakAuras")
+            .expect("get addon");
+        (checks, stored)
+    }
+
+    #[tokio::test]
+    async fn a_check_does_not_bring_back_an_addon_deleted_meanwhile() {
+        let (checks, stored) = check_while(|other| {
+            other.remove_addon("WeakAuras").expect("delete");
+        })
+        .await;
+        assert_eq!(stored, None);
+        assert!(checks.is_empty(), "{checks:?}");
+    }
+
+    #[tokio::test]
+    async fn a_check_does_not_undo_an_update_made_meanwhile() {
+        let (checks, stored) = check_while(|other| {
+            let mut updated = other
+                .get_addon_by_folder("WeakAuras")
+                .expect("get")
+                .expect("row");
+            updated.version = Some("5.21.1".to_string());
+            other.upsert_addon(&updated).expect("update");
+        })
+        .await;
+        let stored = stored.expect("still there");
+        assert_eq!(stored.version.as_deref(), Some("5.21.1"));
+        assert_eq!(stored.last_checked_at, None);
+        assert!(checks.is_empty(), "{checks:?}");
+    }
+
+    #[tokio::test]
+    async fn a_check_writes_only_its_own_fields() {
+        let (checks, stored) = check_while(|other| {
+            let mut changed = other
+                .get_addon_by_folder("WeakAuras")
+                .expect("get")
+                .expect("row");
+            changed.author = Some("Someone".to_string());
+            other.upsert_addon(&changed).expect("change");
+        })
+        .await;
+        let stored = stored.expect("still there");
+        assert_eq!(stored.author.as_deref(), Some("Someone"));
+        assert_eq!(stored.remote_version.as_deref(), Some("5.21.1"));
+        assert!(stored.last_checked_at.is_some());
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, UpdateStatus::UpdateAvailable);
     }
 
     #[tokio::test]

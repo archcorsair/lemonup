@@ -29,9 +29,10 @@ use clap::Parser;
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding};
 use lemonup_core::{
     AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    ScanSummary, StateDatabase, UpdateStatus, V1Location, V1MigrationOutcome, analyze_import,
-    default_transfer_path, export_addons, migrate_v1_if_needed, parse_import_file,
-    scan_addons_dir_report, validate_addons_path,
+    ProfileRoots, ProfileSummary, ScanSummary, StateDatabase, TuiProfile, UpdateStatus, V1Location,
+    V1MigrationOutcome, analyze_import, default_transfer_path, export_addons, list_profiles,
+    migrate_v1_if_needed, parse_import_file, remember_last_used, scan_addons_dir_report,
+    tui_profile, validate_addons_path,
 };
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -118,19 +119,33 @@ fn error_text(error: &(dyn std::error::Error + 'static)) -> String {
 
 async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Commands::Tui);
+    let roots = ProfileRoots::discover()?;
+    let TuiProfile {
+        name: profile,
+        notice: profile_notice,
+    } = command_profile(&roots, cli.profile, &command)?;
     let runtime = AppRuntime::new(
-        cli.profile.clone(),
+        profile.clone(),
         cli.addon_dir.clone(),
-        load_guarded_addon_dirs(&cli.profile)?,
+        load_guarded_addon_dirs(&profile)?,
     )
     .with_display(theme::DisplayEnv::detect());
-    let paths = AppPaths::discover(cli.profile)?;
+    let paths = roots.paths(&profile)?;
     paths.ensure()?;
 
-    let command = cli.command.unwrap_or(Commands::Tui);
     configure_tracing(log_destination(&command, &paths));
 
-    let startup_notice = run_v1_migration(&paths, V1Location::discover());
+    if let Some(notice) = &profile_notice {
+        tracing::warn!(notice, "the last used game didn't open");
+    }
+    let startup_notice = run_v1_migration(&paths, V1Location::discover()).or_else(|| {
+        profile_notice.map(|text| StartupNotice {
+            text,
+            is_error: true,
+            details: Vec::new(),
+        })
+    });
     if let Some(notice) = startup_notice.as_ref()
         && !matches!(command, Commands::Tui)
     {
@@ -143,6 +158,12 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             CommandOutcome::Success
         }
         Commands::Sync => run_sync(paths, runtime)?,
+        Commands::Profiles => {
+            for line in profile_lines(&list_profiles(&paths.roots)?) {
+                println!("{line}");
+            }
+            CommandOutcome::Success
+        }
         Commands::Check { addons } => run_check(paths, runtime, addons).await?,
         Commands::Update {
             addons,
@@ -191,6 +212,58 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     Ok(outcome)
 }
 
+/// A command's config: the profile's own settings with the ones all games share.
+fn load_profile_config(paths: &AppPaths) -> lemonup_core::Result<(ConfigStore, ConfigLoad)> {
+    let config_store = ConfigStore::for_profile(paths);
+    let config_state = config_store.load()?;
+    Ok((config_store, config_state))
+}
+
+/// The profile a run uses: `--profile` when given; else the TUI opens the game used last,
+/// and every other command uses the default profile, so scripts keep acting on it.
+fn command_profile(
+    roots: &ProfileRoots,
+    requested: Option<String>,
+    command: &Commands,
+) -> lemonup_core::Result<TuiProfile> {
+    let plain = |name: String| TuiProfile { name, notice: None };
+    match requested {
+        Some(profile) => Ok(plain(profile)),
+        None if matches!(command, Commands::Tui) => tui_profile(roots, None),
+        None => Ok(plain(DEFAULT_PROFILE.to_string())),
+    }
+}
+
+/// `lemonup profiles`: a summary line, then one line per profile.
+fn profile_lines(profiles: &[ProfileSummary]) -> Vec<String> {
+    let mut lines = vec![format!("profiles summary: count={}", profiles.len())];
+    for profile in profiles {
+        let mut line = format!(
+            "profile: name={}, game={}, game_version={}, addon_dir={}, addons={}",
+            profile.name,
+            profile.display_name,
+            profile
+                .flavor
+                .map(lemonup_core::profiles::profile_name_for)
+                .unwrap_or("<unknown>"),
+            profile
+                .addon_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "<unconfigured>".to_string()),
+            profile
+                .addon_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+        );
+        if let Some(problem) = &profile.problem {
+            line.push_str(&format!(", problem={problem}"));
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
 /// asks, so changing a "Not linked" addon needs `--yes`.
 fn run_toc(
@@ -213,8 +286,7 @@ fn run_toc(
             ))));
         }
     };
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -266,8 +338,7 @@ async fn run_find(
     yes: bool,
     plain: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -310,7 +381,7 @@ async fn run_find(
     let rows = database.list_addons()?;
     let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
     let wago_lookups = inputs.wago_lookups(&rows, None);
-    let api_key = resolve_wago_api_key(&config_state);
+    let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let sends_to_wago = api_key.is_some() && !wago_lookups.is_empty();
     if plain && sends_to_wago {
         println!(
@@ -337,10 +408,7 @@ async fn run_find(
         let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
         // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
         // about stderr.
-        let theme_config = match &config_state {
-            ConfigLoad::Loaded(config) => config.clone(),
-            ConfigLoad::Missing(_) => lemonup_core::AppConfig::new_unconfigured(),
-        };
+        let theme_config = config_store.effective(&config_state)?;
         let paint = crate::find::Paint::for_stdout(&theme_config);
         for line in
             crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
@@ -599,7 +667,14 @@ async fn run_tui(
     runtime: AppRuntime,
     startup_notice: Option<StartupNotice>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let roots = paths.roots.clone();
+    let profile = paths.profile.clone();
     let mut app = App::bootstrap(paths, runtime)?;
+    // Plain `lemonup` opens this game next time. Not being able to save that is no reason
+    // to stop.
+    if let Err(error) = remember_last_used(&roots, &profile) {
+        tracing::warn!(%error, "couldn't remember the last used game");
+    }
     if let Some(notice) = startup_notice {
         app.show_startup_notice(&notice.text, notice.is_error);
     }
@@ -616,11 +691,10 @@ async fn run_check(
     runtime: AppRuntime,
     addons: Vec<String>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(paths.state_db_file)?;
     let show_details = !addons.is_empty();
-    let api_key = resolve_wago_api_key(&config_state);
+    let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -718,8 +792,7 @@ async fn run_update(
     force: bool,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     let installed = database.list_addons()?;
     let configured_addon_dir = match &config_state {
@@ -775,7 +848,7 @@ async fn run_update(
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
-            let api_key = resolve_wago_api_key(&config_state);
+            let api_key = resolve_wago_api_key(&config_store, &config_state)?;
             if !dry_run {
                 let backup_settings =
                     pre_update_backup_settings(&config_state, &paths.data_dir, &addon_dir);
@@ -849,8 +922,7 @@ fn run_sync(
     runtime: AppRuntime,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let mut outcome = CommandOutcome::Success;
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1002,8 +1074,7 @@ async fn run_import_addons(
     let input_path = input.unwrap_or(default_transfer_path()?);
     let transfer = parse_import_file(&input_path)?;
 
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1056,7 +1127,7 @@ async fn run_import_addons(
         )));
     };
 
-    let wago_api_key = resolve_wago_api_key(&config_state);
+    let wago_api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let summary = install_transfer_addons(
         &mut database,
         &addon_dir,
@@ -1090,8 +1161,7 @@ fn run_restore_backup(
     runtime: AppRuntime,
     archive: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1248,8 +1318,7 @@ async fn run_install_wago(
     stability: WagoStability,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1288,7 +1357,7 @@ async fn run_install_wago(
         !dry_run,
     )?;
 
-    let Some(api_key) = resolve_wago_api_key(&config_state) else {
+    let Some(api_key) = resolve_wago_api_key(&config_store, &config_state)? else {
         println!(
             "install skipped: profile={}, addon={}, reason=no Wago API key configured",
             runtime.profile_name, addon
@@ -1328,8 +1397,7 @@ async fn run_install_tukui(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1392,8 +1460,7 @@ async fn run_install_wowinterface(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1459,8 +1526,7 @@ async fn run_install_github(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1619,6 +1685,11 @@ mod tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         }
     }
 
@@ -2186,6 +2257,11 @@ mod v1_migration_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         }
     }
 
@@ -2296,6 +2372,11 @@ mod addon_dir_binding_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         paths.ensure().expect("ensure paths");
         let wow = temp.path().join("World of Warcraft");
@@ -2314,7 +2395,7 @@ mod addon_dir_binding_tests {
             addon_dir: Some(retail.clone()),
             ..AppConfig::default()
         };
-        ConfigStore::new(paths.config_file.clone())
+        ConfigStore::for_profile(&paths)
             .write_new_config(&config)
             .expect("write config");
         let database = StateDatabase::open(&paths.state_db_file).expect("open db");
@@ -2553,6 +2634,11 @@ mod addon_dir_binding_tests {
             log_dir: other_root.join("data").join("logs"),
             config_file: other_root.join("config").join("config.toml"),
             state_db_file: other_root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                other_root.join("config"),
+                other_root.join("data"),
+                other_root.join("cache"),
+            ),
         };
         other_paths.ensure().expect("ensure other");
         let error = run_sync(
@@ -2587,6 +2673,11 @@ mod addon_dir_binding_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         assert_eq!(
             guarded_dirs_of(&paths).expect("guard"),
@@ -2818,5 +2909,164 @@ mod addon_dir_binding_tests {
         )
         .expect_err("refused");
         assert!(error.to_string().contains("line breaks"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use lemonup_core::{
+        AddonRecord, AppConfig, ConfigLoad, ConfigStore, DEFAULT_PROFILE, ProfileRoots,
+        SharedSettings, SharedSettingsStore, SourceKind, StateDatabase, ThemeMode, create_profile,
+        list_profiles, remember_last_used,
+    };
+    use tempfile::tempdir;
+
+    use super::{command_profile, load_profile_config, profile_lines};
+    use crate::cli::Commands;
+
+    fn test_roots(base: &Path) -> ProfileRoots {
+        ProfileRoots::new(base.join("config"), base.join("data"), base.join("cache"))
+    }
+
+    fn install(base: &Path, client: &str) -> PathBuf {
+        let root = base.join("wow");
+        let dir = root.join(client).join("Interface").join("AddOns");
+        fs::create_dir_all(&dir).expect("addons dir");
+        fs::create_dir_all(root.join("Data")).expect("data dir");
+        fs::write(root.join(".build.info"), "build").expect("build info");
+        dir
+    }
+
+    #[test]
+    fn commands_read_the_settings_all_games_share() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let mut own = AppConfig::new_unconfigured();
+        own.check_interval_secs = 60;
+        ConfigStore::new(paths.config_file.clone())
+            .write_config(&own)
+            .expect("write own");
+        let shared = SharedSettings {
+            check_interval_secs: 1800,
+            theme: ThemeMode::Light,
+            ..SharedSettings::default()
+        };
+        SharedSettingsStore::for_roots(&roots)
+            .write(&shared)
+            .expect("write shared");
+
+        let (_, state) = load_profile_config(&paths).expect("load");
+        let ConfigLoad::Loaded(config) = state else {
+            panic!("config exists");
+        };
+        assert_eq!(config.check_interval_secs, 1800);
+        assert_eq!(config.theme, ThemeMode::Light);
+
+        // Every command that reads its settings reads them that way, `find` included:
+        // none opens a profile's config file on its own.
+        let source = include_str!("main.rs");
+        let commands = [
+            "fn run_toc(",
+            "async fn run_find(",
+            "async fn run_check(",
+            "async fn run_update(",
+            "fn run_sync(",
+            "async fn run_import_addons(",
+            "fn run_restore_backup(",
+            "async fn run_install_wago(",
+            "async fn run_install_tukui(",
+            "async fn run_install_wowinterface(",
+            "async fn run_install_github(",
+        ];
+        for command in commands {
+            let start = source.find(command).unwrap_or_else(|| panic!("{command}"));
+            let rest = &source[start + command.len()..];
+            let end = ["\nfn ", "\nasync fn "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            let body = &rest[..end];
+            assert!(body.contains("load_profile_config(&paths)"), "{command}");
+            assert!(!body.contains("ConfigStore::new("), "{command}");
+        }
+    }
+
+    #[test]
+    fn only_the_tui_opens_the_last_used_game() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        create_profile(&roots, &install(temp.path(), "_forever_"), None).expect("create");
+        remember_last_used(&roots, "forever").expect("remember");
+
+        let profile = |requested: Option<&str>, command: Commands| {
+            command_profile(&roots, requested.map(str::to_string), &command)
+                .expect("profile")
+                .name
+        };
+        assert_eq!(profile(None, Commands::Tui), "forever");
+        assert_eq!(profile(None, Commands::Sync), DEFAULT_PROFILE);
+        assert_eq!(profile(None, Commands::Profiles), DEFAULT_PROFILE);
+        assert_eq!(
+            profile(Some(DEFAULT_PROFILE), Commands::Tui),
+            DEFAULT_PROFILE
+        );
+        assert_eq!(profile(Some("forever"), Commands::Sync), "forever");
+    }
+
+    #[test]
+    fn profiles_command_lists_each_game() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let retail = install(temp.path(), "_retail_");
+        let forever = install(temp.path(), "_forever_");
+        let default = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let config = AppConfig {
+            addon_dir: Some(retail.clone()),
+            ..AppConfig::default()
+        };
+        ConfigStore::for_profile(&default)
+            .write_config(&config)
+            .expect("write default");
+        let database = StateDatabase::open(&default.state_db_file).expect("open");
+        database.bind_addon_dir(&retail).expect("bind");
+        for name in ["One", "Two"] {
+            database
+                .upsert_addon(&AddonRecord::new(name, name, SourceKind::Manual))
+                .expect("upsert");
+        }
+        create_profile(&roots, &forever, None).expect("create forever");
+        let broken = roots.paths("broken").expect("paths");
+        fs::create_dir_all(&broken.config_dir).expect("dir");
+        fs::write(&broken.config_file, "addon_dir = [").expect("broken");
+
+        let lines = profile_lines(&list_profiles(&roots).expect("list"));
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[0], "profiles summary: count=3");
+        assert_eq!(
+            lines[1],
+            format!(
+                "profile: name=default, game=Retail, game_version=retail, addon_dir={}, addons=2",
+                retail.display()
+            )
+        );
+        assert!(
+            lines[2].starts_with(
+                "profile: name=broken, game=broken, game_version=<unknown>, addon_dir=<unconfigured>, addons=0, problem=couldn't read its settings:"
+            ),
+            "{}",
+            lines[2]
+        );
+        assert_eq!(
+            lines[3],
+            format!(
+                "profile: name=forever, game=WoW Forever, game_version=forever, addon_dir={}, addons=0",
+                forever.display()
+            )
+        );
     }
 }

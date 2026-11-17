@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 use lemonup_core::{
-    AddonRecord, ConfigLoad, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase,
-    scan_addons_dir,
+    AddonRecord, ConfigLoad, ConfigStore, GameFlavor, OwnedFolder, ScannedAddon, SourceKind,
+    StateDatabase, scan_addons_dir,
 };
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -1094,15 +1094,29 @@ fn is_valid_wago_slug(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-pub(crate) fn resolve_wago_api_key(config_state: &ConfigLoad) -> Option<String> {
-    let saved = match config_state {
-        ConfigLoad::Loaded(config) => config.wago_api_key.clone(),
-        ConfigLoad::Missing(_) => None,
-    };
-    wago_api_key_in_use(saved, environment_wago_api_key(process_env))
+/// The key a command uses: the saved one (shared by all games), else `WAGO_API_KEY`. A profile
+/// that isn't set up yet still gets the shared key.
+pub(crate) fn resolve_wago_api_key(
+    config_store: &ConfigStore,
+    config_state: &ConfigLoad,
+) -> lemonup_core::Result<Option<String>> {
+    resolve_wago_api_key_with(
+        config_store,
+        config_state,
+        environment_wago_api_key(process_env),
+    )
 }
 
-/// The key to use: the one saved in the profile config, else the one from the environment.
+fn resolve_wago_api_key_with(
+    config_store: &ConfigStore,
+    config_state: &ConfigLoad,
+    environment: Option<String>,
+) -> lemonup_core::Result<Option<String>> {
+    let saved = config_store.effective(config_state)?.wago_api_key;
+    Ok(wago_api_key_in_use(saved, environment))
+}
+
+/// The key to use: the saved one (shared by all games), else the one from the environment.
 /// Every place that turns a config into the running key goes through here, so a key that comes
 /// from `WAGO_API_KEY` is not lost when the config is saved.
 pub(crate) fn wago_api_key_in_use(
@@ -1133,9 +1147,9 @@ pub(crate) fn process_env(name: &str) -> Option<String> {
 /// the repo-root `.env`, so they must not advertise it.
 pub(crate) fn wago_api_key_sources_hint() -> &'static str {
     if cfg!(debug_assertions) {
-        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env."
+        "Use the key you saved in Settings, or set WAGO_API_KEY (or the repo-root .env)."
     } else {
-        "Accepted sources: profile config, WAGO_API_KEY."
+        "Use the key you saved in Settings, or set WAGO_API_KEY."
     }
 }
 
@@ -1866,7 +1880,8 @@ mod tests {
     #[test]
     fn api_key_sources_hint_matches_build_profile() {
         let hint = super::wago_api_key_sources_hint();
-        assert!(hint.contains("profile config"));
+        assert!(hint.contains("the key you saved in Settings"), "{hint}");
+        assert!(!hint.contains("profile config"), "{hint}");
         assert!(hint.contains("WAGO_API_KEY"));
         assert_eq!(hint.contains(".env"), cfg!(debug_assertions));
     }
@@ -1887,5 +1902,34 @@ mod tests {
         assert_eq!(in_use(Some("saved"), Some("env")).as_deref(), Some("saved"));
         assert_eq!(in_use(None, Some("env")).as_deref(), Some("env"));
         assert_eq!(in_use(None, None), None);
+    }
+
+    #[test]
+    fn commands_use_the_shared_key_else_the_environment_key() {
+        let temp = tempdir().expect("tempdir");
+        let roots = lemonup_core::ProfileRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("cache"),
+        );
+        // A game that isn't set up yet, with no key saved anywhere: WAGO_API_KEY is used.
+        let paths = roots.paths("forever").expect("paths");
+        let store = lemonup_core::ConfigStore::for_profile(&paths);
+        let state = store.load().expect("load");
+        assert!(matches!(state, lemonup_core::ConfigLoad::Missing(_)));
+        let key = super::resolve_wago_api_key_with(&store, &state, Some("env".to_string()))
+            .expect("resolve");
+        assert_eq!(key.as_deref(), Some("env"));
+
+        // A key saved while in another game is that game's key too, and wins.
+        let default = roots.paths(lemonup_core::DEFAULT_PROFILE).expect("paths");
+        let mut config = lemonup_core::AppConfig::new_unconfigured();
+        config.wago_api_key = Some("shared-test-key".to_string());
+        lemonup_core::ConfigStore::for_profile(&default)
+            .write_config(&config)
+            .expect("save");
+        let key = super::resolve_wago_api_key_with(&store, &state, Some("env".to_string()))
+            .expect("resolve");
+        assert!(key.as_deref() == Some("shared-test-key"));
     }
 }

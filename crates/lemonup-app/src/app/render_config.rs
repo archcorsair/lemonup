@@ -2,40 +2,41 @@ use super::render_dashboard::shorten_path_middle;
 use super::sheet::{SheetBody, SheetRoom, text_height};
 use super::*;
 
-/// Settings in the order they show, under their section titles. "Your
-/// setup" also shows the game folder, read only, above its rows.
-const CONFIG_SECTIONS: [(&str, &[ConfigField]); 5] = [
-    ("Addon sources", &[ConfigField::WagoApiKey]),
+/// The two groups of Settings: what all games share, then what belongs to
+/// the game in use. The second also shows the game folder, read only,
+/// above its rows.
+const CONFIG_SECTIONS: [(ConfigGroup, &[ConfigField]); 2] = [
     (
-        "Updates",
+        ConfigGroup::AllGames,
         &[
-            ConfigField::AutoCheckEnabled,
-            ConfigField::AutoCheckInterval,
-            ConfigField::CheckInterval,
-        ],
-    ),
-    (
-        "Backups",
-        &[ConfigField::BackupWtf, ConfigField::BackupRetention],
-    ),
-    (
-        "Look",
-        &[
+            ConfigField::WagoApiKey,
             ConfigField::Theme,
             ConfigField::SimpleSymbols,
             ConfigField::ReduceMotion,
-            ConfigField::ShowLibs,
+            ConfigField::AutoCheckEnabled,
+            ConfigField::AutoCheckInterval,
+            ConfigField::CheckInterval,
+            ConfigField::CheckOtherGames,
         ],
     ),
     (
-        "Your setup",
+        ConfigGroup::ThisGame,
         &[
+            ConfigField::BackupWtf,
+            ConfigField::BackupRetention,
+            ConfigField::ShowLibs,
             ConfigField::ChangeGameFolder,
             ConfigField::SaveAddonList,
             ConfigField::LoadAddonList,
         ],
     ),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigGroup {
+    AllGames,
+    ThisGame,
+}
 
 /// The label column on a wide sheet, and on a narrow one.
 const LABEL_WIDTH_WIDE: usize = 49;
@@ -74,17 +75,25 @@ impl App {
         if spaced {
             body.gap(1);
         }
-        for (index, (title, fields)) in CONFIG_SECTIONS.iter().enumerate() {
+        for (index, (group, fields)) in CONFIG_SECTIONS.iter().enumerate() {
             if spaced && index > 0 {
                 body.gap(1);
             }
+            let title = match group {
+                ConfigGroup::AllGames => "For all games".to_string(),
+                // Before a folder is chosen the game has no name yet.
+                ConfigGroup::ThisGame if self.effective_addon_dir.is_none() => {
+                    "For this game".to_string()
+                }
+                ConfigGroup::ThisGame => format!("For {}", self.current_game_name()),
+            };
             body.text(vec![Line::from(Span::styled(
-                *title,
+                title,
                 Style::default()
                     .fg(self.ui_theme.roles.muted)
                     .add_modifier(Modifier::BOLD),
             ))]);
-            if *title == "Your setup" {
+            if *group == ConfigGroup::ThisGame {
                 body.text(vec![self.config_game_folder_line(width)]);
             }
             for field in *fields {
@@ -320,6 +329,9 @@ impl App {
                 ConfigField::CheckInterval => {
                     "an addon checked this recently is not checked again yet".to_string()
                 }
+                ConfigField::CheckOtherGames => {
+                    "how often your other games are checked while LemonUp is open".to_string()
+                }
                 ConfigField::BackupWtf => {
                     "copies your keybinds, macros and addon setups before updates".to_string()
                 }
@@ -408,6 +420,10 @@ impl App {
             ConfigField::CheckInterval => plain(
                 "An addon checked less than this long ago is not checked again yet, which \
                  keeps checks quick.",
+            ),
+            ConfigField::CheckOtherGames => plain(
+                "While LemonUp is open, it also checks your other games for updates this \
+                 often, one at a time. It only checks: it never updates or changes them.",
             ),
             ConfigField::BackupWtf => plain(
                 "Before updates, LemonUp saves a copy of your game settings: your keybinds, \

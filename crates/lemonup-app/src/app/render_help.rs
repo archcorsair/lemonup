@@ -27,6 +27,7 @@ impl App {
             DetailMode::Config => HelpContext::Config,
             DetailMode::Backup => HelpContext::Backup,
             DetailMode::TocEdit => HelpContext::TocEdit,
+            DetailMode::Games => HelpContext::Games,
         }
     }
 

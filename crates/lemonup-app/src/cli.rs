@@ -5,7 +5,7 @@ use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
 use crate::wowinterface::parse_wowinterface_target;
 use clap::{Parser, Subcommand};
-use lemonup_core::{DEFAULT_PROFILE, TocField};
+use lemonup_core::TocField;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,8 +18,10 @@ pub struct Cli {
     /// Print version
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
     version: (),
-    #[arg(long, default_value = DEFAULT_PROFILE)]
-    pub profile: String,
+    /// Profile to use. Without it the TUI opens the game you used last, and other commands
+    /// use the default profile
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
     #[arg(long)]
     pub addon_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -32,6 +34,8 @@ pub enum Commands {
     Tui,
     /// Scan the AddOns folder and update LemonUp's list
     Sync,
+    /// List your games: profile name, game version, AddOns folder and addon count
+    Profiles,
     /// Check linked addons for updates without changing anything
     Check {
         #[arg(value_name = "ADDON", value_parser = parse_addon_selector)]
@@ -210,6 +214,16 @@ mod tests {
         Cli, Commands, parse_addon_selector, parse_github_install_target,
         parse_tukui_install_target, parse_wago_install_target, parse_wowinterface_install_target,
     };
+
+    #[test]
+    fn profile_flag_is_optional_and_profiles_parses() {
+        let cli = Cli::try_parse_from(["lemonup"]).expect("plain");
+        assert_eq!(cli.profile, None);
+        let cli =
+            Cli::try_parse_from(["lemonup", "--profile", "forever", "profiles"]).expect("profiles");
+        assert_eq!(cli.profile.as_deref(), Some("forever"));
+        assert!(matches!(cli.command, Some(Commands::Profiles)));
+    }
 
     #[test]
     fn version_flags_display_version() {

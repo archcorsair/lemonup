@@ -6,6 +6,31 @@ pub enum LemonupError {
     PathsUnavailable,
     #[error("missing config file at {0}")]
     ConfigMissing(PathBuf),
+    #[error(
+        "couldn't read {}: {reason} | nothing was changed | fix or move that file, then run LemonUp again",
+        path.display()
+    )]
+    SettingsUnreadable { path: PathBuf, reason: String },
+    /// Another game needed the default game's settings, for the settings all games share.
+    #[error(
+        "couldn't read the settings of your default game at {}: {reason} | nothing was changed | fix that file, then run LemonUp again",
+        path.display()
+    )]
+    DefaultSettingsUnreadable { path: PathBuf, reason: String },
+    /// A change to the settings all games share, while another game's config can't be read:
+    /// `shared.toml` can't be made before then, and the change would be lost.
+    #[error(
+        "this change waits until {} can be read: every game shares it | nothing was changed | fix or move that file, then try again",
+        list_paths(paths)
+    )]
+    SharedChangeWaits { paths: Vec<PathBuf> },
+    #[error(
+        "{} was saved by a newer LemonUp | nothing was changed | update LemonUp to change these settings",
+        path.display()
+    )]
+    SettingsTooNew { path: PathBuf },
+    #[error("another LemonUp is saving settings | nothing was changed | try again")]
+    SharedSettingsBusy,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// A command declined to act and changed nothing. The message says what happened and what
@@ -22,6 +47,14 @@ pub enum LemonupError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+fn list_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 pub type Result<T> = std::result::Result<T, LemonupError>;

@@ -69,6 +69,49 @@ impl StateDatabase {
         }
     }
 
+    /// How many addons (not libraries) the database at `path` lists, read without creating
+    /// or modifying anything: a missing file, or one without the addons table, lists none.
+    pub fn read_addon_count(path: &Path) -> Result<usize> {
+        if !path.is_file() {
+            return Ok(0);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM addons WHERE kind != 'library'",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        match count {
+            Ok(count) => Ok(usize::try_from(count).unwrap_or(0)),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("no such table") =>
+            {
+                Ok(0)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The addons the database at `path` lists, read without creating or modifying anything:
+    /// a missing file, or one without the addons table, lists none.
+    pub fn read_addons(path: &Path) -> Result<Vec<AddonRecord>> {
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        match Self::list_addons_from_connection(&connection) {
+            Ok(addons) => Ok(addons),
+            Err(LemonupError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
+                if message.contains("no such table") =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Milliseconds this connection waits on a locked database (test hook).
     #[cfg(test)]
     fn busy_timeout_millis(&self) -> i64 {
@@ -191,6 +234,40 @@ impl StateDatabase {
 
     pub fn upsert_addon(&self, addon: &AddonRecord) -> Result<()> {
         Self::upsert_addon_with_connection(&self.connection, addon)
+    }
+
+    /// Writes what a check found online (the remote version, the source URL when it knows
+    /// one, and when it checked) onto the stored row of `checked`, and nothing else of the
+    /// row: a check waits for the network, and meanwhile another LemonUp may have updated
+    /// or deleted the addon, which a whole-row write would undo. Returns the row as it is
+    /// now, or `None` and writes nothing when the row is gone or no longer has the folder,
+    /// source and installed version `checked` had.
+    pub fn record_check_result(
+        &self,
+        checked: &AddonRecord,
+        remote_version: Option<&str>,
+        source_url: Option<&str>,
+        checked_at: OffsetDateTime,
+    ) -> Result<Option<AddonRecord>> {
+        let changed = self.connection.execute(
+            "UPDATE addons
+             SET remote_version = ?1,
+                 source_url = COALESCE(?2, source_url),
+                 last_checked_at = ?3
+             WHERE folder = ?4 AND source = ?5 AND version IS ?6",
+            params![
+                remote_version,
+                source_url,
+                checked_at.unix_timestamp(),
+                checked.folder,
+                serialize_source(checked.source),
+                checked.version,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_addon_by_folder(&checked.folder)
     }
 
     /// The TOC overrides [`Self::record_managed_addon`] would store for `addon` right now: the
@@ -1238,6 +1315,27 @@ mod tests {
 
     use super::StateDatabase;
     use crate::domain::{AddonKind, GameFlavor};
+
+    #[test]
+    fn read_addons_lists_without_creating_anything() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        assert!(
+            StateDatabase::read_addons(&path)
+                .expect("missing")
+                .is_empty()
+        );
+        assert!(!path.exists(), "reading must not create the database");
+
+        let database = StateDatabase::open(&path).expect("open");
+        database
+            .upsert_addon(&AddonRecord::new("Bagnon", "Bagnon", SourceKind::Wago))
+            .expect("upsert");
+        drop(database);
+        let addons = StateDatabase::read_addons(&path).expect("read");
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].folder, "Bagnon");
+    }
     use crate::toc_edit::TocField;
 
     #[test]

@@ -37,7 +37,7 @@ pub(super) fn sheet_width(kind: OverlayKind) -> u16 {
         OverlayKind::Config => 100,
         OverlayKind::Backup | OverlayKind::TocEdit => 84,
         OverlayKind::Help => 108,
-        OverlayKind::Update | OverlayKind::Confirm => 76,
+        OverlayKind::Update | OverlayKind::Confirm | OverlayKind::Games => 76,
     }
 }
 
