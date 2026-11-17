@@ -236,6 +236,40 @@ impl StateDatabase {
         Self::upsert_addon_with_connection(&self.connection, addon)
     }
 
+    /// Writes what a check found online (the remote version, the source URL when it knows
+    /// one, and when it checked) onto the stored row of `checked`, and nothing else of the
+    /// row: a check waits for the network, and meanwhile another LemonUp may have updated
+    /// or deleted the addon, which a whole-row write would undo. Returns the row as it is
+    /// now, or `None` and writes nothing when the row is gone or no longer has the folder,
+    /// source and installed version `checked` had.
+    pub fn record_check_result(
+        &self,
+        checked: &AddonRecord,
+        remote_version: Option<&str>,
+        source_url: Option<&str>,
+        checked_at: OffsetDateTime,
+    ) -> Result<Option<AddonRecord>> {
+        let changed = self.connection.execute(
+            "UPDATE addons
+             SET remote_version = ?1,
+                 source_url = COALESCE(?2, source_url),
+                 last_checked_at = ?3
+             WHERE folder = ?4 AND source = ?5 AND version IS ?6",
+            params![
+                remote_version,
+                source_url,
+                checked_at.unix_timestamp(),
+                checked.folder,
+                serialize_source(checked.source),
+                checked.version,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_addon_by_folder(&checked.folder)
+    }
+
     /// The TOC overrides [`Self::record_managed_addon`] would store for `addon` right now: the
     /// stored row's (or, without one, `addon`'s own) plus those of the rows it absorbs. Installs
     /// and updates write these into the staged files, so the files and the row agree.
