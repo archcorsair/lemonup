@@ -208,7 +208,30 @@ impl StateDatabase {
 
     pub fn record_managed_addon(&mut self, addon: &AddonRecord) -> Result<()> {
         let tx = self.connection.transaction()?;
-        let existing_addons = Self::list_addons_from_connection(&tx)?;
+        Self::record_managed_addon_with_connection(&tx, addon)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records every addon of `addons` as [`Self::record_managed_addon`] does, in one
+    /// transaction: if `guard` (given the rows inside the transaction) or any write fails,
+    /// nothing is written.
+    pub fn record_managed_addons(
+        &mut self,
+        addons: &[AddonRecord],
+        guard: impl FnOnce(&[AddonRecord]) -> Result<()>,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        guard(&Self::list_addons_from_connection(&tx)?)?;
+        for addon in addons {
+            Self::record_managed_addon_with_connection(&tx, addon)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn record_managed_addon_with_connection(tx: &Connection, addon: &AddonRecord) -> Result<()> {
+        let existing_addons = Self::list_addons_from_connection(tx)?;
         let ManagedRecordPlan {
             existing_parent,
             incoming_owned_folders,
@@ -253,21 +276,19 @@ impl StateDatabase {
                 } else {
                     existing.owned_folders = filtered;
                 }
-                Self::upsert_addon_with_connection(&tx, &existing)?;
+                Self::upsert_addon_with_connection(tx, &existing)?;
             }
         }
 
         for folder in &absorbed_folders {
-            Self::remove_addon_with_connection(&tx, folder)?;
+            Self::remove_addon_with_connection(tx, folder)?;
         }
 
         let merged = merge_managed_addon(addon, existing_parent, &absorbed);
-        Self::upsert_addon_with_connection(&tx, &merged)?;
+        Self::upsert_addon_with_connection(tx, &merged)?;
         if existing_parent.is_some_and(|parent| parent.toc_overrides != merged.toc_overrides) {
-            Self::write_toc_overrides_with_connection(&tx, &merged.folder, &merged.toc_overrides)?;
+            Self::write_toc_overrides_with_connection(tx, &merged.folder, &merged.toc_overrides)?;
         }
-
-        tx.commit()?;
         Ok(())
     }
 

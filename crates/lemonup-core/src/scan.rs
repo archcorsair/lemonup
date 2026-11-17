@@ -223,8 +223,34 @@ pub fn read_addon_toc_fields(
         .map(|addon| crate::toc_edit::TocFieldValues::from_scanned(&addon)))
 }
 
+/// The text of the TOC a scan selects for `flavor` in the addon folder at `addon_path`.
+/// `Ok(None)` when the folder has no TOC loadable by `flavor`.
+pub(crate) fn read_selected_toc(
+    addon_path: &Path,
+    folder: &str,
+    flavor: GameFlavor,
+) -> Result<Option<String>> {
+    let toc_files = list_root_toc_files(addon_path)?
+        .into_iter()
+        .filter(|toc| toc_loadable_by_flavor(toc, folder, flavor))
+        .collect::<Vec<_>>();
+    if toc_files.is_empty() {
+        return Ok(None);
+    }
+    let selected_toc = select_toc_file(folder, &toc_files, flavor)?;
+    Ok(Some(read_toc_file(
+        &addon_path.join(&selected_toc.selected),
+    )?))
+}
+
+/// The value of the `## <key>:` field the game uses for `flavor`'s client (the last line that
+/// applies), with its inline conditions taken out.
+pub(crate) fn toc_field(content: &str, key: &str, flavor: GameFlavor) -> Option<String> {
+    last_field_value(content, &[key], Some(flavor))
+}
+
 /// Scans one addon folder. `Ok(None)` means the folder has no TOC loadable by `flavor`.
-fn scan_addon_folder(
+pub(crate) fn scan_addon_folder(
     addon_path: &Path,
     folder: &str,
     flavor: GameFlavor,

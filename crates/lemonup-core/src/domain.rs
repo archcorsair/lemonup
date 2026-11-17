@@ -185,6 +185,22 @@ impl AddonRecord {
         self.effective_ownership_source() == OwnershipSource::Managed
     }
 
+    /// Whether another addon must leave this row's folders alone: it is linked here, or a newer
+    /// LemonUp linked it (it shows as "Not linked" in this version, but its folders still belong
+    /// to it).
+    pub fn holds_its_folders(&self) -> bool {
+        self.source != SourceKind::Manual || self.unrecognized.is_some()
+    }
+
+    /// Whether this row is `folder` itself or lists it among its owned folders, without case.
+    pub fn claims_folder(&self, folder: &str) -> bool {
+        self.folder.to_lowercase() == folder.to_lowercase()
+            || self
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name.to_lowercase() == folder.to_lowercase())
+    }
+
     /// Whether a newer LemonUp stored how this addon's owned folders were assigned in a way this
     /// version does not know. Its owned folders are then kept as stored but never acted on.
     pub fn has_unrecognized_ownership(&self) -> bool {
