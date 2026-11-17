@@ -398,16 +398,19 @@ impl App {
         };
         let mut next = self.config_pane.clone();
         next.draft.wago_api_key = Some(key.clone());
-        if let Err(error) = self.config_store.write_config(&next.draft) {
-            return vec![AppAction::SetStatus(self.dashboard_status_for(
-                StatusKind::Problem,
-                DetailMode::Search,
-                &format!("Couldn't save your Wago.io key: {error}"),
-            ))];
-        }
+        let saved = match self.config_store.write_config(&next.draft) {
+            Ok(saved) => saved,
+            Err(error) => {
+                return vec![AppAction::SetStatus(self.dashboard_status_for(
+                    StatusKind::Problem,
+                    DetailMode::Search,
+                    &format!("Couldn't save your Wago.io key: {error}"),
+                ))];
+            }
+        };
         let mut actions = vec![
-            AppAction::SetPersistedConfig(next.draft.clone()),
-            AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
+            AppAction::SetPersistedConfig(saved.clone()),
+            AppAction::SetConfigPaneState(next.mark_saved(saved)),
             AppAction::SetStatus(self.dashboard_status_for(
                 StatusKind::Done,
                 DetailMode::Search,

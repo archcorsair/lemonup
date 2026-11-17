@@ -157,7 +157,11 @@ pub(crate) async fn check_other_game(
     wago_env_key: Option<String>,
 ) -> std::result::Result<(), String> {
     let store = ConfigStore::for_profile(&paths);
-    let config = match store.load().map_err(|error| error.to_string())? {
+    // Never writes the settings all games share: the game in use may be saving them.
+    let config = match store
+        .load_without_writing()
+        .map_err(|error| error.to_string())?
+    {
         ConfigLoad::Loaded(config) => config,
         ConfigLoad::Missing(_) => return Err("it isn't set up".to_string()),
     };

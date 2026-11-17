@@ -17,6 +17,13 @@ pub enum LemonupError {
         path.display()
     )]
     DefaultSettingsUnreadable { path: PathBuf, reason: String },
+    /// A change to the settings all games share, while another game's config can't be read:
+    /// `shared.toml` can't be made before then, and the change would be lost.
+    #[error(
+        "this change waits until {} can be read: every game shares it | nothing was changed | fix or move that file, then try again",
+        list_paths(paths)
+    )]
+    SharedChangeWaits { paths: Vec<PathBuf> },
     #[error(
         "{} was saved by a newer LemonUp | nothing was changed | update LemonUp to change these settings",
         path.display()
@@ -38,6 +45,14 @@ pub enum LemonupError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+fn list_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 pub type Result<T> = std::result::Result<T, LemonupError>;

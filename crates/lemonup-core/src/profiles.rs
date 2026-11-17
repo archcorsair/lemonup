@@ -294,7 +294,7 @@ pub fn create_profile(
     // Through the shared settings, so they record what this game's config now holds.
     let written = ConfigStore::for_profile(&paths)
         .write_config(&config)
-        .and_then(|()| StateDatabase::open(&paths.state_db_file)?.bind_addon_dir(&addon_dir));
+        .and_then(|_| StateDatabase::open(&paths.state_db_file)?.bind_addon_dir(&addon_dir));
     if let Err(error) = written {
         forget_profile_files(&paths);
         return Err(error.into());
@@ -343,6 +343,8 @@ pub fn remove_profile(
     remove_if_present(&paths.config_file)?;
     // Only when empty: anything else someone put there stays.
     let _ = fs::remove_dir(&paths.config_dir);
+    // The copy of the shared settings, Wago.io key included, recorded for it.
+    SharedSettingsStore::for_roots(roots).forget_profile(name);
 
     Ok(RemovedProfile {
         name: name.to_string(),
@@ -433,6 +435,7 @@ mod tests {
     use crate::config::{AppConfig, ConfigLoad, ConfigStore, ThemeMode};
     use crate::domain::{AddonKind, AddonRecord, GameFlavor, SourceKind};
     use crate::paths::{DEFAULT_PROFILE, ProfileRoots};
+    use crate::shared::SharedSettingsStore;
     use crate::storage::StateDatabase;
 
     fn test_roots(base: &Path) -> ProfileRoots {
@@ -677,6 +680,37 @@ mod tests {
         // It can be added again, and finds its backups where they were.
         create_profile(&roots, &forever, None).expect("add again");
         assert!(backups.join("wtf-1.zip").is_file());
+    }
+
+    #[test]
+    fn remove_forgets_the_shared_settings_copy_of_the_game() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let retail = install(temp.path(), "_retail_");
+        set_up_default(&roots, &retail, 0);
+        let forever = install(temp.path(), "_forever_");
+        create_profile(&roots, &forever, None).expect("create");
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let recorded = |shared: &SharedSettingsStore| {
+            shared
+                .read()
+                .expect("read")
+                .expect("exists")
+                .profile_copies
+                .contains_key("forever")
+        };
+        assert!(recorded(&shared));
+
+        remove_profile(&roots, "forever", DEFAULT_PROFILE).expect("remove");
+        assert!(!recorded(&shared));
+        assert!(
+            shared
+                .read()
+                .expect("read")
+                .expect("exists")
+                .profile_copies
+                .contains_key(DEFAULT_PROFILE)
+        );
     }
 
     #[test]

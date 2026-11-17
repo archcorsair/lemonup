@@ -18,7 +18,11 @@
 //! LemonUp that knows nothing of `shared.toml` keeps working with the values that profile last
 //! saved. `shared.toml` also records, per profile, the shared values LemonUp last wrote into
 //! that profile's config. When the config holds other values later, an older LemonUp changed
-//! them there, and they are taken as the newer ones.
+//! them there, and they are taken as the newer ones. Removing a game drops its record, and
+//! removing the Wago.io key removes the copies of it LemonUp wrote into every game's config.
+//!
+//! While another game's config can't be read, `shared.toml` isn't created, and a change to a
+//! shared value waits: the save is refused, naming that file.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -356,9 +360,25 @@ pub(crate) struct CurrentShared {
     pub(crate) settings: SharedSettings,
     /// `shared.toml` exists and holds `settings`.
     pub(crate) on_disk: bool,
-    /// A save may write `shared.toml`. Not while a game's config couldn't be read for the
-    /// migration: its values would be lost.
-    pub(crate) may_write: bool,
+    /// The configs of other games that couldn't be read for the migration. While there are
+    /// any, `shared.toml` isn't written (their values would be lost), and a change to a
+    /// shared value can't be saved.
+    pub(crate) waiting_for: Vec<PathBuf>,
+}
+
+impl CurrentShared {
+    /// A save may write `shared.toml`.
+    pub(crate) fn may_write(&self) -> bool {
+        self.waiting_for.is_empty()
+    }
+}
+
+/// Whether reading the shared settings may write `shared.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Writes {
+    Allowed,
+    /// For reads in the background: two writers could undo each other's change.
+    Never,
 }
 
 /// What the migration found in the configs of every game.
@@ -409,16 +429,28 @@ impl SharedSettingsStore {
     }
 
     pub(crate) fn current(&self) -> Result<CurrentShared> {
+        self.current_with(Writes::Allowed)
+    }
+
+    /// Like [`Self::current`], but with `Writes::Never` it doesn't create `shared.toml`.
+    fn current_with(&self, writes: Writes) -> Result<CurrentShared> {
         if let Some(settings) = self.read()? {
             return Ok(CurrentShared {
                 settings,
                 on_disk: true,
-                may_write: true,
+                waiting_for: Vec::new(),
             });
         }
 
         let migration = self.migrate()?;
         let complete = migration.skipped.is_empty();
+        if writes == Writes::Never {
+            return Ok(CurrentShared {
+                settings: migration.settings,
+                on_disk: false,
+                waiting_for: migration.skipped,
+            });
+        }
         if migration.found_any && complete {
             self.write(&migration.settings)?;
             tracing::info!(path = %self.path.display(), "created the settings shared by all games");
@@ -431,7 +463,7 @@ impl SharedSettingsStore {
         Ok(CurrentShared {
             settings: migration.settings,
             on_disk: migration.found_any && complete,
-            may_write: complete,
+            waiting_for: migration.skipped,
         })
     }
 
@@ -479,13 +511,15 @@ impl SharedSettingsStore {
 
     /// The shared settings for opening `profile`, whose config holds `in_file`. Values there
     /// that differ from what LemonUp last wrote into it were changed by an older LemonUp and
-    /// are taken as the newer ones.
+    /// are taken as the newer ones. With `Writes::Never` nothing is written: neither
+    /// `shared.toml`'s creation nor the record of what the config holds.
     pub(crate) fn load_for_profile(
         &self,
         profile: &str,
         in_file: &SharedFields,
+        writes: Writes,
     ) -> Result<SharedSettings> {
-        let current = self.current()?;
+        let current = self.current_with(writes)?;
         let mut settings = current.settings;
         if !current.on_disk || settings.profile_copies.get(profile) == Some(in_file) {
             return Ok(settings);
@@ -500,6 +534,9 @@ impl SharedSettingsStore {
         settings
             .profile_copies
             .insert(profile.to_string(), in_file.clone());
+        if writes == Writes::Never {
+            return Ok(settings);
+        }
         match self.write(&settings) {
             Ok(()) if !newer.is_empty() => {
                 tracing::info!(profile, "kept the shared settings an older LemonUp changed");
@@ -534,6 +571,90 @@ impl SharedSettingsStore {
         };
         if let Err(error) = restored {
             tracing::warn!(%error, "couldn't put the shared settings back after a failed save");
+        }
+    }
+
+    /// The shared settings as they are now, to show them. Never writes.
+    pub(crate) fn current_without_writing(&self) -> Result<SharedSettings> {
+        Ok(self.current_with(Writes::Never)?.settings)
+    }
+
+    /// After a save removed the Wago.io key: removes the copy of it from every other game's
+    /// config that still holds the copy LemonUp wrote there, then from the record of that
+    /// copy. A config that holds another key (an older LemonUp changed it) keeps it; its
+    /// record loses the key either way, since that key differs from both. A config that
+    /// can't be read or written keeps its record as it is: a record without the key next to
+    /// a config with it would bring the key back as an older LemonUp's change. Best effort;
+    /// the save is already done.
+    pub(crate) fn clear_key_copies(&self, saved_by: &str) {
+        let Ok(Some(mut settings)) = self.read() else {
+            return;
+        };
+        let mut cleared = false;
+        for (profile, record) in &mut settings.profile_copies {
+            if profile == saved_by || record.wago_api_key.is_none() {
+                continue;
+            }
+            match self.clear_key_copy(profile, record) {
+                Ok(()) => {
+                    record.wago_api_key = None;
+                    cleared = true;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, profile, "kept the Wago.io key in a game's settings");
+                }
+            }
+        }
+        if cleared && let Err(error) = self.write(&settings) {
+            tracing::warn!(%error, "couldn't record the Wago.io key removal for every game");
+        }
+    }
+
+    /// Removes the key from `profile`'s config when it holds the copy `record` says LemonUp
+    /// wrote there. `Ok` once the config no longer holds that copy.
+    fn clear_key_copy(&self, profile: &str, record: &SharedFields) -> Result<()> {
+        let path = self.roots.paths(profile)?.config_file;
+        if !path.try_exists()? {
+            return Ok(());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let in_file = parse_profile_config(&path, &raw)?.1;
+        if in_file.wago_api_key != record.wago_api_key {
+            return Ok(());
+        }
+        let mut table = raw.parse::<toml::Table>()?;
+        table.remove("wago_api_key");
+        write_private_file(&path, &toml::to_string_pretty(&table)?)
+    }
+
+    /// After `profile` was removed: forgets what LemonUp wrote into its config, the
+    /// Wago.io key included. Best effort; the game is already removed.
+    pub(crate) fn forget_profile(&self, profile: &str) {
+        let forget = || -> Result<()> {
+            let Some(mut settings) = self.read()? else {
+                return Ok(());
+            };
+            // Also a record in another case whose config is gone, like Windows and macOS
+            // find the folder without case.
+            let mut gone = Vec::new();
+            for name in settings.profile_copies.keys() {
+                if name == profile
+                    || (name.eq_ignore_ascii_case(profile)
+                        && !self.roots.paths(name)?.config_file.try_exists()?)
+                {
+                    gone.push(name.clone());
+                }
+            }
+            if gone.is_empty() {
+                return Ok(());
+            }
+            for name in gone {
+                settings.profile_copies.remove(&name);
+            }
+            self.write(&settings)
+        };
+        if let Err(error) = forget() {
+            tracing::warn!(%error, profile, "couldn't forget a removed game's shared settings");
         }
     }
 
@@ -1240,5 +1361,272 @@ mod tests {
         assert_eq!(table["theme"].as_str(), Some("terminal"));
         assert_eq!(table["schema_version"].as_integer(), Some(1));
         assert!(table["wago_api_key"].as_str() == Some(SECRET));
+    }
+
+    /// Retail and WoW Forever set up with `key`, both through the bare files, so no
+    /// `shared.toml` yet.
+    fn two_games(roots: &ProfileRoots, key: &str) {
+        let mut retail = AppConfig::new_unconfigured();
+        retail.addon_dir = Some("/g/_retail_/Interface/AddOns".into());
+        retail.wago_api_key = Some(key.to_string());
+        ConfigStore::new(roots.default_config_file())
+            .write_config(&retail)
+            .expect("write default");
+        let mut forever = retail.clone();
+        forever.addon_dir = Some("/g/_forever_/Interface/AddOns".into());
+        ConfigStore::new(roots.paths("forever").expect("paths").config_file)
+            .write_config(&forever)
+            .expect("write forever");
+    }
+
+    /// Reviewer's scenario F: another game's config can't be read, so `shared.toml` can't
+    /// be made. A shared change made then would be lost on the next load.
+    #[test]
+    fn a_shared_change_waits_while_another_games_settings_cant_be_read() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, "old-key");
+        let broken = roots.paths("broken").expect("paths");
+        fs::create_dir_all(&broken.config_dir).expect("dir");
+        fs::write(&broken.config_file, "theme = [").expect("broken");
+        let forever = roots.paths("forever").expect("paths");
+        let before = fs::read(&forever.config_file).expect("read");
+
+        let store = ConfigStore::for_profile(&forever);
+        let mut config = loaded(&store);
+        config.wago_api_key = Some(SECRET.to_string());
+        config.theme = ThemeMode::Light;
+        let Err(error) = store.write_config(&config) else {
+            panic!("must wait");
+        };
+        let shown = error.to_string();
+        assert!(
+            shown.contains(&format!(
+                "this change waits until {} can be read",
+                broken.config_file.display()
+            )),
+            "{shown}"
+        );
+        assert!(shown.contains("nothing was changed"), "{shown}");
+        assert!(!shown.contains(SECRET));
+        // Nothing was written, and the next load shows what was there.
+        assert!(fs::read(&forever.config_file).expect("read") == before);
+        assert!(!SharedSettingsStore::for_roots(&roots).path().exists());
+        let again = loaded(&ConfigStore::for_profile(&forever));
+        assert!(again.wago_api_key.as_deref() == Some("old-key"));
+        assert_eq!(again.theme, ThemeMode::Dark);
+
+        // What belongs to this game alone still saves.
+        let mut own = loaded(&store);
+        own.show_libs = true;
+        let saved = store.write_config(&own).expect("save this game");
+        assert!(saved.show_libs);
+        assert!(loaded(&ConfigStore::for_profile(&forever)).show_libs);
+    }
+
+    /// Reviewer's scenario G: a crash after `shared.toml` was written and before the
+    /// profile's file was. That save never reported done, and the next load undoes it.
+    #[test]
+    fn a_crash_between_the_two_writes_undoes_the_save() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, "old-key");
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let store = ConfigStore::for_profile(&paths);
+        let mut config = loaded(&store);
+        let before = fs::read(&paths.config_file).expect("read");
+        config.wago_api_key = Some(SECRET.to_string());
+        store.write_config(&config).expect("save");
+        // As if the profile's file was never written.
+        fs::write(&paths.config_file, before).expect("put back");
+
+        let after = loaded(&ConfigStore::for_profile(&paths));
+        assert!(after.wago_api_key.as_deref() == Some("old-key"));
+    }
+
+    /// Reviewer's scenario J: Retail saw one key, WoW Forever saved another since. Retail
+    /// shows the stored key after its next save, and typing the first key again saves it.
+    #[test]
+    fn after_a_save_this_game_shows_and_changes_the_stored_shared_values() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, "first-key");
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        let forever_store = ConfigStore::for_profile(&roots.paths("forever").expect("p"));
+        let mut retail = loaded(&retail_store);
+        let mut forever = loaded(&forever_store);
+        forever.wago_api_key = Some(SECRET.to_string());
+        forever_store.write_config(&forever).expect("save forever");
+
+        retail.reduce_motion = true;
+        let mut retail = retail_store.write_config(&retail).expect("save retail");
+        assert!(
+            retail.wago_api_key.as_deref() == Some(SECRET),
+            "shows what is stored"
+        );
+        assert!(retail.reduce_motion);
+
+        retail.wago_api_key = Some("first-key".to_string());
+        retail_store.write_config(&retail).expect("type it again");
+        let shared = SharedSettingsStore::for_roots(&roots)
+            .read()
+            .expect("read")
+            .expect("exists");
+        assert!(shared.wago_api_key.as_deref() == Some("first-key"));
+    }
+
+    /// Scenario J with Settings opened again: it reads the shared values first.
+    #[test]
+    fn refreshing_shows_another_games_change_and_typing_the_old_value_saves_it() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, "first-key");
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        let forever_store = ConfigStore::for_profile(&roots.paths("forever").expect("p"));
+        let mut retail = loaded(&retail_store);
+        let mut forever = loaded(&forever_store);
+        forever.wago_api_key = Some(SECRET.to_string());
+        forever.theme = ThemeMode::Light;
+        forever_store.write_config(&forever).expect("save forever");
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let before = fs::read(shared.path()).expect("read");
+
+        retail_store.refresh_shared(&mut retail).expect("refresh");
+        assert!(retail.wago_api_key.as_deref() == Some(SECRET));
+        assert_eq!(retail.theme, ThemeMode::Light);
+        assert!(
+            fs::read(shared.path()).expect("read") == before,
+            "never writes"
+        );
+
+        retail.wago_api_key = Some("first-key".to_string());
+        retail_store.write_config(&retail).expect("save");
+        let stored = shared.read().expect("read").expect("exists");
+        assert!(stored.wago_api_key.as_deref() == Some("first-key"));
+        assert_eq!(stored.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn removing_the_key_removes_the_copies_lemonup_wrote_for_other_games() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, SECRET);
+        let classic = roots.paths("classic").expect("paths");
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        let forever = roots.paths("forever").expect("paths");
+        // Every game opened once, so each has a record of the key LemonUp wrote there.
+        loaded(&ConfigStore::for_profile(&forever));
+        let mut classic_config = AppConfig::new_unconfigured();
+        classic_config.wago_api_key = Some(SECRET.to_string());
+        ConfigStore::new(classic.config_file.clone())
+            .write_config(&classic_config)
+            .expect("write classic");
+        loaded(&ConfigStore::for_profile(&classic));
+        // Then an older LemonUp saves another key in classic's own file.
+        classic_config.wago_api_key = Some("older-lemonup-key".to_string());
+        ConfigStore::new(classic.config_file.clone())
+            .write_config(&classic_config)
+            .expect("older lemonup");
+
+        let mut retail = loaded(&retail_store);
+        retail.wago_api_key = None;
+        let saved = retail_store.write_config(&retail).expect("remove key");
+        assert!(saved.wago_api_key.is_none());
+
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let stored = shared.read().expect("read").expect("exists");
+        assert!(stored.wago_api_key.is_none());
+        for profile in [DEFAULT_PROFILE, "forever", "classic"] {
+            assert!(
+                stored.profile_copies[profile].wago_api_key.is_none(),
+                "{profile}"
+            );
+        }
+        assert!(
+            !fs::read_to_string(shared.path())
+                .expect("read")
+                .contains(SECRET)
+        );
+        let forever_raw = fs::read_to_string(&forever.config_file).expect("read");
+        assert!(!forever_raw.contains(SECRET), "{forever_raw}");
+        assert!(forever_raw.contains("_forever_"), "the rest stays");
+        // Classic's file holds a key an older LemonUp saved there: it stays, and classic
+        // takes it up as that LemonUp's change, as before.
+        assert!(own_key(&classic.config_file).as_deref() == Some("older-lemonup-key"));
+
+        // The key stays removed in WoW Forever.
+        assert!(
+            loaded(&ConfigStore::for_profile(&forever))
+                .wago_api_key
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_key_copy_that_cant_be_removed_keeps_its_record() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, SECRET);
+        let forever = roots.paths("forever").expect("paths");
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        loaded(&ConfigStore::for_profile(&forever));
+        // Forever's file can't be replaced.
+        fs::create_dir_all(temp_path_for(&forever.config_file)).expect("block");
+
+        let mut retail = loaded(&retail_store);
+        retail.wago_api_key = None;
+        retail_store.write_config(&retail).expect("remove key");
+
+        let stored = SharedSettingsStore::for_roots(&roots)
+            .read()
+            .expect("read")
+            .expect("exists");
+        assert!(stored.wago_api_key.is_none());
+        assert!(stored.profile_copies["forever"].wago_api_key.as_deref() == Some(SECRET));
+        // So forever doesn't take its copy back as an older LemonUp's change.
+        assert!(
+            loaded(&ConfigStore::for_profile(&forever))
+                .wago_api_key
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_background_load_never_writes_the_shared_settings() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, "first-key");
+        let forever = roots.paths("forever").expect("paths");
+        let shared = SharedSettingsStore::for_roots(&roots);
+
+        // Before `shared.toml` exists: not made.
+        let config = match ConfigStore::for_profile(&forever)
+            .load_without_writing()
+            .expect("load")
+        {
+            ConfigLoad::Loaded(config) => config,
+            ConfigLoad::Missing(_) => panic!("forever is set up"),
+        };
+        assert!(config.wago_api_key.as_deref() == Some("first-key"));
+        assert!(!shared.path().exists());
+
+        // An older LemonUp changed forever's file: the change shows, and isn't recorded.
+        loaded(&ConfigStore::for_profile(&forever));
+        let mut older =
+            toml::from_str::<AppConfig>(&fs::read_to_string(&forever.config_file).expect("read"))
+                .expect("parse");
+        older.theme = ThemeMode::Light;
+        ConfigStore::new(forever.config_file.clone())
+            .write_config(&older)
+            .expect("older lemonup");
+        let before = fs::read(shared.path()).expect("read");
+        let ConfigLoad::Loaded(config) = ConfigStore::for_profile(&forever)
+            .load_without_writing()
+            .expect("load")
+        else {
+            panic!("forever is set up");
+        };
+        assert_eq!(config.theme, ThemeMode::Light);
+        assert!(fs::read(shared.path()).expect("read") == before, "written");
     }
 }

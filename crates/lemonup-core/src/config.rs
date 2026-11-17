@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{LemonupError, Result};
 use crate::paths::AppPaths;
 use crate::shared::{
-    OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore, parse_profile_config,
+    OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore, Writes,
+    parse_profile_config,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +160,16 @@ impl ConfigStore {
 
     /// The profile's settings. A file that can't be read or parsed is an error naming it.
     pub fn load(&self) -> Result<ConfigLoad> {
+        self.load_with(Writes::Allowed)
+    }
+
+    /// Like [`ConfigStore::load`], but never writes `shared.toml`, for reads in the
+    /// background: two writers could undo each other's change there.
+    pub fn load_without_writing(&self) -> Result<ConfigLoad> {
+        self.load_with(Writes::Never)
+    }
+
+    fn load_with(&self, writes: Writes) -> Result<ConfigLoad> {
         if !self.path.try_exists()? {
             return Ok(ConfigLoad::Missing(self.path.clone()));
         }
@@ -170,7 +181,9 @@ impl ConfigStore {
             })?;
         let (mut config, in_file) = parse_profile_config(&self.path, &raw)?;
         if let Some(link) = &self.shared {
-            let settings = link.store.load_for_profile(&link.profile, &in_file)?;
+            let settings = link
+                .store
+                .load_for_profile(&link.profile, &in_file, writes)?;
             settings.apply_to(&mut config);
             link.remember(settings);
         }
@@ -196,22 +209,43 @@ impl ConfigStore {
         }
     }
 
-    /// Saves `config`.
+    /// Puts the shared values as they are now into `config`, and starts from them: the
+    /// next save takes as changed the shared values that differ from these. For showing
+    /// Settings as they are stored. Never writes.
+    pub fn refresh_shared(&self, config: &mut AppConfig) -> Result<()> {
+        if let Some(link) = &self.shared {
+            let settings = link.store.current_without_writing()?;
+            settings.apply_to(config);
+            link.remember(settings);
+        }
+        Ok(())
+    }
+
+    /// Saves `config` and returns it as stored: callers keep that one, so what they show
+    /// and save next is what is stored.
     ///
     /// `shared.toml` is read again and gets only the shared values changed in this game
     /// since this store last read or saved them (all of them when it hasn't). The profile's
     /// file gets every field, the shared ones as `shared.toml` now holds them, so an older
     /// LemonUp can read it.
     ///
+    /// While another game's config can't be read, `shared.toml` can't be made, and a save
+    /// that changes a shared value is refused, writing nothing: the change would be lost.
+    ///
     /// `shared.toml` is written first. When the profile's file then can't be written, the
     /// old `shared.toml` is put back and the save fails, so nothing reports a save that
     /// didn't happen. A crash between the two writes, or a failed put back, can still leave
-    /// the new shared values with the old profile file; the next load then keeps the shared
-    /// ones.
-    pub fn write_config(&self, config: &AppConfig) -> Result<()> {
+    /// the new shared values with the old profile file. That file then differs from what
+    /// `shared.toml` records LemonUp wrote into it, so the next load takes its values as an
+    /// older LemonUp's change and keeps them: the save that never finished is undone.
+    ///
+    /// Removing the Wago.io key also removes the copies of it LemonUp wrote into other
+    /// games' configs.
+    pub fn write_config(&self, config: &AppConfig) -> Result<AppConfig> {
         let Some(link) = &self.shared else {
             let rendered = toml::to_string_pretty(config)?;
-            return write_private_file(&self.path, &rendered);
+            write_private_file(&self.path, &rendered)?;
+            return Ok(config.clone());
         };
 
         let current = link.store.current()?;
@@ -221,7 +255,7 @@ impl ConfigStore {
         merged.apply_to(&mut file_config);
         let rendered = toml::to_string_pretty(&file_config)?;
 
-        if current.may_write {
+        if current.may_write() {
             merged
                 .profile_copies
                 .insert(link.profile.clone(), SharedFields::of(&merged));
@@ -231,14 +265,21 @@ impl ConfigStore {
                     .restore(current.on_disk.then_some(&current.settings));
                 return Err(error);
             }
+            if current.settings.wago_api_key.is_some() && merged.wago_api_key.is_none() {
+                link.store.clear_key_copies(&link.profile);
+            }
+        } else if SharedFields::of(&merged) != SharedFields::of(&current.settings) {
+            return Err(LemonupError::SharedChangeWaits {
+                paths: current.waiting_for,
+            });
         } else {
             write_private_file(&self.path, &rendered)?;
         }
-        link.remember(SharedSettings::from_config(config));
-        Ok(())
+        link.remember(merged);
+        Ok(file_config)
     }
 
-    pub fn write_new_config(&self, config: &AppConfig) -> Result<()> {
+    pub fn write_new_config(&self, config: &AppConfig) -> Result<AppConfig> {
         self.write_config(config)
     }
 }

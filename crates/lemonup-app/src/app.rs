@@ -4208,10 +4208,8 @@ impl App {
                 let mut saved = self.config_pane.persisted.clone();
                 saved.hide_first_run_card = true;
                 match self.config_store.write_config(&saved) {
-                    Ok(()) => {
-                        let mut pane = self.config_pane.clone();
-                        pane.persisted = saved.clone();
-                        pane.draft.hide_first_run_card = true;
+                    Ok(saved) => {
+                        let pane = self.config_pane.mark_saved(saved.clone());
                         vec![
                             AppAction::SetPersistedConfig(saved),
                             AppAction::SetConfigPaneState(pane),
@@ -5824,6 +5822,25 @@ impl App {
         }
     }
 
+    /// Reads the settings all games share again, so Settings shows them as stored, and the
+    /// next change saves when it differs from them. When they can't be read, the values
+    /// shown stay as they were.
+    fn reload_shared_settings(&mut self) {
+        let mut persisted = self.config_pane.persisted.clone();
+        if let Err(error) = self.config_store.refresh_shared(&mut persisted) {
+            tracing::warn!(%error, "could not read the settings all games share");
+            return;
+        }
+        if persisted == self.config_pane.persisted {
+            return;
+        }
+        let mut pane = self.config_pane.clone();
+        lemonup_core::SharedSettings::from_config(&persisted).apply_to(&mut pane.draft);
+        pane.persisted = persisted.clone();
+        self.apply(AppAction::SetPersistedConfig(persisted));
+        self.config_pane = pane;
+    }
+
     fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.quit_requested = true,
@@ -6096,6 +6113,10 @@ impl App {
                 if detail_mode == DetailMode::Backup {
                     self.reload_backups();
                 }
+                // Settings shows the shared values as stored, another game's changes too.
+                if detail_mode == DetailMode::Config {
+                    self.reload_shared_settings();
+                }
             }
             AppAction::ReenterOnboarding => {
                 self.shell_mode = ShellMode::Onboarding;
@@ -6239,7 +6260,7 @@ impl App {
                 };
 
                 match self.config_store.write_new_config(&config) {
-                    Ok(()) => {
+                    Ok(config) => {
                         self.config_present = true;
                         self.config_pane = self.config_pane.mark_saved(config.clone());
                         self.wago_api_key = wago_api_key_in_use(
@@ -7395,13 +7416,13 @@ impl App {
         field: ConfigField,
     ) -> std::result::Result<Vec<AppAction>, String> {
         match self.config_store.write_config(&next.draft) {
-            Ok(()) => Ok(vec![
-                AppAction::SetPersistedConfig(next.draft.clone()),
-                AppAction::SetConfigPaneState(next.mark_saved(next.draft.clone())),
+            Ok(saved) => Ok(vec![
+                AppAction::SetPersistedConfig(saved.clone()),
+                AppAction::SetConfigPaneState(next.mark_saved(saved.clone())),
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Done,
                     DetailMode::Config,
-                    &self.config_field_saved_message(field, &next.draft),
+                    &self.config_field_saved_message(field, &saved),
                 )),
             ]),
             Err(error) => Err(format!("failed to save {}: {error}", field.label())),
@@ -20589,6 +20610,126 @@ mod tests {
             assert_eq!(app.config_pane.draft.theme, changed);
         }
 
+        /// Reviewer's scenario F in the TUI: while another game's settings can't be read, a
+        /// change to a setting all games share isn't saved, and Settings says why.
+        #[test]
+        fn a_shared_change_waits_while_another_games_settings_cant_be_read() {
+            let games = games(true);
+            let shared = lemonup_core::SharedSettingsStore::for_roots(&games.roots);
+            std::fs::remove_file(shared.path()).expect("as before shared settings");
+            let broken = games.roots.paths("broken").expect("paths");
+            std::fs::create_dir_all(&broken.config_dir).expect("dir");
+            std::fs::write(&broken.config_file, "theme = [").expect("broken");
+            let mut app = open_app(&games, "forever");
+            let before = app.config_pane.persisted.theme;
+
+            press_key(&mut app, KeyCode::Char('s'));
+            app.config_pane.selected_field = ConfigField::ALL
+                .iter()
+                .position(|field| *field == ConfigField::Theme)
+                .expect("theme row");
+            press_key(&mut app, KeyCode::Right);
+
+            let message = app
+                .active_detail_status_message(DetailMode::Config)
+                .expect("a message");
+            assert!(
+                message.contains(&format!(
+                    "this change waits until {} can be read",
+                    broken.config_file.display()
+                )),
+                "{message}"
+            );
+            assert!(!message.contains("Saved"), "{message}");
+            assert_eq!(app.config_pane.persisted.theme, before);
+            assert_eq!(app.config_pane.draft.theme, before, "shows the old value");
+            assert!(!shared.path().exists());
+            let ConfigLoad::Loaded(stored) =
+                ConfigStore::for_profile(&games.roots.paths("forever").expect("paths"))
+                    .load()
+                    .expect("load")
+            else {
+                panic!("forever is set up");
+            };
+            assert_eq!(stored.theme, before);
+        }
+
+        /// Reviewer's scenario J in the TUI: another window saved a key since this one read
+        /// the settings. Settings shows that key, and typing the old one saves it.
+        #[test]
+        fn settings_shows_the_shared_values_as_stored() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+            let old_theme = retail.config_pane.persisted.theme;
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+            change_setting(&mut forever, ConfigField::Theme);
+            let theme = shared_now(&games).theme;
+            assert_ne!(theme, old_theme);
+
+            press_key(&mut retail, KeyCode::Char('s'));
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert!(retail.config_pane.persisted.wago_api_key.as_deref() == Some(KEY));
+            assert_eq!(retail.config_pane.draft.theme, theme);
+            assert!(
+                retail.wago_api_key.as_deref() == Some(KEY),
+                "the key in use"
+            );
+            press_key(&mut retail, KeyCode::Esc);
+
+            // Typing back the key Retail started with saves it.
+            let mut next = retail.config_pane.clone();
+            next.draft.wago_api_key = None;
+            for action in retail
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("remove the key")
+            {
+                retail.apply(action);
+            }
+            assert!(shared_now(&games).wago_api_key.is_none());
+            assert_eq!(shared_now(&games).theme, theme);
+        }
+
+        /// After a save, Settings shows every shared value as stored, also the ones another
+        /// window changed.
+        #[test]
+        fn a_save_shows_the_shared_values_another_window_saved() {
+            const KEY: &str = "key-saved-in-forever";
+            let games = games(true);
+            let mut retail = open_app(&games, DEFAULT_PROFILE);
+            let mut forever = open_app(&games, "forever");
+            let mut next = forever.config_pane.clone();
+            next.draft.wago_api_key = Some(KEY.to_string());
+            for action in forever
+                .persist_config_pane(next, ConfigField::WagoApiKey)
+                .expect("save the key")
+            {
+                forever.apply(action);
+            }
+
+            let mut next = retail.config_pane.clone();
+            next.draft.reduce_motion = !next.draft.reduce_motion;
+            for action in retail
+                .persist_config_pane(next, ConfigField::ReduceMotion)
+                .expect("save")
+            {
+                retail.apply(action);
+            }
+            assert!(retail.config_pane.draft.wago_api_key.as_deref() == Some(KEY));
+            assert!(
+                retail.wago_api_key.as_deref() == Some(KEY),
+                "the key in use"
+            );
+        }
+
         fn shared_now(games: &Games) -> lemonup_core::SharedSettings {
             lemonup_core::SharedSettingsStore::for_roots(&games.roots)
                 .read()
@@ -20820,6 +20961,29 @@ mod tests {
                 .expect_err("refused");
             assert!(error.contains("is bound to"), "{error}");
             assert_eq!(std::fs::read(&paths.state_db_file).expect("read"), before);
+        }
+
+        /// The game in use may be saving the settings all games share: a check of another
+        /// game never writes them, so neither undoes the other's change.
+        #[tokio::test]
+        async fn a_background_check_never_writes_the_shared_settings() {
+            let games = games(true);
+            // A game LemonUp hasn't opened yet: its first load would record its settings.
+            let classic = games.roots.paths("classic").expect("paths");
+            ConfigStore::new(classic.config_file.clone())
+                .write_config(&AppConfig::new_unconfigured())
+                .expect("write classic");
+            let shared = lemonup_core::SharedSettingsStore::for_roots(&games.roots);
+            let before = std::fs::read(shared.path()).expect("read");
+
+            let error = check_other_game(classic, None)
+                .await
+                .expect_err("no AddOns folder");
+            assert!(error.contains("no AddOns folder"), "{error}");
+            assert!(
+                std::fs::read(shared.path()).expect("read") == before,
+                "written"
+            );
         }
 
         fn badge_app(ready: usize) -> App {
