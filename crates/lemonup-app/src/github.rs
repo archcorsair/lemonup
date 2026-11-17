@@ -957,7 +957,7 @@ fn declares_x_library(folder: &Path) -> Result<bool, String> {
             continue;
         }
         let bytes = fs::read(entry.path()).map_err(|error| error.to_string())?;
-        if lemonup_core::parse_toc_content(&String::from_utf8_lossy(&bytes), "").x_library {
+        if lemonup_core::parse_toc_content(&String::from_utf8_lossy(&bytes), "", None).x_library {
             return Ok(true);
         }
     }

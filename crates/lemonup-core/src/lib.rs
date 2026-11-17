@@ -6,6 +6,7 @@ pub mod events;
 pub mod paths;
 pub mod scan;
 pub mod storage;
+pub mod toc_conditions;
 pub mod toc_edit;
 pub mod transfer;
 pub mod v1_migration;
