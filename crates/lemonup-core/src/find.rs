@@ -1306,6 +1306,11 @@ fn cluster(found: &[FoundAddon]) -> Vec<Vec<usize>> {
 /// the source names for the files on disk, the source's newest version (so the status is
 /// right at once) and the source's folders as managed folders. The rest comes from the parent
 /// folder's TOC, as a scan reads it.
+///
+/// When the source doesn't name the version on disk (a Wago.io match without a release label),
+/// the TOC Version is kept but the source's newest version is not: the two may be written
+/// differently, so comparing them could claim Update ready falsely. The addon is then "Not
+/// checked yet" until the next check.
 pub fn link_record(found: &FoundAddon, parent: &ScannedAddon, now: OffsetDateTime) -> AddonRecord {
     let mut record = AddonRecord::new(
         parent.name.clone(),
@@ -1324,8 +1329,12 @@ pub fn link_record(found: &FoundAddon, parent: &ScannedAddon, now: OffsetDateTim
     record.required_deps = parent.required_deps.clone();
     record.optional_deps = parent.optional_deps.clone();
     record.embedded_libs = parent.embedded_libs.clone();
-    record.remote_version = found.latest_version.clone();
-    record.last_checked_at = found.latest_version.as_ref().map(|_| now);
+    let latest = found
+        .latest_version
+        .clone()
+        .filter(|_| found.matched_version.is_some());
+    record.last_checked_at = latest.as_ref().map(|_| now);
+    record.remote_version = latest;
     record.set_managed_owned_folders(
         found
             .folders

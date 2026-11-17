@@ -1095,3 +1095,39 @@ fn an_incomplete_wago_answer_leaves_what_it_did_not_match_not_checked() {
     assert_eq!(spy.not_checked_by, [FindSource::Wago]);
     assert_eq!(report.failed, [FindSource::Wago]);
 }
+
+#[test]
+fn a_wago_match_without_a_release_label_claims_no_status() {
+    let mut fixture = fixture();
+    addon(&fixture.addons, "Pawn", &["## Version: 2.5.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let mut project = wago(
+        "PAWN",
+        "Pawn",
+        vec![("Pawn".to_string(), hash_of(&inputs, "Pawn"))],
+    );
+    project.matched_version = None;
+    project.latest_version = Some("v2.5.0".to_string());
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+    let pick = result(&report, "Pawn").found().expect("pick").clone();
+    assert_eq!(pick.label, FindLabel::Exact);
+
+    let linked = link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Forever,
+        &[pick],
+    )
+    .expect("link");
+
+    let row = &linked[0];
+    assert_eq!(row.source, SourceKind::Wago);
+    assert_eq!(row.version.as_deref(), Some("2.5.0"));
+    assert_eq!(row.remote_version, None);
+    assert_eq!(row.last_checked_at, None);
+}
