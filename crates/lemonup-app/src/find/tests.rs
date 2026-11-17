@@ -1167,6 +1167,30 @@ fn heading(color: &str, title: &str, count: usize) -> String {
 }
 
 #[test]
+fn the_quiet_headings_are_bold_in_the_text_role_not_muted() {
+    let lines = colored_report();
+
+    for (title, count) in [
+        ("On CurseForge only, LemonUp can't update these yet", 11),
+        ("Not found", 2),
+        ("Skipped, developer copy", 1),
+    ] {
+        // The text role is the terminal's own color, so bold is the only escape on the title.
+        let expected = format!("{BOLD}{title}{END} {MUTED}({count}){END}");
+        assert!(
+            lines.contains(&expected),
+            "missing {expected:?} in {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains(&format!("{MUTED}{title}"))),
+            "{title} is muted"
+        );
+    }
+}
+
+#[test]
 fn colored_headings_are_bold_in_the_color_of_what_they_mean() {
     let lines = colored_report();
 
@@ -1177,13 +1201,6 @@ fn colored_headings_are_bold_in_the_color_of_what_they_mean() {
         (AMBER, "Partial matches", 1),
         (AMBER, "Choose one in LemonUp", 1),
         (RED, "Not checked", 1),
-        (
-            MUTED,
-            "On CurseForge only, LemonUp can't update these yet",
-            11,
-        ),
-        (MUTED, "Not found", 2),
-        (MUTED, "Skipped, developer copy", 1),
     ] {
         let expected = heading(color, title, count);
         assert!(
@@ -1424,6 +1441,72 @@ fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
         "{error}"
     );
     assert!(!error.contains("also takes"), "{error}");
+}
+
+#[test]
+fn the_report_wraps_to_the_width_it_is_given() {
+    let wide = |width: usize| {
+        human_report(
+            &full_report(),
+            &wowinterface_down(),
+            &full_names(),
+            44,
+            Paint::PLAIN.with_width(width),
+        )
+    };
+    let at_78 = wide(78);
+    let at_100 = wide(100);
+    let at_120 = wide(120);
+
+    // At 78 the lines wrap as they always did.
+    assert_eq!(
+        section_lines(&at_78, "Choose one in LemonUp (1)").len(),
+        2,
+        "{at_78:?}"
+    );
+    assert!(
+        at_78.contains(
+            &"      also takes GatherMate2Storage_Dragonflight, GatherMate2Storage_Midnight,"
+                .to_string()
+        )
+    );
+    // At 100 and 120 the Choose one line fits on one line.
+    for lines in [&at_100, &at_120] {
+        assert_eq!(
+            section_lines(lines, "Choose one in LemonUp (1)"),
+            [
+                "  QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from the release)"
+            ]
+        );
+    }
+    // The "also takes" folders need 120 to fit on one line, and still wrap at 100.
+    assert!(
+        !at_100
+            .iter()
+            .any(|line| line.contains("Midnight, GatherMate2Storage_Shadowlands")),
+        "{at_100:?}"
+    );
+    assert!(
+        at_120.contains(
+            &"      also takes GatherMate2Storage_Dragonflight, GatherMate2Storage_Midnight, GatherMate2Storage_Shadowlands"
+                .to_string()
+        ),
+        "{at_120:?}"
+    );
+}
+
+#[test]
+fn the_width_follows_the_terminal_within_limits() {
+    use super::human::report_width;
+
+    // A column of margin, kept between 60 and 120.
+    assert_eq!(report_width(true, Some(100)), 99);
+    assert_eq!(report_width(true, Some(40)), 60);
+    assert_eq!(report_width(true, Some(200)), 120);
+    // Not a terminal, or a size that can't be read: 78.
+    assert_eq!(report_width(false, Some(200)), 78);
+    assert_eq!(report_width(true, None), 78);
+    assert_eq!(report_width(false, None), 78);
 }
 
 #[test]

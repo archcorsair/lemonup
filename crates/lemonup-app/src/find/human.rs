@@ -18,8 +18,12 @@ use super::{LinkOutcome, SourceProblem, exact_picks};
 use crate::source_error::SourceErrorKind;
 use crate::theme::{ColorRoles, DisplayEnv};
 
-/// Longest line of a wrapped list or sentence. Addon lines are never wrapped or cut.
+/// Longest line of a wrapped list or sentence when the terminal's width is unknown. Addon lines
+/// are never wrapped or cut.
 const WIDTH: usize = 78;
+/// The narrowest and widest the report is wrapped to on a terminal.
+const MIN_WIDTH: usize = 60;
+const MAX_WIDTH: usize = 120;
 const INDENT: &str = "  ";
 const SUB_INDENT: &str = "      ";
 
@@ -32,7 +36,7 @@ enum Tone {
     Warn,
     /// A source failed: the problem role.
     Problem,
-    /// Nothing LemonUp can do: the muted role.
+    /// Nothing LemonUp can do: bold in the normal text role, so it stays readable.
     Quiet,
 }
 
@@ -52,22 +56,38 @@ pub(crate) fn color_wanted(is_terminal: bool, display: DisplayEnv) -> bool {
     is_terminal && !display.no_color
 }
 
-/// How the readable report is drawn. Colors are the Terminal theme's color roles, so they follow
-/// the person's own terminal palette. It is a value, not a look at the environment, so tests
-/// render both ways.
+/// The columns the report is wrapped to: the terminal's width less a column of margin, kept
+/// between 60 and 120. Without a terminal, or when its size can't be read, 78.
+pub(crate) fn report_width(is_terminal: bool, columns: Option<u16>) -> usize {
+    match columns {
+        Some(columns) if is_terminal => {
+            usize::from(columns.saturating_sub(1)).clamp(MIN_WIDTH, MAX_WIDTH)
+        }
+        _ => WIDTH,
+    }
+}
+
+/// How the readable report is drawn: its color and the columns it wraps to. Colors are the
+/// Terminal theme's color roles, so they follow the person's own terminal palette. It is a
+/// value, not a look at the environment, so tests render both ways and at any width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Paint(Option<ColorRoles>);
+pub(crate) struct Paint(Option<ColorRoles>, usize);
 
 impl Paint {
-    /// No escape codes at all.
-    pub(crate) const PLAIN: Self = Self(None);
+    /// No escape codes at all, wrapped at 78 columns.
+    pub(crate) const PLAIN: Self = Self(None, WIDTH);
+
+    /// The same drawing, wrapped to `width` columns.
+    pub(crate) fn with_width(self, width: usize) -> Self {
+        Self(self.0, width)
+    }
 
     /// The Terminal theme's colors.
     pub(crate) fn terminal() -> Self {
         // The decision to use color was made by the caller. Without this, crossterm would drop
         // every color again whenever `NO_COLOR` is set in the environment it runs in.
         Colored::set_ansi_color_disabled(false);
-        Self(Some(ColorRoles::terminal()))
+        Self(Some(ColorRoles::terminal()), WIDTH)
     }
 
     /// Colored for a stream that `is_terminal` (and that `display` allows), else plain.
@@ -80,8 +100,11 @@ impl Paint {
     }
 
     pub(crate) fn for_stdout() -> Self {
-        let colors = std::io::stdout().is_terminal() && ansi_supported();
+        let is_terminal = std::io::stdout().is_terminal();
+        let colors = is_terminal && ansi_supported();
+        let columns = crossterm::terminal::size().ok().map(|(columns, _)| columns);
         Self::for_stream(colors, DisplayEnv::detect())
+            .with_width(report_width(is_terminal, columns))
     }
 
     pub(crate) fn for_stderr() -> Self {
@@ -131,7 +154,7 @@ impl Paint {
             Tone::Good => |roles| roles.green,
             Tone::Warn => |roles| roles.amber,
             Tone::Problem => |roles| roles.red,
-            Tone::Quiet => |roles| roles.muted,
+            Tone::Quiet => |roles| roles.text,
         };
         self.apply(text, pick, true)
     }
@@ -214,7 +237,7 @@ fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
         ));
         for note in &entry.notes {
             lines.extend(
-                wrap_words(SUB_INDENT, note)
+                wrap_words(SUB_INDENT, note, paint.1)
                     .iter()
                     .map(|line| paint.muted(line)),
             );
@@ -223,14 +246,14 @@ fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
     lines
 }
 
-/// Fills lines of at most [`WIDTH`] columns with `units`, each kept whole, after `indent`.
-fn wrap_units(indent: &str, units: &[String]) -> Vec<String> {
+/// Fills lines of at most `width` columns with `units`, each kept whole, after `indent`.
+fn wrap_units(indent: &str, units: &[String], width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for unit in units {
         if line.is_empty() {
             line = format!("{indent}{unit}");
-        } else if line.chars().count() + 1 + unit.chars().count() > WIDTH {
+        } else if line.chars().count() + 1 + unit.chars().count() > width {
             lines.push(std::mem::take(&mut line));
             line = format!("{indent}{unit}");
         } else {
@@ -245,7 +268,7 @@ fn wrap_units(indent: &str, units: &[String]) -> Vec<String> {
 }
 
 /// `items` as a wrapped, comma separated list.
-fn wrapped_list(items: Vec<String>) -> Vec<String> {
+fn wrapped_list(items: Vec<String>, width: usize) -> Vec<String> {
     let last = items.len().saturating_sub(1);
     let units = items
         .into_iter()
@@ -258,22 +281,23 @@ fn wrapped_list(items: Vec<String>) -> Vec<String> {
             }
         })
         .collect::<Vec<_>>();
-    wrap_units(INDENT, &units)
+    wrap_units(INDENT, &units, width)
 }
 
 /// `text` wrapped at spaces, every line after `indent`.
-fn wrap_words(indent: &str, text: &str) -> Vec<String> {
+fn wrap_words(indent: &str, text: &str, width: usize) -> Vec<String> {
     wrap_units(
         indent,
         &text
             .split_whitespace()
             .map(str::to_string)
             .collect::<Vec<_>>(),
+        width,
     )
 }
 
-fn wrapped_text(text: &str) -> Vec<String> {
-    wrap_words(INDENT, text)
+fn wrapped_text(text: &str, width: usize) -> Vec<String> {
+    wrap_words(INDENT, text, width)
 }
 
 fn capitalize(text: &str) -> String {
@@ -451,7 +475,7 @@ fn choice_why(candidate: &FoundAddon) -> Option<String> {
 
 /// `QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from the release)`,
 /// wrapped. The choices are named by their folders.
-fn choose_one_lines(result: &FindResult) -> Vec<String> {
+fn choose_one_lines(result: &FindResult, width: usize) -> Vec<String> {
     let mut seen = HashSet::new();
     let repeated = result
         .candidates
@@ -476,7 +500,7 @@ fn choose_one_lines(result: &FindResult) -> Vec<String> {
         [only] => only.clone(),
         [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     };
-    wrap_words(INDENT, &joined)
+    wrap_words(INDENT, &joined, width)
 }
 
 /// The names of name-only results, sorted. Results that share one CurseForge project are one
@@ -520,7 +544,7 @@ fn name_list(results: &[&FindResult], names: &LocalNames) -> Vec<String> {
 }
 
 /// What a failed source means for the addons it couldn't check.
-fn problem_line(problem: &SourceProblem) -> Vec<String> {
+fn problem_line(problem: &SourceProblem, width: usize) -> Vec<String> {
     let provider = problem.source.name();
     let mut text = format!(
         "{provider}: {}",
@@ -529,7 +553,7 @@ fn problem_line(problem: &SourceProblem) -> Vec<String> {
     if problem.error.kind == SourceErrorKind::Other && !problem.error.detail.is_empty() {
         text.push_str(&format!(" Details: {}", problem.error.detail));
     }
-    wrapped_text(&text)
+    wrapped_text(&text, width)
 }
 
 fn found_of<'a>(results: &[&'a FindResult]) -> Vec<&'a FoundAddon> {
@@ -657,7 +681,7 @@ pub(crate) fn human_report(
             .map(|result| {
                 (
                     names.name(&result.folder, &result.name).to_lowercase(),
-                    choose_one_lines(result),
+                    choose_one_lines(result, paint.1),
                 )
             })
             .collect::<Vec<_>>();
@@ -677,12 +701,12 @@ pub(crate) fn human_report(
         .flat_map(|result| result.not_checked_by.iter().copied())
         .collect::<HashSet<_>>();
     if !not_checked.is_empty() {
-        let mut body = wrapped_list(name_list(&not_checked, names));
+        let mut body = wrapped_list(name_list(&not_checked, names), paint.1);
         for problem in problems
             .iter()
             .filter(|problem| asked_in_vain.contains(&problem.source))
         {
-            body.extend(problem_line(problem));
+            body.extend(problem_line(problem, paint.1));
         }
         section(
             &mut lines,
@@ -700,7 +724,7 @@ pub(crate) fn human_report(
     if !unexplained.is_empty() {
         let body = unexplained
             .iter()
-            .flat_map(|problem| problem_line(problem))
+            .flat_map(|problem| problem_line(problem, paint.1))
             .collect();
         section(
             &mut lines,
@@ -727,7 +751,7 @@ pub(crate) fn human_report(
                 Tone::Quiet,
                 title,
                 results.len(),
-                wrapped_list(name_list(&results, names)),
+                wrapped_list(name_list(&results, names), paint.1),
             );
         }
     }
