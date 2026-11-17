@@ -1095,16 +1095,38 @@ fn is_valid_wago_slug(value: &str) -> bool {
 }
 
 pub(crate) fn resolve_wago_api_key(config_state: &ConfigLoad) -> Option<String> {
-    let from_config = match config_state {
+    let saved = match config_state {
         ConfigLoad::Loaded(config) => config.wago_api_key.clone(),
         ConfigLoad::Missing(_) => None,
     };
+    wago_api_key_in_use(saved, environment_wago_api_key(process_env))
+}
 
-    let key = from_config.or_else(read_process_wago_api_key);
+/// The key to use: the one saved in the profile config, else the one from the environment.
+/// Every place that turns a config into the running key goes through here, so a key that comes
+/// from `WAGO_API_KEY` is not lost when the config is saved.
+pub(crate) fn wago_api_key_in_use(
+    saved: Option<String>,
+    environment: Option<String>,
+) -> Option<String> {
+    saved.or(environment)
+}
+
+/// The key that comes from outside the config: `WAGO_API_KEY` as `lookup` sees it, else (debug
+/// builds only) the repo-root `.env`.
+pub(crate) fn environment_wago_api_key(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let key = lookup("WAGO_API_KEY")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     // Developer convenience only: release binaries never read a `.env` baked in at build time.
     #[cfg(debug_assertions)]
     let key = key.or_else(load_repo_root_wago_api_key);
     key
+}
+
+/// The process environment, for [`environment_wago_api_key`].
+pub(crate) fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 /// User-facing list of where a missing Wago API key can come from. Release builds do not read
@@ -1115,13 +1137,6 @@ pub(crate) fn wago_api_key_sources_hint() -> &'static str {
     } else {
         "Accepted sources: profile config, WAGO_API_KEY."
     }
-}
-
-fn read_process_wago_api_key() -> Option<String> {
-    std::env::var("WAGO_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(debug_assertions)]
@@ -1854,5 +1869,23 @@ mod tests {
         assert!(hint.contains("profile config"));
         assert!(hint.contains("WAGO_API_KEY"));
         assert_eq!(hint.contains(".env"), cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn environment_key_is_trimmed_and_read_from_the_lookup() {
+        let key = super::environment_wago_api_key(|name| {
+            (name == "WAGO_API_KEY").then(|| "  env-key \n".to_string())
+        });
+        assert_eq!(key.as_deref(), Some("env-key"));
+    }
+
+    #[test]
+    fn saved_key_wins_over_the_environment_key() {
+        let in_use = |saved: Option<&str>, environment: Option<&str>| {
+            super::wago_api_key_in_use(saved.map(str::to_string), environment.map(str::to_string))
+        };
+        assert_eq!(in_use(Some("saved"), Some("env")).as_deref(), Some("saved"));
+        assert_eq!(in_use(None, Some("env")).as_deref(), Some("env"));
+        assert_eq!(in_use(None, None), None);
     }
 }

@@ -53,8 +53,8 @@ use crate::update::{
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
-    inspect_wago_install_target, install_wago_addon_with_replace, resolve_wago_api_key,
-    search_wago_addons,
+    environment_wago_api_key, inspect_wago_install_target, install_wago_addon_with_replace,
+    process_env, resolve_wago_api_key, search_wago_addons, wago_api_key_in_use,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -2711,6 +2711,9 @@ pub struct App {
     config_pane: ConfigPaneState,
     backup_pane: BackupPaneState,
     wago_api_key: Option<String>,
+    /// A Wago.io key that comes from `WAGO_API_KEY` rather than the config. It is used while the
+    /// config has no key, and is never written to the config.
+    wago_env_key: Option<String>,
     config_store: ConfigStore,
     state_db_file: PathBuf,
     trash_dir: PathBuf,
@@ -2780,6 +2783,7 @@ impl App {
         let database = StateDatabase::open(state_db_file.clone())?;
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
+        let wago_env_key = environment_wago_api_key(process_env);
         let wago_api_key = resolve_wago_api_key(&config_state);
         let loaded_config = match &config_state {
             ConfigLoad::Loaded(config) => config.clone(),
@@ -2897,6 +2901,7 @@ impl App {
                 last_completed_backup_at: None,
             },
             wago_api_key,
+            wago_env_key,
             config_store,
             state_db_file,
             trash_dir,
@@ -5884,7 +5889,8 @@ impl App {
                 self.config_pane = state;
             }
             AppAction::SetPersistedConfig(config) => {
-                self.wago_api_key = config.wago_api_key.clone();
+                self.wago_api_key =
+                    wago_api_key_in_use(config.wago_api_key.clone(), self.wago_env_key.clone());
                 self.config_present = true;
                 self.ui_theme = self.look_theme(&config);
                 if config.show_libs != self.config_pane.persisted.show_libs {
@@ -6161,7 +6167,10 @@ impl App {
                     Ok(()) => {
                         self.config_present = true;
                         self.config_pane = self.config_pane.mark_saved(config.clone());
-                        self.wago_api_key = config.wago_api_key.clone();
+                        self.wago_api_key = wago_api_key_in_use(
+                            config.wago_api_key.clone(),
+                            self.wago_env_key.clone(),
+                        );
                         self.effective_addon_dir = Some(path.clone());
                         let backup_store = backup_root(&self.data_dir);
                         if let Err(error) = adopt_legacy_backups(&backup_store, &path) {
@@ -7175,6 +7184,9 @@ impl App {
             ))
             .to_string(),
             ConfigField::SimpleSymbols => on_off(draft.simple_symbols || !display.utf8).to_string(),
+            ConfigField::WagoApiKey if self.wago_key_from_environment(draft) => {
+                "From WAGO_API_KEY".to_string()
+            }
             _ => config_value_text(draft, field),
         }
     }
@@ -7260,10 +7272,17 @@ impl App {
         }
     }
 
+    /// The Wago.io key in use comes from `WAGO_API_KEY` because `config` has none saved.
+    fn wago_key_from_environment(&self, config: &AppConfig) -> bool {
+        config.wago_api_key.is_none() && self.wago_env_key.is_some()
+    }
+
     fn config_field_saved_message(&self, field: ConfigField, config: &AppConfig) -> String {
         if field == ConfigField::WagoApiKey {
             return if config.wago_api_key.is_some() {
                 "Saved your Wago.io key".to_string()
+            } else if self.wago_key_from_environment(config) {
+                "Removed your Wago.io key. Using the one from WAGO_API_KEY.".to_string()
             } else {
                 "Removed your Wago.io key".to_string()
             };
@@ -8571,6 +8590,7 @@ mod tests {
             }),
             backup_pane: BackupPaneState::default(),
             wago_api_key: Some("test-wago-key".to_string()),
+            wago_env_key: None,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
@@ -11400,6 +11420,144 @@ mod tests {
         app.config_pane.edit = None;
         let text = render_rows(&mut app, 120, 36).join("\n");
         assert!(text.contains("Not set"), "{text}");
+    }
+
+    /// An app whose Wago.io key comes from `WAGO_API_KEY` and not from the config.
+    fn app_with_environment_wago_key(key: &str) -> (App, tempfile::TempDir) {
+        let temp = tempdir().expect("tempdir");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.wago_api_key = None;
+        app.config_pane.persisted.wago_api_key = None;
+        app.wago_env_key = Some(key.to_string());
+        app.wago_api_key = Some(key.to_string());
+        app.config_store = ConfigStore::new(temp.path().join("config.toml"));
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        (app, temp)
+    }
+
+    fn select_config_field(app: &mut App, field: ConfigField) {
+        app.config_pane.selected_field = ConfigField::ALL
+            .iter()
+            .position(|candidate| *candidate == field)
+            .expect("field");
+    }
+
+    #[test]
+    fn settings_keeps_a_wago_key_from_the_environment_and_says_so() {
+        let env_key = "ENVKEY1234567890";
+        let (mut app, _temp) = app_with_environment_wago_key(env_key);
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(text.contains("From WAGO_API_KEY"), "{text}");
+            assert!(!text.contains("Not set"), "{text}");
+            assert!(!text.contains(env_key), "{text}");
+        }
+
+        // Saving another setting closes the loop through the real message flow.
+        select_config_field(&mut app, ConfigField::ShowLibs);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+
+        assert_eq!(app.wago_api_key.as_deref(), Some(env_key));
+        assert_eq!(app.config_pane.persisted.wago_api_key, None);
+        let saved = app.config_store.load().expect("load config");
+        match saved {
+            ConfigLoad::Loaded(config) => assert_eq!(config.wago_api_key, None),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(text.contains("From WAGO_API_KEY"), "{text}");
+            assert!(!text.contains(env_key), "{text}");
+        }
+    }
+
+    #[test]
+    fn settings_explains_a_wago_key_from_the_environment() {
+        let (mut app, _temp) = app_with_environment_wago_key("ENVKEY1234567890");
+        select_config_field(&mut app, ConfigField::WagoApiKey);
+        let wide = render_rows(&mut app, 120, 36).join("\n");
+        assert!(wide.contains("WAGO_API_KEY environment variable"), "{wide}");
+        assert!(wide.contains("A key you save here is used"), "{wide}");
+        let narrow = render_rows(&mut app, 80, 24).join("\n");
+        assert!(narrow.contains("WAGO_API_KEY"), "{narrow}");
+        assert!(narrow.contains("used instead"), "{narrow}");
+    }
+
+    #[test]
+    fn finishing_setup_keeps_a_wago_key_from_the_environment() {
+        let temp = tempdir().expect("tempdir");
+        let (paths, retail, _forever) = two_client_profile(temp.path());
+        let mut app = App::bootstrap(
+            paths,
+            AppRuntime::new(DEFAULT_PROFILE.to_string(), None, Vec::new()),
+        )
+        .expect("bootstrap");
+        app.wago_env_key = Some("ENVKEY1234567890".to_string());
+        app.wago_api_key = Some("ENVKEY1234567890".to_string());
+
+        let mut config = app.config_pane.draft.clone();
+        config.addon_dir = Some(retail);
+        config.wago_api_key = None;
+        app.apply(AppAction::SaveOnboardingConfig(config));
+
+        assert_eq!(app.wago_api_key.as_deref(), Some("ENVKEY1234567890"));
+        match app.config_store.load().expect("load config") {
+            ConfigLoad::Loaded(saved) => assert_eq!(saved.wago_api_key, None),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+    }
+
+    #[test]
+    fn removing_the_saved_wago_key_falls_back_to_the_environment_key() {
+        let (mut app, _temp) = app_with_environment_wago_key("ENVKEY1234567890");
+        app.config_pane.draft.wago_api_key = Some("saved-key".to_string());
+        app.config_pane.persisted.wago_api_key = Some("saved-key".to_string());
+        app.wago_api_key = Some("saved-key".to_string());
+        select_config_field(&mut app, ConfigField::WagoApiKey);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        // Clear the box and save the empty value.
+        for _ in 0.."saved-key".len() {
+            apply_all(&mut app, AppMessage::ConfigBackspace);
+        }
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+
+        assert_eq!(app.config_pane.persisted.wago_api_key, None);
+        assert_eq!(app.wago_api_key.as_deref(), Some("ENVKEY1234567890"));
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Config,
+                "Removed your Wago.io key. Using the one from WAGO_API_KEY."
+            )
+            .text
+        );
+    }
+
+    #[test]
+    fn removing_the_saved_wago_key_without_an_environment_key_stops_using_one() {
+        let (mut app, _temp) = app_with_environment_wago_key("unused");
+        app.wago_env_key = None;
+        app.config_pane.draft.wago_api_key = Some("saved-key".to_string());
+        app.config_pane.persisted.wago_api_key = Some("saved-key".to_string());
+        app.wago_api_key = Some("saved-key".to_string());
+        select_config_field(&mut app, ConfigField::WagoApiKey);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        for _ in 0.."saved-key".len() {
+            apply_all(&mut app, AppMessage::ConfigBackspace);
+        }
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+
+        assert_eq!(app.wago_api_key, None);
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Config,
+                "Removed your Wago.io key"
+            )
+            .text
+        );
     }
 
     #[test]
