@@ -567,8 +567,13 @@ fn key(folder: &str) -> String {
 struct Unit {
     name: String,
     folder: String,
-    /// The parent first, then its owned folders; only folders on disk.
+    /// The parent first, then its owned folders; only folders on disk, and never one another
+    /// addon holds.
     folders: Vec<String>,
+    /// Folders the row still lists that a linked addon (or a row from a newer LemonUp) holds,
+    /// for example after a scan that failed. Linking this addon would take them, so it is
+    /// refused until a scan sorts them out.
+    held: Vec<String>,
     has_row: bool,
 }
 
@@ -585,13 +590,20 @@ impl<'a> Groups<'a> {
         let mut units = Vec::new();
         let mut unit_of = HashMap::new();
         let present = |folder: &str| inputs.get(folder).map(|local| local.folder.clone());
+        let held = |folder: &str| {
+            rows.iter()
+                .any(|row| row.holds_its_folders() && row.claims_folder(folder))
+        };
         for row in rows.iter().filter(|row| !row.holds_its_folders()) {
-            let Some(parent) = present(&row.folder) else {
+            let Some(parent) = present(&row.folder).filter(|parent| !held(parent)) else {
                 continue;
             };
             let mut folders = vec![parent];
+            let mut held_folders = Vec::new();
             for owned in &row.owned_folders {
-                if let Some(owned) = present(&owned.name)
+                if held(&owned.name) {
+                    held_folders.push(owned.name.clone());
+                } else if let Some(owned) = present(&owned.name)
                     && !folders.iter().any(|known| key(known) == key(&owned))
                 {
                     folders.push(owned);
@@ -609,6 +621,7 @@ impl<'a> Groups<'a> {
                 },
                 folder: folders[0].clone(),
                 folders,
+                held: held_folders,
                 has_row: true,
             });
         }
@@ -624,6 +637,7 @@ impl<'a> Groups<'a> {
                 name: local.title.clone().unwrap_or_else(|| local.folder.clone()),
                 folder: local.folder.clone(),
                 folders: vec![local.folder.clone()],
+                held: Vec::new(),
                 has_row: false,
             });
         }
@@ -1161,11 +1175,13 @@ fn place(mut found: FoundAddon, inputs: &FindInputs, groups: &Groups<'_>) -> Fou
         found.matched_version = inputs.get(&parent).and_then(|local| local.version.clone());
     }
 
-    let own = groups
+    let own_unit = groups
         .unit_containing(&parent)
-        .filter(|unit| key(&unit.folder) == key(&parent))
+        .filter(|unit| key(&unit.folder) == key(&parent));
+    let own = own_unit
         .map(|unit| unit.folders.clone())
         .unwrap_or_default();
+    let own_held = own_unit.map(|unit| unit.held.clone()).unwrap_or_default();
     let contains =
         |folders: &[String], folder: &str| folders.iter().any(|known| key(known) == key(folder));
     found.joining = found
@@ -1189,7 +1205,13 @@ fn place(mut found: FoundAddon, inputs: &FindInputs, groups: &Groups<'_>) -> Fou
         .collect();
 
     let mut blocked = Vec::new();
-    for folder in found.folders.iter().chain(found.missing.iter()) {
+    let checked = found
+        .folders
+        .iter()
+        .chain(found.missing.iter())
+        .chain(found.leaving.iter())
+        .chain(own_held.iter());
+    for folder in checked {
         if let Some(owner) = groups.holder(folder) {
             let addon = if owner.name.trim().is_empty() {
                 owner.folder.clone()
@@ -1305,8 +1327,9 @@ pub fn link_record(found: &FoundAddon, parent: &ScannedAddon, now: OffsetDateTim
 ///
 /// Refuses, before writing, a pick whose folders are not all on disk, picks that share a
 /// folder, and (checked again inside the transaction) any pick that needs a folder of a linked
-/// addon or of a row from a newer LemonUp. Folders that leave a group have no row afterwards;
-/// the next scan lists them as Not linked addons.
+/// addon or of a row from a newer LemonUp, the folders the parent's Not linked row lists
+/// included. Folders that leave a group have no row afterwards; the next scan lists them as Not
+/// linked addons. Returns the linked rows as the database holds them after the write.
 pub fn link_found_addons(
     database: &mut StateDatabase,
     addons_dir: &Path,
@@ -1353,13 +1376,29 @@ pub fn link_found_addons(
 
     database.record_managed_addons(&records, |rows| {
         for record in &records {
+            if let Some(owner) = rows
+                .iter()
+                .find(|row| row.folder == record.folder && row.holds_its_folders())
+            {
+                return Err(LemonupError::InvalidArgument(format!(
+                    "{} can't be linked: its folder {} belongs to {}",
+                    record.name, record.folder, owner.folder
+                )));
+            }
+            // The folders the parent's Not linked row lists are absorbed too, so they count.
+            let listed = rows
+                .iter()
+                .filter(|row| row.folder == record.folder)
+                .flat_map(|row| row.owned_folders.iter().map(|owned| &owned.name));
             let folders = std::iter::once(&record.folder)
-                .chain(record.owned_folders.iter().map(|owned| &owned.name));
+                .chain(record.owned_folders.iter().map(|owned| &owned.name))
+                .chain(listed);
             for folder in folders {
-                if let Some(owner) = rows
-                    .iter()
-                    .find(|row| row.holds_its_folders() && row.claims_folder(folder))
-                {
+                if let Some(owner) = rows.iter().find(|row| {
+                    row.folder != record.folder
+                        && row.holds_its_folders()
+                        && row.claims_folder(folder)
+                }) {
                     return Err(LemonupError::InvalidArgument(format!(
                         "{} can't be linked: its folder {folder} belongs to {}",
                         record.name, owner.folder
@@ -1369,7 +1408,17 @@ pub fn link_found_addons(
         }
         Ok(())
     })?;
-    Ok(records)
+
+    // What the database holds now, never what was planned.
+    let rows = database.list_addons()?;
+    Ok(records
+        .iter()
+        .filter_map(|record| {
+            rows.iter()
+                .find(|row| row.folder == record.folder && row.source == record.source)
+                .cloned()
+        })
+        .collect())
 }
 
 #[cfg(test)]

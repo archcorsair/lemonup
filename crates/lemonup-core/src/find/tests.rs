@@ -795,3 +795,191 @@ fn a_write_that_fails_part_way_leaves_the_database_unchanged() {
     assert!(error.to_string().contains("newer LemonUp"), "{error}");
     assert_eq!(fixture.database.list_addons().expect("rows"), before);
 }
+
+fn rows_by_folder(database: &StateDatabase) -> Vec<(String, SourceKind, Vec<String>)> {
+    database
+        .list_addons()
+        .expect("rows")
+        .into_iter()
+        .map(|row| {
+            (
+                row.folder,
+                row.source,
+                row.owned_folders
+                    .into_iter()
+                    .map(|owned| owned.name)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The scan grouped GatherMate2_Data under GatherMate2. Wago.io matches GatherMate2_Data on its
+/// own (it joins from GatherMate2) and WoWInterface matches GatherMate2 alone (Data leaves).
+fn gathermate2_split(fixture: &Fixture) -> Vec<FoundAddon> {
+    addon(&fixture.addons, "GatherMate2", &["## Version: 2.0"]);
+    addon(&fixture.addons, "GatherMate2_Data", &["## Version: 1"]);
+    fixture
+        .database
+        .upsert_addon(&manual_row("GatherMate2", &["GatherMate2_Data"]))
+        .expect("row");
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let rows = fixture.database.list_addons().expect("rows");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "GMD",
+        "AAA GatherMate2 Data",
+        vec![(
+            "GatherMate2_Data".to_string(),
+            hash_of(&inputs, "GatherMate2_Data"),
+        )],
+    )]));
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "7",
+        "GatherMate2",
+        "2.0",
+        &[("GatherMate2", "2.0")],
+    )]);
+    let report = match_addons(&inputs, &rows, None, &lookups);
+    let picks = report
+        .results
+        .iter()
+        .filter(|result| result.preselected())
+        .filter_map(FindResult::found)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        picks
+            .iter()
+            .map(|pick| pick.parent_folder.as_str())
+            .collect::<Vec<_>>(),
+        ["GatherMate2_Data", "GatherMate2"]
+    );
+    picks
+}
+
+#[test]
+fn a_folder_that_joins_one_pick_and_leaves_another_keeps_both_rows_in_either_order() {
+    for reversed in [false, true] {
+        let mut fixture = fixture();
+        let mut picks = gathermate2_split(&fixture);
+        if reversed {
+            picks.reverse();
+        }
+
+        let linked = link_found_addons(
+            &mut fixture.database,
+            &fixture.addons,
+            GameFlavor::Forever,
+            &picks,
+        )
+        .expect("link");
+
+        let mut linked = linked
+            .iter()
+            .map(|row| (row.folder.as_str(), row.source))
+            .collect::<Vec<_>>();
+        linked.sort_by_key(|(folder, _)| *folder);
+        assert_eq!(
+            linked,
+            [
+                ("GatherMate2", SourceKind::WowInterface),
+                ("GatherMate2_Data", SourceKind::Wago),
+            ],
+            "reversed={reversed}"
+        );
+        assert_eq!(
+            rows_by_folder(&fixture.database),
+            [
+                (
+                    "GatherMate2".to_string(),
+                    SourceKind::WowInterface,
+                    Vec::new()
+                ),
+                ("GatherMate2_Data".to_string(), SourceKind::Wago, Vec::new()),
+            ],
+            "reversed={reversed}"
+        );
+    }
+}
+
+/// A Not linked row that still lists a linked addon's folder, as after a scan that failed.
+fn stale_parent(fixture: &Fixture) -> (FindInputs, Vec<AddonRecord>) {
+    addon(&fixture.addons, "Parent", &["## Version: 2.0"]);
+    addon(&fixture.addons, "Child", &["## Version: 1.0"]);
+    fixture
+        .database
+        .upsert_addon(&AddonRecord::new("Child", "Child", SourceKind::Wago))
+        .expect("linked row");
+    fixture
+        .database
+        .upsert_addon(&manual_row("Parent", &["Child"]))
+        .expect("stale row");
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let rows = fixture.database.list_addons().expect("rows");
+    (inputs, rows)
+}
+
+fn parent_on_wowinterface() -> SourceLookups {
+    let mut lookups = lookups(SourceAnswer::Found(Vec::new()));
+    lookups.wowinterface =
+        SourceAnswer::Found(vec![wowi_file("9", "Parent", "2.0", &[("Parent", "2.0")])]);
+    lookups
+}
+
+#[test]
+fn a_not_linked_row_listing_a_linked_addons_folder_is_not_linkable() {
+    let fixture = fixture();
+    let (inputs, rows) = stale_parent(&fixture);
+
+    let report = match_addons(&inputs, &rows, None, &parent_on_wowinterface());
+
+    let found = result(&report, "Parent");
+    assert!(!found.preselected());
+    let candidate = found.found().expect("candidate");
+    assert!(candidate.leaving.is_empty());
+    assert_eq!(
+        candidate.blocked,
+        [BlockedFolder {
+            folder: "Child".to_string(),
+            reason: BlockReason::Linked {
+                addon: "Child".to_string()
+            },
+        }]
+    );
+    // The linked addon's folder is not part of the Not linked addon, so it is never sent.
+    assert!(
+        inputs
+            .wago_lookups(&rows, None)
+            .iter()
+            .all(|lookup| lookup.folder != "Child")
+    );
+}
+
+#[test]
+fn linking_never_deletes_a_linked_addons_row_a_not_linked_row_still_lists() {
+    let mut fixture = fixture();
+    let (inputs, rows) = stale_parent(&fixture);
+    let mut pick = result(
+        &match_addons(&inputs, &rows, None, &parent_on_wowinterface()),
+        "Parent",
+    )
+    .found()
+    .expect("candidate")
+    .clone();
+    // Even a pick that looks linkable (planned before the row went stale) is refused.
+    pick.blocked.clear();
+
+    let error = link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Forever,
+        &[pick],
+    )
+    .expect_err("refused");
+
+    assert!(
+        error.to_string().contains("Child belongs to Child"),
+        "{error}"
+    );
+    assert_eq!(fixture.database.list_addons().expect("rows"), rows);
+}

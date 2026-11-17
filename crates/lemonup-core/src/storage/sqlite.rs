@@ -258,7 +258,34 @@ impl StateDatabase {
                 addon.folder, newer.folder
             )));
         }
+        // Absorbing deletes a row, so a linked addon is never absorbed, and a linked addon never
+        // loses its folders to this one.
+        let parent_key = addon.folder.to_lowercase();
+        let lists_parent = |existing: &AddonRecord| {
+            existing
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name.to_lowercase() == parent_key)
+        };
+        if let Some(linked) = absorbed
+            .iter()
+            .find(|existing| existing.holds_its_folders())
+            .copied()
+            .or_else(|| {
+                existing_addons.iter().find(|existing| {
+                    existing.folder != addon.folder
+                        && existing.holds_its_folders()
+                        && lists_parent(existing)
+                })
+            })
+        {
+            return Err(LemonupError::InvalidArgument(format!(
+                "{} can't take folders of {}, which is linked",
+                addon.folder, linked.folder
+            )));
+        }
 
+        // Every folder this addon now holds, its own included, leaves the other rows.
         for mut existing in existing_addons
             .iter()
             .filter(|existing| existing.folder != addon.folder)
@@ -267,7 +294,10 @@ impl StateDatabase {
             let filtered = existing
                 .owned_folders
                 .iter()
-                .filter(|owned_folder| !incoming_owned_folders.contains(&owned_folder.name))
+                .filter(|owned_folder| {
+                    !incoming_owned_folders.contains(&owned_folder.name)
+                        && owned_folder.name.to_lowercase() != parent_key
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if filtered.len() != existing.owned_folders.len() {
@@ -1823,6 +1853,86 @@ mod tests {
                 .expect("get second child")
                 .is_none()
         );
+    }
+
+    fn manual_with_owned(folder: &str, owned: &[&str]) -> AddonRecord {
+        let mut row = AddonRecord::new(folder, folder, SourceKind::Manual);
+        row.set_scan_owned_folders(
+            owned
+                .iter()
+                .map(|name| OwnedFolder {
+                    name: name.to_string(),
+                })
+                .collect(),
+        );
+        row
+    }
+
+    #[test]
+    fn record_managed_addon_takes_its_own_folder_out_of_other_rows_whatever_its_case() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&manual_with_owned("GatherMate2", &["GatherMate2_Data"]))
+            .expect("seed parent");
+        database
+            .upsert_addon(&manual_with_owned("Other", &["gathermate2_data"]))
+            .expect("seed other");
+
+        database
+            .record_managed_addon(&AddonRecord::new(
+                "GatherMate2 Data",
+                "GatherMate2_Data",
+                SourceKind::Wago,
+            ))
+            .expect("record data");
+        // GatherMate2 no longer lists the folder, so linking it later can't absorb that row.
+        database
+            .record_managed_addon(&AddonRecord::new(
+                "GatherMate2",
+                "GatherMate2",
+                SourceKind::WowInterface,
+            ))
+            .expect("record parent");
+
+        let rows = database.list_addons().expect("rows");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.folder.as_str(), row.source, row.owned_folders.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("GatherMate2", SourceKind::WowInterface, 0),
+                ("GatherMate2_Data", SourceKind::Wago, 0),
+                ("Other", SourceKind::Manual, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_managed_addon_never_absorbs_or_strips_a_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut linked = AddonRecord::new("Child", "Child", SourceKind::Wago);
+        linked.set_managed_owned_folders(vec![OwnedFolder {
+            name: "PARENT".to_string(),
+        }]);
+        database.upsert_addon(&linked).expect("seed linked");
+        // A Not linked row that still lists the linked addon's folder.
+        database
+            .upsert_addon(&manual_with_owned("Other", &["Child"]))
+            .expect("seed stale");
+        let before = database.list_addons().expect("rows");
+
+        let absorbing = database
+            .record_managed_addon(&AddonRecord::new("Other", "Other", SourceKind::Wago))
+            .expect_err("absorbing a linked row is refused");
+        let stripping = database
+            .record_managed_addon(&AddonRecord::new("Parent", "Parent", SourceKind::Wago))
+            .expect_err("taking a linked addon's folder is refused");
+
+        assert!(absorbing.to_string().contains("Child"), "{absorbing}");
+        assert!(stripping.to_string().contains("Child"), "{stripping}");
+        assert_eq!(database.list_addons().expect("rows"), before);
     }
 
     #[test]
