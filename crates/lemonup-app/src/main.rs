@@ -325,8 +325,7 @@ async fn run_find(
     yes: bool,
     plain: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -369,7 +368,7 @@ async fn run_find(
     let rows = database.list_addons()?;
     let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
     let wago_lookups = inputs.wago_lookups(&rows, None);
-    let api_key = resolve_wago_api_key(&config_state);
+    let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let sends_to_wago = api_key.is_some() && !wago_lookups.is_empty();
     if plain && sends_to_wago {
         println!(
@@ -396,10 +395,7 @@ async fn run_find(
         let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
         // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
         // about stderr.
-        let theme_config = match &config_state {
-            ConfigLoad::Loaded(config) => config.clone(),
-            ConfigLoad::Missing(_) => lemonup_core::AppConfig::new_unconfigured(),
-        };
+        let theme_config = config_store.effective(&config_state)?;
         let paint = crate::find::Paint::for_stdout(&theme_config);
         for line in
             crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
