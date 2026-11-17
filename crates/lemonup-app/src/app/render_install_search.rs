@@ -8,7 +8,7 @@ use crate::source_error::FolderClash;
 
 /// What the sheet says for each kind of source error: what happened and
 /// what to do. The raw error is shown under it as a technical detail.
-pub(super) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> String {
+pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> String {
     match kind {
         SourceErrorKind::NoConnection => format!(
             "LemonUp couldn't reach {provider}. Check your internet connection and try again."

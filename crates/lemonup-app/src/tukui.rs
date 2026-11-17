@@ -294,6 +294,35 @@ fn plan_tukui_update(
     Ok(TukuiUpdatePlan::Download)
 }
 
+/// The canonical TukUI packages (ElvUI, Tukui) that support `flavor`, fresh from the feed, for
+/// "find your addons online".
+pub(crate) async fn fetch_tukui_packages(
+    flavor: GameFlavor,
+) -> Result<Vec<lemonup_core::find::TukuiPackage>, SourceError> {
+    let client = build_tukui_client()?;
+    let addons = fetch_tukui_addons(&client, true).await?;
+    Ok(tukui_packages_for(addons, flavor))
+}
+
+fn tukui_packages_for(
+    addons: Vec<TukuiAddon>,
+    flavor: GameFlavor,
+) -> Vec<lemonup_core::find::TukuiPackage> {
+    addons
+        .into_iter()
+        .filter(|addon| canonical_tukui_slug(&addon.slug).is_some())
+        .filter(|addon| ensure_tukui_supports_flavor(addon, flavor, "link").is_ok())
+        .map(|addon| lemonup_core::find::TukuiPackage {
+            id: addon.slug,
+            name: addon.name,
+            version: addon.version,
+            web_url: addon.web_url,
+            author: Some(addon.author).filter(|author| !author.trim().is_empty()),
+            directories: addon.directories,
+        })
+        .collect()
+}
+
 fn build_tukui_client() -> Result<Client, String> {
     crate::http::client_builder()
         .build()
@@ -818,6 +847,25 @@ mod tests {
             ensure_tukui_supports_flavor(&addon, lemonup_core::GameFlavor::Retail, "install")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn find_offers_only_canonical_packages_for_the_game_version() {
+        let mut plugin = forever_addon_with_patch(&["1.60.1"]);
+        plugin.slug = "elvui-windtools".to_string();
+        let addons = vec![
+            forever_addon_with_patch(&["1.60.1"]),
+            forever_addon_with_patch(&["12.0.5"]),
+            plugin,
+        ];
+
+        let forever = super::tukui_packages_for(addons.clone(), lemonup_core::GameFlavor::Forever);
+        let retail = super::tukui_packages_for(addons, lemonup_core::GameFlavor::Retail);
+
+        assert_eq!(forever.len(), 1);
+        assert_eq!(forever[0].id, "elvui");
+        assert_eq!(forever[0].directories, ["ElvUI"]);
+        assert_eq!(retail.len(), 2);
     }
 
     fn forever_addon_with_patch(patch: &[&str]) -> TukuiAddon {

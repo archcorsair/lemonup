@@ -947,7 +947,7 @@ fn normalize_selector(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-fn normalize_version(value: &str) -> String {
+pub(crate) fn normalize_version(value: &str) -> String {
     let trimmed = value.trim();
     let trimmed = trimmed.trim_start_matches(|character: char| !character.is_ascii_alphanumeric());
     let normalized = trimmed

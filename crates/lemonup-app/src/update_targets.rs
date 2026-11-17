@@ -86,23 +86,16 @@ fn plan_update_replacements_from_rows(
     }
 }
 
-/// The linked addon (see `holds_its_folders`), other than `updating`, that is `folder` itself or
-/// lists it among its owned folders.
+/// The linked addon (see `AddonRecord::holds_its_folders`), other than `updating`, that is
+/// `folder` itself or lists it among its owned folders.
 fn tracked_owner_of<'a>(
     rows: &'a [AddonRecord],
     updating: &str,
     folder: &str,
 ) -> Option<&'a AddonRecord> {
     rows.iter()
-        .filter(|row| row.folder != updating && holds_its_folders(row))
-        .find(|row| row_claims_folder(row, folder))
-}
-
-/// Whether another addon's install or update must leave `row`'s folders alone: it is linked
-/// here, or a newer LemonUp linked it. Such a row shows as "Not linked" in this version, but its
-/// folders still belong to it.
-fn holds_its_folders(row: &AddonRecord) -> bool {
-    row.source != SourceKind::Manual || row.unrecognized.is_some()
+        .filter(|row| row.folder != updating && row.holds_its_folders())
+        .find(|row| row.claims_folder(folder))
 }
 
 fn display_name(row: &AddonRecord) -> String {
@@ -124,15 +117,6 @@ fn same_folder_name(left: &str, right: &str) -> bool {
 
 fn contains_folder(folders: &[String], folder: &str) -> bool {
     folders.iter().any(|known| same_folder_name(known, folder))
-}
-
-/// Whether `row` is `folder` itself or lists it among its owned folders (ignoring case).
-fn row_claims_folder(row: &AddonRecord, folder: &str) -> bool {
-    same_folder_name(&row.folder, folder)
-        || row
-            .owned_folders
-            .iter()
-            .any(|owned| same_folder_name(&owned.name, folder))
 }
 
 /// Sorts the folders a fresh install of a package brings into what is in the way.
@@ -157,11 +141,11 @@ pub(crate) fn classify_install_folders(
         let owner = rows
             .iter()
             .filter(|row| {
-                holds_its_folders(row)
+                row.holds_its_folders()
                     && Some(row.folder.as_str()) != reinstalling
                     && !(row.unrecognized.is_some() && same_folder_name(&row.folder, parent_folder))
             })
-            .find(|row| row_claims_folder(row, folder));
+            .find(|row| row.claims_folder(folder));
         if let Some(owner) = owner {
             let name = display_name(owner);
             clash.newer_version_linked |= owner.unrecognized.is_some();

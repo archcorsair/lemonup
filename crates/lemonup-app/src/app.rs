@@ -66,7 +66,7 @@ mod render_config;
 mod render_dashboard;
 mod render_help;
 mod render_inspect;
-mod render_install_search;
+pub(crate) mod render_install_search;
 mod render_setup;
 mod render_shared;
 mod sheet;

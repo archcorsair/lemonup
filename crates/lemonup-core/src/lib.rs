@@ -3,6 +3,8 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod events;
+pub mod find;
+pub mod fingerprint;
 pub mod paths;
 pub mod scan;
 pub mod storage;
