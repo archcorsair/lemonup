@@ -1374,3 +1374,5 @@ pub fn link_found_addons(
 
 #[cfg(test)]
 mod tests;
+
+pub mod wire;
