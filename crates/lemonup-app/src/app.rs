@@ -13266,6 +13266,35 @@ mod tests {
     }
 
     #[test]
+    fn find_online_key_says_this_one_while_addons_are_selected() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard = DashboardState::from_addons(vec![
+            AddonRecord::new("Bug Sack", "BugSack", SourceKind::Manual),
+            versioned(SourceKind::Wago, "1.0", Some("1.0")),
+        ]);
+        let index = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| row.folder == "BugSack")
+            .expect("row");
+        app.dashboard.list_state.select(Some(index));
+        let keys = line_text(&app.dashboard_key_line(160));
+        assert!(keys.contains("f find online"), "{keys}");
+        assert!(!keys.contains("find this one"), "{keys}");
+
+        // `u`, `c` and `x` act on the selection, but `f` does not.
+        app.apply(AppAction::SelectAllDashboardParents);
+        let keys = line_text(&app.dashboard_key_line(160));
+        assert!(keys.contains("f find this one online"), "{keys}");
+        // Narrow windows use the short form and still keep `?`.
+        let keys = line_text(&app.dashboard_key_line(80));
+        assert!(keys.contains("f find this one"), "{keys}");
+        assert!(keys.contains("? help"), "{keys}");
+        assert!(keys.chars().count() <= 80, "{keys}");
+    }
+
+    #[test]
     fn dashboard_frame_renders_at_every_size() {
         let now = OffsetDateTime::now_utc();
         for (width, height) in [(80u16, 24u16), (120, 30), (138, 36)] {
