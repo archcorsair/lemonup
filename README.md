@@ -113,17 +113,31 @@ what was not found, ending with what was changed (nothing, unless you pass `--li
 Searching Wago.io by name needs a Wago.io API key (Wago gives them to Patreon supporters).
 GitHub, WoWInterface and TukUI links work without one.
 
-To manage a second game version, or to keep separate setups, use a profile:
+### Your games
+
+LemonUp looks after each game version you play, such as Retail and WoW Forever, with its own
+addon list, backups of your game settings and game folder. Press `p` on the addon list to switch
+games or to add another one; Add another game finds the installs you haven't set up yet. In the
+same sheet, `x` removes a game you're not using from LemonUp after asking. Its addons, game
+settings and backups stay on disk.
+
+Plain `lemonup` opens the game you used last. The header shows when another game has updates
+ready: while LemonUp is open it checks your other games in the background (Settings, "Check other
+games", from Off to every 3 days; once a day by default). It only checks them and never updates
+or changes them.
+
+Settings shows what all games share (the Wago.io key, theme, symbols, motion and update checks)
+apart from what belongs to the game you're using (backups, show libraries and the game folder).
+
+On the command line each game is a profile:
 
 ```sh
-lemonup --profile forever
 lemonup profiles
+lemonup --profile forever check
 ```
 
-`lemonup profiles` lists each profile with its game version, AddOns folder and addon count.
-Plain `lemonup` opens the game you used last. Other commands use the default profile unless you
-pass `--profile`. The Wago.io key, theme, symbols, motion and update checks are shared by every
-profile; the AddOns folder, addon list, backups and show libraries belong to each one.
+`lemonup profiles` lists each game with its profile name, game version, AddOns folder and addon
+count. Commands use the default game unless you pass `--profile`.
 
 ## Troubleshooting
 
