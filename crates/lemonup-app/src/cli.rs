@@ -100,6 +100,15 @@ pub enum Commands {
         #[arg(value_name = "BACKUP_ZIP")]
         archive: Option<PathBuf>,
     },
+    /// Find where your Not linked addons come from (Wago.io, WoWInterface, TukUI); changes nothing
+    Find {
+        /// Link the exact matches to their source; nothing is downloaded
+        #[arg(long)]
+        link: bool,
+        /// With --link, also link exact matches that take over folders of other addons
+        #[arg(long, requires = "link")]
+        yes: bool,
+    },
     /// Show an addon's Title, Notes and Category, or change one in its .toc files
     Toc {
         /// The addon's exact name or folder name
@@ -377,6 +386,27 @@ mod tests {
             }
             other => panic!("expected install-github command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn find_command_parses_and_yes_needs_link() {
+        let cli = Cli::try_parse_from(["lemonup", "find"]).expect("find parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Find {
+                link: false,
+                yes: false
+            })
+        ));
+        let cli = Cli::try_parse_from(["lemonup", "find", "--link", "--yes"]).expect("link parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Find {
+                link: true,
+                yes: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["lemonup", "find", "--yes"]).is_err());
     }
 
     #[test]

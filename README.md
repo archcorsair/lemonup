@@ -98,6 +98,14 @@ lemonup update WeakAuras
 lemonup update-all --dry-run
 ```
 
+Find where the addons LemonUp didn't install come from (Wago.io, WoWInterface and TukUI), then
+link the exact matches so LemonUp keeps them updated. Nothing is downloaded:
+
+```sh
+lemonup find
+lemonup find --link
+```
+
 Searching Wago.io by name needs a Wago.io API key (Wago gives them to Patreon supporters).
 GitHub, WoWInterface and TukUI links work without one.
 

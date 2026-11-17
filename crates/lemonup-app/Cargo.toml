@@ -14,7 +14,7 @@ crossterm.workspace = true
 dotenvy = "0.15.7"
 lemonup-core = { path = "../lemonup-core" }
 ratatui.workspace = true
-reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["gzip", "json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tempfile.workspace = true
 time = { version = "0.3.44", features = ["formatting", "macros", "parsing", "serde"] }

@@ -828,7 +828,7 @@ async fn download_wago_release_bytes(
 }
 
 /// Wago `game_version` key for a client flavor (`forever` for WoW Forever installs).
-fn wago_game_version(flavor: GameFlavor) -> &'static str {
+pub(crate) fn wago_game_version(flavor: GameFlavor) -> &'static str {
     match flavor {
         GameFlavor::Retail => "retail",
         GameFlavor::Forever => "forever",

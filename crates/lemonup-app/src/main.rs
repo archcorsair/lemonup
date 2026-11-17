@@ -5,6 +5,7 @@ mod backup;
 mod cli;
 mod drift;
 mod event;
+mod find;
 mod github;
 mod http;
 mod onboarding;
@@ -175,6 +176,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             clear,
             yes,
         } => run_toc(paths, runtime, &addon, field, value, clear, yes)?,
+        Commands::Find { link, yes } => run_find(paths, runtime, link, yes).await?,
     };
 
     Ok(outcome)
@@ -242,6 +244,82 @@ fn run_toc(
         println!("{line}");
     }
     Ok(CommandOutcome::Success)
+}
+
+/// `lemonup find`: lists where the Not linked addons come from, grouped by label, and changes
+/// nothing. `--link` links the exact matches (no download); the CLI never asks, so matches that
+/// take over folders beyond their own need `--yes`. Exits 1 when a source failed.
+async fn run_find(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    link: bool,
+    yes: bool,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let Some(addon_dir) = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone())
+    else {
+        println!(
+            "find skipped: profile={}, addon_dir=<unconfigured>",
+            runtime.profile_name
+        );
+        return Ok(CommandOutcome::Skipped);
+    };
+    if runtime.is_guarded_path(&addon_dir) {
+        return Err(Box::new(LemonupError::InvalidArgument(format!(
+            "profile '{}' refuses to target the default profile addon directory: {}",
+            runtime.profile_name,
+            addon_dir.display()
+        ))));
+    }
+    validate_addons_path(&addon_dir).map_err(|error| {
+        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+    })?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        link,
+    )?;
+
+    let flavor = GameFlavor::for_addons_dir(&addon_dir);
+    let rows = database.list_addons()?;
+    let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
+    let wago_lookups = inputs.wago_lookups(&rows, None);
+    let api_key = resolve_wago_api_key(&config_state);
+    if api_key.is_some() && !wago_lookups.is_empty() {
+        println!(
+            "find note: sending {} folder names and file hashes to Wago.io",
+            wago_lookups.len()
+        );
+    }
+    let lookups =
+        crate::find::lookup_sources(&wago_lookups, flavor, api_key.as_deref(), &paths.cache_dir)
+            .await;
+    let report = lemonup_core::find::match_addons(&inputs, &rows, None, &lookups.lookups);
+    for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
+        println!("{line}");
+    }
+    if link {
+        for line in
+            crate::find::link_exact_matches(&mut database, &addon_dir, flavor, &report, yes)?
+        {
+            println!("{line}");
+        }
+    } else if report.results.iter().any(|result| result.preselected()) {
+        println!("find detail: nothing was changed; `lemonup find --link` links the exact matches");
+    }
+    Ok(CommandOutcome::from_error_count(lookups.problems.len()))
 }
 
 /// What `lemonup toc` prints, after changing a field when `change` asks for it (`None` as the
