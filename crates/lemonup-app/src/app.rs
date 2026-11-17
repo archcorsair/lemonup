@@ -20385,13 +20385,13 @@ mod tests {
                 .find(|line| line.contains("Retail") && line.contains("1 addon"))
                 .unwrap_or_else(|| panic!("no Retail row:\n{shown}"));
             assert!(retail.contains("Not checked yet"), "{retail}");
-            assert!(retail.contains("in use"), "{retail}");
+            assert!(retail.contains("current"), "{retail}");
             let forever = shown
                 .lines()
                 .find(|line| line.contains("WoW Forever") && line.contains("1 addon"))
                 .unwrap_or_else(|| panic!("no Forever row:\n{shown}"));
             assert!(forever.contains("↑1 Update ready"), "{forever}");
-            assert!(!forever.contains("in use"), "{forever}");
+            assert!(!forever.contains("current"), "{forever}");
             assert!(shown.contains("Add another game…"), "{shown}");
         }
 
@@ -21357,7 +21357,7 @@ mod tests {
                     app.games.games.truncate(1);
                     app.apply(AppAction::Games(GamesAction::Select(0)))
                 }),
-                ("This is the game in use", &|app: &mut App| {
+                ("This is your current game", &|app: &mut App| {
                     app.apply(AppAction::Games(GamesAction::Select(0)))
                 }),
             ];

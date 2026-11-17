@@ -792,7 +792,7 @@ impl App {
             updates,
         ];
         if in_use {
-            spans.push(Span::styled("in use", Style::default().fg(roles.muted)));
+            spans.push(Span::styled("current", Style::default().fg(roles.muted)));
         }
         Line::from(spans)
     }
@@ -808,21 +808,18 @@ impl App {
             )
         };
         let spans = match self.games.games.get(selected) {
-            None => vec![
-                key("enter"),
-                Span::styled(" looks for another install of the game to add.", muted),
-            ],
+            None => vec![key("enter"), Span::styled(" add another game", muted)],
             Some(game) if game.profile == self.runtime.profile_name => {
-                vec![Span::styled("This is the game in use.", muted)]
+                vec![Span::styled("This is your current game", muted)]
             }
             Some(game) if game.profile == DEFAULT_PROFILE => {
-                vec![key("enter"), Span::styled(" opens its addon list.", muted)]
+                vec![key("enter"), Span::styled(" select game", muted)]
             }
             Some(_) => vec![
                 key("enter"),
-                Span::styled(" opens its addon list, ", muted),
+                Span::styled(" select game, ", muted),
                 key("x"),
-                Span::styled(" removes it from LemonUp.", muted),
+                Span::styled(" remove from LemonUp", muted),
             ],
         };
         Line::from(fit_spans(spans, usize::from(width)))
