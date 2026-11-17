@@ -1303,3 +1303,141 @@ fn the_welcome_card_shows_capital_f_in_the_color_of_f() {
     assert_eq!(small, roles.lemon);
     assert_eq!(capital, small);
 }
+
+/// A report whose rows are too long for one line at 80 columns.
+fn long_report() -> (FindReport, Vec<SourceProblem>) {
+    let mut likely = found(
+        FindLabel::Likely,
+        FindSource::Wago,
+        "A Very Long Addon Name Indeed",
+        &["LongOne"],
+    );
+    likely.matched_version = Some("v5.1.5-release-with-a-long-tail".to_string());
+    likely.likely_reason = Some(lemonup_core::find::LikelyReason::TocNamesIt);
+    let mut partial = found(
+        FindLabel::Partial,
+        FindSource::Wago,
+        "Questie",
+        &["Questie", "QuestieDB"],
+    );
+    partial.differing = (0..8).map(|n| format!("Questie_Module_{n}")).collect();
+    let mut choice = partial.clone();
+    choice.parent_folder = "QuestieDev".to_string();
+    let mut not_checked = (0..14)
+        .map(|n| {
+            let mut result = result(
+                FindLabel::NotChecked,
+                &format!("NotCheckedAddon{n}"),
+                Vec::new(),
+            );
+            result.not_checked_by = vec![FindSource::Tukui];
+            result
+        })
+        .collect::<Vec<_>>();
+    let mut results = vec![
+        result(FindLabel::Likely, "LongOne", vec![likely]),
+        result(FindLabel::Partial, "Questie", vec![partial]),
+        result(
+            FindLabel::ChooseOne,
+            "QuestieDev",
+            vec![
+                choice,
+                found(
+                    FindLabel::Exact,
+                    FindSource::WowInterface,
+                    "QuestieDev",
+                    &["QuestieDev"],
+                ),
+            ],
+        ),
+    ];
+    results.append(&mut not_checked);
+    let problems = vec![
+        SourceProblem {
+            source: FindSource::Tukui,
+            error: SourceError::new(SourceErrorKind::Other, "a long technical detail ".repeat(4)),
+        },
+        SourceProblem {
+            source: FindSource::WowInterface,
+            error: SourceError::new(SourceErrorKind::SlowDown, "429"),
+        },
+    ];
+    (
+        FindReport {
+            results,
+            failed: vec![FindSource::Tukui],
+            skipped: Vec::new(),
+        },
+        problems,
+    )
+}
+
+#[test]
+fn long_result_rows_continue_under_their_text() {
+    let headings = [
+        "Likely matches",
+        "Partial matches",
+        "Choose one",
+        "Not checked",
+        "Check failed",
+    ];
+    for (width, height) in [(80, 90), (138, 90)] {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_find(&mut app);
+        let (report, problems) = long_report();
+        app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
+            FindResults::new(FindOutcome {
+                report,
+                problems,
+                names: LocalNames::default(),
+            }),
+        ))));
+        let rows = render_rows(&mut app, width, height)
+            .into_iter()
+            .map(|row| row.chars().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let text = |row: &[char]| row.iter().collect::<String>();
+        let shown = rows
+            .iter()
+            .map(|row| text(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let top = rows
+            .iter()
+            .position(|row| text(row).contains("Likely matches"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        let heading = text(&rows[top]);
+        let left = heading[..heading.find("Likely matches").expect("heading")]
+            .chars()
+            .count();
+        let bottom = rows
+            .iter()
+            .position(|row| text(row).contains("Nothing selected"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        for row in &rows[top..bottom] {
+            let from = text(&row[left..]);
+            if row[left] == ' ' {
+                assert!(
+                    row[left + 1] == ' ' || from.starts_with(" ○") || from.starts_with(" ●"),
+                    "{width}x{height}: a row starts one column in:\n{from}\n{shown}"
+                );
+                continue;
+            }
+            assert!(
+                from.starts_with('▌') || headings.iter().any(|heading| from.starts_with(heading)),
+                "{width}x{height}: a row starts at the left edge:\n{from}\n{shown}"
+            );
+        }
+        // The long rows did wrap at 80 columns.
+        if width == 80 {
+            assert!(
+                rows[top..bottom].iter().any(|row| {
+                    let line = text(row);
+                    line.contains("checked") && !line.contains("A Very Long")
+                }),
+                "{shown}"
+            );
+        }
+        assert!(shown.contains("Questie_Module_7"), "{shown}");
+    }
+}

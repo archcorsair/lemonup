@@ -1118,12 +1118,12 @@ impl App {
             match label {
                 FindLabel::Exact | FindLabel::Likely | FindLabel::Partial => {
                     for index in members {
-                        self.find_entry_lines(body, results, index, name_width);
+                        self.find_entry_lines(body, results, index, name_width, width);
                     }
                 }
                 FindLabel::ChooseOne => {
                     for index in members {
-                        self.find_choice_lines(body, results, index);
+                        self.find_choice_lines(body, results, index, width);
                     }
                 }
                 _ => {
@@ -1131,20 +1131,28 @@ impl App {
                         .iter()
                         .map(|index| &report.results[*index])
                         .collect::<Vec<&FindResult>>();
-                    body.text(vec![Line::from(Span::styled(
-                        format!("  {}", crate::find::listed_names(&listed, names).join(", ")),
-                        text,
-                    ))]);
+                    body.text(hanging(
+                        vec![Line::from(Span::styled(
+                            format!("  {}", crate::find::listed_names(&listed, names).join(", ")),
+                            text,
+                        ))],
+                        width,
+                        2,
+                    ));
                     if *label == FindLabel::NotChecked {
                         for problem in results
                             .problems
                             .iter()
                             .filter(|problem| not_checked_by.contains(&problem.source))
                         {
-                            body.text(vec![Line::from(Span::styled(
-                                format!("  {}", crate::find::problem_text(problem)),
-                                muted,
-                            ))]);
+                            body.text(hanging(
+                                vec![Line::from(Span::styled(
+                                    format!("  {}", crate::find::problem_text(problem)),
+                                    muted,
+                                ))],
+                                width,
+                                2,
+                            ));
                         }
                     }
                 }
@@ -1203,6 +1211,7 @@ impl App {
         results: &FindResults,
         index: usize,
         name_width: usize,
+        width: u16,
     ) {
         let roles = self.ui_theme.roles;
         let muted = Style::default().fg(roles.muted);
@@ -1237,7 +1246,14 @@ impl App {
                 Style::default().fg(roles.amber),
             ));
         }
-        body.text(vec![Line::from(spans)]);
+        // A long version or reason continues under itself, or under the name.
+        let version_column = 3 + name_width + 2 + SOURCE_WIDTH;
+        let indent = if version_column < usize::from(width) / 2 {
+            version_column
+        } else {
+            3
+        };
+        body.text(hanging(vec![Line::from(spans)], width, indent));
         if cursor {
             body.focus_last();
         }
@@ -1250,12 +1266,14 @@ impl App {
             });
         }
         if !notes.is_empty() {
-            body.text(
+            body.text(hanging(
                 notes
                     .into_iter()
                     .map(|note| Line::from(Span::styled(format!("      {note}"), muted)))
                     .collect(),
-            );
+                width,
+                6,
+            ));
         }
     }
 
@@ -1264,6 +1282,7 @@ impl App {
         body: &mut SheetBody<'static>,
         results: &FindResults,
         index: usize,
+        width: u16,
     ) {
         let roles = self.ui_theme.roles;
         let muted = Style::default().fg(roles.muted);
@@ -1278,14 +1297,18 @@ impl App {
             Some(candidate) => format!("  {}", candidate.parent_folder),
             None => "  none picked".to_string(),
         };
-        body.text(vec![Line::from(vec![
-            Span::styled(
-                if cursor { "▌ " } else { "  " },
-                Style::default().fg(roles.lemon),
-            ),
-            Span::styled(results.name_of(index), name_style),
-            Span::styled(picked_text, muted),
-        ])]);
+        body.text(hanging(
+            vec![Line::from(vec![
+                Span::styled(
+                    if cursor { "▌ " } else { "  " },
+                    Style::default().fg(roles.lemon),
+                ),
+                Span::styled(results.name_of(index), name_style),
+                Span::styled(picked_text, muted),
+            ])],
+            width,
+            2,
+        ));
         if cursor {
             body.focus_last();
         }
@@ -1318,7 +1341,7 @@ impl App {
                 ])
             })
             .collect();
-        body.text(lines);
+        body.text(hanging(lines, width, 6));
     }
 
     /// The action row and what the keys do on the row under the cursor.
