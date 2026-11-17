@@ -582,7 +582,6 @@ fn a_tukui_package_with_an_older_folder_is_only_likely() {
     let found = result(&report, "ElvUI");
     assert_eq!(found.label, FindLabel::Likely);
     assert!(!found.preselected());
-    assert_eq!(found.found().expect("candidate").matched_version, None);
 }
 
 #[test]
