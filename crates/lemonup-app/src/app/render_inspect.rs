@@ -5,7 +5,7 @@
 use super::render_dashboard::{
     RowStatus, dashboard_item_installed_version, dashboard_item_remote_label, dashboard_source_name,
 };
-use super::sheet::{SheetBody, SheetScroll, wrap_lines};
+use super::sheet::{SheetBody, SheetRoom, SheetScroll, text_height, wrap_lines};
 use super::*;
 
 /// At this width and wider, Details docks beside the list.
@@ -137,13 +137,35 @@ impl App {
 
     /// Details as a sheet: the status row, the sentence, then the facts with
     /// their labels in one column. The body scrolls, so nothing is dropped.
-    pub(super) fn inspect_sheet_body(&self, width: u16) -> SheetBody<'static> {
+    ///
+    /// The sheet is as tall as the tallest addon's Details, so moving to
+    /// another addon never moves or resizes it.
+    pub(super) fn inspect_sheet_body(&self, room: &SheetRoom) -> SheetBody<'static> {
+        let width = room.width;
         let mut body = SheetBody::new();
         match self.details_content() {
             Some(content) => body.text(self.details_sheet_lines(&content, width)),
             None => body.text(self.details_empty_lines()),
         };
+        body.reserve(
+            room.reserved()
+                .unwrap_or_else(|| self.details_sheet_rows(width)),
+        );
         body
+    }
+
+    /// Rows the tallest Details of all the addons in the list takes at
+    /// `width`.
+    fn details_sheet_rows(&self, width: u16) -> u16 {
+        self.dashboard
+            .items
+            .iter()
+            .map(|item| {
+                let lines = self.details_sheet_lines(&self.details_content_for(item), width);
+                text_height(&lines, width)
+            })
+            .max()
+            .unwrap_or(1)
     }
 
     fn details_empty_lines(&self) -> Vec<Line<'static>> {
@@ -156,7 +178,10 @@ impl App {
 
     fn details_content(&self) -> Option<DetailsContent> {
         let target = self.inspect_resolved_target()?;
-        let item = target.item;
+        Some(self.details_content_for(target.item))
+    }
+
+    fn details_content_for(&self, item: &DashboardItem) -> DetailsContent {
         let roles = self.ui_theme.roles;
         let text = Style::default().fg(roles.text);
         let muted = Style::default().fg(roles.muted);
@@ -317,13 +342,13 @@ impl App {
             rows.push(("Web page", DetailValue::Link(web_page_label(url))));
         }
 
-        Some(DetailsContent {
+        DetailsContent {
             status: status_spans,
             versions,
             sentence,
             follow_up,
             rows,
-        })
+        }
     }
 
     fn details_sheet_lines(&self, content: &DetailsContent, width: u16) -> Vec<Line<'static>> {
@@ -570,6 +595,7 @@ impl App {
                 focus: None,
                 max_offset,
                 viewport: body.height,
+                kept: None,
             };
             docked.area = Some(body);
             lines.drain(..usize::from(offset));

@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::widgets::Widget;
 
 use super::direct_install::DirectInstallProvider;
-use super::sheet::{SheetBody, render_stateful, text_height, wrap_lines_hanging};
+use super::sheet::{SheetBody, SheetRoom, render_stateful, text_height, wrap_lines_hanging};
 use super::*;
 use crate::source_error::FolderClash;
 
@@ -88,8 +88,14 @@ impl App {
     /// The box (always drawn), one line saying what enter will do with its
     /// text, then the body for what the sheet is doing. The results get the
     /// rows the rest leaves.
-    pub(super) fn search_sheet_body(&self, width: u16, max_height: u16) -> SheetBody<'_> {
+    ///
+    /// The sheet is as tall as it can be under the header in every state,
+    /// the room the results get, so typing, searching, results and messages
+    /// never move or resize it. Results past that scroll.
+    pub(super) fn search_sheet_body(&self, room: &SheetRoom) -> SheetBody<'_> {
+        let (width, max_height) = (room.width, room.clear_of_header());
         let mut body = SheetBody::new();
+        body.reserve(max_height);
         body.widget(3, |area, buffer| self.render_search_input(area, buffer))
             .text(vec![self.search_hint_line()])
             .gap(1);

@@ -9576,6 +9576,7 @@ mod tests {
             focus: None,
             max_offset: 12,
             viewport: 5,
+            kept: None,
         });
         let scroll = |app: &mut App, message: AppMessage| {
             let actions = app.update(message);
@@ -15342,6 +15343,181 @@ mod tests {
             app.search_pane.last_query = Some("result".to_string());
         }
 
+        /// The window sizes a sheet is checked at for holding still.
+        const STILL_SIZES: [(u16, u16); 3] = [(138, 36), (120, 30), (80, 24)];
+
+        /// Where the open sheet's outline is in `rows`: its title row, and
+        /// its bottom border, or the last row for a full screen sheet.
+        fn sheet_outline(rows: &[String]) -> (usize, usize) {
+            let title = rows
+                .iter()
+                .position(|row| row.contains("esc close"))
+                .unwrap_or_else(|| panic!("no sheet title:\n{}", rows.join("\n")));
+            let bottom = match rows[title].chars().position(|c| c == '╭') {
+                Some(column) => (title + 1..rows.len())
+                    .find(|row| rows[*row].chars().nth(column) == Some('╰'))
+                    .unwrap_or_else(|| panic!("no bottom border:\n{}", rows.join("\n"))),
+                None => rows.len() - 1,
+            };
+            (title, bottom)
+        }
+
+        /// A change to an open sheet, and text it then shows.
+        type SheetStep<'a> = (&'a str, &'a dyn Fn(&mut App));
+
+        /// At each of `sizes`: opens a sheet with `open`, then takes it
+        /// through `steps` in order, drawing after each. Every state must
+        /// show its text, and the sheet's top and bottom rows must stay where
+        /// they were when it opened.
+        fn assert_sheet_holds_still(
+            sizes: &[(u16, u16)],
+            open: &dyn Fn(&mut App),
+            steps: &[SheetStep<'_>],
+        ) {
+            for &(width, height) in sizes {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open(&mut app);
+                let rows = render_rows(&mut app, width, height);
+                let seen = sheet_outline(&rows);
+                for (shows, step) in steps {
+                    step(&mut app);
+                    let rows = render_rows(&mut app, width, height);
+                    let screen = rows.join("\n");
+                    assert!(
+                        screen.contains(shows),
+                        "no {shows:?} at {width}x{height}:\n{screen}"
+                    );
+                    assert_eq!(
+                        sheet_outline(&rows),
+                        seen,
+                        "{shows:?} moved the sheet at {width}x{height}:\n{screen}"
+                    );
+                }
+            }
+        }
+
+        fn install_error(app: &mut App) {
+            app.search_pane.install_state = SearchInstallState::Error {
+                addon_id: Some("slug0".to_string()),
+                addon_name: Some("Result Addon 0".to_string()),
+                provider: "Wago.io",
+                kind: SourceErrorKind::NoConnection,
+                detail: "connection refused".to_string(),
+                clash: None,
+            };
+        }
+
+        #[test]
+        fn the_install_sheet_keeps_its_size_and_place_in_every_state() {
+            let idle = |app: &mut App| {
+                app.search_pane.install_state = SearchInstallState::Idle;
+                app.search_pane.key_box = None;
+            };
+            assert_sheet_holds_still(
+                &STILL_SIZES,
+                &|app| {
+                    app.apply(AppAction::SetDetailMode(DetailMode::Search));
+                    app.wago_api_key = Some("key".to_string());
+                },
+                &[
+                    ("You can type or paste any of these", &|_| {}),
+                    ("Search Wago.io for \"deadly\"", &|app| {
+                        type_text(app, "deadly")
+                    }),
+                    ("Searching Wago.io for \"deadly\"", &|app| {
+                        app.search_pane.in_progress = true;
+                        app.search_pane.last_query = Some("deadly".to_string());
+                    }),
+                    ("No addons on Wago.io match \"deadly\"", &|app| {
+                        app.search_pane.in_progress = false;
+                    }),
+                    ("Result Addon 0", &|app| {
+                        app.search_pane.results = wago_results(1);
+                    }),
+                    ("Summary for result 0", &|app| {
+                        app.search_pane.results = wago_results(30);
+                        app.search_pane.focus = SearchFocus::Results;
+                        app.search_pane.selected_result = Some(0);
+                    }),
+                    ("Couldn't install Result Addon 0", &install_error),
+                    ("Install ElvUI from TukUI?", &|app| {
+                        app.search_pane.install_state = SearchInstallState::ConfirmDirect {
+                            request: crate::app::direct_install::DirectInstallRequest {
+                                provider: crate::app::direct_install::DirectInstallProvider::Tukui,
+                                target: "elvui".to_string(),
+                                display: "ElvUI".to_string(),
+                            },
+                        };
+                    }),
+                    ("Searching Wago.io needs your Wago.io key", &|app| {
+                        idle(app);
+                        app.search_pane.focus = SearchFocus::Box;
+                        app.search_pane.key_box = Some(TextInput::default());
+                    }),
+                    ("Result Addon 0 is installed", &|app| {
+                        idle(app);
+                        app.search_pane.install_state = SearchInstallState::Success {
+                            addon_id: "slug0".to_string(),
+                            addon_name: "Result Addon 0".to_string(),
+                            parent_folder: "ResultAddon0".to_string(),
+                            warning: None,
+                        };
+                    }),
+                ],
+            );
+        }
+
+        #[test]
+        fn details_keeps_its_size_and_place_moving_between_addons() {
+            // Details docks from 120 columns; below that it is a sheet.
+            let down = |app: &mut App| press_key(app, KeyCode::Down);
+            let up = |app: &mut App| press_key(app, KeyCode::Up);
+            assert_sheet_holds_still(
+                &[(110, 36), (100, 30), (80, 24)],
+                &open_inspect_up_to_date,
+                &[
+                    ("First", &up),
+                    ("Second", &up),
+                    ("First", &down),
+                    ("Third", &down),
+                ],
+            );
+        }
+
+        #[test]
+        fn backups_keeps_its_size_and_place_while_backups_come_and_go() {
+            let status = |kind: StatusKind, message: &'static str| {
+                move |app: &mut App| {
+                    app.apply(AppAction::SetStatus(app.dashboard_status_for(
+                        kind,
+                        DetailMode::Backup,
+                        message,
+                    )));
+                }
+            };
+            let working = status(StatusKind::Working, "Backing up your game settings");
+            let made = status(StatusKind::Done, "Made a backup");
+            let deleted = status(StatusKind::Done, "Deleted the backup");
+            assert_sheet_holds_still(
+                &STILL_SIZES,
+                &|app| {
+                    app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+                    app.backup_pane.backups = backups(3);
+                },
+                &[
+                    ("Backing up your game settings", &working),
+                    ("Made a backup", &|app| {
+                        app.backup_pane.backups = backups(4);
+                        made(app);
+                    }),
+                    ("Deleted the backup", &|app| {
+                        app.backup_pane.backups = backups(2);
+                        deleted(app);
+                    }),
+                ],
+            );
+        }
+
         fn open_config(app: &mut App) {
             app.apply(AppAction::SetDetailMode(DetailMode::Config));
         }
@@ -16012,6 +16188,49 @@ mod tests {
         }
 
         #[test]
+        fn a_reserving_sheet_sits_for_its_reserve_and_grows_down() {
+            let window = Rect::new(0, 0, 138, 36);
+            let frame = SheetFrame::new(window, Rect::new(0, 0, 138, 34), 2, 84);
+            let tall = frame.place(20);
+            // Shorter content sits where the reserve would, padded below.
+            let short = frame.place_reserved(6, 20);
+            assert_eq!(short.outer, tall.outer);
+            assert_eq!(short.body, tall.body);
+            // Taller content keeps the top and grows down to the bottom.
+            let taller = frame.place_reserved(22, 20);
+            assert_eq!(taller.outer.y, tall.outer.y);
+            assert_eq!(taller.body.height, 22);
+            let tallest = frame.place_reserved(80, 20);
+            assert_eq!(tallest.outer.y, tall.outer.y);
+            assert_eq!(tallest.outer.bottom(), 34);
+        }
+
+        #[test]
+        fn a_sheet_that_outgrows_its_reserve_keeps_its_top() {
+            // Backups makes room for one more backup and a result line when
+            // it opens; here two more come, and the result.
+            for (width, height) in [(138, 36), (120, 30)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                app.apply(AppAction::SetDetailMode(DetailMode::Backup));
+                app.backup_pane.backups = backups(2);
+                let (top, bottom) = sheet_outline(&render_rows(&mut app, width, height));
+                app.backup_pane.backups = backups(4);
+                app.apply(AppAction::SetStatus(app.dashboard_status_for(
+                    StatusKind::Done,
+                    DetailMode::Backup,
+                    "Made a backup",
+                )));
+                let rows = render_rows(&mut app, width, height);
+                assert_eq!(
+                    sheet_outline(&rows),
+                    (top, bottom + 1),
+                    "at {width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+
+        #[test]
         fn sheet_text_wraps_at_words_and_measures_what_it_draws() {
             let line = Line::from(vec![
                 Span::styled("Store: ", Style::default().fg(Color::Red)),
@@ -16185,6 +16404,7 @@ mod tests {
                 focus: None,
                 max_offset: 6,
                 viewport: 10,
+                kept: None,
             };
             let kind = Some(OverlayKind::Help);
             assert_eq!(scroll.moved(SheetMove::LineUp, kind), 2);

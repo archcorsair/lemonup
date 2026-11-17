@@ -1,5 +1,5 @@
 use super::render_dashboard::shorten_path_middle;
-use super::sheet::{SheetBody, text_height};
+use super::sheet::{SheetBody, SheetRoom, text_height};
 use super::*;
 
 /// Settings in the order they show, under their section titles. "Your
@@ -48,40 +48,29 @@ impl App {
     /// full; with less the blank rows go first, then the explanation is cut
     /// to one line.
     ///
-    /// A layout that fits under the header rows (`below_header`) comes
-    /// first, the explanation cut to one line if that is what it takes, so
-    /// the sheet only grows over the header when it has to.
-    pub(super) fn config_sheet_body(
-        &self,
-        width: u16,
-        height: u16,
-        below_header: u16,
-    ) -> SheetBody<'static> {
-        // Room for the longest explanation, so moving the cursor never
-        // resizes or moves the sheet; shorter ones are padded below.
+    /// The sheet reserves room for the longest explanation, so moving the
+    /// cursor never resizes or moves it.
+    pub(super) fn config_sheet_body(&self, room: &SheetRoom) -> SheetBody<'static> {
+        let width = room.width;
         let long_rows = self.config_reserved_rows(width);
-        let mut long = self.config_description(width, true);
-        let own_rows = text_height(&long, width);
-        long.extend((own_rows..long_rows).map(|_| Line::default()));
         let spaced_rows = self.config_list_rows(true);
         let tight_rows = self.config_list_rows(false);
         let short = self.config_description(width, false);
         let short_rows = text_height(&short, width);
-        let (spaced, footer) = if spaced_rows + long_rows <= below_header {
-            (true, long)
-        } else if tight_rows + long_rows <= below_header {
-            (false, long)
-        } else if tight_rows + short_rows <= below_header {
-            (false, short)
-        } else if spaced_rows + long_rows <= height {
-            (true, long)
-        } else if tight_rows + long_rows <= height {
-            (false, long)
-        } else {
-            (false, short)
+        let layouts = [
+            spaced_rows + long_rows,
+            tight_rows + long_rows,
+            tight_rows + short_rows,
+        ];
+        let layout = room.pick(&layouts);
+        let (spaced, footer) = match layout {
+            0 => (true, self.config_description(width, true)),
+            1 => (false, self.config_description(width, true)),
+            _ => (false, short),
         };
 
         let mut body = SheetBody::new();
+        body.reserve(layouts[layout]);
         if spaced {
             body.gap(1);
         }
