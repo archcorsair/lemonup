@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use lemonup_core::find::{FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon};
 
 use super::render_dashboard::fit_spans;
-use super::sheet::{SheetBody, SheetRoom};
+use super::sheet::{SheetBody, SheetMove, SheetRoom};
 use super::*;
 use crate::find::{LocalNames, SourceProblem};
 
@@ -419,16 +419,40 @@ impl App {
             (_, KeyCode::Esc | KeyCode::Char('q')) => message(FindMessage::Close),
             (FindStep::Start, KeyCode::Enter) => message(FindMessage::Start),
             (FindStep::Results(results), code) => {
-                let has_rows = !results.focusables(self.find_offers_search()).is_empty();
+                let focus = results.focusables(self.find_offers_search());
+                let position = focus
+                    .iter()
+                    .position(|focus| *focus == results.cursor)
+                    .unwrap_or(0);
+                // The cursor moves while it can; at the first or last row (or
+                // with no rows at all) the keys scroll the report instead, so
+                // every line of it, listed names and source errors too, can
+                // be read.
+                let can_down = position + 1 < focus.len();
+                let can_up = position > 0;
+                let scroll = |movement| Some(vec![AppMessage::SheetScroll(movement)]);
+                let with_scroll = |first, movement| {
+                    let mut messages = if focus.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AppMessage::Find(first)]
+                    };
+                    messages.push(AppMessage::SheetScroll(movement));
+                    Some(messages)
+                };
                 match code {
-                    KeyCode::Down | KeyCode::Char('j') if has_rows => message(FindMessage::Move(1)),
-                    KeyCode::Up | KeyCode::Char('k') if has_rows => message(FindMessage::Move(-1)),
-                    KeyCode::PageDown if has_rows => message(FindMessage::Move(PAGE_ROWS as isize)),
-                    KeyCode::PageUp if has_rows => {
-                        message(FindMessage::Move(-(PAGE_ROWS as isize)))
-                    }
-                    KeyCode::Home if has_rows => message(FindMessage::First),
-                    KeyCode::End if has_rows => message(FindMessage::Last),
+                    KeyCode::Down | KeyCode::Char('j') if can_down => message(FindMessage::Move(1)),
+                    KeyCode::Down | KeyCode::Char('j') => scroll(SheetMove::LineDown),
+                    KeyCode::Up | KeyCode::Char('k') if can_up => message(FindMessage::Move(-1)),
+                    KeyCode::Up | KeyCode::Char('k') => scroll(SheetMove::LineUp),
+                    KeyCode::PageDown if can_down => message(FindMessage::Move(PAGE_ROWS as isize)),
+                    KeyCode::PageDown => scroll(SheetMove::PageDown),
+                    KeyCode::PageUp if can_up => message(FindMessage::Move(-(PAGE_ROWS as isize))),
+                    KeyCode::PageUp => scroll(SheetMove::PageUp),
+                    // The cursor goes to the first or last row, and the view
+                    // to the very top or bottom of the report.
+                    KeyCode::Home => with_scroll(FindMessage::First, SheetMove::Top),
+                    KeyCode::End => with_scroll(FindMessage::Last, SheetMove::Bottom),
                     KeyCode::Char(' ') if self.find_space_works() => message(FindMessage::Toggle),
                     KeyCode::Enter if self.find_enter_works() => message(FindMessage::Enter),
                     // The keys of the list never reach it behind the sheet.

@@ -774,9 +774,17 @@ static FIND_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Find your addons online",
             rows: &[
-                HelpRow::key("↑ ↓  or  j k", "move", K_MOVE),
-                HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
-                HelpRow::key("Home End  or  gg G", "first, last", K_ENDS_VIM),
+                HelpRow::key("↑ ↓  or  j k", "move; past the last row, scroll", K_MOVE),
+                HelpRow::key(
+                    "PgUp PgDn",
+                    "move a page; past the last row, scroll",
+                    K_PAGE,
+                ),
+                HelpRow::key(
+                    "Home End  or  gg G",
+                    "first and last row, top and bottom of the report",
+                    K_ENDS_VIM,
+                ),
                 HelpRow::key(
                     "space",
                     "select or unselect a match, or its replacement",
@@ -1222,6 +1230,9 @@ impl App {
                 let mut hints = Vec::new();
                 if results.focusables(self.find_offers_search()).len() > 1 {
                     hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", SCROLL));
+                } else {
+                    // With no row to move to, the arrows scroll a long report.
+                    hints.extend(self.sheet_scroll_hint(true));
                 }
                 if self.find_space_works() {
                     let label = match results.cursor {

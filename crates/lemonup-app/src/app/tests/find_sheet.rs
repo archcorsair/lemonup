@@ -1630,3 +1630,269 @@ fn a_committed_install_whose_list_cannot_be_read_is_not_an_error() {
         "{outcome:?}"
     );
 }
+
+/// A report much taller than 80x24: a few matches, then long lists of names
+/// below the last row the cursor can reach, and a source that failed.
+fn tall_report(selectable: bool) -> FindReport {
+    let mut results = Vec::new();
+    if selectable {
+        results.push(result(
+            FindLabel::Exact,
+            "Clique",
+            vec![found(
+                FindLabel::Exact,
+                FindSource::WowInterface,
+                "Clique",
+                &["Clique"],
+            )],
+        ));
+        results.push(result(
+            FindLabel::Likely,
+            "Pawn",
+            vec![found(
+                FindLabel::Likely,
+                FindSource::WowInterface,
+                "Pawn",
+                &["Pawn"],
+            )],
+        ));
+    }
+    for index in 0..40 {
+        results.push(result(
+            FindLabel::NotFound,
+            &format!("Gone{index:02}Name"),
+            Vec::new(),
+        ));
+    }
+    results.push(result(FindLabel::CurseForgeOnly, "Leatrix", Vec::new()));
+    results.push(result(FindLabel::DeveloperCopy, "ZzLastCopy", Vec::new()));
+    FindReport {
+        results,
+        failed: vec![FindSource::Wago],
+        skipped: Vec::new(),
+    }
+}
+
+/// The long report open in the sheet, drawn once at 80x24.
+fn open_tall_report(app: &mut App, selectable: bool) {
+    open_find(app);
+    app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
+        FindResults::new(FindOutcome {
+            report: tall_report(selectable),
+            problems: vec![SourceProblem {
+                source: FindSource::Wago,
+                error: SourceError::new(SourceErrorKind::Other, "wago exploded"),
+            }],
+            names: LocalNames::default(),
+        }),
+    ))));
+    let shown = screen(app, 80, 24);
+    assert!(app.sheet_scroll.get().max_offset > 0, "{shown}");
+    assert!(!shown.contains("ZzLastCopy"), "{shown}");
+}
+
+/// A key, then the sheet drawn again, as the terminal loop does.
+fn press_and_draw(app: &mut App, code: KeyCode) -> String {
+    key(app, code);
+    screen(app, 80, 24)
+}
+
+fn wheel_event(kind: MouseEventKind) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: 10,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn wheel_and_draw(app: &mut App, kind: MouseEventKind) -> String {
+    for message in app.messages_for_mouse(wheel_event(kind)) {
+        apply_all(app, message);
+    }
+    screen(app, 80, 24)
+}
+
+#[test]
+fn down_past_the_last_row_scrolls_to_the_end_of_the_report() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    // The cursor walks down to the action row, then the report scrolls.
+    let mut shown = String::new();
+    for _ in 0..200 {
+        shown = press_and_draw(&mut app, KeyCode::Down);
+    }
+    assert_eq!(results(&app).cursor, FindFocus::Action);
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    assert!(shown.contains("Gone39Name"), "{shown}");
+    assert!(
+        app.sheet_scroll.get().offset == app.sheet_scroll.get().max_offset,
+        "{shown}"
+    );
+    // Back up: the cursor moves up first, and the top of the report returns.
+    for _ in 0..200 {
+        shown = press_and_draw(&mut app, KeyCode::Up);
+    }
+    assert!(shown.contains("Ready to link"), "{shown}");
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+}
+
+#[test]
+fn j_and_k_scroll_past_the_ends_like_the_arrows() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    let mut shown = String::new();
+    for _ in 0..200 {
+        shown = press_and_draw(&mut app, KeyCode::Char('j'));
+    }
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    for _ in 0..200 {
+        shown = press_and_draw(&mut app, KeyCode::Char('k'));
+    }
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+}
+
+#[test]
+fn end_and_home_go_to_the_bottom_and_top_of_the_report() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    let shown = press_and_draw(&mut app, KeyCode::End);
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    assert_eq!(results(&app).cursor, FindFocus::Action);
+    assert_eq!(
+        app.sheet_scroll.get().offset,
+        app.sheet_scroll.get().max_offset
+    );
+
+    let shown = press_and_draw(&mut app, KeyCode::Home);
+    assert!(!shown.contains("ZzLastCopy"), "{shown}");
+    assert!(shown.contains("Ready to link"), "{shown}");
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    assert_eq!(results(&app).cursor, FindFocus::Result(0), "{shown}");
+
+    // G and gg do the same.
+    let shown = press_and_draw(&mut app, KeyCode::Char('G'));
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    key(&mut app, KeyCode::Char('g'));
+    let shown = press_and_draw(&mut app, KeyCode::Char('g'));
+    assert!(!shown.contains("ZzLastCopy"), "{shown}");
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+}
+
+#[test]
+fn page_keys_move_the_view_past_the_last_row() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    // The first page down takes the cursor to the action row.
+    press_and_draw(&mut app, KeyCode::PageDown);
+    assert_eq!(results(&app).cursor, FindFocus::Action);
+    let before = app.sheet_scroll.get().offset;
+    // The next ones scroll a page at a time, to the end.
+    let mut last = before;
+    for _ in 0..30 {
+        let shown = press_and_draw(&mut app, KeyCode::PageDown);
+        let offset = app.sheet_scroll.get().offset;
+        assert!(offset >= last, "{shown}");
+        last = offset;
+    }
+    let shown = screen(&mut app, 80, 24);
+    assert!(last > before, "{shown}");
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    // And back up to the top.
+    let mut shown = String::new();
+    for _ in 0..30 {
+        shown = press_and_draw(&mut app, KeyCode::PageUp);
+    }
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    assert!(!shown.contains("ZzLastCopy"), "{shown}");
+}
+
+#[test]
+fn the_wheel_scrolls_the_report_when_the_cursor_cannot_move() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    // The cursor goes first.
+    assert_eq!(
+        app.messages_for_mouse(wheel_event(MouseEventKind::ScrollDown)),
+        vec![AppMessage::Find(FindMessage::Move(1))]
+    );
+    press_and_draw(&mut app, KeyCode::End);
+    press_and_draw(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::End);
+    // On the last row the same wheel scrolls the text.
+    let _ = screen(&mut app, 80, 24);
+    apply_all(&mut app, AppMessage::SheetScroll(SheetMove::Top));
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    assert_eq!(
+        app.messages_for_mouse(wheel_event(MouseEventKind::ScrollDown)),
+        vec![AppMessage::SheetScroll(SheetMove::LineDown)]
+    );
+    let mut shown = shown;
+    for _ in 0..200 {
+        shown = wheel_and_draw(&mut app, MouseEventKind::ScrollDown);
+    }
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    assert_eq!(results(&app).cursor, FindFocus::Action);
+}
+
+#[test]
+fn a_report_with_no_rows_to_pick_scrolls_with_every_key() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, false);
+    assert!(
+        results(&app)
+            .focusables(app.find_offers_search())
+            .is_empty()
+    );
+    // The key line offers the scroll, and the sheet says more is below.
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("↓"), "{shown}");
+    assert!(shown.contains("more"), "{shown}");
+    let keys = shown.lines().last().expect("key line").to_string();
+    assert!(keys.contains("↑/↓ scroll"), "{keys}");
+
+    let shown = press_and_draw(&mut app, KeyCode::Down);
+    assert_eq!(app.sheet_scroll.get().offset, 1, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sheet_scroll.get().offset, 2, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::Up);
+    assert_eq!(app.sheet_scroll.get().offset, 1, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::PageDown);
+    assert!(app.sheet_scroll.get().offset > 1, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::PageUp);
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::End);
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    let shown = press_and_draw(&mut app, KeyCode::Home);
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    let shown = wheel_and_draw(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sheet_scroll.get().offset, 1, "{shown}");
+    let shown = wheel_and_draw(&mut app, MouseEventKind::ScrollUp);
+    assert_eq!(app.sheet_scroll.get().offset, 0, "{shown}");
+    // Keys that do nothing here still do nothing.
+    assert_eq!(
+        app.messages_for_key(KeyEvent::from(KeyCode::Char(' '))),
+        vec![]
+    );
+}
+
+#[test]
+fn help_says_the_arrows_scroll_past_the_last_row() {
+    let help = crate::app::keymap::help_page(HelpContext::Find);
+    let row = |label: &str| {
+        help.sections()
+            .flat_map(|section| section.rows.iter())
+            .find(|row| matches!(row.label, crate::app::keymap::HelpLabel::Keys(keys) if keys == label))
+            .expect(label)
+    };
+    assert!(row("↑ ↓  or  j k").text.contains("scroll"));
+    assert!(row("PgUp PgDn").text.contains("scroll"));
+    assert!(
+        row("Home End  or  gg G")
+            .text
+            .contains("bottom of the report")
+    );
+}
