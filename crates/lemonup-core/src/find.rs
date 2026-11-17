@@ -1075,11 +1075,14 @@ pub fn match_addons(
         }
     }
 
-    let claims = drop_outweighed(merge_same_projects(claims));
-    let placed = claims
-        .into_iter()
-        .map(|claim| place(claim.found, inputs, &groups))
-        .collect::<Vec<_>>();
+    // Placed first, so an exact match that can't be linked (a folder it needs belongs to
+    // another addon) never hides a usable alternative.
+    let placed = drop_outweighed(
+        merge_same_projects(claims)
+            .into_iter()
+            .map(|claim| place(claim.found, inputs, &groups))
+            .collect(),
+    );
 
     // Candidates that share a folder or a project are one "Choose one" result.
     let clusters = cluster(&placed);
@@ -1278,31 +1281,28 @@ fn merge_same_projects(claims: Vec<Claim>) -> Vec<Claim> {
 /// candidate from another source matches exactly on a folder they share: the exact one proves
 /// the files, the other only names a project. Candidates of comparable strength stay, and
 /// become a choice.
-fn drop_outweighed(claims: Vec<Claim>) -> Vec<Claim> {
-    let outweighed = |claim: &Claim| {
-        claim.found.label == FindLabel::Likely
-            && claim
-                .found
+fn drop_outweighed(placed: Vec<FoundAddon>) -> Vec<FoundAddon> {
+    let outweighed = |found: &FoundAddon| {
+        found.label == FindLabel::Likely
+            && found
                 .likely_reason
                 .as_ref()
                 .is_some_and(LikelyReason::is_weak)
-            && claims.iter().any(|other| {
-                other.found.label == FindLabel::Exact
-                    && other.found.source != claim.found.source
-                    && other.found.folders.iter().any(|folder| {
-                        claim
-                            .found
-                            .folders
-                            .iter()
-                            .any(|known| key(known) == key(folder))
-                    })
+            && placed.iter().any(|other| {
+                other.label == FindLabel::Exact
+                    && other.is_linkable()
+                    && other.source != found.source
+                    && other
+                        .folders
+                        .iter()
+                        .any(|folder| found.folders.iter().any(|known| key(known) == key(folder)))
             })
     };
-    let dropped = claims.iter().map(outweighed).collect::<Vec<_>>();
-    claims
+    let dropped = placed.iter().map(outweighed).collect::<Vec<_>>();
+    placed
         .into_iter()
         .zip(dropped)
-        .filter_map(|(claim, dropped)| (!dropped).then_some(claim))
+        .filter_map(|(found, dropped)| (!dropped).then_some(found))
         .collect()
 }
 

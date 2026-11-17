@@ -1613,3 +1613,38 @@ fn a_likely_match_says_which_versions_were_compared() {
         })
     );
 }
+
+#[test]
+fn an_exact_match_that_cannot_be_linked_keeps_the_other_sources_candidate() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Pack", &["## Version: 3.0"]);
+    addon(&fixture.addons, "SharedLib", &[]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut linked = AddonRecord::new("Other", "Other", SourceKind::Wago);
+    linked.set_managed_owned_folders(vec![OwnedFolder {
+        name: "SharedLib".to_string(),
+    }]);
+    let rows = vec![linked, manual_row("Pack", &[])];
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "PCK",
+        "Pack",
+        vec![
+            ("Pack".to_string(), hash_of(&inputs, "Pack")),
+            ("SharedLib".to_string(), hash_of(&inputs, "SharedLib")),
+        ],
+    )]));
+    lookups.wowinterface =
+        SourceAnswer::Found(vec![wowi_file("33", "Pack", "2.0", &[("Pack", "2.0")])]);
+
+    let report = match_addons(&inputs, &rows, None, &lookups);
+
+    let found = result(&report, "Pack");
+    assert!(
+        found
+            .candidates
+            .iter()
+            .any(|candidate| candidate.source == FindSource::WowInterface),
+        "the WoWInterface candidate must stay: {:#?}",
+        found.candidates
+    );
+}
