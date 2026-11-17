@@ -69,13 +69,12 @@ fn write_overrides(staged: &Path, overrides: &BTreeMap<String, String>) -> Resul
 /// Returns the folders that were rewritten. It asks nothing itself: the caller asks before
 /// rewriting a "Not linked" addon. It refuses a folder with a symlink anywhere inside, because
 /// the staged copy would drop it, and a folder another linked addon holds.
-#[cfg_attr(not(test), allow(dead_code))] // Called by the TOC overrides sheet, coming next.
 pub(crate) fn apply_toc_overrides_now(
     database: &mut StateDatabase,
     addon_dir: &Path,
     folder: &str,
     overrides: &BTreeMap<String, String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, TocApplyError> {
     apply_toc_overrides_now_storing_with(
         database,
         addon_dir,
@@ -89,6 +88,48 @@ pub(crate) fn apply_toc_overrides_now(
     )
 }
 
+/// Why [`apply_toc_overrides_now`] left an addon's files alone, so callers can word it without
+/// reading the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TocApplyError {
+    /// `folder` has a symbolic link at or below it.
+    Symlink { folder: String, link: String },
+    /// `folder` belongs to the linked addon in `owner`.
+    HeldByOther { folder: String, owner: String },
+    /// The addon's parent folder is not in the AddOns folder.
+    Missing { folder: String, addon_dir: String },
+    /// Anything else: a refused value, a read, swap or database failure.
+    Other(String),
+}
+
+impl std::fmt::Display for TocApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Symlink { folder, link } => write!(
+                formatter,
+                "{folder} contains a symbolic link ({link}); LemonUp can't rewrite its TOC files safely"
+            ),
+            Self::HeldByOther { folder, owner } => write!(
+                formatter,
+                "{folder} belongs to {owner}, so its TOC files were left alone"
+            ),
+            Self::Missing { folder, addon_dir } => {
+                write!(
+                    formatter,
+                    "{folder} is not in the AddOns folder {addon_dir}"
+                )
+            }
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for TocApplyError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 /// [`apply_toc_overrides_now`] with the database write passed in, so tests can make it fail.
 fn apply_toc_overrides_now_storing_with(
     database: &mut StateDatabase,
@@ -96,7 +137,7 @@ fn apply_toc_overrides_now_storing_with(
     folder: &str,
     overrides: &BTreeMap<String, String>,
     store: impl FnOnce(&mut StateDatabase, &str, &BTreeMap<String, String>) -> Result<(), String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, TocApplyError> {
     // The same check the database write makes, so nothing is swapped for a value it refuses.
     toc_edit::validate_stored_overrides(overrides).map_err(|error| error.to_string())?;
     let rows = database.list_addons().map_err(|error| error.to_string())?;
@@ -115,26 +156,25 @@ fn apply_toc_overrides_now_storing_with(
         }
     }
     if fs::symlink_metadata(addon_dir.join(&addon.folder)).is_err() {
-        return Err(format!(
-            "{} is not in the AddOns folder {}",
-            addon.folder,
-            addon_dir.display()
-        ));
+        return Err(TocApplyError::Missing {
+            folder: addon.folder.clone(),
+            addon_dir: addon_dir.display().to_string(),
+        });
     }
     // Owned folders that are gone are skipped, like an update skips them.
     folders.retain(|name| fs::symlink_metadata(addon_dir.join(name)).is_ok());
     for name in &folders {
         if let Some(owner) = tracked_owner_of(&rows, &addon.folder, name) {
-            return Err(format!(
-                "{name} belongs to {}, so its TOC files were left alone",
-                owner.folder
-            ));
+            return Err(TocApplyError::HeldByOther {
+                folder: name.clone(),
+                owner: owner.folder.clone(),
+            });
         }
         if let Some(link) = find_symlink(&addon_dir.join(name))? {
-            return Err(format!(
-                "{name} contains a symbolic link ({}); LemonUp can't rewrite its TOC files safely",
-                link.display()
-            ));
+            return Err(TocApplyError::Symlink {
+                folder: name.clone(),
+                link: link.display().to_string(),
+            });
         }
     }
 
@@ -146,7 +186,7 @@ fn apply_toc_overrides_now_storing_with(
         &mut |_, staged| write_overrides(staged, overrides),
     )?;
     if let Err(error) = store(database, &addon.folder, overrides) {
-        return Err(swap.abort(error));
+        return Err(swap.abort(error).into());
     }
     swap.commit();
     Ok(folders)
@@ -300,7 +340,7 @@ mod tests {
             &overrides(&[("Title", "  My Foo ")]),
         )
         .expect_err("untrimmed value refused");
-        assert!(error.contains("Title override"), "{error}");
+        assert!(error.to_string().contains("Title override"), "{error}");
         assert!(
             apply_toc_overrides_now(
                 &mut database,
@@ -334,7 +374,7 @@ mod tests {
             &overrides(&[("Title", "My Foo")]),
         )
         .expect_err("refused");
-        assert!(error.contains("symbolic link"), "{error}");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
         assert_eq!(
             fs::read(addon_dir.join("Foo/Foo.toc")).expect("foo"),
             FOO_TOC
@@ -368,7 +408,7 @@ mod tests {
             &overrides(&[("Title", "My Foo")]),
         )
         .expect_err("refused");
-        assert!(error.contains("belongs to Bar"), "{error}");
+        assert!(error.to_string().contains("belongs to Bar"), "{error}");
         assert_eq!(
             fs::read(addon_dir.join("Foo/Foo.toc")).expect("foo"),
             FOO_TOC
@@ -403,7 +443,10 @@ mod tests {
             |_, _, _| Err("refused for the test".to_string()),
         )
         .expect_err("database write fails");
-        assert!(error.contains("refused for the test"), "{error}");
+        assert!(
+            error.to_string().contains("refused for the test"),
+            "{error}"
+        );
         assert_eq!(
             fs::read(addon_dir.join("Foo/Foo.toc")).expect("foo"),
             FOO_TOC

@@ -163,6 +163,147 @@ pub fn set_override(
     Ok(())
 }
 
+/// The headings the game's AddOns list offers, for suggestions while the user types a Category.
+pub const STANDARD_CATEGORIES: [&str; 27] = [
+    "Action Bars",
+    "Auctions",
+    "Buffs & Debuffs",
+    "Chat",
+    "Collections",
+    "Combat",
+    "Data Broker",
+    "Development Tools",
+    "Dungeons & Raids",
+    "Equipment",
+    "Expansion Features",
+    "Housing",
+    "Inventory",
+    "Libraries",
+    "Loot",
+    "Map",
+    "Media",
+    "Minigames",
+    "Other",
+    "Pet Battles",
+    "Professions",
+    "PvP",
+    "Quests",
+    "Roleplay",
+    "UI Overhaul",
+    "Unit Frames",
+    "User Interface",
+];
+
+/// The values the game reads for the fields an addon's TOC sets, as a scan found them (see
+/// [`crate::TocMetadata`]). `None` when the TOC has no such line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TocFieldValues {
+    pub title: Option<String>,
+    pub notes: Option<String>,
+    pub category: Option<String>,
+}
+
+impl TocFieldValues {
+    pub fn from_scanned(addon: &crate::ScannedAddon) -> Self {
+        Self {
+            title: addon.toc_title.clone(),
+            notes: addon.notes.clone(),
+            category: addon.category.clone(),
+        }
+    }
+
+    pub fn get(&self, field: TocField) -> Option<&str> {
+        match field {
+            TocField::Title => self.title.as_deref(),
+            TocField::Notes => self.notes.as_deref(),
+            TocField::Category => self.category.as_deref(),
+        }
+        .filter(|value| !value.trim().is_empty())
+    }
+}
+
+/// Where the value the game uses for a field comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TocValueSource {
+    /// No override: the addon's own line, or none.
+    Addon,
+    /// The user's override, and the files have it.
+    Override,
+    /// An override is stored but the files say something else (another program rewrote the
+    /// TOC, for example), so the game does not show it.
+    OverrideNotApplied,
+}
+
+impl TocValueSource {
+    /// The word the CLI prints.
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Addon => "addon",
+            Self::Override => "override",
+            Self::OverrideNotApplied => "override-not-applied",
+        }
+    }
+}
+
+/// Where `field`'s value comes from, given the stored `overrides` and the `effective` value a
+/// scan read. A Title is compared without color codes; every value without surrounding spaces.
+pub fn value_source(
+    field: TocField,
+    overrides: &BTreeMap<String, String>,
+    effective: Option<&str>,
+) -> TocValueSource {
+    let Some(wanted) = overrides.get(field.name()) else {
+        return TocValueSource::Addon;
+    };
+    let normalize = |value: &str| match field {
+        TocField::Title => display_value(value),
+        TocField::Notes | TocField::Category => value.trim().to_string(),
+    };
+    if effective.is_some_and(|effective| normalize(effective) == normalize(wanted)) {
+        TocValueSource::Override
+    } else {
+        TocValueSource::OverrideNotApplied
+    }
+}
+
+/// `value` as a person reads it: without WoW color codes and surrounding spaces.
+pub fn display_value(value: &str) -> String {
+    crate::scan::strip_wow_color_codes(value.to_string())
+        .trim()
+        .to_string()
+}
+
+/// Up to `limit` Category suggestions for `typed`: the headings in `used` (what other addons
+/// already use) and [`STANDARD_CATEGORIES`], each once whatever its case. Those that start with
+/// `typed` come first, then those that contain it, alphabetically within each; case is ignored.
+pub fn category_suggestions<'a>(
+    typed: &str,
+    used: impl IntoIterator<Item = &'a str>,
+    limit: usize,
+) -> Vec<String> {
+    let typed = typed.trim().to_lowercase();
+    let mut candidates: Vec<String> = Vec::new();
+    for candidate in used.into_iter().chain(STANDARD_CATEGORIES) {
+        let candidate = candidate.trim();
+        if candidate.is_empty()
+            || candidates
+                .iter()
+                .any(|known| known.to_lowercase() == candidate.to_lowercase())
+        {
+            continue;
+        }
+        candidates.push(candidate.to_string());
+    }
+    candidates.sort_by_key(|candidate| candidate.to_lowercase());
+    let (mut starts, contains): (Vec<String>, Vec<String>) = candidates
+        .into_iter()
+        .filter(|candidate| candidate.to_lowercase().contains(&typed))
+        .partition(|candidate| candidate.to_lowercase().starts_with(&typed));
+    starts.extend(contains);
+    starts.truncate(limit);
+    starts
+}
+
 /// The known fields of a stored overrides map with validated values, in [`TocField::ALL`] order.
 fn known_overrides(overrides: &BTreeMap<String, String>) -> Result<Vec<(TocField, String)>> {
     let mut fields = Vec::new();
@@ -458,6 +599,7 @@ mod tests {
         apply_overrides_to_folder, restore, set_override, title_override_name, usable_overrides,
         validate_override_value, validate_stored_overrides,
     };
+    use super::{TocValueSource, category_suggestions, display_value, value_source};
 
     fn overrides(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -746,5 +888,59 @@ mod tests {
             fs::read(temp.path().join("Foo.toc")).expect("toc"),
             original
         );
+    }
+
+    #[test]
+    fn value_source_says_where_the_value_comes_from() {
+        let none = BTreeMap::new();
+        assert_eq!(
+            value_source(TocField::Category, &none, Some("Combat")),
+            TocValueSource::Addon
+        );
+        let mine = overrides(&[("Category", "Mine"), ("Title", "|cff00ff00My Foo|r")]);
+        assert_eq!(
+            value_source(TocField::Category, &mine, Some("Mine")),
+            TocValueSource::Override
+        );
+        assert_eq!(
+            value_source(TocField::Category, &mine, Some("Combat")),
+            TocValueSource::OverrideNotApplied
+        );
+        assert_eq!(
+            value_source(TocField::Category, &mine, None),
+            TocValueSource::OverrideNotApplied
+        );
+        // A Title is compared without its color codes.
+        assert_eq!(
+            value_source(TocField::Title, &mine, Some("My Foo")),
+            TocValueSource::Override
+        );
+        assert_eq!(
+            value_source(TocField::Title, &mine, Some("Foo")),
+            TocValueSource::OverrideNotApplied
+        );
+        assert_eq!(
+            TocValueSource::OverrideNotApplied.cli_name(),
+            "override-not-applied"
+        );
+        assert_eq!(display_value(" |cffff0000Red|r Foo "), "Red Foo");
+    }
+
+    #[test]
+    fn category_suggestions_match_used_and_standard_headings() {
+        let used = ["Bags", "combat", "Unit Frames"];
+        assert_eq!(
+            category_suggestions("un", used, 5),
+            vec!["Unit Frames", "Dungeons & Raids"]
+        );
+        // Each heading once, whatever its case; the used spelling wins.
+        let combat = category_suggestions("COMBAT", used, 5);
+        assert_eq!(combat, vec!["combat"]);
+        assert_eq!(category_suggestions("", used, 5).len(), 5);
+        assert_eq!(
+            category_suggestions("b", used, 3),
+            vec!["Bags", "Buffs & Debuffs", "Action Bars"]
+        );
+        assert!(category_suggestions("zzz", used, 5).is_empty());
     }
 }

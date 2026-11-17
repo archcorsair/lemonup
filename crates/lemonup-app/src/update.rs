@@ -894,7 +894,7 @@ pub(crate) fn build_managed_update_record(
     refreshed
 }
 
-fn resolve_selected_addons<'a>(
+pub(crate) fn resolve_selected_addons<'a>(
     installed: &'a [AddonRecord],
     selectors: &[String],
 ) -> Result<Vec<&'a AddonRecord>, LemonupError> {

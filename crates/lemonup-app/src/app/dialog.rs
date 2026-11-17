@@ -47,6 +47,15 @@ pub(super) enum Question {
         direct: bool,
         folders: Vec<String>,
     },
+    /// Saving a .toc field of a "Not linked" addon. `folders` are exactly
+    /// the folders whose .toc files change; `restore` when the field goes
+    /// back to the addon's own.
+    ChangeTocFiles {
+        name: String,
+        field: &'static str,
+        restore: bool,
+        folders: Vec<String>,
+    },
     /// `progress` is (done, total) once the update phase has started.
     QuitWhileUpdating {
         progress: Option<(usize, usize)>,
@@ -68,6 +77,7 @@ impl Question {
             Self::RestoreBackup { .. } => "Restore this backup?".to_string(),
             Self::DeleteBackup { .. } => "Delete this backup?".to_string(),
             Self::ReplaceAddon { name, .. } => format!("Replace your copy of {name}?"),
+            Self::ChangeTocFiles { name, .. } => format!("Change the files of {name}?"),
             Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
             Self::QuitSetup { .. } => "Quit setup?".to_string(),
         }
@@ -89,6 +99,7 @@ impl Question {
             Self::RestoreBackup { .. } => ("restore", "keep what I have now"),
             Self::DeleteBackup { .. } => ("delete it", "keep it"),
             Self::ReplaceAddon { .. } => ("replace it", "leave it alone"),
+            Self::ChangeTocFiles { .. } => ("change them", "leave them alone"),
             Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
             Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
             Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
@@ -117,6 +128,10 @@ impl Question {
             Self::ReplaceAddon { .. } => (
                 AppMessage::WagoConfirmInstall,
                 AppMessage::WagoCancelInstall,
+            ),
+            Self::ChangeTocFiles { .. } => (
+                AppMessage::TocEdit(TocEditMessage::ConfirmApply),
+                AppMessage::TocEdit(TocEditMessage::CancelApply),
             ),
             Self::QuitWhileUpdating { .. } => {
                 (AppMessage::QuitConfirmed, AppMessage::QuitCancelled)
@@ -256,6 +271,45 @@ impl Question {
                 )));
                 lines
             }
+            Self::ChangeTocFiles {
+                name,
+                field,
+                restore,
+                folders,
+            } => {
+                let what = if *restore {
+                    format!("puts back the addon's own {field}")
+                } else {
+                    format!("writes your {field}")
+                };
+                let mut lines = vec![Line::from(Span::styled(
+                    format!(
+                        "LemonUp didn't install {name}. This {what} into the .toc files of \
+                         these folders:"
+                    ),
+                    text,
+                ))];
+                let shown = if folders.len() > names {
+                    names.saturating_sub(1)
+                } else {
+                    folders.len()
+                };
+                for folder in folders.iter().take(shown) {
+                    lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                }
+                if shown < folders.len() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  and {} more", folders.len() - shown),
+                        muted,
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "The addon's own lines are kept, so you can restore them by clearing the field.",
+                    muted,
+                )));
+                lines
+            }
             Self::QuitWhileUpdating { progress } => {
                 let first = match progress {
                     Some((done, total)) => format!(
@@ -321,7 +375,9 @@ impl Question {
         };
         let mut names = match self {
             Self::DeleteAddons(targets) => targets.len().min(DIALOG_MAX_NAMES),
-            Self::ReplaceAddon { folders, .. } => folders.len().min(DIALOG_MAX_NAMES),
+            Self::ReplaceAddon { folders, .. } | Self::ChangeTocFiles { folders, .. } => {
+                folders.len().min(DIALOG_MAX_NAMES)
+            }
             _ => 0,
         };
         let mut lines = build(names);
@@ -410,6 +466,9 @@ impl App {
                 direct: true,
                 folders: folders.to_vec(),
             });
+        }
+        if let Some(question) = self.toc_apply_question() {
+            return Some(question);
         }
         if let Some(backup) = &self.backup_pane.pending_restore {
             return Some(Question::RestoreBackup {

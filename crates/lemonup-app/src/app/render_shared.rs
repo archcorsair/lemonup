@@ -23,6 +23,7 @@ impl App {
             OverlayKind::Update => "Update".to_string(),
             OverlayKind::Config => "Settings".to_string(),
             OverlayKind::Backup => "Backups of your game settings".to_string(),
+            OverlayKind::TocEdit => "Edit .toc fields".to_string(),
             OverlayKind::Confirm => "Confirm".to_string(),
         };
         let chrome = SheetChrome {
@@ -55,6 +56,11 @@ impl App {
             OverlayKind::Backup => {
                 self.render_sheet(frame, region, header, kind, chrome, |width, height| {
                     self.backup_sheet_body(width, height)
+                })
+            }
+            OverlayKind::TocEdit => {
+                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
+                    self.toc_edit_sheet_body(width)
                 })
             }
             OverlayKind::Update | OverlayKind::Confirm => {

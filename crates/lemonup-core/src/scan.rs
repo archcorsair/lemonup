@@ -209,6 +209,17 @@ pub fn scan_addons_dir_report(
     })
 }
 
+/// The Title, Notes and Category the game reads for the addon in `folder` of `addons_dir`, from
+/// the TOC a scan selects for `flavor`. `Ok(None)` when the folder has no TOC for `flavor`.
+pub fn read_addon_toc_fields(
+    addons_dir: &Path,
+    folder: &str,
+    flavor: GameFlavor,
+) -> Result<Option<crate::toc_edit::TocFieldValues>> {
+    Ok(scan_addon_folder(&addons_dir.join(folder), folder, flavor)?
+        .map(|addon| crate::toc_edit::TocFieldValues::from_scanned(&addon)))
+}
+
 /// Scans one addon folder. `Ok(None)` means the folder has no TOC loadable by `flavor`.
 fn scan_addon_folder(
     addon_path: &Path,
@@ -724,8 +735,8 @@ mod tests {
 
     use super::{
         GroupingGuard, ScannedAddon, TocSelectionConfidence, UPDATE_STAGING_PREFIX,
-        collapse_owned_folders, parse_toc_content, scan_addons_dir, scan_addons_dir_report,
-        scan_addons_dir_with_tracked, select_toc_file,
+        collapse_owned_folders, parse_toc_content, read_addon_toc_fields, scan_addons_dir,
+        scan_addons_dir_report, scan_addons_dir_with_tracked, select_toc_file,
     };
     use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
 
@@ -834,6 +845,24 @@ mod tests {
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].notes.as_deref(), Some("Does things"));
         assert_eq!(scanned[0].category.as_deref(), Some("Bags"));
+    }
+
+    #[test]
+    fn read_addon_toc_fields_reads_what_the_game_reads() {
+        let temp = tempdir().expect("temp dir");
+        let folder = temp.path().join("Foo");
+        fs::create_dir_all(&folder).expect("folder");
+        fs::write(
+            folder.join("Foo.toc"),
+            "## Interface: 110005\n## Title: Foo\n## Category: Bags\n# LemonUp: ## Notes: Old\n",
+        )
+        .expect("toc");
+        let fields = read_addon_toc_fields(temp.path(), "Foo", GameFlavor::Retail)
+            .expect("read")
+            .expect("fields");
+        assert_eq!(fields.title.as_deref(), Some("Foo"));
+        assert_eq!(fields.category.as_deref(), Some("Bags"));
+        assert_eq!(fields.notes, None);
     }
 
     #[test]

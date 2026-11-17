@@ -271,6 +271,7 @@ const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
 const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
 const K_HELP: &[KeyEvent] = &[ch('?')];
 const K_FIND: &[KeyEvent] = &[ch('f')];
+const K_EDIT: &[KeyEvent] = &[ch('e')];
 const K_CTRL_C: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
 const K_TEXT_MOVE: &[KeyEvent] = &[
     press(KeyCode::Left),
@@ -413,6 +414,7 @@ static DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check it for updates", &[ch('c')]).when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete it", &[ch('x')]),
                 HelpRow::key("space", "select or unselect it", &[ch(' ')]),
+                HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
                     .when(HelpWhen::NotLinked),
             ],
@@ -456,6 +458,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                     .when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
+                HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
                     .when(HelpWhen::NotLinked),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
@@ -675,6 +678,52 @@ static BACKUPS_HELP: HelpPage = HelpPage {
     ],
 };
 
+static TOC_EDIT_HELP: HelpPage = HelpPage {
+    title: "Help: Edit .toc fields",
+    left: &[
+        HelpSection {
+            title: "Edit .toc fields",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "choose Title, Notes or Category", K_MOVE),
+                HelpRow::key("enter", "edit it", K_ENTER),
+                HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
+                HelpRow::key("Home End  or  gg G", "top, bottom", K_ENDS_VIM),
+            ],
+        },
+        HelpSection {
+            title: "While you edit a field",
+            rows: &[
+                HelpRow::key(
+                    "enter",
+                    "save it and write it to the addon's files",
+                    K_ENTER,
+                ),
+                HelpRow::key("esc", "keep what you had", K_ESC),
+                HelpRow::key(
+                    "tab",
+                    "fill in the next suggestion (Category)",
+                    &[press(KeyCode::Tab)],
+                ),
+                TEXT_DELETE,
+                TEXT_MOVE_ROW,
+                TEXT_CLEAR,
+                HelpRow::typed("an empty box", "gives back the addon's own value"),
+            ],
+        },
+    ],
+    right: &[
+        QUESTIONS,
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc  q", "close, back to Details", K_CLOSE),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
 /// What Help shows for each context.
 pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
     match context {
@@ -684,6 +733,7 @@ pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
         HelpContext::InstallSearch => &INSTALL_HELP,
         HelpContext::Config => &SETTINGS_HELP,
         HelpContext::Backup => &BACKUPS_HELP,
+        HelpContext::TocEdit => &TOC_EDIT_HELP,
     }
 }
 
@@ -873,6 +923,9 @@ impl App {
             select_label,
             &[KeyCode::Char(' ')],
         ));
+        hints.push(
+            KeyHint::key(Id::Edit, "e", "edit .toc fields", &[KeyCode::Char('e')]).short("edit"),
+        );
         if docked {
             hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", UP_DOWN));
             if self.docked_details_overflow() {
@@ -1009,8 +1062,37 @@ impl App {
                 hints.push(self.help_hint());
                 hints
             }
+            DetailMode::TocEdit => self.toc_edit_key_table(),
             DetailMode::Overview => vec![KeyHint::key(Id::Close, "esc", "close", CLOSE)],
         }
+    }
+
+    /// The .toc editor: moving and enter, or the box's keys while a field
+    /// is edited. Tab shows only while it has a suggestion to fill in.
+    fn toc_edit_key_table(&self) -> Vec<KeyHint> {
+        use FooterHintId as Id;
+        if self.toc_pane.edit.is_some() {
+            let mut hints = vec![
+                KeyHint::key(Id::Save, "enter", "save", ENTER).main(),
+                KeyHint::key(Id::Cancel, "esc", "cancel", ESC),
+            ];
+            if !self.toc_suggestions().is_empty() {
+                hints.push(
+                    KeyHint::key(Id::Next, "tab", "next suggestion", &[KeyCode::Tab])
+                        .short("suggest"),
+                );
+            }
+            hints.extend(self.text_box_hints());
+            return hints;
+        }
+        let mut hints = vec![
+            KeyHint::key(Id::Fields, "↑/↓", "choose", UP_DOWN),
+            KeyHint::key(Id::Edit, "enter", "edit", ENTER).main(),
+            KeyHint::key(Id::Close, "esc", "back to details", CLOSE).short("back"),
+        ];
+        hints.extend(self.sheet_scroll_hint(false));
+        hints.push(self.help_hint());
+        hints
     }
 
     /// Install: typing always goes to the box, so `q` and letters never

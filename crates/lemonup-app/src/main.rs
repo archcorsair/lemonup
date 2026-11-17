@@ -168,9 +168,164 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             run_restore_backup(paths, runtime, archive)?;
             CommandOutcome::Success
         }
+        Commands::Toc {
+            addon,
+            field,
+            value,
+            clear,
+            yes,
+        } => run_toc(paths, runtime, &addon, field, value, clear, yes)?,
     };
 
     Ok(outcome)
+}
+
+/// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
+/// asks, so changing a "Not linked" addon needs `--yes`.
+fn run_toc(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    field: Option<lemonup_core::TocField>,
+    value: Option<String>,
+    clear: bool,
+    yes: bool,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let change = match (field, value, clear) {
+        (None, _, _) => None,
+        (Some(field), Some(value), false) => Some((field, Some(value))),
+        (Some(field), None, true) => Some((field, None)),
+        (Some(field), _, _) => {
+            return Err(Box::new(LemonupError::InvalidArgument(format!(
+                "give a new {} value, or --clear to restore the addon's own",
+                field.name()
+            ))));
+        }
+    };
+    let config_store = ConfigStore::new(paths.config_file.clone());
+    let config_state = config_store.load()?;
+    let configured_addon_dir = match &config_state {
+        ConfigLoad::Loaded(config) => config.addon_dir.clone(),
+        ConfigLoad::Missing(_) => None,
+    };
+    let Some(addon_dir) = runtime
+        .addon_dir_override
+        .clone()
+        .or(configured_addon_dir.clone())
+    else {
+        println!(
+            "toc skipped: profile={}, addon_dir=<unconfigured>",
+            runtime.profile_name
+        );
+        return Ok(CommandOutcome::Skipped);
+    };
+    if runtime.is_guarded_path(&addon_dir) {
+        return Err(Box::new(LemonupError::InvalidArgument(format!(
+            "profile '{}' refuses to target the default profile addon directory: {}",
+            runtime.profile_name,
+            addon_dir.display()
+        ))));
+    }
+    validate_addons_path(&addon_dir).map_err(|error| {
+        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+    })?;
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        &paths,
+        &runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        change.is_some(),
+    )?;
+    for line in toc_command(&mut database, &addon_dir, addon, change, yes)? {
+        println!("{line}");
+    }
+    Ok(CommandOutcome::Success)
+}
+
+/// What `lemonup toc` prints, after changing a field when `change` asks for it (`None` as the
+/// value restores the addon's own). A change rewrites the addon's .toc files and reads the
+/// AddOns folder again, so the stored name follows a new Title.
+fn toc_command(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    selector: &str,
+    change: Option<(lemonup_core::TocField, Option<String>)>,
+    yes: bool,
+) -> Result<Vec<String>, LemonupError> {
+    use lemonup_core::toc_edit;
+
+    let installed = database.list_addons()?;
+    let record = crate::update::resolve_selected_addons(&installed, &[selector.to_string()])
+        .ok()
+        .and_then(|selected| selected.first().map(|record| (*record).clone()))
+        .ok_or_else(|| {
+            LemonupError::InvalidArgument(format!(
+                "No addon matches {selector}. Use the exact addon name or folder name; \
+                 `lemonup sync` reads your AddOns folder first."
+            ))
+        })?;
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+
+    let Some((field, value)) = change else {
+        let effective = lemonup_core::read_addon_toc_fields(addon_dir, &record.folder, flavor)?
+            .unwrap_or_default();
+        return Ok(lemonup_core::TocField::ALL
+            .into_iter()
+            .map(|field| {
+                let value = effective.get(field);
+                format!(
+                    "toc field={} value={} source={}",
+                    field.name(),
+                    value.unwrap_or("<none>"),
+                    toc_edit::value_source(field, &record.toc_overrides, value).cli_name()
+                )
+            })
+            .collect());
+    };
+
+    let mut overrides = record.toc_overrides.clone();
+    toc_edit::set_override(&mut overrides, field, value.as_deref())?;
+    if record.source == lemonup_core::SourceKind::Manual && !yes {
+        return Err(LemonupError::InvalidArgument(format!(
+            "{} is Not linked: LemonUp didn't install it, so changing its .toc files needs \
+             --yes. Its own lines are kept, and --clear puts them back.",
+            record.name
+        )));
+    }
+    let folders = crate::update_targets::apply_toc_overrides_now(
+        database,
+        addon_dir,
+        &record.folder,
+        &overrides,
+    )
+    .map_err(|error| LemonupError::InvalidArgument(error.to_string()))?;
+    // The list catches up on the next scan if this read fails.
+    let rescan = database.list_addons().and_then(|tracked| {
+        let report = scan_addons_dir_report(addon_dir, flavor, &tracked)?;
+        database.reconcile_scan(&report)
+    });
+    if let Err(error) = rescan {
+        tracing::warn!(%error, "could not read the AddOns folder after a .toc change");
+    }
+    let folders = folders.join("|");
+    Ok(match value {
+        Some(_) => vec![
+            format!(
+                "toc saved: addon={}, field={}, value={}, folders={folders}",
+                record.name,
+                field.name(),
+                overrides.get(field.name()).map_or("", String::as_str)
+            ),
+            "toc note: /reload in the game to see it".to_string(),
+        ],
+        None => vec![format!(
+            "toc restored: addon={}, field={}, folders={folders}",
+            record.name,
+            field.name()
+        )],
+    })
 }
 
 /// Log filter used when `RUST_LOG` is unset or invalid: quiet (`warn`) for
@@ -1987,7 +2142,7 @@ mod addon_dir_binding_tests {
 
     use super::{
         format_skipped_detail, format_sync_summary, guarded_dirs_of, leftover_staging_warnings,
-        run_import_addons, run_restore_backup, run_sync, run_update,
+        run_import_addons, run_restore_backup, run_sync, run_update, toc_command,
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
@@ -2389,5 +2544,146 @@ mod addon_dir_binding_tests {
         )
         .expect("scan");
         assert_eq!(report.leftover_staging, vec![".lemonup-staging-9-9-0"]);
+    }
+
+    /// An AddOns folder with Foo (linked, from GitHub) and Bar (Not linked), each with a
+    /// Category, and the database that knows them.
+    fn toc_fixture(root: &std::path::Path) -> (std::path::PathBuf, StateDatabase) {
+        let addon_dir = root.join("AddOns");
+        for name in ["Foo", "Bar"] {
+            std::fs::create_dir_all(addon_dir.join(name)).expect("folder");
+            std::fs::write(
+                addon_dir.join(name).join(format!("{name}.toc")),
+                format!("## Interface: 110005\n## Title: {name}\n## Category: Bags\n"),
+            )
+            .expect("toc");
+        }
+        let database = StateDatabase::open(root.join("state.sqlite")).expect("db");
+        database
+            .upsert_addon(&lemonup_core::AddonRecord::new(
+                "Foo",
+                "Foo",
+                SourceKind::GitHub,
+            ))
+            .expect("foo");
+        database
+            .upsert_addon(&lemonup_core::AddonRecord::new(
+                "Bar",
+                "Bar",
+                SourceKind::Manual,
+            ))
+            .expect("bar");
+        (addon_dir, database)
+    }
+
+    #[test]
+    fn toc_command_shows_sets_and_clears_a_field() {
+        use lemonup_core::TocField;
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = toc_fixture(temp.path());
+
+        let shown = toc_command(&mut database, &addon_dir, "foo", None, false).expect("show");
+        assert_eq!(
+            shown,
+            vec![
+                "toc field=Title value=Foo source=addon",
+                "toc field=Notes value=<none> source=addon",
+                "toc field=Category value=Bags source=addon",
+            ]
+        );
+
+        let saved = toc_command(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            Some((TocField::Category, Some(" My Bags ".to_string()))),
+            false,
+        )
+        .expect("set");
+        assert_eq!(
+            saved[0],
+            "toc saved: addon=Foo, field=Category, value=My Bags, folders=Foo"
+        );
+        let toc = std::fs::read_to_string(addon_dir.join("Foo/Foo.toc")).expect("toc");
+        assert!(toc.contains("## Category: My Bags"), "{toc}");
+        assert!(toc.contains("# LemonUp: ## Category: Bags"), "{toc}");
+        let shown = toc_command(&mut database, &addon_dir, "Foo", None, false).expect("show");
+        assert_eq!(shown[2], "toc field=Category value=My Bags source=override");
+
+        // Another program puts the addon's own line back.
+        std::fs::write(
+            addon_dir.join("Foo/Foo.toc"),
+            "## Interface: 110005\n## Title: Foo\n## Category: Bags\n",
+        )
+        .expect("toc");
+        let shown = toc_command(&mut database, &addon_dir, "Foo", None, false).expect("show");
+        assert_eq!(
+            shown[2],
+            "toc field=Category value=Bags source=override-not-applied"
+        );
+
+        let cleared = toc_command(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            Some((TocField::Category, None)),
+            false,
+        )
+        .expect("clear");
+        assert_eq!(
+            cleared,
+            vec!["toc restored: addon=Foo, field=Category, folders=Foo"]
+        );
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("read")
+            .expect("row");
+        assert!(stored.toc_overrides.is_empty());
+    }
+
+    #[test]
+    fn toc_command_needs_yes_for_a_not_linked_addon_and_a_known_addon() {
+        use lemonup_core::TocField;
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = toc_fixture(temp.path());
+        let change = || Some((TocField::Notes, Some("Mine".to_string())));
+
+        let error = toc_command(&mut database, &addon_dir, "Bar", change(), false)
+            .expect_err("needs --yes")
+            .to_string();
+        assert!(error.contains("Bar is Not linked"), "{error}");
+        assert!(error.contains("--yes"), "{error}");
+        let toc = std::fs::read_to_string(addon_dir.join("Bar/Bar.toc")).expect("toc");
+        assert!(!toc.contains("LemonUp"), "{toc}");
+        assert!(
+            database
+                .get_addon_by_folder("Bar")
+                .expect("read")
+                .expect("row")
+                .toc_overrides
+                .is_empty()
+        );
+
+        toc_command(&mut database, &addon_dir, "Bar", change(), true).expect("with --yes");
+        let toc = std::fs::read_to_string(addon_dir.join("Bar/Bar.toc")).expect("toc");
+        assert!(toc.contains("## Notes: Mine"), "{toc}");
+
+        // An unknown addon is named, and nothing says "linked".
+        let error = toc_command(&mut database, &addon_dir, "Nope", None, false)
+            .expect_err("unknown addon")
+            .to_string();
+        assert!(error.contains("No addon matches Nope"), "{error}");
+        assert!(!error.contains("linked"), "{error}");
+
+        // A value the game can't read is refused before anything changes.
+        let error = toc_command(
+            &mut database,
+            &addon_dir,
+            "Foo",
+            Some((TocField::Title, Some("two\nlines".to_string()))),
+            false,
+        )
+        .expect_err("refused");
+        assert!(error.to_string().contains("line breaks"), "{error}");
     }
 }

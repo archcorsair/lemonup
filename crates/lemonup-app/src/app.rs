@@ -72,6 +72,7 @@ mod render_shared;
 mod sheet;
 mod status;
 pub(crate) mod text_input;
+mod toc_editor;
 
 pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
@@ -90,6 +91,8 @@ use self::render_shared::{
 };
 pub(crate) use self::sheet::{SheetMove, SheetScroll};
 pub(crate) use self::status::{StatusKind, StatusMessage, StatusOffer};
+use self::toc_editor::run_toc_apply;
+pub(crate) use self::toc_editor::{TocApplyRequest, TocEditMessage, TocEditPane};
 
 const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
@@ -115,6 +118,8 @@ enum OverlayKind {
     Update,
     Config,
     Backup,
+    /// The .toc editor, opened from Details.
+    TocEdit,
     Confirm,
 }
 
@@ -133,6 +138,7 @@ pub(crate) enum HelpContext {
     InstallSearch,
     Config,
     Backup,
+    TocEdit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +259,8 @@ pub enum DetailMode {
     Update,
     Config,
     Backup,
+    /// The .toc editor of one addon.
+    TocEdit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +317,8 @@ enum TextBox {
     WagoKey,
     Install,
     Config,
+    /// The value box of the .toc editor.
+    TocEdit,
     DashboardFilter,
 }
 
@@ -490,6 +500,7 @@ enum AppMessage {
     OnboardingPreferenceChange(i16),
     OnboardingInputChar(char),
     OnboardingBackspace,
+    TocEdit(TocEditMessage),
     BackgroundTask(AppTaskEvent),
 }
 
@@ -513,6 +524,12 @@ enum AppTaskEvent {
     DirectInstallFinished {
         request: DirectInstallRequest,
         result: std::result::Result<DirectInstallOutcome, SourceError>,
+    },
+    /// A .toc change is written, with the AddOns folder read again after it
+    /// (`None` when that read failed).
+    TocApplyFinished {
+        request: TocApplyRequest,
+        result: std::result::Result<Option<AddonScanOutcome>, String>,
     },
 }
 
@@ -1155,6 +1172,8 @@ struct DashboardItem {
     embedded_libs: Vec<String>,
     owned_folder_count: usize,
     has_authoritative_owned_folders: bool,
+    /// The user's Title, Notes and Category, by field name.
+    toc_overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1332,6 +1351,7 @@ impl DashboardState {
                     embedded_libs: addon.embedded_libs,
                     owned_folder_count,
                     has_authoritative_owned_folders,
+                    toc_overrides: addon.toc_overrides,
                 }
             })
             .collect::<Vec<_>>();
@@ -2714,6 +2734,9 @@ pub struct App {
     undo_delete_in_progress: bool,
     /// A delete from the list is moving folders to the trash.
     delete_in_progress: bool,
+    toc_pane: TocEditPane,
+    /// A .toc change is being written.
+    toc_apply_running: bool,
     /// When the key being handled was read from the terminal; `None` in tests.
     key_read_at: Option<Instant>,
     /// The question last drawn and when it first was, so a key typed before
@@ -2892,6 +2915,8 @@ impl App {
             undo_delete: None,
             undo_delete_in_progress: false,
             delete_in_progress: false,
+            toc_pane: TocEditPane::default(),
+            toc_apply_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -3430,6 +3455,8 @@ impl App {
             OverlayKind::Config if self.config_pane.edit.is_some() => Some(vec![]),
             OverlayKind::Config => self.config_messages_for_key(key),
             OverlayKind::Backup => self.backup_messages_for_key(key),
+            OverlayKind::TocEdit if self.toc_pane.edit.is_some() => Some(vec![]),
+            OverlayKind::TocEdit => self.toc_edit_messages_for_key(key),
             // Only a cursor in the results moves; with the box focused the
             // arrow would change focus, so the sheet scrolls instead.
             OverlayKind::Search => self.search_messages_for_key(key).filter(|messages| {
@@ -3476,6 +3503,11 @@ impl App {
             )];
         }
 
+        // Docked, `e` opens the .toc editor; the list has no `e` of its own.
+        if docked_details && !self.dashboard.filter_editing() && key.code == KeyCode::Char('e') {
+            return vec![AppMessage::TocEdit(TocEditMessage::Open)];
+        }
+
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) && !docked_details {
             return match key.code {
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
@@ -3498,6 +3530,7 @@ impl App {
                 KeyCode::Char('u') => vec![AppMessage::InspectRunUpdate],
                 KeyCode::Char('x') => vec![AppMessage::InspectRequestDelete],
                 KeyCode::Char(' ') => vec![AppMessage::InspectToggleSelected],
+                KeyCode::Char('e') => vec![AppMessage::TocEdit(TocEditMessage::Open)],
                 KeyCode::Char('f') if self.not_linked_current_item().is_some() => {
                     vec![AppMessage::FindOnline]
                 }
@@ -3538,6 +3571,9 @@ impl App {
             return messages;
         }
         if let Some(messages) = self.backup_messages_for_key(key) {
+            return messages;
+        }
+        if let Some(messages) = self.toc_edit_messages_for_key(key) {
             return messages;
         }
 
@@ -3663,6 +3699,9 @@ impl App {
             DetailMode::Config if self.config_pane.edit.is_some() => {
                 return Some(TextBox::Config);
             }
+            DetailMode::TocEdit if self.toc_pane.edit.is_some() => {
+                return Some(TextBox::TocEdit);
+            }
             _ => {}
         }
 
@@ -3708,6 +3747,7 @@ impl App {
             TextBox::Config => vec![AppAction::SetConfigPaneState(
                 self.config_pane.edit_text(change),
             )],
+            TextBox::TocEdit => vec![AppAction::SetTocEditPane(self.toc_pane.edit_text(change))],
             TextBox::DashboardFilter => {
                 let mut query = self.dashboard.filter_input().clone();
                 change(&mut query);
@@ -4127,6 +4167,13 @@ impl App {
                     vec![
                         AppAction::SetHelpOverlay(false),
                         AppAction::SetStatus(StatusMessage::cleared()),
+                    ]
+                } else if self.shell_ui.overlay.active == Some(OverlayKind::TocEdit) {
+                    // Back to the Details it was opened from.
+                    vec![
+                        AppAction::SetStatus(StatusMessage::cleared()),
+                        AppAction::SetDetailMode(DetailMode::Overview),
+                        AppAction::SetInspectOverlay(true),
                     ]
                 } else {
                     vec![
@@ -5271,8 +5318,12 @@ impl App {
             AppMessage::OnboardingBackspace => {
                 vec![AppAction::SetOnboardingState(self.onboarding.backspace())]
             }
+            AppMessage::TocEdit(message) => self.toc_edit_actions(message),
             AppMessage::BackgroundTask(event) => match event {
                 AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
+                AppTaskEvent::TocApplyFinished { request, result } => {
+                    self.toc_apply_finished_actions(request, result)
+                }
                 AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
                     AppAction::SetDashboardDriftReport(Some(outcome.drift_report)),
@@ -5745,6 +5796,7 @@ impl App {
                         DetailMode::Update => Some(OverlayKind::Update),
                         DetailMode::Config => Some(OverlayKind::Config),
                         DetailMode::Backup => Some(OverlayKind::Backup),
+                        DetailMode::TocEdit => Some(OverlayKind::TocEdit),
                     };
                 }
             }
@@ -5842,6 +5894,21 @@ impl App {
             AppAction::SetBackupPaneState(state) => {
                 self.backup_pane = state;
             }
+            AppAction::SetTocEditPane(pane) => self.toc_pane = pane,
+            AppAction::SetTocApplyInProgress(running) => self.toc_apply_running = running,
+            AppAction::StartTocApply { addon_dir, request } => {
+                let sender = self.task_events_tx.clone();
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let task_request = request.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        run_toc_apply(&state_db_file, &addon_dir, &task_request)
+                    })
+                    .await
+                    .unwrap_or_else(|join_error| Err(join_error.to_string()));
+                    let _ = sender.send(AppTaskEvent::TocApplyFinished { request, result });
+                });
+            }
             AppAction::ReloadBackups => self.reload_backups(),
             AppAction::SetPendingWagoInstallConfirmation(confirmation) => {
                 self.pending_wago_install_confirmation = confirmation;
@@ -5935,6 +6002,7 @@ impl App {
                     DetailMode::Update => Some(OverlayKind::Update),
                     DetailMode::Config => Some(OverlayKind::Config),
                     DetailMode::Backup => Some(OverlayKind::Backup),
+                    DetailMode::TocEdit => Some(OverlayKind::TocEdit),
                 };
                 // Backups shows what is on disk, automatic backups included.
                 if detail_mode == DetailMode::Backup {
@@ -6830,7 +6898,7 @@ impl App {
                 }
             }
             // Backups draws its own sheet (`render_backup.rs`).
-            DetailMode::Backup => {}
+            DetailMode::Backup | DetailMode::TocEdit => {}
         }
 
         lines
@@ -8330,6 +8398,7 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
         DetailMode::Update => "Update",
         DetailMode::Config => "Settings",
         DetailMode::Backup => "Backups",
+        DetailMode::TocEdit => "Edit .toc fields",
     }
 }
 
@@ -8417,7 +8486,7 @@ mod tests {
     };
     use super::{
         DashboardItem, DashboardUndoDeleteState, SheetMove, SheetScroll, StatusKind, StatusMessage,
-        StatusOffer,
+        StatusOffer, TocApplyRequest, TocEditMessage, TocEditPane,
     };
     use crate::action::AppAction;
     use crate::app::render_install_search::install_error_advice;
@@ -8513,6 +8582,8 @@ mod tests {
             undo_delete: None,
             undo_delete_in_progress: false,
             delete_in_progress: false,
+            toc_pane: TocEditPane::default(),
+            toc_apply_running: false,
             key_read_at: None,
             question_shown: None,
             last_dashboard_list_area: None,
@@ -12523,6 +12594,7 @@ mod tests {
                 child_folder: "DBM-Naxx".to_string(),
             }],
             parent_missing_owned_children: HashMap::new(),
+            toc_fields: Default::default(),
         }));
 
         let lines = app.last_scan_drift_lines();
@@ -16786,6 +16858,15 @@ mod tests {
                 open(app);
                 question(app);
             }
+            fn toc_edit(app: &mut App) {
+                open_inspect(app);
+                apply_all(app, AppMessage::TocEdit(TocEditMessage::Open));
+            }
+            fn toc_editing(app: &mut App) {
+                toc_edit(app);
+                app.toc_pane.selected = 2;
+                apply_all(app, AppMessage::TocEdit(TocEditMessage::BeginEdit));
+            }
             match (context, title) {
                 (HelpContext::Overview, "While you type a filter") => filter_typing,
                 (HelpContext::Overview, "Questions") => question,
@@ -16808,16 +16889,20 @@ mod tests {
                 (HelpContext::Config, _) => settings,
                 (HelpContext::Backup, "Questions") => |app| questions_in(open_backups, app),
                 (HelpContext::Backup, _) => open_backups,
+                (HelpContext::TocEdit, "While you edit a field") => toc_editing,
+                (HelpContext::TocEdit, "Questions") => |app| questions_in(toc_edit, app),
+                (HelpContext::TocEdit, _) => toc_edit,
             }
         }
 
-        const HELP_CONTEXTS: [HelpContext; 6] = [
+        const HELP_CONTEXTS: [HelpContext; 7] = [
             HelpContext::Overview,
             HelpContext::Inspect,
             HelpContext::DetailsDocked,
             HelpContext::InstallSearch,
             HelpContext::Config,
             HelpContext::Backup,
+            HelpContext::TocEdit,
         ];
 
         fn help_test_app(context: HelpContext, title: &str, when: HelpWhen) -> App {
@@ -17069,6 +17154,492 @@ mod tests {
                         && row.contains("Getting things done")),
                 "{text}"
             );
+        }
+
+        /// The .toc editor, opened with `e` from Details.
+        mod toc_editor {
+            use super::*;
+            use crate::app::dialog::Question;
+            use lemonup_core::{TocField, TocFieldValues};
+            use std::collections::BTreeMap;
+
+            fn fields(title: &str, notes: Option<&str>, category: Option<&str>) -> TocFieldValues {
+                TocFieldValues {
+                    title: Some(title.to_string()),
+                    notes: notes.map(str::to_string),
+                    category: category.map(str::to_string),
+                }
+            }
+
+            /// What the last scan read: Second's own Notes, and the Category
+            /// `second_category`; Third sits under "Bags & Stuff".
+            fn scanned(app: &mut App, second_category: Option<&str>) {
+                let mut report = DriftReport::empty();
+                report.toc_fields.insert(
+                    "Second".to_string(),
+                    fields("Second", Some("Does things"), second_category),
+                );
+                report.toc_fields.insert(
+                    "Third".to_string(),
+                    fields("Third", None, Some("Bags & Stuff")),
+                );
+                report
+                    .toc_fields
+                    .insert("First".to_string(), fields("First", None, None));
+                app.dashboard.set_drift_report(Some(report));
+            }
+
+            fn set_overrides(app: &mut App, folder: &str, pairs: &[(&str, &str)]) {
+                let item = app
+                    .dashboard
+                    .items
+                    .iter_mut()
+                    .find(|item| item.folder == folder)
+                    .expect("item");
+                item.toc_overrides = pairs
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect();
+            }
+
+            fn open_editor_on(app: &mut App, folder: &str) {
+                open_details_on(app, folder);
+                press(app, KeyCode::Char('e'));
+            }
+
+            fn select(app: &mut App, field: TocField) {
+                app.toc_pane.selected = TocField::ALL
+                    .iter()
+                    .position(|known| *known == field)
+                    .expect("field");
+            }
+
+            fn edit_value(app: &App) -> String {
+                app.toc_pane
+                    .edit
+                    .as_ref()
+                    .expect("editing")
+                    .input
+                    .value()
+                    .to_string()
+            }
+
+            /// The actions `message` gives, all applied but the background
+            /// task, which the tests look at instead of running.
+            fn run(app: &mut App, message: TocEditMessage) -> Vec<AppAction> {
+                let actions = app.update(AppMessage::TocEdit(message));
+                for action in actions.clone() {
+                    if !matches!(action, AppAction::StartTocApply { .. }) {
+                        app.apply(action);
+                    }
+                }
+                actions
+            }
+
+            fn started(actions: &[AppAction]) -> Option<TocApplyRequest> {
+                actions.iter().find_map(|action| match action {
+                    AppAction::StartTocApply { request, .. } => Some(request.clone()),
+                    _ => None,
+                })
+            }
+
+            fn with_addon_dir(app: &mut App) -> tempfile::TempDir {
+                let temp = tempdir().expect("tempdir");
+                for folder in ["First", "Second", "Second_Config", "Third"] {
+                    fs::create_dir_all(temp.path().join(folder)).expect("folder");
+                }
+                app.effective_addon_dir = Some(temp.path().to_path_buf());
+                temp
+            }
+
+            #[test]
+            fn e_opens_the_editor_from_details_and_esc_goes_back() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_editor_on(&mut app, "Second");
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::TocEdit));
+                assert_eq!(app.toc_pane.folder, "Second");
+                press(&mut app, KeyCode::Char('q'));
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+                assert_eq!(app.dashboard.detail_mode, DetailMode::Overview);
+
+                // Docked beside the list, `e` opens it too, and closing it
+                // docks Details again.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                render_rows(&mut app, 160, 40);
+                open_details_on(&mut app, "Third");
+                assert!(app.details_docked());
+                assert!(
+                    app.key_table(160)
+                        .iter()
+                        .any(|hint| hint.key == "e" && hint.label == "edit .toc fields")
+                );
+                press(&mut app, KeyCode::Char('e'));
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::TocEdit));
+                assert_eq!(app.toc_pane.folder, "Third");
+                press(&mut app, KeyCode::Esc);
+                assert!(app.details_docked());
+            }
+
+            #[test]
+            fn rows_say_where_each_value_comes_from() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                // Category is yours and in the files; Notes is yours but
+                // another program put the old line back.
+                scanned(&mut app, Some("Mine"));
+                set_overrides(
+                    &mut app,
+                    "Second",
+                    &[("Category", "Mine"), ("Notes", "My notes")],
+                );
+                open_editor_on(&mut app, "Second");
+                for (width, height) in [(80, 24), (120, 36)] {
+                    let rows = render_rows(&mut app, width, height);
+                    let text = rows.join("\n");
+                    assert!(text.contains("Edit .toc fields"), "{text}");
+                    let row = |label: &str| {
+                        rows.iter()
+                            .find(|row| row.contains(&format!("{label}  ")) && row.contains("  "))
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                    assert!(row("Title").contains("from the addon"), "{text}");
+                    assert!(row("Notes").contains("Does things"), "{text}");
+                    assert!(
+                        row("Notes").contains("set by you, not in the files"),
+                        "{text}"
+                    );
+                    assert!(row("Category").contains("Mine"), "{text}");
+                    assert!(row("Category").contains("set by you"), "{text}");
+                    assert!(
+                        text.contains("The name the game's AddOns list shows"),
+                        "{text}"
+                    );
+                    let keys = rows.last().expect("key line");
+                    assert!(keys.contains("enter edit"), "{text}");
+                }
+                select(&mut app, TocField::Notes);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(text.contains("is not in the files"), "{text}");
+            }
+
+            #[test]
+            fn the_box_takes_every_letter_while_a_field_is_edited() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                scanned(&mut app, None);
+                open_editor_on(&mut app, "Second");
+                press(&mut app, KeyCode::Enter);
+                // The addon's own Title to start from.
+                assert_eq!(edit_value(&app), "Second");
+                type_text(&mut app, " gGqjk?");
+                assert_eq!(edit_value(&app), "Second gGqjk?");
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::TocEdit));
+                let keys = app.key_table(120);
+                assert!(
+                    keys.iter()
+                        .any(|hint| hint.key == "enter" && hint.label == "save")
+                );
+                // esc ends the edit; a second esc goes back to Details.
+                press(&mut app, KeyCode::Esc);
+                assert!(app.toc_pane.edit.is_none());
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::TocEdit));
+                press(&mut app, KeyCode::Esc);
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Inspect));
+            }
+
+            #[test]
+            fn enter_saves_a_linked_addon_right_away() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let _dir = with_addon_dir(&mut app);
+                scanned(&mut app, Some("Bags"));
+                set_overrides(&mut app, "Second", &[("Notes", "Mine")]);
+                open_editor_on(&mut app, "Second");
+                select(&mut app, TocField::Category);
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(edit_value(&app), "Bags");
+                app.apply(AppAction::SetTocEditPane(
+                    app.toc_pane
+                        .edit_text(|input| *input = TextInput::new("  My Bags ")),
+                ));
+                let actions = run(&mut app, TocEditMessage::Save);
+                let request = started(&actions).expect("applies");
+                assert_eq!(request.folder, "Second");
+                assert_eq!(request.value.as_deref(), Some("My Bags"));
+                assert_eq!(
+                    request.overrides,
+                    BTreeMap::from([
+                        ("Category".to_string(), "My Bags".to_string()),
+                        ("Notes".to_string(), "Mine".to_string()),
+                    ])
+                );
+                assert_eq!(request.folders, vec!["Second", "Second_Config"]);
+                assert!(app.toc_apply_running);
+                assert!(app.toc_pane.edit.is_none());
+                assert!(app.active_question().is_none());
+
+                // While it runs, nothing else changes the AddOns folder.
+                assert_eq!(
+                    app.install_running_status(),
+                    Some("Wait for the .toc change to finish first.")
+                );
+                assert_eq!(
+                    app.install_busy_status(),
+                    Some("Wait for the .toc change to finish first.")
+                );
+                press(&mut app, KeyCode::Enter);
+                assert!(started(&run(&mut app, TocEditMessage::Save)).is_none());
+
+                // The result names the field and says what to do next.
+                for action in
+                    app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        request: request.clone(),
+                        result: Ok(None),
+                    }))
+                {
+                    app.apply(action);
+                }
+                assert!(!app.toc_apply_running);
+                assert_eq!(app.status_line.kind, StatusKind::Done);
+                let text = render_rows(&mut app, 120, 36).join("\n");
+                assert!(
+                    text.contains("Saved Category for Second · /reload in the game to see it"),
+                    "{text}"
+                );
+                for action in
+                    app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        request,
+                        result: Err(
+                            "Second has a symlink inside, so LemonUp won't edit it".to_string()
+                        ),
+                    }))
+                {
+                    app.apply(action);
+                }
+                assert_eq!(app.status_line.kind, StatusKind::Problem);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(text.contains("has a symlink inside"), "{text}");
+            }
+
+            #[test]
+            fn a_not_linked_addon_asks_first_and_only_y_changes_it() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let _dir = with_addon_dir(&mut app);
+                scanned(&mut app, None);
+                open_editor_on(&mut app, "First");
+                select(&mut app, TocField::Category);
+                press(&mut app, KeyCode::Enter);
+                type_text(&mut app, "Mine");
+                let actions = run(&mut app, TocEditMessage::Save);
+                assert!(started(&actions).is_none());
+                match app.active_question() {
+                    Some(Question::ChangeTocFiles { name, folders, .. }) => {
+                        assert_eq!(name, "First");
+                        assert_eq!(folders, vec!["First"]);
+                    }
+                    other => panic!("expected the question, got {other:?}"),
+                }
+                for (width, height) in [(80, 24), (120, 36)] {
+                    let text = render_rows(&mut app, width, height).join("\n");
+                    assert!(text.contains("Change the files of First?"), "{text}");
+                    assert!(text.contains("own lines are kept"), "{text}");
+                }
+                // Enter never says yes.
+                assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+                    vec![AppMessage::TocEdit(TocEditMessage::ConfirmApply)]
+                );
+                let request =
+                    started(&run(&mut app, TocEditMessage::ConfirmApply)).expect("y applies");
+                assert_eq!(
+                    request.overrides.get("Category").map(String::as_str),
+                    Some("Mine")
+                );
+                assert!(app.active_question().is_none());
+
+                // No: nothing is stored or changed.
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let _dir = with_addon_dir(&mut app);
+                open_editor_on(&mut app, "First");
+                press(&mut app, KeyCode::Enter);
+                type_text(&mut app, "Mine");
+                run(&mut app, TocEditMessage::Save);
+                assert!(app.active_question().is_some());
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+                    vec![AppMessage::TocEdit(TocEditMessage::CancelApply)]
+                );
+                let actions = run(&mut app, TocEditMessage::CancelApply);
+                assert!(started(&actions).is_none());
+                assert!(app.active_question().is_none());
+                assert!(!app.toc_apply_running);
+            }
+
+            #[test]
+            fn an_empty_box_gives_back_the_addons_own_value() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let _dir = with_addon_dir(&mut app);
+                scanned(&mut app, Some("Mine"));
+                set_overrides(&mut app, "Second", &[("Category", "Mine")]);
+                open_editor_on(&mut app, "Second");
+                select(&mut app, TocField::Category);
+                press(&mut app, KeyCode::Enter);
+                // Your value to start from.
+                assert_eq!(edit_value(&app), "Mine");
+                for _ in 0..4 {
+                    press(&mut app, KeyCode::Backspace);
+                }
+                let request = started(&run(&mut app, TocEditMessage::Save)).expect("applies");
+                assert_eq!(request.value, None);
+                assert!(request.overrides.is_empty());
+                for action in
+                    app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        request,
+                        result: Ok(None),
+                    }))
+                {
+                    app.apply(action);
+                }
+                assert!(
+                    app.footer_status_text()
+                        .contains("Restored Second's own Category"),
+                    "{}",
+                    app.footer_status_text()
+                );
+
+                // A value that changes nothing writes nothing.
+                press(&mut app, KeyCode::Enter);
+                let actions = run(&mut app, TocEditMessage::Save);
+                assert!(started(&actions).is_none());
+                assert!(app.footer_status_text().contains("Nothing changed"));
+            }
+
+            #[test]
+            fn tab_fills_in_category_suggestions() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                scanned(&mut app, None);
+                open_editor_on(&mut app, "Second");
+                select(&mut app, TocField::Category);
+                press(&mut app, KeyCode::Enter);
+                type_text(&mut app, "b");
+                assert_eq!(
+                    app.toc_suggestions(),
+                    vec![
+                        "Bags & Stuff",
+                        "Buffs & Debuffs",
+                        "Action Bars",
+                        "Combat",
+                        "Data Broker"
+                    ]
+                );
+                for (width, height) in [(80, 24), (120, 36)] {
+                    let rows = render_rows(&mut app, width, height);
+                    let text = rows.join("\n");
+                    assert!(text.contains("Bags & Stuff"), "{text}");
+                    assert!(text.contains("Data Broker"), "{text}");
+                    assert!(rows.last().expect("keys").contains("tab"), "{text}");
+                }
+                press(&mut app, KeyCode::Tab);
+                assert_eq!(edit_value(&app), "Bags & Stuff");
+                press(&mut app, KeyCode::Tab);
+                assert_eq!(edit_value(&app), "Buffs & Debuffs");
+                // Typing starts over from what is typed.
+                press(&mut app, KeyCode::Backspace);
+                assert_eq!(app.toc_pane.edit.as_ref().expect("edit").suggestion, None);
+
+                // Title has no suggestions, so tab does nothing there.
+                press(&mut app, KeyCode::Esc);
+                select(&mut app, TocField::Title);
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Tab)), vec![]);
+                assert!(!app.key_table(120).iter().any(|hint| hint.key == "tab"));
+            }
+
+            #[test]
+            fn details_shows_the_category_and_whose_it_is() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                scanned(&mut app, Some("Bags"));
+                open_inspect(&mut app);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(
+                    text.lines()
+                        .any(|row| row.contains("Category") && row.contains("Bags")),
+                    "{text}"
+                );
+                assert!(!text.contains("set by you"), "{text}");
+
+                set_overrides(&mut app, "Second", &[("Category", "Mine")]);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(
+                    text.contains("Bags (set by you, not in the files)"),
+                    "{text}"
+                );
+                scanned(&mut app, Some("Mine"));
+                let text = render_rows(&mut app, 160, 40).join("\n");
+                assert!(text.contains("Mine (set by you)"), "{text}");
+
+                // No Category and none of yours: no row.
+                open_inspect_up_to_date(&mut app);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(text.contains("Category"), "{text}");
+                open_inspect_not_linked(&mut app);
+                let text = render_rows(&mut app, 80, 24).join("\n");
+                assert!(!text.contains("Category"), "{text}");
+            }
+
+            #[test]
+            fn saving_writes_the_files_and_reads_the_folder_again() {
+                let temp = tempdir().expect("tempdir");
+                let addon_dir = temp.path().join("AddOns");
+                fs::create_dir_all(addon_dir.join("Foo")).expect("folder");
+                fs::write(
+                    addon_dir.join("Foo/Foo.toc"),
+                    "## Interface: 110005\n## Title: Foo\n## Category: Bags\n",
+                )
+                .expect("toc");
+                let state_db_file = temp.path().join("state.sqlite");
+                let database = StateDatabase::open(&state_db_file).expect("db");
+                database
+                    .upsert_addon(&AddonRecord::new("Foo", "Foo", SourceKind::GitHub))
+                    .expect("row");
+                drop(database);
+
+                let request = TocApplyRequest {
+                    folder: "Foo".to_string(),
+                    name: "Foo".to_string(),
+                    field: TocField::Title,
+                    value: Some("My Foo".to_string()),
+                    overrides: BTreeMap::from([("Title".to_string(), "My Foo".to_string())]),
+                    folders: vec!["Foo".to_string()],
+                };
+                let sync = super::super::super::toc_editor::run_toc_apply(
+                    &state_db_file,
+                    &addon_dir,
+                    &request,
+                )
+                .expect("applies")
+                .expect("read again");
+                let toc = fs::read_to_string(addon_dir.join("Foo/Foo.toc")).expect("toc");
+                assert!(toc.contains("# LemonUp: ## Title: Foo"), "{toc}");
+                assert_eq!(
+                    sync.drift_report.toc_fields["Foo"].title.as_deref(),
+                    Some("My Foo")
+                );
+                // The list shows the new name right away.
+                assert!(sync.addons.iter().any(|addon| addon.name == "My Foo"));
+
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(temp.path(), addon_dir.join("Foo/Link"))
+                        .expect("symlink");
+                    let error = super::super::super::toc_editor::run_toc_apply(
+                        &state_db_file,
+                        &addon_dir,
+                        &request,
+                    )
+                    .expect_err("refused");
+                    assert_eq!(error, "Foo has a symlink inside, so LemonUp won't edit it");
+                }
+            }
         }
     }
 

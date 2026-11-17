@@ -188,15 +188,23 @@ impl App {
             Some("Wait for the delete to finish first.")
         } else if self.undo_delete_in_progress {
             Some("Wait for the undo to finish first.")
+        } else if self.toc_apply_running {
+            Some("Wait for the .toc change to finish first.")
         } else {
             None
         }
     }
 
-    /// Why an update, delete or undo can't start now: an install is running.
+    /// Why an update, delete or undo can't start now: an install, or a
+    /// .toc change, is running.
     pub(super) fn install_running_status(&self) -> Option<&'static str> {
-        self.install_running()
-            .then_some("Wait for the install to finish first.")
+        if self.install_running() {
+            Some("Wait for the install to finish first.")
+        } else if self.toc_apply_running {
+            Some("Wait for the .toc change to finish first.")
+        } else {
+            None
+        }
     }
 
     /// The addon `f` finds online: the current one, when it is not linked.

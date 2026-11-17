@@ -26,6 +26,7 @@ impl App {
             DetailMode::Install | DetailMode::Search => HelpContext::InstallSearch,
             DetailMode::Config => HelpContext::Config,
             DetailMode::Backup => HelpContext::Backup,
+            DetailMode::TocEdit => HelpContext::TocEdit,
         }
     }
 
