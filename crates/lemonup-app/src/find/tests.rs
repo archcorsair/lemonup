@@ -482,6 +482,7 @@ fn found(source: FindSource, name: &str, folder: &str, version: &str, latest: &s
         latest_version: Some(latest.to_string()),
         joining: Vec::new(),
         leaving: Vec::new(),
+        likely_reason: None,
         missing: Vec::new(),
         differing: Vec::new(),
         blocked: Vec::new(),

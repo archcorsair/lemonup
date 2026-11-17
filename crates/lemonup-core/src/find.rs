@@ -458,6 +458,31 @@ impl BlockedFolder {
     }
 }
 
+/// What was checked for a `Likely` candidate, and why that is not enough for `Exact`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LikelyReason {
+    /// A .toc names the project and nothing else was checked.
+    TocNamesIt,
+    /// A .toc names the project, and Wago.io hashed the files: they match no release.
+    FilesMatchNoRelease,
+    /// The folder's version differs from the one the source lists.
+    VersionDiffers {
+        folder: String,
+        /// The version in the folder's .toc, when it has one.
+        installed: Option<String>,
+        /// The version the source lists.
+        listed: String,
+    },
+}
+
+impl LikelyReason {
+    /// Whether the candidate rests on a .toc ID or on a version that differs, so a candidate
+    /// from another source that matches exactly outweighs it.
+    fn is_weak(&self) -> bool {
+        !matches!(self, Self::FilesMatchNoRelease)
+    }
+}
+
 /// A folder that moves into a result's addon from another Not linked addon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderMove {
@@ -498,6 +523,8 @@ pub struct FoundAddon {
     /// Folders grouped under the parent now that the source doesn't list; they become their own
     /// Not linked addons.
     pub leaving: Vec<String>,
+    /// Why it is only `Likely`, set for that label only.
+    pub likely_reason: Option<LikelyReason>,
     /// The source's folders that are not on disk.
     pub missing: Vec<String>,
     /// Folders whose files differ from the source's (Wago.io hashes).
@@ -747,6 +774,7 @@ fn empty_found(source: FindSource, source_id: &str, source_url: String, name: &s
         latest_version: None,
         joining: Vec::new(),
         leaving: Vec::new(),
+        likely_reason: None,
         missing: Vec::new(),
         differing: Vec::new(),
         blocked: Vec::new(),
@@ -807,6 +835,10 @@ pub fn match_addons(
         {
             continue;
         }
+        let hashed = found
+            .folders
+            .iter()
+            .any(|folder| inputs.get(folder).and_then(LocalFolder::hash).is_some());
         found.label = if matched == 0 {
             FindLabel::Likely
         } else if found.differing.is_empty() && found.missing.is_empty() {
@@ -814,6 +846,13 @@ pub fn match_addons(
         } else {
             FindLabel::Partial
         };
+        if found.label == FindLabel::Likely {
+            found.likely_reason = Some(if hashed {
+                LikelyReason::FilesMatchNoRelease
+            } else {
+                LikelyReason::TocNamesIt
+            });
+        }
         found.author = project.author.clone();
         found.matched_version = project.matched_version.clone();
         found.latest_version = project.latest_version.clone();
@@ -857,6 +896,23 @@ pub fn match_addons(
         } else {
             FindLabel::Likely
         };
+        if !versions_match {
+            found.likely_reason = file.folders.iter().find_map(|folder| {
+                let installed = inputs
+                    .get(&folder.folder)
+                    .and_then(|local| local.version.as_deref());
+                (!same_version(installed, folder.version.as_deref())).then(|| {
+                    LikelyReason::VersionDiffers {
+                        folder: folder.folder.clone(),
+                        installed: installed.map(str::to_string),
+                        listed: folder
+                            .version
+                            .clone()
+                            .unwrap_or_else(|| file.version.clone()),
+                    }
+                })
+            });
+        }
         found.folders = folders;
         found.author = file.author.clone();
         found.matched_version = versions_match.then(|| file.version.clone());
@@ -900,6 +956,20 @@ pub fn match_addons(
         } else {
             FindLabel::Likely
         };
+        if !versions_match {
+            found.likely_reason = folders.iter().find_map(|folder| {
+                let installed = inputs
+                    .get(folder)
+                    .and_then(|local| local.version.as_deref());
+                (!same_version(installed, Some(&package.version))).then(|| {
+                    LikelyReason::VersionDiffers {
+                        folder: folder.clone(),
+                        installed: installed.map(str::to_string),
+                        listed: package.version.clone(),
+                    }
+                })
+            });
+        }
         found.folders = folders;
         found.author = package.author.clone();
         found.matched_version = versions_match.then(|| package.version.clone());
@@ -940,6 +1010,7 @@ pub fn match_addons(
             {
                 let mut found = empty_found(FindSource::Wago, id, wago_url(id), &name);
                 found.folders = current.clone();
+                found.likely_reason = Some(LikelyReason::TocNamesIt);
                 found.matched_version = local.version.clone();
                 claims.push(Claim {
                     found,
@@ -969,6 +1040,22 @@ pub fn match_addons(
                 if !found.folders.iter().any(|known| key(known) == key(folder)) {
                     found.folders.push(local.folder.clone());
                 }
+                found.likely_reason = Some(
+                    match file
+                        .folders
+                        .iter()
+                        .find(|listed| key(&listed.folder) == key(folder))
+                        .and_then(|listed| listed.version.as_deref())
+                        .filter(|listed| !same_version(local.version.as_deref(), Some(listed)))
+                    {
+                        Some(listed) => LikelyReason::VersionDiffers {
+                            folder: local.folder.clone(),
+                            installed: local.version.clone(),
+                            listed: listed.to_string(),
+                        },
+                        None => LikelyReason::TocNamesIt,
+                    },
+                );
                 found.author = file.author.clone();
                 found.matched_version = local.version.clone();
                 found.latest_version = Some(file.version.clone());
@@ -980,7 +1067,7 @@ pub fn match_addons(
         }
     }
 
-    let claims = merge_same_projects(claims);
+    let claims = drop_outweighed(merge_same_projects(claims));
     let placed = claims
         .into_iter()
         .map(|claim| place(claim.found, inputs, &groups))
@@ -1172,6 +1259,38 @@ fn merge_same_projects(claims: Vec<Claim>) -> Vec<Claim> {
             }
         }
     }
+    claims
+        .into_iter()
+        .zip(dropped)
+        .filter_map(|(claim, dropped)| (!dropped).then_some(claim))
+        .collect()
+}
+
+/// A `Likely` candidate that rests on a .toc ID or a version that differs is dropped when a
+/// candidate from another source matches exactly on a folder they share: the exact one proves
+/// the files, the other only names a project. Candidates of comparable strength stay, and
+/// become a choice.
+fn drop_outweighed(claims: Vec<Claim>) -> Vec<Claim> {
+    let outweighed = |claim: &Claim| {
+        claim.found.label == FindLabel::Likely
+            && claim
+                .found
+                .likely_reason
+                .as_ref()
+                .is_some_and(LikelyReason::is_weak)
+            && claims.iter().any(|other| {
+                other.found.label == FindLabel::Exact
+                    && other.found.source != claim.found.source
+                    && other.found.folders.iter().any(|folder| {
+                        claim
+                            .found
+                            .folders
+                            .iter()
+                            .any(|known| key(known) == key(folder))
+                    })
+            })
+    };
+    let dropped = claims.iter().map(outweighed).collect::<Vec<_>>();
     claims
         .into_iter()
         .zip(dropped)

@@ -256,17 +256,23 @@ fn two_folders_naming_one_project_are_choose_one() {
 }
 
 #[test]
-fn two_sources_for_one_folder_are_choose_one() {
+fn two_exact_matches_on_one_folder_are_choose_one() {
     let fixture = fixture();
     addon(&fixture.addons, "Spy", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Spy_Extra", &["## Version: 1.0"]);
     let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
     let mut lookups = lookups(SourceAnswer::Found(vec![wago(
         "SPY",
         "Spy",
         vec![("Spy".to_string(), hash_of(&inputs, "Spy"))],
     )]));
-    lookups.wowinterface =
-        SourceAnswer::Found(vec![wowi_file("99", "Spy fork", "2.0", &[("Spy", "2.0")])]);
+    // Both match exactly, but not the same folders: the files can't tell them apart.
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "99",
+        "Spy fork",
+        "1.0",
+        &[("Spy", "1.0"), ("Spy_Extra", "1.0")],
+    )]);
 
     let report = match_addons(&inputs, &[], None, &lookups);
 
@@ -1401,4 +1407,100 @@ fn a_folder_named_like_the_project_is_the_parent_before_any_requirement() {
     );
 
     assert_eq!(report.results[0].folder, "FooBar");
+}
+
+#[test]
+fn an_exact_match_outweighs_a_version_mismatch_on_another_source() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Pawn",
+        &["## Version: 3.0", "## X-WoWI-ID: 11"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "PWN",
+        "Pawn",
+        vec![("Pawn".to_string(), hash_of(&inputs, "Pawn"))],
+    )]));
+    lookups.wowinterface =
+        SourceAnswer::Found(vec![wowi_file("11", "Pawn", "2.0", &[("Pawn", "2.0")])]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = result(&report, "Pawn");
+    assert_eq!(found.label, FindLabel::Exact);
+    assert!(found.preselected());
+    assert_eq!(found.candidates.len(), 1);
+    assert_eq!(found.found().expect("candidate").source, FindSource::Wago);
+}
+
+#[test]
+fn an_exact_match_outweighs_a_toc_id_on_another_source() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "HandyNotes",
+        &["## Version: 1.0", "## X-WoWI-ID: 22"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Found(vec![wago(
+        "HN",
+        "HandyNotes",
+        vec![("HandyNotes".to_string(), hash_of(&inputs, "HandyNotes"))],
+    )]));
+    // The WoWInterface file lists a folder that is not here, so only the .toc's ID links them.
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "22",
+        "HandyNotes",
+        "1.0",
+        &[("HandyNotes", "1.0"), ("HandyNotes_Extra", "1.0")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = result(&report, "HandyNotes");
+    assert_eq!(found.label, FindLabel::Exact);
+    assert_eq!(found.candidates.len(), 1);
+    assert_eq!(found.found().expect("candidate").source, FindSource::Wago);
+}
+
+#[test]
+fn a_likely_match_beside_a_partial_one_is_still_a_choice() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Questie", &["## X-Wago-ID: QID"]);
+    addon(&fixture.addons, "QuestieDB", &["## X-Wago-ID: QID"]);
+    addon(&fixture.addons, "QuestieDev", &["## X-Wago-ID: QID"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = vec![
+        ("Questie".to_string(), hash_of(&inputs, "Questie")),
+        ("QuestieDB".to_string(), "0".repeat(32)),
+    ];
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("QID", "Questie", modules)])),
+    );
+
+    let choose = report
+        .results
+        .iter()
+        .find(|result| result.label == FindLabel::ChooseOne)
+        .unwrap_or_else(|| panic!("{:#?}", report.results));
+    let parents = choose
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.parent_folder.as_str(), candidate.label))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parents,
+        [
+            ("QuestieDev", FindLabel::Likely),
+            ("Questie", FindLabel::Partial)
+        ]
+    );
 }
