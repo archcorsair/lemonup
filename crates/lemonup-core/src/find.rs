@@ -653,7 +653,8 @@ impl<'a> Groups<'a> {
         }
     }
 
-    /// The Not linked addons looked up: those named in `scope` (row or folder names), or all.
+    /// The Not linked addons looked up: those whose folder (the parent folder of a row) is named
+    /// in `scope`, without case, or all of them.
     fn units(&self, scope: Option<&[String]>) -> impl Iterator<Item = &Unit> {
         let wanted = scope.map(|names| names.iter().map(|name| key(name)).collect::<HashSet<_>>());
         self.units.iter().filter(move |unit| {
@@ -737,9 +738,9 @@ fn empty_found(source: FindSource, source_id: &str, source_url: String, name: &s
     }
 }
 
-/// Matches what the sources answered against the Not linked addons in `scope` (row or folder
-/// names; `None` for all of them, folders without a row included). Linked addons are never
-/// looked up, and their folders are never offered.
+/// Matches what the sources answered against the Not linked addons in `scope` (their folders,
+/// the parent folder for a row, compared without case; `None` for all of them, folders without
+/// a row included). Linked addons are never looked up, and their folders are never offered.
 pub fn match_addons(
     inputs: &FindInputs,
     rows: &[AddonRecord],
