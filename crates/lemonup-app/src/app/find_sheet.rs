@@ -473,6 +473,10 @@ impl App {
                         )),
                     ];
                 }
+                // An update, install or other job that changes the addons runs.
+                if let Some(note) = self.switch_busy_note() {
+                    return vec![self.find_note(StatusKind::Note, note)];
+                }
                 vec![AppAction::Find(FindAction::StartLookup)]
             }
             FindMessage::Close => vec![AppAction::Find(FindAction::Close)],

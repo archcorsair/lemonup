@@ -996,3 +996,62 @@ fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
     let text = app.status_line.text.to_lowercase();
     assert_eq!(text.matches("nothing was linked").count(), 1, "{text}");
 }
+
+#[test]
+fn start_waits_for_a_job_that_changes_the_addons() {
+    for (busy, note) in [
+        (
+            (|app: &mut App| app.dashboard.update_in_progress = true) as fn(&mut App),
+            "Wait for the update to finish first.",
+        ),
+        (
+            |app: &mut App| app.wago_install_in_progress = true,
+            "Wait for the install to finish first.",
+        ),
+        (
+            |app: &mut App| app.delete_in_progress = true,
+            "Wait for the delete to finish first.",
+        ),
+    ] {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        open_find(&mut app);
+        busy(&mut app);
+        let generation = app.find.generation;
+        let actions = app.update(AppMessage::Find(FindMessage::Start));
+        assert!(
+            !actions.contains(&AppAction::Find(FindAction::StartLookup)),
+            "{actions:?}"
+        );
+        for action in actions {
+            app.apply(action);
+        }
+        assert_eq!(app.find.step, Some(FindStep::Start));
+        assert_eq!(app.find.generation, generation);
+        assert!(
+            app.status_line.text.contains(note),
+            "{}",
+            app.status_line.text
+        );
+    }
+}
+
+#[test]
+fn auto_checks_wait_while_find_links_or_replaces() {
+    let ready = || {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.scan_state = ScanState::Succeeded {
+            path: PathBuf::from("AddOns"),
+            summary: ScanSummary::default(),
+        };
+        app.effective_addon_dir = Some(PathBuf::from("AddOns"));
+        app.config_pane.draft.auto_check_enabled = true;
+        app
+    };
+    assert!(ready().auto_check_due_targets().is_some());
+    let mut app = ready();
+    app.find.linking = true;
+    assert!(app.auto_check_due_targets().is_none());
+    let mut app = ready();
+    app.find.replacements = vec![found(FindLabel::Partial, FindSource::Wago, "Q", &["Q"])].into();
+    assert!(app.auto_check_due_targets().is_none());
+}

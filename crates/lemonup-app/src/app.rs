@@ -7273,6 +7273,8 @@ impl App {
             || self.wago_install_in_progress
             || self.direct_install_in_progress
             || self.pending_wago_install_confirmation.is_some()
+            || self.find.linking
+            || !self.find.replacements.is_empty()
             || self.effective_addon_dir.is_none()
             || !matches!(self.scan_state, ScanState::Succeeded { .. })
         {
