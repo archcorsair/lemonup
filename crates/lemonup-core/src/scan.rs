@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::domain::{AddonKind, AddonRecord, GameFlavor, OwnedFolder, SourceKind};
 use crate::error::{LemonupError, Result};
+use crate::toc_conditions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TocSelectionConfidence {
@@ -20,14 +21,16 @@ pub struct TocSelectionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocMetadata {
-    /// The addon's name: the first `## Title:` line (indented ones included) with color codes
-    /// removed, or the fallback.
+    /// The addon's name: the first `## Title:` line (indented ones included) that applies to the
+    /// client, with its inline conditions and color codes removed, or the fallback.
     pub title: String,
-    /// `## Title:` as the game reads it (the last base line wins), without color codes removed.
+    /// `## Title:` as the game reads it (the last base line that applies to the client wins),
+    /// without color codes removed.
     pub toc_title: Option<String>,
-    /// `## Notes:` as the game reads it (the last base line wins), without color codes removed.
+    /// `## Notes:` as the game reads it (the last base line that applies to the client wins),
+    /// without color codes removed.
     pub notes: Option<String>,
-    /// `## Category:` as the game reads it (the last base line wins).
+    /// `## Category:` as the game reads it (the last base line that applies to the client wins).
     pub category: Option<String>,
     pub version: Option<String>,
     pub author: Option<String>,
@@ -236,7 +239,7 @@ fn scan_addon_folder(
 
     let selected_toc = select_toc_file(folder, &toc_files, flavor)?;
     let content = read_toc_file(&addon_path.join(&selected_toc.selected))?;
-    let toc = parse_toc_content(&content, folder);
+    let toc = parse_toc_content(&content, folder, Some(flavor));
     let kind = detect_addon_kind(addon_path, &toc);
     let git_commit = read_git_commit(addon_path);
     let version = toc
@@ -341,28 +344,35 @@ pub fn select_toc_file(
     })
 }
 
-pub fn parse_toc_content(content: &str, fallback_title: &str) -> TocMetadata {
+/// Reads a TOC's metadata for `flavor`'s client: lines whose inline conditions
+/// (`[AllowLoadGameType ...]`, see [`crate::toc_conditions`]) leave this client out are skipped,
+/// and the conditions are taken out of the values. With `flavor` `None` (game version not known)
+/// only lines without a game type condition count.
+pub fn parse_toc_content(
+    content: &str,
+    fallback_title: &str,
+    flavor: Option<GameFlavor>,
+) -> TocMetadata {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let title = field_value(content, &["Title"])
+    // The game uses the last line that applies; only the name keeps the first, so names stay
+    // stable.
+    let field = |keys: &[&str]| last_field_value(content, keys, flavor);
+    let title = field_value(content, &["Title"], flavor)
         .map(strip_wow_color_codes)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
 
     TocMetadata {
         title,
-        toc_title: directive_value(content, "Title"),
-        notes: directive_value(content, "Notes"),
-        category: directive_value(content, "Category"),
-        version: field_value(content, &["Version"]),
-        author: field_value(content, &["Author"]),
-        interface: field_value(content, &["Interface"]),
-        required_deps: parse_dependency_list(field_value(
-            content,
-            &["Dependencies", "RequiredDeps"],
-        )),
-        optional_deps: parse_dependency_list(field_value(content, &["OptionalDeps"])),
-        x_library: field_value(content, &["X-Library"])
-            .is_some_and(|value| value.eq_ignore_ascii_case("true")),
+        toc_title: directive_value(content, "Title", flavor),
+        notes: directive_value(content, "Notes", flavor),
+        category: directive_value(content, "Category", flavor),
+        version: field(&["Version"]),
+        author: field(&["Author"]),
+        interface: field(&["Interface"]),
+        required_deps: parse_dependency_list(field(&["Dependencies", "RequiredDeps"])),
+        optional_deps: parse_dependency_list(field(&["OptionalDeps"])),
+        x_library: field(&["X-Library"]).is_some_and(|value| value.eq_ignore_ascii_case("true")),
     }
 }
 
@@ -643,7 +653,9 @@ fn toc_loadable_by_flavor(toc_file: &str, addon_folder: &str, flavor: GameFlavor
         .any(|suffix| stem == format!("{folder}{suffix}"))
 }
 
-fn field_value(content: &str, keys: &[&str]) -> Option<String> {
+/// The first `## <key>:` line (indented ones included) that applies to `flavor`'s client, with
+/// its inline conditions taken out.
+fn field_value(content: &str, keys: &[&str], flavor: Option<GameFlavor>) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         let Some(remainder) = trimmed.strip_prefix("##") else {
@@ -657,9 +669,9 @@ fn field_value(content: &str, keys: &[&str]) -> Option<String> {
             .iter()
             .any(|key| raw_key.trim().eq_ignore_ascii_case(key))
         {
-            let value = raw_value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
+            let line = toc_conditions::evaluate(raw_value, flavor);
+            if line.applies && !line.value.is_empty() {
+                return Some(line.value);
             }
         }
     }
@@ -667,10 +679,35 @@ fn field_value(content: &str, keys: &[&str]) -> Option<String> {
     None
 }
 
-/// The value the game uses for a display directive: the last `## <key>:` line that starts in
-/// column 0 and has no locale suffix wins. Lines LemonUp commented out (`# LemonUp: ...`) are not
+/// The last `## <key>:` line (indented ones included) that applies to `flavor`'s client, with its
+/// inline conditions taken out: the line the game uses when a directive is given more than once.
+fn last_field_value(content: &str, keys: &[&str], flavor: Option<GameFlavor>) -> Option<String> {
+    let mut found = None;
+    for line in content.lines() {
+        let Some(remainder) = line.trim().strip_prefix("##") else {
+            continue;
+        };
+        let Some((raw_key, raw_value)) = remainder.trim().split_once(':') else {
+            continue;
+        };
+        if keys
+            .iter()
+            .any(|key| raw_key.trim().eq_ignore_ascii_case(key))
+        {
+            let line = toc_conditions::evaluate(raw_value, flavor);
+            if line.applies && !line.value.is_empty() {
+                found = Some(line.value);
+            }
+        }
+    }
+    found
+}
+
+/// The value the game uses for a display directive: of the `## <key>:` lines that start in
+/// column 0, have no locale suffix and apply to `flavor`'s client, the last one wins, with its
+/// inline conditions taken out. Lines LemonUp commented out (`# LemonUp: ...`) are not
 /// directives, so an override LemonUp wrote is what this returns.
-fn directive_value(content: &str, key: &str) -> Option<String> {
+fn directive_value(content: &str, key: &str, flavor: Option<GameFlavor>) -> Option<String> {
     let mut found = None;
     for line in content.lines() {
         let Some(remainder) = line.strip_prefix("##") else {
@@ -680,9 +717,9 @@ fn directive_value(content: &str, key: &str) -> Option<String> {
             continue;
         };
         if raw_key.trim().eq_ignore_ascii_case(key) {
-            let value = raw_value.trim();
-            if !value.is_empty() {
-                found = Some(value.to_string());
+            let line = toc_conditions::evaluate(raw_value, flavor);
+            if line.applies && !line.value.is_empty() {
+                found = Some(line.value);
             }
         }
     }
@@ -781,6 +818,7 @@ mod tests {
         let parsed = parse_toc_content(
             "## Title: |cffabd473Details! Damage Meter|r\n## Version: 1.0\n## Author: Tercio\n## Interface: 110002\n## Dependencies: Ace3, LibStub CallbackHandler-1.0\n## OptionalDeps: ElvUI Masque\n## X-Library: true",
             "Fallback",
+            None,
         );
 
         assert_eq!(parsed.title, "Details! Damage Meter");
@@ -800,6 +838,7 @@ mod tests {
         let parsed = parse_toc_content(
             "## Title: First\r\n## Notes: Old notes\r\n## Category: Combat\r\n## Title-deDE: Erster\r\n## Notes-frFR: Notes\r\n# LemonUp: ## Category: Commented\r\n  ## Title: Indented\r\n## Title: |cff00ff00Last|r\r\n## Notes: New notes\r\n",
             "Fallback",
+            None,
         );
         // The name keeps the first Title line, indented or not, as before overrides existed.
         assert_eq!(parsed.title, "First");
@@ -810,6 +849,7 @@ mod tests {
         let overridden = parse_toc_content(
             "## Interface: 110002\n# LemonUp: ## Title: Original\n# LemonUp: ## Category: Combat\n# LemonUp-managed\n## Title: Mine\n",
             "Fallback",
+            None,
         );
         assert_eq!(overridden.title, "Mine");
         assert_eq!(overridden.toc_title.as_deref(), Some("Mine"));
@@ -822,11 +862,12 @@ mod tests {
         let parsed = parse_toc_content(
             "## Interface: 110002\n  ## Title: |cffff0000Indented|r\n## Title: Later\n",
             "Fallback",
+            None,
         );
         assert_eq!(parsed.title, "Indented");
         assert_eq!(parsed.toc_title.as_deref(), Some("Later"));
         assert_eq!(
-            parse_toc_content("## Notes: x\n", "Fallback").title,
+            parse_toc_content("## Notes: x\n", "Fallback", None).title,
             "Fallback"
         );
     }
@@ -865,11 +906,132 @@ mod tests {
         assert_eq!(fields.notes, None);
     }
 
+    /// The Title lines of ElvUI's root TOC (v16.01), one per game version.
+    const ELVUI_TITLES: &str = "## Interface: 11509, 16001, 20506, 38002, 50504, 120100, 120105\r\n## Notes: User Interface Replacement\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bMists|r [AllowLoadGameType mists]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bMidnight|r [AllowLoadGameType standard]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bForever|r [AllowLoadGameType camelot][ExcludeLoadGameType standard, classic]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bWrath|r [AllowLoadGameType wrath]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bTBC|r [AllowLoadGameType tbc]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bClassic|r [AllowLoadGameType vanilla]\r\n";
+
+    fn scan_one(flavor: GameFlavor, client: &str, toc: &str) -> ScannedAddon {
+        let temp = tempdir().expect("tempdir");
+        let addons = temp.path().join(client).join("Interface").join("AddOns");
+        fs::create_dir_all(addons.join("ElvUI")).expect("dir");
+        fs::write(addons.join("ElvUI").join("ElvUI.toc"), toc).expect("toc");
+        let mut scanned = scan_addons_dir(&addons, flavor).expect("scan");
+        assert_eq!(scanned.len(), 1);
+        scanned.remove(0)
+    }
+
+    #[test]
+    fn titles_for_another_game_version_are_skipped_and_their_conditions_never_shown() {
+        let forever = scan_one(GameFlavor::Forever, "_forever_", ELVUI_TITLES);
+        assert_eq!(forever.name, "ElvUI Forever");
+        assert_eq!(
+            forever.toc_title.as_deref(),
+            Some("|cff1784d1ElvUI|r |cfd9b9b9bForever|r")
+        );
+        assert_eq!(forever.notes.as_deref(), Some("User Interface Replacement"));
+
+        let retail = scan_one(GameFlavor::Retail, "_retail_", ELVUI_TITLES);
+        assert_eq!(retail.name, "ElvUI Midnight");
+        assert_eq!(
+            retail.toc_title.as_deref(),
+            Some("|cff1784d1ElvUI|r |cfd9b9b9bMidnight|r")
+        );
+
+        let classic = scan_one(GameFlavor::Classic, "_classic_era_", ELVUI_TITLES);
+        assert_eq!(classic.name, "ElvUI Classic");
+
+        // Without a known game version only lines without a game version condition count,
+        // and ElvUI has none, so its folder name is the name.
+        let unknown = parse_toc_content(ELVUI_TITLES, "ElvUI", None);
+        assert_eq!(unknown.title, "ElvUI");
+        assert_eq!(unknown.toc_title, None);
+        assert_eq!(unknown.notes.as_deref(), Some("User Interface Replacement"));
+
+        for addon in [&forever, &retail, &classic] {
+            assert!(!addon.name.contains('['), "{}", addon.name);
+            assert!(
+                !addon.toc_title.as_deref().unwrap_or_default().contains('['),
+                "{:?}",
+                addon.toc_title
+            );
+        }
+    }
+
+    #[test]
+    fn an_unconditional_title_and_conditional_ones_follow_the_game() {
+        let toc = "## Title: Foo\n## Title: Foo Classic [AllowLoadGameType classic]\n## Title: Foo Forever [ExcludeLoadGameType standard]\n";
+        // Retail skips both conditional lines: the second is for the Classic family, the third
+        // excludes Retail.
+        let retail = scan_one(GameFlavor::Retail, "_retail_", toc);
+        assert_eq!(retail.name, "Foo");
+        assert_eq!(retail.toc_title.as_deref(), Some("Foo"));
+        // Forever is in the Mainline family: the Classic line is skipped and the last line that
+        // applies wins, while the name keeps the first line that applies.
+        let forever = scan_one(GameFlavor::Forever, "_forever_", toc);
+        assert_eq!(forever.name, "Foo");
+        assert_eq!(forever.toc_title.as_deref(), Some("Foo Forever"));
+        // Without a known game version only the unconditional line counts.
+        let unknown = parse_toc_content(toc, "Fallback", None);
+        assert_eq!(unknown.title, "Foo");
+        assert_eq!(unknown.toc_title.as_deref(), Some("Foo"));
+
+        // A Title that only applies elsewhere comes first: it is skipped for the name too.
+        let later = scan_one(
+            GameFlavor::Retail,
+            "_retail_",
+            "## Title: Bar Wrath [AllowLoadGameType wrath]\n## Title: Bar\n",
+        );
+        assert_eq!(later.name, "Bar");
+    }
+
+    #[test]
+    fn version_interface_and_dependencies_use_the_last_line_for_the_game() {
+        let toc = "## Title: Foo\n## Title: Foo Forever [AllowLoadGameType camelot]\n## Interface: 120100\n## Interface: 16001 [AllowLoadGameType camelot]\n## Version: 1.0\n## Version: 2.0 [AllowLoadGameType camelot]\n## Dependencies: LibA\n## Dependencies: LibB [AllowLoadGameType camelot]\n";
+        let forever = parse_toc_content(toc, "Foo", Some(GameFlavor::Forever));
+        // The name keeps the first line that applies, so names stay stable.
+        assert_eq!(forever.title, "Foo");
+        assert_eq!(forever.version.as_deref(), Some("2.0"));
+        assert_eq!(forever.interface.as_deref(), Some("16001"));
+        assert_eq!(forever.required_deps, vec!["LibB".to_string()]);
+
+        let retail = parse_toc_content(toc, "Foo", Some(GameFlavor::Retail));
+        assert_eq!(retail.version.as_deref(), Some("1.0"));
+        assert_eq!(retail.interface.as_deref(), Some("120100"));
+        assert_eq!(retail.required_deps, vec!["LibA".to_string()]);
+    }
+
+    #[test]
+    fn notes_and_category_with_conditions_follow_the_game() {
+        let toc = "## Title: Foo\n## Notes: Everywhere\n## Notes: On Forever [AllowLoadGameType forever]\n## Category: Combat [AllowLoadGameType camelot]\n## Category: Bags [AllowLoadGameType standard]\n";
+        let forever = scan_one(GameFlavor::Forever, "_forever_", toc);
+        assert_eq!(forever.notes.as_deref(), Some("On Forever"));
+        assert_eq!(forever.category.as_deref(), Some("Combat"));
+        let retail = scan_one(GameFlavor::Retail, "_retail_", toc);
+        assert_eq!(retail.notes.as_deref(), Some("Everywhere"));
+        assert_eq!(retail.category.as_deref(), Some("Bags"));
+
+        let temp = tempdir().expect("tempdir");
+        let addons = temp
+            .path()
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addons.join("ElvUI")).expect("dir");
+        fs::write(addons.join("ElvUI").join("ElvUI.toc"), ELVUI_TITLES).expect("toc");
+        let fields = read_addon_toc_fields(&addons, "ElvUI", GameFlavor::Forever)
+            .expect("read")
+            .expect("fields");
+        assert_eq!(
+            fields.title.as_deref(),
+            Some("|cff1784d1ElvUI|r |cfd9b9b9bForever|r")
+        );
+    }
+
     #[test]
     fn ignores_localized_metadata_without_utf8_boundary_panics() {
         let parsed = parse_toc_content(
             "## Notes-ruRU: Собирает информацию об ошибках и ловит их в мешок.\n## Title: BugSack\n## Author: Rabbit\n## OptionalDeps: Masque",
             "Fallback",
+            None,
         );
 
         assert_eq!(parsed.title, "BugSack");
@@ -1421,7 +1583,7 @@ mod tests {
         assert_eq!(scanned[0].name, "Bom Addon");
 
         // parse_toc_content is BOM-safe for callers that already hold a string.
-        let parsed = parse_toc_content("\u{feff}## Interface: 110002\n", "Fallback");
+        let parsed = parse_toc_content("\u{feff}## Interface: 110002\n", "Fallback", None);
         assert_eq!(parsed.interface.as_deref(), Some("110002"));
     }
 

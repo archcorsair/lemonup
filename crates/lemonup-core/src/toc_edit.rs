@@ -668,6 +668,58 @@ mod tests {
         }
     }
 
+    /// The header of ElvUI's root TOC (v16.01), with one Title line per game version.
+    const ELVUI_TOC: &[u8] = b"## Interface: 11509, 16001, 20506, 38002, 50504, 120100, 120105\r\n## Version: v16.01\r\n\r\n## Notes: User Interface Replacement\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bMists|r [AllowLoadGameType mists]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bMidnight|r [AllowLoadGameType standard]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bForever|r [AllowLoadGameType camelot][ExcludeLoadGameType standard, classic]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bWrath|r [AllowLoadGameType wrath]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bTBC|r [AllowLoadGameType tbc]\r\n## Title: |cff1784d1ElvUI|r |cfd9b9b9bClassic|r [AllowLoadGameType vanilla]\r\n\r\n## Category-enUS: UI Overhaul\r\n\r\nElvUI.lua\r\n";
+
+    #[test]
+    fn titles_for_each_game_version_are_overridden_and_restored_byte_for_byte() {
+        use crate::domain::GameFlavor;
+        use crate::scan::parse_toc_content;
+
+        assert_round_trip(ELVUI_TOC);
+        let read = |bytes: &[u8], flavor| {
+            parse_toc_content(&String::from_utf8_lossy(bytes), "ElvUI", Some(flavor))
+        };
+
+        // Before an override, the editor shows the Forever line, from the addon.
+        let none = BTreeMap::new();
+        let original = read(ELVUI_TOC, GameFlavor::Forever);
+        assert_eq!(
+            original.toc_title.as_deref(),
+            Some("|cff1784d1ElvUI|r |cfd9b9b9bForever|r")
+        );
+        assert_eq!(
+            value_source(TocField::Title, &none, original.toc_title.as_deref()),
+            TocValueSource::Addon
+        );
+        assert_eq!(
+            display_value(original.toc_title.as_deref().unwrap_or_default()),
+            "ElvUI Forever"
+        );
+
+        // An override comments out every Title line, for every game version, and LemonUp's
+        // unconditional line is the only one left, so it wins in every game version.
+        let mine = overrides(&[("Title", "My UI")]);
+        let applied = apply_overrides(ELVUI_TOC, &mine).expect("apply");
+        let text = String::from_utf8_lossy(&applied);
+        assert_eq!(
+            text.matches("\r\n# LemonUp: ## Title: ").count(),
+            6,
+            "{text}"
+        );
+        assert_eq!(text.matches("\r\n## Title: ").count(), 1, "{text}");
+        for flavor in [GameFlavor::Forever, GameFlavor::Retail, GameFlavor::Classic] {
+            let parsed = read(&applied, flavor);
+            assert_eq!(parsed.title, "My UI");
+            assert_eq!(parsed.toc_title.as_deref(), Some("My UI"));
+            assert_eq!(
+                value_source(TocField::Title, &mine, parsed.toc_title.as_deref()),
+                TocValueSource::Override
+            );
+        }
+        assert_eq!(restore(&applied), ELVUI_TOC);
+    }
+
     #[test]
     fn apply_comments_base_and_localized_lines_and_adds_the_override_last_in_the_header() {
         let original =
