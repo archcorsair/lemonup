@@ -401,7 +401,7 @@ pub(crate) fn link_exact_matches(
         )));
     }
 
-    let records = find::link_found_addons(database, addon_dir, flavor, &picks)?;
+    let linked = find::link_found_addons(database, addon_dir, flavor, &picks)?;
     // The list catches up on the next scan if this read fails.
     let rescan = database.list_addons().and_then(|tracked| {
         let report = scan_addons_dir_report(addon_dir, flavor, &tracked)?;
@@ -410,14 +410,18 @@ pub(crate) fn link_exact_matches(
     if let Err(error) = rescan {
         tracing::warn!(%error, "could not read the AddOns folder after linking");
     }
+    // Only what the database holds now is reported as linked.
     let rows = database.list_addons()?;
-    let mut lines = records
+    let stored = linked
         .iter()
-        .map(|record| {
-            let stored = rows
-                .iter()
-                .find(|row| row.folder == record.folder)
-                .unwrap_or(record);
+        .filter_map(|linked| {
+            rows.iter()
+                .find(|row| row.folder == linked.folder && row.source == linked.source)
+        })
+        .collect::<Vec<_>>();
+    let mut lines = stored
+        .iter()
+        .map(|stored| {
             let (status, _) = crate::update::determine_update_status(stored);
             format!(
                 "find linked: addon={}, source={}, version={}, latest={}, status={}, folders={}",
@@ -433,7 +437,7 @@ pub(crate) fn link_exact_matches(
             )
         })
         .collect::<Vec<_>>();
-    lines.push(format!("find link summary: linked={}", records.len()));
+    lines.push(format!("find link summary: linked={}", stored.len()));
     Ok(lines)
 }
 

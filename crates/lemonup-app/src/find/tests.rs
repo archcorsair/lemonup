@@ -278,3 +278,62 @@ fn find_link_with_yes_links_exact_matches_with_their_status_right_away() {
     let spy = rows.iter().find(|row| row.folder == "Spy").expect("spy");
     assert_eq!(spy.source, SourceKind::Manual);
 }
+
+#[test]
+fn find_link_reports_every_pick_the_database_holds_when_one_folder_moves_between_them() {
+    let mut sandbox = sandbox();
+    addon(&sandbox.addons, "GatherMate2", "2.0");
+    addon(&sandbox.addons, "GatherMate2_Data", "1");
+    sandbox
+        .database
+        .upsert_addon(&manual("GatherMate2", &["GatherMate2_Data"]))
+        .expect("row");
+    let inputs = FindInputs::read(&sandbox.addons, GameFlavor::Forever).expect("inputs");
+    let rows = sandbox.database.list_addons().expect("rows");
+    let mut data = wago_match(&inputs, "GMD", &["GatherMate2_Data"], "1.0");
+    data.name = "AAA GatherMate2 Data".to_string();
+    let lookups = SourceLookups {
+        wago: SourceAnswer::Found(vec![data]),
+        wowinterface: SourceAnswer::Found(vec![WowiFile {
+            id: "7".to_string(),
+            title: "GatherMate2".to_string(),
+            version: "2.0".to_string(),
+            author: None,
+            folders: vec![lemonup_core::find::WowiFolder {
+                folder: "GatherMate2".to_string(),
+                version: Some("2.0".to_string()),
+                api_version: Some("16001".to_string()),
+            }],
+        }]),
+        tukui: SourceAnswer::Found(Vec::new()),
+    };
+    let report = match_addons(&inputs, &rows, None, &lookups);
+
+    let lines = link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        &report,
+        true,
+    )
+    .expect("linked");
+
+    assert_eq!(
+        lines,
+        [
+            "find linked: addon=GatherMate2_Data, source=wago, version=1.0, latest=1.0, status=up_to_date, folders=GatherMate2_Data",
+            "find linked: addon=GatherMate2, source=wowinterface, version=2.0, latest=2.0, status=up_to_date, folders=GatherMate2",
+            "find link summary: linked=2",
+        ]
+    );
+    let rows = sandbox.database.list_addons().expect("rows");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.folder.as_str(), row.source))
+            .collect::<Vec<_>>(),
+        [
+            ("GatherMate2", SourceKind::WowInterface),
+            ("GatherMate2_Data", SourceKind::Wago),
+        ]
+    );
+}
