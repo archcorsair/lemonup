@@ -20784,6 +20784,16 @@ mod tests {
 
         #[test]
         fn the_key_line_offers_p_only_with_two_games_or_more() {
+            // Help lists it always, with one game too.
+            let listed = |context| {
+                crate::app::keymap::help_page(context)
+                    .sections()
+                    .flat_map(|section| section.rows.iter())
+                    .any(|row| row.text == "switch game")
+            };
+            assert!(listed(HelpContext::Overview));
+            assert!(listed(HelpContext::DetailsDocked));
+
             let mut app = scheduling_app();
             assert!(key_line(&mut app, 138).contains("p switch game"));
             app.games.games.truncate(1);

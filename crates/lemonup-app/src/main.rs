@@ -2952,6 +2952,35 @@ mod profile_tests {
         };
         assert_eq!(config.check_interval_secs, 1800);
         assert_eq!(config.theme, ThemeMode::Light);
+
+        // Every command that reads its settings reads them that way, `find` included:
+        // none opens a profile's config file on its own.
+        let source = include_str!("main.rs");
+        let commands = [
+            "fn run_toc(",
+            "async fn run_find(",
+            "async fn run_check(",
+            "async fn run_update(",
+            "fn run_sync(",
+            "async fn run_import_addons(",
+            "fn run_restore_backup(",
+            "async fn run_install_wago(",
+            "async fn run_install_tukui(",
+            "async fn run_install_wowinterface(",
+            "async fn run_install_github(",
+        ];
+        for command in commands {
+            let start = source.find(command).unwrap_or_else(|| panic!("{command}"));
+            let rest = &source[start + command.len()..];
+            let end = ["\nfn ", "\nasync fn "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            let body = &rest[..end];
+            assert!(body.contains("load_profile_config(&paths)"), "{command}");
+            assert!(!body.contains("ConfigStore::new("), "{command}");
+        }
     }
 
     #[test]

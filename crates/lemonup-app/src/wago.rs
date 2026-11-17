@@ -1147,9 +1147,9 @@ pub(crate) fn process_env(name: &str) -> Option<String> {
 /// the repo-root `.env`, so they must not advertise it.
 pub(crate) fn wago_api_key_sources_hint() -> &'static str {
     if cfg!(debug_assertions) {
-        "Accepted sources: profile config, WAGO_API_KEY, repo-root .env."
+        "Use the key you saved in Settings, or set WAGO_API_KEY (or the repo-root .env)."
     } else {
-        "Accepted sources: profile config, WAGO_API_KEY."
+        "Use the key you saved in Settings, or set WAGO_API_KEY."
     }
 }
 
@@ -1880,7 +1880,8 @@ mod tests {
     #[test]
     fn api_key_sources_hint_matches_build_profile() {
         let hint = super::wago_api_key_sources_hint();
-        assert!(hint.contains("profile config"));
+        assert!(hint.contains("the key you saved in Settings"), "{hint}");
+        assert!(!hint.contains("profile config"), "{hint}");
         assert!(hint.contains("WAGO_API_KEY"));
         assert_eq!(hint.contains(".env"), cfg!(debug_assertions));
     }
