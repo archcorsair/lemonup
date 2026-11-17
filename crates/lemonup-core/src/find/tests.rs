@@ -1131,3 +1131,70 @@ fn a_wago_match_without_a_release_label_claims_no_status() {
     assert_eq!(row.remote_version, None);
     assert_eq!(row.last_checked_at, None);
 }
+
+#[test]
+fn a_folder_linked_on_its_own_leaves_its_old_addon_which_links_later_without_losing_it() {
+    let mut fixture = fixture();
+    let picks = gathermate2_split(&fixture);
+    let data = picks
+        .iter()
+        .find(|pick| pick.parent_folder == "GatherMate2_Data")
+        .expect("data pick")
+        .clone();
+
+    link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Forever,
+        &[data],
+    )
+    .expect("link data");
+
+    assert_eq!(
+        rows_by_folder(&fixture.database),
+        [
+            ("GatherMate2".to_string(), SourceKind::Manual, Vec::new()),
+            ("GatherMate2_Data".to_string(), SourceKind::Wago, Vec::new()),
+        ]
+    );
+
+    // A later find, before any scan, links GatherMate2 on its own.
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let rows = fixture.database.list_addons().expect("rows");
+    let mut lookups = lookups(SourceAnswer::Found(Vec::new()));
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "7",
+        "GatherMate2",
+        "2.0",
+        &[("GatherMate2", "2.0")],
+    )]);
+    let report = match_addons(&inputs, &rows, None, &lookups);
+    let main = result(&report, "GatherMate2");
+    assert!(main.preselected());
+    assert!(!main.found().expect("candidate").regroups());
+    let pick = main.found().expect("candidate").clone();
+    link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Forever,
+        &[pick],
+    )
+    .expect("link parent");
+
+    // A scan afterwards keeps both.
+    let tracked = fixture.database.list_addons().expect("rows");
+    let scan = crate::scan::scan_addons_dir_report(&fixture.addons, GameFlavor::Forever, &tracked)
+        .expect("scan");
+    fixture.database.reconcile_scan(&scan).expect("reconcile");
+    assert_eq!(
+        rows_by_folder(&fixture.database),
+        [
+            (
+                "GatherMate2".to_string(),
+                SourceKind::WowInterface,
+                Vec::new()
+            ),
+            ("GatherMate2_Data".to_string(), SourceKind::Wago, Vec::new()),
+        ]
+    );
+}
