@@ -526,8 +526,10 @@ enum AppTaskEvent {
         result: std::result::Result<DirectInstallOutcome, SourceError>,
     },
     /// A .toc change is written, with the AddOns folder read again after it
-    /// (`None` when that read failed).
+    /// (`None` when that read failed or the game folder changed meanwhile).
     TocApplyFinished {
+        /// The AddOns folder the change was written to.
+        addon_dir: PathBuf,
         request: TocApplyRequest,
         result: std::result::Result<Option<AddonScanOutcome>, String>,
     },
@@ -5321,9 +5323,11 @@ impl App {
             AppMessage::TocEdit(message) => self.toc_edit_actions(message),
             AppMessage::BackgroundTask(event) => match event {
                 AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
-                AppTaskEvent::TocApplyFinished { request, result } => {
-                    self.toc_apply_finished_actions(request, result)
-                }
+                AppTaskEvent::TocApplyFinished {
+                    addon_dir,
+                    request,
+                    result,
+                } => self.toc_apply_finished_actions(&addon_dir, request, result),
                 AppTaskEvent::AddonScanFinished(Ok(outcome)) => vec![
                     AppAction::ReplaceDashboardAddons(outcome.addons),
                     AppAction::SetDashboardDriftReport(Some(outcome.drift_report)),
@@ -5901,12 +5905,17 @@ impl App {
                 let state_db_file = self.state_db_file.clone();
                 tokio::spawn(async move {
                     let task_request = request.clone();
+                    let task_addon_dir = addon_dir.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        run_toc_apply(&state_db_file, &addon_dir, &task_request)
+                        run_toc_apply(&state_db_file, &task_addon_dir, &task_request)
                     })
                     .await
                     .unwrap_or_else(|join_error| Err(join_error.to_string()));
-                    let _ = sender.send(AppTaskEvent::TocApplyFinished { request, result });
+                    let _ = sender.send(AppTaskEvent::TocApplyFinished {
+                        addon_dir,
+                        request,
+                        result,
+                    });
                 });
             }
             AppAction::ReloadBackups => self.reload_backups(),
@@ -17486,6 +17495,7 @@ mod tests {
                 // The result names the field and says what to do next.
                 for action in
                     app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        addon_dir: app.effective_addon_dir.clone().expect("addon dir"),
                         request: request.clone(),
                         result: Ok(None),
                     }))
@@ -17501,6 +17511,7 @@ mod tests {
                 );
                 for action in
                     app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        addon_dir: app.effective_addon_dir.clone().expect("addon dir"),
                         request,
                         result: Err(
                             "Second has a symlink inside, so LemonUp won't edit it".to_string()
@@ -17588,6 +17599,7 @@ mod tests {
                 assert!(request.overrides.is_empty());
                 for action in
                     app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        addon_dir: app.effective_addon_dir.clone().expect("addon dir"),
                         request,
                         result: Ok(None),
                     }))
@@ -17734,6 +17746,90 @@ mod tests {
                     .expect_err("refused");
                     assert_eq!(error, "Foo has a symlink inside, so LemonUp won't edit it");
                 }
+            }
+
+            #[test]
+            fn a_toc_change_never_reads_the_old_folder_into_a_moved_profile() {
+                let temp = tempdir().expect("tempdir");
+                let old_dir = temp.path().join("old").join("AddOns");
+                let new_dir = temp.path().join("new").join("AddOns");
+                fs::create_dir_all(old_dir.join("Foo")).expect("old folder");
+                fs::create_dir_all(new_dir.join("Bar")).expect("new folder");
+                fs::write(old_dir.join("Foo/Foo.toc"), "## Title: Foo\n").expect("toc");
+                let state_db_file = temp.path().join("state.sqlite");
+                let database = StateDatabase::open(&state_db_file).expect("db");
+                for name in ["Foo", "Bar"] {
+                    database
+                        .upsert_addon(&AddonRecord::new(name, name, SourceKind::GitHub))
+                        .expect("row");
+                }
+                // The game folder was changed in setup while the change ran.
+                database.bind_addon_dir(&new_dir).expect("bind");
+                drop(database);
+
+                let request = TocApplyRequest {
+                    folder: "Foo".to_string(),
+                    name: "Foo".to_string(),
+                    field: TocField::Title,
+                    value: Some("My Foo".to_string()),
+                    overrides: BTreeMap::from([("Title".to_string(), "My Foo".to_string())]),
+                    folders: vec!["Foo".to_string()],
+                };
+                let sync = super::super::super::toc_editor::run_toc_apply(
+                    &state_db_file,
+                    &old_dir,
+                    &request,
+                )
+                .expect("applies");
+                assert!(sync.is_none());
+                let database = StateDatabase::open(&state_db_file).expect("db");
+                assert!(
+                    database.get_addon_by_folder("Bar").expect("get").is_some(),
+                    "the new folder's rows are kept"
+                );
+            }
+
+            #[test]
+            fn a_toc_change_that_ends_after_the_game_folder_changed_leaves_the_list_alone() {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let _dir = with_addon_dir(&mut app);
+                scanned(&mut app, None);
+                let before = app.dashboard.items.clone();
+                app.apply(AppAction::SetTocApplyInProgress(true));
+                let old_dir = tempdir().expect("old folder");
+                let request = TocApplyRequest {
+                    folder: "Foo".to_string(),
+                    name: "Foo".to_string(),
+                    field: TocField::Title,
+                    value: Some("My Foo".to_string()),
+                    overrides: BTreeMap::from([("Title".to_string(), "My Foo".to_string())]),
+                    folders: vec!["Foo".to_string()],
+                };
+                let old_rows = vec![AddonRecord::new("Foo", "Foo", SourceKind::GitHub)];
+                let sync = AddonScanOutcome {
+                    path: old_dir.path().to_path_buf(),
+                    summary: ScanSummary::default(),
+                    drift_report: crate::drift::compute_drift_report(&old_rows, &[]),
+                    addons: old_rows,
+                };
+
+                for action in
+                    app.update(AppMessage::BackgroundTask(AppTaskEvent::TocApplyFinished {
+                        addon_dir: old_dir.path().to_path_buf(),
+                        request,
+                        result: Ok(Some(sync)),
+                    }))
+                {
+                    app.apply(action);
+                }
+                assert!(!app.toc_apply_running);
+                assert_eq!(app.dashboard.items, before);
+                assert_ne!(app.status_line.kind, StatusKind::Done);
+                assert!(
+                    !app.footer_status_text().contains("Saved Title"),
+                    "{}",
+                    app.footer_status_text()
+                );
             }
         }
     }

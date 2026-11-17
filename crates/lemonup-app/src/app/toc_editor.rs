@@ -11,6 +11,7 @@ use super::dialog::Question;
 use super::sheet::{SheetBody, text_height, wrap_lines};
 use super::*;
 use crate::update_targets::{TocApplyError, apply_toc_overrides_now};
+use lemonup_core::paths::same_addons_folder;
 
 /// The most Category suggestions shown under the box.
 const SUGGESTION_LIMIT: usize = 5;
@@ -437,12 +438,26 @@ impl App {
     }
 
     /// The end of a .toc change: the list, Details and the editor show what
-    /// the files say now.
+    /// the files say now. When the game folder changed while it ran, the
+    /// result belongs to the old folder, so the screen keeps showing the new
+    /// one and says nothing about it.
     pub(super) fn toc_apply_finished_actions(
         &self,
+        addon_dir: &Path,
         request: TocApplyRequest,
         result: std::result::Result<Option<AddonScanOutcome>, String>,
     ) -> Vec<AppAction> {
+        if !self
+            .effective_addon_dir
+            .as_deref()
+            .is_some_and(|current| same_addons_folder(current, addon_dir))
+        {
+            tracing::info!(
+                addon_dir = %addon_dir.display(),
+                "a .toc change finished after the game folder changed"
+            );
+            return vec![AppAction::SetTocApplyInProgress(false)];
+        }
         match result {
             Ok(sync) => {
                 let mut actions = Vec::new();
@@ -842,11 +857,35 @@ pub(super) fn run_toc_apply(
             }
         })?;
     }
+    // The game folder may have changed while the files were written: the
+    // state then belongs to the new folder, and reading the old one into it
+    // would drop the new folder's rows.
+    if !still_bound_to(state_db_file, addon_dir) {
+        tracing::info!(
+            addon_dir = %addon_dir.display(),
+            "the game folder changed during a .toc change; not reading the old folder again"
+        );
+        return Ok(None);
+    }
     match sync_dashboard_state(state_db_file, addon_dir) {
         Ok(sync) => Ok(Some(sync)),
         Err(error) => {
             tracing::warn!(%error, "could not read the AddOns folder after a .toc change");
             Ok(None)
+        }
+    }
+}
+
+/// Whether the profile's state still belongs to `addon_dir`. A database
+/// without a binding yet counts as bound; one that can't be read does not,
+/// so nothing is reconciled into it.
+fn still_bound_to(state_db_file: &Path, addon_dir: &Path) -> bool {
+    match StateDatabase::open(state_db_file).and_then(|database| database.bound_addon_dir()) {
+        Ok(Some(bound)) => same_addons_folder(&bound, addon_dir),
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(%error, "could not read which AddOns folder the profile is bound to");
+            false
         }
     }
 }
