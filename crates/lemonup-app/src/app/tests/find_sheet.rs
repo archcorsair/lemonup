@@ -697,14 +697,13 @@ fn the_report_comes_from_the_core_matcher_with_injected_lookups() {
 }
 
 #[test]
-fn search_name_drops_tags_and_color_codes() {
+fn search_name_drops_tag_brackets_and_color_codes_but_keeps_the_words() {
     assert_eq!(
         search_name("<DBM Core> |cffff0000Main|r  Core"),
-        "Main Core"
+        "DBM Core Main Core"
     );
     assert_eq!(search_name("Mythic Dungeon Tools"), "Mythic Dungeon Tools");
-    // A name that is only a tag keeps its words.
-    assert_eq!(search_name("<Tag>"), "<Tag>");
+    assert_eq!(search_name("<Tag>"), "Tag");
 }
 
 #[test]
@@ -760,7 +759,7 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
     let actions = app.update(AppMessage::Find(FindMessage::Enter));
     assert!(
         actions.contains(&AppAction::StartWagoSearch {
-            query: "Main Core".to_string(),
+            query: "DBM Core Main Core".to_string(),
             api_key: "test-wago-key".to_string(),
         }),
         "{actions:?}"
@@ -771,7 +770,7 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
         }
     }
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
-    assert_eq!(app.search_pane.query, "Main Core");
+    assert_eq!(app.search_pane.query, "DBM Core Main Core");
 }
 
 #[test]

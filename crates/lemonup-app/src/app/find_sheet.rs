@@ -178,21 +178,12 @@ pub(crate) enum FindAction {
     PopReplacement,
 }
 
-/// The name searched on Wago.io when nothing else finds an addon: without
-/// WoW color codes and `<...>` tags, which no search matches.
+/// The name to search Wago.io for: WoW color codes removed, and `<...>` tag brackets dropped
+/// while their words stay ("<DBM Core> Main Core" searches "DBM Core Main Core").
 pub(crate) fn search_name(name: &str) -> String {
     let plain = lemonup_core::toc_edit::display_value(name);
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for character in plain.chars() {
-        match character {
-            '<' => depth += 1,
-            '>' if depth > 0 => depth -= 1,
-            _ if depth == 0 => out.push(character),
-            _ => {}
-        }
-    }
-    let cleaned = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let spaced = plain.replace(['<', '>'], " ");
+    let cleaned = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.is_empty() { plain } else { cleaned }
 }
 
