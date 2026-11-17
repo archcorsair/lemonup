@@ -1441,3 +1441,70 @@ fn long_result_rows_continue_under_their_text() {
         assert!(shown.contains("Questie_Module_7"), "{shown}");
     }
 }
+
+#[test]
+fn f_opens_the_sheet_after_a_lookup_closed_with_nothing_picked() {
+    // As the visual check typed it: F, enter, the results, G, enter, n, esc, j, j, f.
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.effective_addon_dir = Some(std::env::temp_dir().join("lemonup-find-test/AddOns"));
+    app.dashboard = DashboardState::from_addons(vec![
+        AddonRecord::new("Alpha", "Alpha", SourceKind::Manual),
+        AddonRecord::new("AzerothGPS", "AzerothGPS", SourceKind::Manual),
+        AddonRecord::new("Beta", "Beta", SourceKind::Manual),
+        AddonRecord::new("Gamma", "Gamma", SourceKind::Manual),
+    ]);
+    app.dashboard.list_state.select(Some(0));
+    key(&mut app, KeyCode::Char('F'));
+    assert_eq!(app.find.step, Some(FindStep::Start));
+    // Enter starts the lookup; here without the network.
+    assert_eq!(
+        app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+        vec![AppMessage::Find(FindMessage::Start)]
+    );
+    app.find.generation += 1;
+    app.find.step = Some(FindStep::Looking {
+        folders: 4,
+        asking: Vec::new(),
+    });
+    // Every source failed: nothing to link.
+    let mut lookup = report();
+    lookup.results.retain(|result| {
+        matches!(
+            result.label,
+            FindLabel::Likely
+                | FindLabel::ChooseOne
+                | FindLabel::NotChecked
+                | FindLabel::DeveloperCopy
+        )
+    });
+    let generation = app.find.generation;
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Looked {
+            generation,
+            result: Ok(Box::new(outcome(lookup))),
+        })),
+    );
+    assert!(app.find.results().is_some());
+    for code in [
+        KeyCode::Char('G'),
+        KeyCode::Enter,
+        KeyCode::Char('n'),
+        KeyCode::Esc,
+    ] {
+        key(&mut app, code);
+    }
+    assert_eq!(app.shell_ui.overlay.active, None);
+    assert_eq!(app.find.step, None);
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Char('j'));
+    let under = app
+        .dashboard
+        .selected_item()
+        .map(|item| item.folder.clone())
+        .expect("a row under the cursor");
+    key(&mut app, KeyCode::Char('f'));
+    assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
+    assert_eq!(app.find.step, Some(FindStep::Start));
+    assert_eq!(app.find.scope, Some(vec![under]));
+}
