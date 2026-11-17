@@ -193,30 +193,29 @@ impl StateDatabase {
         Self::upsert_addon_with_connection(&self.connection, addon)
     }
 
+    /// The TOC overrides [`Self::record_managed_addon`] would store for `addon` right now: the
+    /// stored row's (or, without one, `addon`'s own) plus those of the rows it absorbs. Installs
+    /// and updates write these into the staged files, so the files and the row agree.
+    pub fn managed_toc_overrides(&self, addon: &AddonRecord) -> Result<BTreeMap<String, String>> {
+        let existing_addons = Self::list_addons_from_connection(&self.connection)?;
+        let plan = ManagedRecordPlan::new(addon, &existing_addons);
+        Ok(merge_toc_overrides(
+            addon,
+            plan.existing_parent,
+            &plan.absorbed,
+        ))
+    }
+
     pub fn record_managed_addon(&mut self, addon: &AddonRecord) -> Result<()> {
         let tx = self.connection.transaction()?;
         let existing_addons = Self::list_addons_from_connection(&tx)?;
-        let existing_parent = existing_addons
-            .iter()
-            .find(|existing| existing.folder == addon.folder);
-        let incoming_owned_folders = addon
-            .owned_folders
-            .iter()
-            .map(|owned_folder| owned_folder.name.clone())
-            .collect::<HashSet<_>>();
-        let prior_owned_folders = existing_parent
-            .iter()
-            .flat_map(|existing| {
-                existing
-                    .owned_folders
-                    .iter()
-                    .map(|owned_folder| owned_folder.name.clone())
-            })
-            .collect::<HashSet<_>>();
-        let represented_folders = incoming_owned_folders
-            .union(&prior_owned_folders)
-            .cloned()
-            .collect::<HashSet<_>>();
+        let ManagedRecordPlan {
+            existing_parent,
+            incoming_owned_folders,
+            represented_folders,
+            absorbed_folders,
+            absorbed,
+        } = ManagedRecordPlan::new(addon, &existing_addons);
 
         // Another addon linked by a newer LemonUp is never deleted or stripped here: its folders
         // are not this addon's to take (compared without case, like every ownership check).
@@ -258,22 +257,6 @@ impl StateDatabase {
             }
         }
 
-        // Rows of folders this addon now owns are absorbed into it; sorted so the result does
-        // not depend on hash order.
-        let mut absorbed_folders = represented_folders
-            .iter()
-            .filter(|folder| **folder != addon.folder)
-            .cloned()
-            .collect::<Vec<_>>();
-        absorbed_folders.sort();
-        let absorbed = absorbed_folders
-            .iter()
-            .filter_map(|folder| {
-                existing_addons
-                    .iter()
-                    .find(|existing| existing.folder == *folder)
-            })
-            .collect::<Vec<_>>();
         for folder in &absorbed_folders {
             Self::remove_addon_with_connection(&tx, folder)?;
         }
@@ -887,17 +870,75 @@ fn is_placeholder_version(value: &str) -> bool {
     trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
-/// `absorbed` are the rows of folders this addon now owns, which are removed: their TOC overrides
-/// carry over for fields the addon does not set itself.
-fn merge_managed_addon(
+/// What [`StateDatabase::record_managed_addon`] reads from the stored rows before it writes.
+struct ManagedRecordPlan<'a> {
+    existing_parent: Option<&'a AddonRecord>,
+    incoming_owned_folders: HashSet<String>,
+    represented_folders: HashSet<String>,
+    /// Folders the addon now owns whose own rows are removed, sorted so the result does not
+    /// depend on hash order.
+    absorbed_folders: Vec<String>,
+    /// The stored rows of `absorbed_folders`.
+    absorbed: Vec<&'a AddonRecord>,
+}
+
+impl<'a> ManagedRecordPlan<'a> {
+    fn new(addon: &AddonRecord, existing_addons: &'a [AddonRecord]) -> Self {
+        let existing_parent = existing_addons
+            .iter()
+            .find(|existing| existing.folder == addon.folder);
+        let incoming_owned_folders = addon
+            .owned_folders
+            .iter()
+            .map(|owned_folder| owned_folder.name.clone())
+            .collect::<HashSet<_>>();
+        let prior_owned_folders = existing_parent
+            .iter()
+            .flat_map(|existing| {
+                existing
+                    .owned_folders
+                    .iter()
+                    .map(|owned_folder| owned_folder.name.clone())
+            })
+            .collect::<HashSet<_>>();
+        let represented_folders = incoming_owned_folders
+            .union(&prior_owned_folders)
+            .cloned()
+            .collect::<HashSet<_>>();
+        // Rows of folders this addon now owns are absorbed into it.
+        let mut absorbed_folders = represented_folders
+            .iter()
+            .filter(|folder| **folder != addon.folder)
+            .cloned()
+            .collect::<Vec<_>>();
+        absorbed_folders.sort();
+        let absorbed = absorbed_folders
+            .iter()
+            .filter_map(|folder| {
+                existing_addons
+                    .iter()
+                    .find(|existing| existing.folder == *folder)
+            })
+            .collect::<Vec<_>>();
+        Self {
+            existing_parent,
+            incoming_owned_folders,
+            represented_folders,
+            absorbed_folders,
+            absorbed,
+        }
+    }
+}
+
+/// The TOC overrides a managed addon ends up with. A stored row keeps its overrides (the upsert
+/// never writes them); a new row starts with the incoming record's, which is how an undone
+/// removal gets them back. `absorbed` are the rows of folders this addon now owns, which are
+/// removed: their overrides carry over for fields the addon does not set itself.
+fn merge_toc_overrides(
     incoming: &AddonRecord,
     existing: Option<&AddonRecord>,
     absorbed: &[&AddonRecord],
-) -> AddonRecord {
-    let now = OffsetDateTime::now_utc();
-    let preserve_kind_override = existing.is_some_and(|addon| addon.kind_override);
-    // A stored row keeps its overrides (the upsert never writes them); a new row starts with
-    // the incoming record's, which is how an undone removal gets them back.
+) -> BTreeMap<String, String> {
     let mut toc_overrides = existing.map_or_else(
         || incoming.toc_overrides.clone(),
         |addon| addon.toc_overrides.clone(),
@@ -909,6 +950,19 @@ fn merge_managed_addon(
                 .or_insert_with(|| value.clone());
         }
     }
+    toc_overrides
+}
+
+/// `absorbed` are the rows of folders this addon now owns, which are removed; see
+/// [`merge_toc_overrides`] for what happens to their TOC overrides.
+fn merge_managed_addon(
+    incoming: &AddonRecord,
+    existing: Option<&AddonRecord>,
+    absorbed: &[&AddonRecord],
+) -> AddonRecord {
+    let now = OffsetDateTime::now_utc();
+    let preserve_kind_override = existing.is_some_and(|addon| addon.kind_override);
+    let toc_overrides = merge_toc_overrides(incoming, existing, absorbed);
     let mut merged = AddonRecord {
         id: existing.and_then(|addon| addon.id),
         // An addon with a Title override is listed under it, the same as after a scan.
@@ -3041,6 +3095,9 @@ mod tests {
         managed.set_managed_owned_folders(vec![OwnedFolder {
             name: "DBM-Naxx".to_string(),
         }]);
+        let planned = database
+            .managed_toc_overrides(&managed)
+            .expect("planned overrides");
         database
             .record_managed_addon(&managed)
             .expect("record managed");
@@ -3059,6 +3116,10 @@ mod tests {
                 .toc_overrides,
             toc_overrides(&[("Category", "Raids"), ("Notes", "Parent notes")])
         );
+        assert_eq!(
+            planned,
+            toc_overrides(&[("Category", "Raids"), ("Notes", "Parent notes")])
+        );
 
         // A parent without a row yet gets them on insert.
         database
@@ -3071,12 +3132,16 @@ mod tests {
         bags.set_managed_owned_folders(vec![OwnedFolder {
             name: "Bags_Config".to_string(),
         }]);
+        let planned = database
+            .managed_toc_overrides(&bags)
+            .expect("planned overrides");
         database.record_managed_addon(&bags).expect("record bags");
         let stored = database
             .get_addon_by_folder("Bags")
             .expect("get bags")
             .expect("bags");
         assert_eq!(stored.toc_overrides, toc_overrides(&[("Title", "My Bags")]));
+        assert_eq!(planned, stored.toc_overrides);
         assert_eq!(stored.name, "My Bags");
     }
 

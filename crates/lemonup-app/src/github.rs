@@ -475,9 +475,9 @@ fn install_downloaded_github_addon(
             replace,
             None,
         )?;
+        let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         // The user's TOC overrides go into the staged copies before anything live moves.
-        let toc_overrides =
-            crate::update_targets::stored_toc_overrides(state_database, &parent_folder)?;
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
         let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
@@ -486,7 +486,6 @@ fn install_downloaded_github_addon(
             &toc_overrides,
         )?;
 
-        let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()).into());
         }
@@ -571,11 +570,11 @@ fn update_downloaded_github_addon(
             });
         }
 
+        let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
         // The user's TOC overrides go into the staged copies before anything live moves.
-        let toc_overrides =
-            crate::update_targets::stored_toc_overrides(state_database, &tracked.folder)?;
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
         let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
@@ -584,7 +583,6 @@ fn update_downloaded_github_addon(
             &toc_overrides,
         )?;
 
-        let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()));
         }
@@ -2003,6 +2001,67 @@ mod tests {
             .expect("get addon")
             .expect("linked");
         assert_eq!(linked.source, SourceKind::GitHub);
+        assert_eq!(linked.toc_overrides, wanted);
+    }
+
+    #[test]
+    fn install_that_takes_over_a_not_linked_folder_writes_its_toc_overrides() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("AdiBags_Config")).expect("not linked copy");
+        std::fs::write(
+            addon_dir.join("AdiBags_Config").join("AdiBags_Config.toc"),
+            "## Title: AdiBags Config\n",
+        )
+        .expect("toc");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "AdiBags Config",
+                "AdiBags_Config",
+                SourceKind::Manual,
+            ))
+            .expect("not linked row");
+        let wanted = toc_overrides(&[("Category", "Mine")]);
+        database
+            .set_toc_overrides("AdiBags_Config", &wanted)
+            .expect("set overrides");
+
+        install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved_repo("AdiAddons", "AdiBags"),
+            &adibags_shaped_zip("-- v1"),
+            false,
+            &["AdiBags_Config".to_string()],
+        )
+        .expect("install");
+
+        for toc in [
+            "AdiBags/AdiBags.toc",
+            "AdiBags/AdiBags_Vanilla.toc",
+            "AdiBags_Config/AdiBags_Config.toc",
+        ] {
+            let text = std::fs::read_to_string(addon_dir.join(toc)).expect("toc");
+            assert!(
+                text.contains("# LemonUp-managed\n## Category: Mine\n"),
+                "{toc}: {text}"
+            );
+        }
+        assert!(
+            database
+                .get_addon_by_folder("AdiBags_Config")
+                .expect("get child")
+                .is_none()
+        );
+        let linked = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("linked");
         assert_eq!(linked.toc_overrides, wanted);
     }
 

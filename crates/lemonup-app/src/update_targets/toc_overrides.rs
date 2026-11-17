@@ -6,23 +6,22 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use lemonup_core::StateDatabase;
 use lemonup_core::toc_edit;
+use lemonup_core::{AddonRecord, StateDatabase};
 
 use super::folder_swap::FolderSwap;
 use super::{same_folder_name, tracked_owner_of};
 
-/// The overrides stored for the addon whose parent folder is `parent_folder`, or none when it has
-/// no row. Installs use this too, so linking a "Not linked" addon keeps the overrides set on it.
+/// The overrides `record_managed_addon` will store for `record`: those of its parent's row plus
+/// those of every row it absorbs (a "Not linked" folder the package now owns). Installs and
+/// updates write exactly these into the staged files, so the files match the stored row.
 pub(crate) fn stored_toc_overrides(
     database: &StateDatabase,
-    parent_folder: &str,
+    record: &AddonRecord,
 ) -> Result<BTreeMap<String, String>, String> {
-    Ok(database
-        .get_addon_by_folder(parent_folder)
-        .map_err(|error| error.to_string())?
-        .map(|addon| addon.toc_overrides)
-        .unwrap_or_default())
+    database
+        .managed_toc_overrides(record)
+        .map_err(|error| error.to_string())
 }
 
 /// [`FolderSwap::apply`] that also writes `overrides` into the root TOC files of every staged

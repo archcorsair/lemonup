@@ -339,9 +339,9 @@ fn install_downloaded_wowinterface_addon(
             replace,
             None,
         )?;
+        let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         // The user's TOC overrides go into the staged copies before anything live moves.
-        let toc_overrides =
-            crate::update_targets::stored_toc_overrides(state_database, &parent_folder)?;
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
         let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
@@ -350,7 +350,6 @@ fn install_downloaded_wowinterface_addon(
             &toc_overrides,
         )?;
 
-        let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()).into());
         }
@@ -437,11 +436,11 @@ fn update_downloaded_wowinterface_addon(
             });
         }
 
+        let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         // Stage, move aside and place by same-volume rename; any failure restores the old
         // folders before the error is returned.
         // The user's TOC overrides go into the staged copies before anything live moves.
-        let toc_overrides =
-            crate::update_targets::stored_toc_overrides(state_database, &tracked.folder)?;
+        let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
         let swap = crate::update_targets::swap_with_toc_overrides(
             addon_dir,
             &extracted.source_root,
@@ -450,7 +449,6 @@ fn update_downloaded_wowinterface_addon(
             &toc_overrides,
         )?;
 
-        let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         if let Err(error) = state_database.record_managed_addon(&record) {
             return Err(swap.abort(error.to_string()));
         }
