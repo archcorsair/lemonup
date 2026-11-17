@@ -850,3 +850,79 @@ fn switching_games_waits_while_find_links() {
     key(&mut app, KeyCode::Char('p'));
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Games));
 }
+
+/// The sheet with Questie (a partial match) picked as the only change, its
+/// question answered yes and its Wago.io install started.
+fn replace_questie(app: &mut App) {
+    open_find_results(app);
+    key(app, KeyCode::Char(' ')); // Clique off
+    for _ in 0..2 {
+        key(app, KeyCode::Down);
+    }
+    key(app, KeyCode::Char(' '));
+    key(app, KeyCode::End);
+    key(app, KeyCode::Enter);
+    app.note_question_shown(Instant::now());
+    key(app, KeyCode::Char('y'));
+    let actions = app.find_replacement_actions();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, AppAction::StartWagoInstall { .. })),
+        "{actions:?}"
+    );
+    for action in actions {
+        if !matches!(action, AppAction::StartWagoInstall { .. }) {
+            app.apply(action);
+        }
+    }
+}
+
+#[test]
+fn a_failed_replacement_says_which_addon_and_stops_the_rest() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    replace_questie(&mut app);
+    assert!(app.wago_install_in_progress);
+    assert!(app.status_line.text.contains("Replacing Questie"));
+    // Another replacement waits behind it.
+    app.find.replacements.push_back(found(
+        FindLabel::Partial,
+        FindSource::Wago,
+        "Details",
+        &["Details"],
+    ));
+
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Err(SourceError::new(
+            SourceErrorKind::NoConnection,
+            "offline",
+        )))),
+    );
+    let text = app.status_line.text.clone();
+    assert_eq!(app.status_line.kind, StatusKind::Problem, "{text}");
+    assert!(
+        text.contains("Questie wasn't replaced: LemonUp couldn't reach Wago.io."),
+        "{text}"
+    );
+    assert!(text.contains("Its folders weren't changed."), "{text}");
+    assert!(
+        text.contains("LemonUp stopped there, so Details wasn't replaced either."),
+        "{text}"
+    );
+    assert!(!text.contains("Replacing"), "{text}");
+    assert!(!app.wago_install_in_progress);
+    // Nothing runs after it, and the Search pane keeps no error of it.
+    assert!(app.find.replacements.is_empty());
+    assert!(app.find_replacement_actions().is_empty());
+    assert!(
+        !matches!(
+            app.search_pane.install_state,
+            SearchInstallState::Error { .. }
+        ),
+        "{:?}",
+        app.search_pane.install_state
+    );
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Questie wasn't replaced"), "{shown}");
+}

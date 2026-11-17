@@ -4950,6 +4950,7 @@ impl App {
             }
             AppMessage::WagoCancelInstall => vec![
                 AppAction::SetPendingWagoInstallConfirmation(None),
+                AppAction::Find(FindAction::ReplacementFinished),
                 AppAction::SetSearchPaneState(self.search_pane.clear_install_state()),
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Quiet,
@@ -5761,12 +5762,18 @@ impl App {
                         },
                         AppAction::SetPendingWagoInstallConfirmation(None),
                         AppAction::SetWagoInstallInProgress(false),
+                        AppAction::Find(FindAction::ReplacementFinished),
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
                             &format!("{} is installed", outcome.summary.addon_name),
                         )),
                     ]
+                }
+                // A replacement the Find sheet started: the error is its own,
+                // not the Search pane's.
+                AppTaskEvent::WagoInstallFinished(Err(error)) if self.find.replacing.is_some() => {
+                    self.find_replacement_failed_actions(&error)
                 }
                 AppTaskEvent::WagoInstallFinished(Err(error)) => {
                     let (addon_id, addon_name) = self.search_pane.install_identity();

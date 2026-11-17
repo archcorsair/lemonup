@@ -119,6 +119,8 @@ pub(crate) struct FindState {
     pub(crate) linking: bool,
     /// Partial matches to replace from Wago.io after linking, one at a time.
     pub(crate) replacements: VecDeque<FoundAddon>,
+    /// The name of the partial match the Wago.io install is replacing now.
+    pub(crate) replacing: Option<String>,
 }
 
 impl FindState {
@@ -176,6 +178,12 @@ pub(crate) enum FindAction {
     LinkFinished,
     /// Takes the next replacement off the queue.
     PopReplacement,
+    /// Takes the next replacement off the queue: its install starts now.
+    BeginReplacement,
+    /// The running replacement's install is over.
+    ReplacementFinished,
+    /// Drops the replacements still to run.
+    StopReplacements,
 }
 
 /// The name to search Wago.io for: WoW color codes removed, and `<...>` tag brackets dropped
@@ -681,7 +689,7 @@ impl App {
             next.source_url.clone()
         };
         vec![
-            AppAction::Find(FindAction::PopReplacement),
+            AppAction::Find(FindAction::BeginReplacement),
             AppAction::SetWagoInstallInProgress(true),
             AppAction::StartWagoInstall {
                 addon_dir,
@@ -696,6 +704,37 @@ impl App {
                 StatusKind::Working,
                 &format!("Replacing {} with the copy from Wago.io", next.name),
             ),
+        ]
+    }
+
+    /// The Wago.io install of a replacement failed: says which addon and
+    /// why, and stops, so the next one doesn't fail the same way unseen.
+    pub(super) fn find_replacement_failed_actions(&self, error: &SourceError) -> Vec<AppAction> {
+        let name = self.find.replacing.clone().unwrap_or_default();
+        let advice = super::render_install_search::install_error_advice(
+            error.kind,
+            "Wago.io",
+            error.clash.as_ref(),
+        );
+        let mut text = format!("{name} wasn't replaced: {advice} Its folders weren't changed.");
+        let rest = self
+            .find
+            .replacements
+            .iter()
+            .map(|replacement| replacement.name.as_str())
+            .collect::<Vec<_>>();
+        if !rest.is_empty() {
+            text.push_str(&format!(
+                " LemonUp stopped there, so {} {} replaced either.",
+                rest.join(", "),
+                if rest.len() == 1 { "wasn't" } else { "weren't" }
+            ));
+        }
+        vec![
+            AppAction::SetWagoInstallInProgress(false),
+            AppAction::Find(FindAction::ReplacementFinished),
+            AppAction::Find(FindAction::StopReplacements),
+            self.find_note(StatusKind::Problem, &text),
         ]
     }
 
@@ -759,6 +798,15 @@ impl App {
             FindAction::PopReplacement => {
                 self.find.replacements.pop_front();
             }
+            FindAction::BeginReplacement => {
+                self.find.replacing = self
+                    .find
+                    .replacements
+                    .pop_front()
+                    .map(|replacement| replacement.name);
+            }
+            FindAction::ReplacementFinished => self.find.replacing = None,
+            FindAction::StopReplacements => self.find.replacements.clear(),
         }
     }
 
