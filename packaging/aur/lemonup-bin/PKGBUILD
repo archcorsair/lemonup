@@ -1,5 +1,5 @@
 pkgname=lemonup-bin
-pkgver=2.2.0
+pkgver=2.2.1
 pkgrel=1
 pkgdesc='Terminal addon manager for World of Warcraft (Retail and WoW Forever)'
 arch=('x86_64')
@@ -11,7 +11,7 @@ conflicts=('lemonup')
 options=('!debug')
 source=("lemonup-${pkgver}::https://github.com/archcorsair/lemonup/releases/download/v${pkgver}/lemonup-linux-x64"
         "LICENSE-${pkgver}::https://raw.githubusercontent.com/archcorsair/lemonup/v${pkgver}/license")
-sha256sums=('613b0651e8646b4b93b779e9dfe23e07584658e47cdbdb672bcc2c07433147a3'
+sha256sums=('73d0ba5f99c92cc8dd36e15f12c0769f9bbffece56e85c6e6606acdede9c8b83'
             '59fc3a839c3c670e017ee18c7adf72c1a8d8af55a5176e2614e4ce02b3de5afa')
 
 package() {
