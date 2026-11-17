@@ -93,6 +93,25 @@ impl StateDatabase {
         }
     }
 
+    /// The addons the database at `path` lists, read without creating or modifying anything:
+    /// a missing file, or one without the addons table, lists none.
+    pub fn read_addons(path: &Path) -> Result<Vec<AddonRecord>> {
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        match Self::list_addons_from_connection(&connection) {
+            Ok(addons) => Ok(addons),
+            Err(LemonupError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
+                if message.contains("no such table") =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Milliseconds this connection waits on a locked database (test hook).
     #[cfg(test)]
     fn busy_timeout_millis(&self) -> i64 {
@@ -1262,6 +1281,27 @@ mod tests {
 
     use super::StateDatabase;
     use crate::domain::{AddonKind, GameFlavor};
+
+    #[test]
+    fn read_addons_lists_without_creating_anything() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        assert!(
+            StateDatabase::read_addons(&path)
+                .expect("missing")
+                .is_empty()
+        );
+        assert!(!path.exists(), "reading must not create the database");
+
+        let database = StateDatabase::open(&path).expect("open");
+        database
+            .upsert_addon(&AddonRecord::new("Bagnon", "Bagnon", SourceKind::Wago))
+            .expect("upsert");
+        drop(database);
+        let addons = StateDatabase::read_addons(&path).expect("read");
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].folder, "Bagnon");
+    }
     use crate::toc_edit::TocField;
 
     #[test]
