@@ -354,8 +354,10 @@ pub fn parse_toc_content(
     flavor: Option<GameFlavor>,
 ) -> TocMetadata {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let field = |keys: &[&str]| field_value(content, keys, flavor);
-    let title = field(&["Title"])
+    // The game uses the last line that applies; only the name keeps the first, so names stay
+    // stable.
+    let field = |keys: &[&str]| last_field_value(content, keys, flavor);
+    let title = field_value(content, &["Title"], flavor)
         .map(strip_wow_color_codes)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
@@ -677,6 +679,30 @@ fn field_value(content: &str, keys: &[&str], flavor: Option<GameFlavor>) -> Opti
     None
 }
 
+/// The last `## <key>:` line (indented ones included) that applies to `flavor`'s client, with its
+/// inline conditions taken out: the line the game uses when a directive is given more than once.
+fn last_field_value(content: &str, keys: &[&str], flavor: Option<GameFlavor>) -> Option<String> {
+    let mut found = None;
+    for line in content.lines() {
+        let Some(remainder) = line.trim().strip_prefix("##") else {
+            continue;
+        };
+        let Some((raw_key, raw_value)) = remainder.trim().split_once(':') else {
+            continue;
+        };
+        if keys
+            .iter()
+            .any(|key| raw_key.trim().eq_ignore_ascii_case(key))
+        {
+            let line = toc_conditions::evaluate(raw_value, flavor);
+            if line.applies && !line.value.is_empty() {
+                found = Some(line.value);
+            }
+        }
+    }
+    found
+}
+
 /// The value the game uses for a display directive: of the `## <key>:` lines that start in
 /// column 0, have no locale suffix and apply to `flavor`'s client, the last one wins, with its
 /// inline conditions taken out. Lines LemonUp commented out (`# LemonUp: ...`) are not
@@ -955,6 +981,22 @@ mod tests {
             "## Title: Bar Wrath [AllowLoadGameType wrath]\n## Title: Bar\n",
         );
         assert_eq!(later.name, "Bar");
+    }
+
+    #[test]
+    fn version_interface_and_dependencies_use_the_last_line_for_the_game() {
+        let toc = "## Title: Foo\n## Title: Foo Forever [AllowLoadGameType camelot]\n## Interface: 120100\n## Interface: 16001 [AllowLoadGameType camelot]\n## Version: 1.0\n## Version: 2.0 [AllowLoadGameType camelot]\n## Dependencies: LibA\n## Dependencies: LibB [AllowLoadGameType camelot]\n";
+        let forever = parse_toc_content(toc, "Foo", Some(GameFlavor::Forever));
+        // The name keeps the first line that applies, so names stay stable.
+        assert_eq!(forever.title, "Foo");
+        assert_eq!(forever.version.as_deref(), Some("2.0"));
+        assert_eq!(forever.interface.as_deref(), Some("16001"));
+        assert_eq!(forever.required_deps, vec!["LibB".to_string()]);
+
+        let retail = parse_toc_content(toc, "Foo", Some(GameFlavor::Retail));
+        assert_eq!(retail.version.as_deref(), Some("1.0"));
+        assert_eq!(retail.interface.as_deref(), Some("120100"));
+        assert_eq!(retail.required_deps, vec!["LibA".to_string()]);
     }
 
     #[test]
