@@ -64,8 +64,10 @@ Coming from LemonUp 1? Your settings and linked addons carry over on the first r
 - **Addon list:** every addon with its status (Update ready, Up to date, Newer than source, Not
   linked), sorting, a `/` filter, multi-select, and Details docked on the right in wide terminals
 - **Install** by name (Wago.io) or by pasting a GitHub, WoWInterface, TukUI or Wago.io link
-- **Find online:** press `f` on a "Not linked" addon to link it to its source, so LemonUp keeps
-  it updated
+- **Find your addons online:** press `F` to look up every "Not linked" addon (or the selected
+  ones) on Wago.io, WoWInterface and TukUI by its files, see what matched, and link the ones you
+  pick after one question. Partial matches can be replaced with the source's copy. `f` does the
+  same for one addon, and offers a Wago.io name search when nothing matches
 - **Edit .toc fields:** press `e` in Details to change the Title, Notes or Category the game shows
   for an addon. Updates keep your values, and clearing one puts the original back
 - **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong

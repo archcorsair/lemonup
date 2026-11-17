@@ -171,6 +171,7 @@ impl Paint {
 
 /// The names LemonUp shows for the addons in the AddOns folder, by parent folder: the name of
 /// its row (its .toc Title, or the one the person set), else the Title of its folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LocalNames(HashMap<String, String>);
 
 impl LocalNames {
@@ -196,7 +197,7 @@ impl LocalNames {
     }
 
     /// The name shown for the addon whose parent folder is `folder`, else `fallback`.
-    fn name(&self, folder: &str, fallback: &str) -> String {
+    pub(crate) fn name(&self, folder: &str, fallback: &str) -> String {
         self.0
             .get(&folder.to_lowercase())
             .cloned()
@@ -210,13 +211,67 @@ fn collapse_spaces(name: &str) -> String {
 }
 
 /// One addon line: name, source and version in columns, then lines under it.
-struct Entry {
-    name: String,
-    source: String,
-    version: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub(crate) name: String,
+    pub(crate) source: String,
+    pub(crate) version: String,
     /// "update ready (x)", shown after the version in its own color.
-    update: Option<String>,
-    notes: Vec<String>,
+    pub(crate) update: Option<String>,
+    pub(crate) notes: Vec<String>,
+}
+
+/// The line of an `Exact`, `Likely` or `Partial` result in the words of the report, for the
+/// TUI's Find sheet.
+pub(crate) fn result_entry(result: &FindResult, names: &LocalNames) -> Option<Entry> {
+    let found = result.found()?;
+    Some(match result.label {
+        FindLabel::Exact if result.preselected() => ready_entry(found, names),
+        FindLabel::Exact => cant_link_entry(found, names),
+        FindLabel::Likely => likely_entry(found, names),
+        _ => partial_entry(found, names),
+    })
+}
+
+/// One choice of a "Choose one" result, as the report names it: its folder, the source when
+/// two choices share a folder, and why it is a choice.
+pub(crate) fn choice_text(result: &FindResult, candidate: &FoundAddon) -> String {
+    let repeated = result
+        .candidates
+        .iter()
+        .filter(|other| {
+            other
+                .parent_folder
+                .eq_ignore_ascii_case(&candidate.parent_folder)
+        })
+        .count()
+        > 1;
+    let mut text = candidate.parent_folder.clone();
+    if repeated {
+        text.push_str(&format!(" on {}", candidate.source.name()));
+    }
+    if let Some(why) = choice_why(candidate) {
+        text.push_str(&format!(" ({why})"));
+    }
+    text
+}
+
+/// The names of name-only results, as the report lists them.
+pub(crate) fn listed_names(results: &[&FindResult], names: &LocalNames) -> Vec<String> {
+    name_list(results, names)
+}
+
+/// What a failed source means, in the words of the report.
+pub(crate) fn problem_text(problem: &SourceProblem) -> String {
+    let provider = problem.source.name();
+    let mut text = format!(
+        "{provider}: {}",
+        crate::app::render_install_search::source_error_advice(problem.error.kind, provider)
+    );
+    if problem.error.kind == SourceErrorKind::Other && !problem.error.detail.is_empty() {
+        text.push_str(&format!(" Details: {}", problem.error.detail));
+    }
+    text
 }
 
 fn pad(text: &str, width: usize) -> String {
@@ -511,24 +566,10 @@ fn choice_why(candidate: &FoundAddon) -> Option<String> {
 /// `QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from the release)`,
 /// wrapped. The choices are named by their folders.
 fn choose_one_lines(result: &FindResult, width: usize) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let repeated = result
-        .candidates
-        .iter()
-        .any(|candidate| !seen.insert(candidate.parent_folder.to_lowercase()));
     let candidates = result
         .candidates
         .iter()
-        .map(|candidate| {
-            let mut text = candidate.parent_folder.clone();
-            if repeated {
-                text.push_str(&format!(" on {}", candidate.source.name()));
-            }
-            if let Some(why) = choice_why(candidate) {
-                text.push_str(&format!(" ({why})"));
-            }
-            text
-        })
+        .map(|candidate| choice_text(result, candidate))
         .collect::<Vec<_>>();
     let joined = match candidates.as_slice() {
         [] => String::new(),
@@ -580,15 +621,7 @@ fn name_list(results: &[&FindResult], names: &LocalNames) -> Vec<String> {
 
 /// What a failed source means for the addons it couldn't check.
 fn problem_line(problem: &SourceProblem, width: usize) -> Vec<String> {
-    let provider = problem.source.name();
-    let mut text = format!(
-        "{provider}: {}",
-        crate::app::render_install_search::source_error_advice(problem.error.kind, provider)
-    );
-    if problem.error.kind == SourceErrorKind::Other && !problem.error.detail.is_empty() {
-        text.push_str(&format!(" Details: {}", problem.error.detail));
-    }
-    wrapped_text(&text, width)
+    wrapped_text(&problem_text(problem), width)
 }
 
 fn found_of<'a>(results: &[&'a FindResult]) -> Vec<&'a FoundAddon> {
@@ -815,8 +848,9 @@ pub(crate) fn human_report(
     lines
 }
 
-/// The words for what a link did to the addons that were linked.
-fn linked_summary(rows: &[AddonRecord], unconfirmed: &[String]) -> Vec<String> {
+/// How the linked addons stand, as the database holds them: "2 up to date", "1 with an update
+/// ready (X)", and the rest; and how many have an update ready.
+pub(crate) fn linked_parts(rows: &[AddonRecord]) -> (Vec<String>, usize) {
     let mut up_to_date = 0;
     let mut newer = 0;
     let mut unchecked = 0;
@@ -852,6 +886,12 @@ fn linked_summary(rows: &[AddonRecord], unconfirmed: &[String]) -> Vec<String> {
     if failed > 0 {
         parts.push(format!("{failed} check failed"));
     }
+    (parts, ready.len())
+}
+
+/// The words for what a link did to the addons that were linked.
+fn linked_summary(rows: &[AddonRecord], unconfirmed: &[String]) -> Vec<String> {
+    let (parts, ready) = linked_parts(rows);
     let mut lines = Vec::new();
     if !rows.is_empty() {
         let mut line = format!(
@@ -860,10 +900,10 @@ fn linked_summary(rows: &[AddonRecord], unconfirmed: &[String]) -> Vec<String> {
             plural(rows.len(), "addon", "addons"),
             parts.join(", ")
         );
-        if !ready.is_empty() {
+        if ready > 0 {
             line.push_str(&format!(
                 " `lemonup update-all` updates {}.",
-                plural(ready.len(), "it", "them")
+                plural(ready, "it", "them")
             ));
         }
         lines.push(line);

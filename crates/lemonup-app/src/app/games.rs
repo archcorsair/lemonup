@@ -232,6 +232,8 @@ impl App {
             Some("Wait for the import to finish first.")
         } else if self.backup_pane.in_progress {
             Some("Wait for the backup to finish first.")
+        } else if self.find.linking || self.find.looking() || !self.find.replacements.is_empty() {
+            Some("Wait for the find to finish first.")
         } else {
             None
         }

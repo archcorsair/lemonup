@@ -190,6 +190,8 @@ impl App {
             Some("Wait for the undo to finish first.")
         } else if self.toc_apply_running {
             Some("Wait for the .toc change to finish first.")
+        } else if self.find.linking {
+            Some("Wait for the find to finish first.")
         } else {
             None
         }
@@ -202,6 +204,8 @@ impl App {
             Some("Wait for the install to finish first.")
         } else if self.toc_apply_running {
             Some("Wait for the .toc change to finish first.")
+        } else if self.find.linking {
+            Some("Wait for the find to finish first.")
         } else {
             None
         }

@@ -71,6 +71,18 @@ pub(super) enum Question {
         game: String,
         backups: String,
     },
+    /// Enter on "Link" in the Find sheet. `taken` are every folder the
+    /// linked addons take over, `replaced` every folder on disk replaced now
+    /// with the source's copy, and `added` the source's folders that aren't
+    /// on disk yet. The list scrolls from `offset`.
+    LinkFound {
+        links: usize,
+        replaces: usize,
+        taken: Vec<String>,
+        replaced: Vec<String>,
+        added: Vec<String>,
+        offset: u16,
+    },
 }
 
 impl Question {
@@ -87,6 +99,15 @@ impl Question {
             Self::QuitWhileUpdating { .. } => "Quit while LemonUp is still updating?".to_string(),
             Self::QuitSetup { .. } => "Quit setup?".to_string(),
             Self::RemoveGame { game, .. } => format!("Remove {game} from LemonUp?"),
+            Self::LinkFound {
+                links, replaces, ..
+            } => match (*links, *replaces) {
+                (links, 0) => format!("Link {}?", addon_count_label(links)),
+                (0, replaces) => format!("Replace {}?", addon_count_label(replaces)),
+                (links, replaces) => {
+                    format!("Link {} and replace {replaces}?", addon_count_label(links))
+                }
+            },
         }
     }
 
@@ -114,6 +135,9 @@ impl Question {
             Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
             Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
             Self::RemoveGame { .. } => ("remove it", "keep it"),
+            Self::LinkFound { replaces: 0, .. } => ("link them", "leave them alone"),
+            Self::LinkFound { links: 0, .. } => ("replace them", "leave them alone"),
+            Self::LinkFound { .. } => ("link and replace", "leave them alone"),
         }
     }
 
@@ -154,6 +178,10 @@ impl Question {
             Self::RemoveGame { .. } => (
                 AppMessage::Games(GamesMessage::ConfirmRemove),
                 AppMessage::Games(GamesMessage::CancelRemove),
+            ),
+            Self::LinkFound { .. } => (
+                AppMessage::Find(FindMessage::ConfirmLink),
+                AppMessage::Find(FindMessage::CancelLink),
             ),
         }
     }
@@ -363,6 +391,62 @@ impl Question {
                     Span::styled(".", muted),
                 ]),
             ],
+            Self::LinkFound {
+                links,
+                taken,
+                replaced,
+                added,
+                ..
+            } => {
+                let mut lines = Vec::new();
+                if *links > 0 {
+                    lines.push(Line::from(Span::styled(
+                        if *links == 1 {
+                            "LemonUp links 1 addon to its source and keeps it updated. Nothing \
+                             on disk changes now. From now on, updates replace these folders:"
+                                .to_string()
+                        } else {
+                            format!(
+                                "LemonUp links {links} addons to their source and keeps them \
+                                 updated. Nothing on disk changes now. From now on, updates \
+                                 replace these folders:"
+                            )
+                        },
+                        text,
+                    )));
+                    for folder in taken {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                }
+                if !replaced.is_empty() {
+                    if !lines.is_empty() {
+                        lines.push(Line::from(""));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "These folders are replaced now with the copy from Wago.io:",
+                        text,
+                    )));
+                    for folder in replaced {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                }
+                if !added.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "These folders are added from Wago.io:",
+                        text,
+                    )));
+                    for folder in added {
+                        lines.push(Line::from(Span::styled(format!("  {folder}"), strong)));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Your addon settings are kept.",
+                    muted,
+                )));
+                lines
+            }
         }
     }
 
@@ -393,6 +477,9 @@ impl Question {
     /// Every row inside the border at `width` columns, at most `max_rows`
     /// of them: a long list of addons gives way to "and N more" first.
     pub(super) fn lines(&self, roles: ColorRoles, width: u16, max_rows: u16) -> Vec<Line<'static>> {
+        if let Self::LinkFound { offset, .. } = self {
+            return self.scrolled_lines(roles, width, max_rows, *offset).0;
+        }
         let build = |names: usize| {
             let mut lines = vec![Line::from("")];
             lines.extend(wrap_lines(&self.body_lines(roles, names), width));
@@ -414,6 +501,51 @@ impl Question {
             lines = build(names);
         }
         lines
+    }
+}
+
+impl Question {
+    /// A question whose folder list scrolls instead of saying "and N more":
+    /// the rows from `offset` that fit, then where the rest is. Also returns
+    /// how far it scrolls.
+    pub(super) fn scrolled_lines(
+        &self,
+        roles: ColorRoles,
+        width: u16,
+        max_rows: u16,
+        offset: u16,
+    ) -> (Vec<Line<'static>>, u16) {
+        let body = wrap_lines(&self.body_lines(roles, usize::MAX), width);
+        let answers = wrap_lines(&[self.answer_line(roles)], width);
+        // A blank row above the body, and above and below the answers.
+        let room = usize::from(max_rows)
+            .saturating_sub(answers.len() + 3)
+            .max(1);
+        let mut lines = vec![Line::from("")];
+        let max = if body.len() <= room {
+            lines.extend(body);
+            0
+        } else {
+            let shown = room.saturating_sub(1).max(1);
+            let max = body.len() - shown;
+            let start = usize::from(offset).min(max);
+            lines.extend(body.iter().skip(start).take(shown).cloned());
+            let below = body.len() - start - shown;
+            let where_ = match (start > 0, below > 0) {
+                (_, true) => format!("↓ {below} more, ↑/↓ scroll"),
+                (true, false) => "↑/↓ scroll".to_string(),
+                (false, false) => String::new(),
+            };
+            lines.push(Line::from(Span::styled(
+                where_,
+                Style::default().fg(roles.muted),
+            )));
+            u16::try_from(max).unwrap_or(u16::MAX)
+        };
+        lines.push(Line::from(""));
+        lines.extend(answers);
+        lines.push(Line::from(""));
+        (lines, max)
     }
 }
 
@@ -513,6 +645,9 @@ impl App {
         if let Some(question) = self.remove_game_question() {
             return Some(question);
         }
+        if let Some(question) = self.find_question() {
+            return Some(question);
+        }
         None
     }
 
@@ -531,6 +666,16 @@ impl App {
             return Some(vec![]);
         }
         let (yes, no) = question.messages();
+        // The Find question's folder list scrolls, when it doesn't fit.
+        if matches!(question, Question::LinkFound { .. })
+            && let Some(delta) = question_scroll_delta(key.code)
+        {
+            return Some(if self.find.question_max.get() > 0 {
+                vec![AppMessage::Find(FindMessage::QuestionScroll(delta))]
+            } else {
+                vec![]
+            });
+        }
         Some(match key.code {
             KeyCode::Char('y') => vec![yes],
             KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => vec![no],
@@ -540,7 +685,25 @@ impl App {
 
     /// The key line while a question is open.
     pub(super) fn question_key_table(&self) -> Vec<KeyHint> {
-        vec![
+        let mut hints = Vec::new();
+        if matches!(self.active_question(), Some(Question::LinkFound { .. }))
+            && self.find.question_max.get() > 0
+        {
+            hints.push(KeyHint::key(
+                FooterHintId::Scroll,
+                "↑/↓",
+                "scroll",
+                &[
+                    KeyCode::Up,
+                    KeyCode::Down,
+                    KeyCode::Char('j'),
+                    KeyCode::Char('k'),
+                    KeyCode::PageUp,
+                    KeyCode::PageDown,
+                ],
+            ));
+        }
+        hints.extend([
             KeyHint::key(FooterHintId::Confirm, "y", "yes", &[KeyCode::Char('y')]).kept(),
             KeyHint::key(
                 FooterHintId::Cancel,
@@ -550,7 +713,8 @@ impl App {
             )
             .kept(),
             KeyHint::key(FooterHintId::Close, "esc", "no", &[KeyCode::Esc]).kept(),
-        ]
+        ]);
+        hints
     }
 
     /// Draws the open question centered in `region`, the space above the
@@ -565,7 +729,15 @@ impl App {
         let roles = self.ui_theme.roles;
         let width = DIALOG_WIDTH.min(region.width.saturating_sub(2).max(4));
         let text_width = width.saturating_sub(2 + DIALOG_PADDING * 2).max(1);
-        let lines = question.lines(roles, text_width, region.height.saturating_sub(2));
+        let max_rows = region.height.saturating_sub(2);
+        let lines = match &question {
+            Question::LinkFound { offset, .. } => {
+                let (lines, max) = question.scrolled_lines(roles, text_width, max_rows, *offset);
+                self.find.question_max.set(max);
+                lines
+            }
+            _ => question.lines(roles, text_width, max_rows),
+        };
         let height = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2).min(region.height);
         let outer = Rect::new(
             region.x + (region.width - width) / 2,
@@ -609,5 +781,16 @@ impl App {
             outer.height.saturating_sub(2),
         );
         frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// How far a key scrolls a question's list, if it does.
+fn question_scroll_delta(code: KeyCode) -> Option<i16> {
+    match code {
+        KeyCode::Down | KeyCode::Char('j') => Some(1),
+        KeyCode::Up | KeyCode::Char('k') => Some(-1),
+        KeyCode::PageDown => Some(8),
+        KeyCode::PageUp => Some(-8),
+        _ => None,
     }
 }

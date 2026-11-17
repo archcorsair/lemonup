@@ -30,7 +30,7 @@ const WOWI_CACHE_FILE: &str = "wowinterface-filelist.json";
 pub(crate) const WOWI_MIN_FILES: usize = 1000;
 
 /// A source that could not answer, and why.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceProblem {
     pub(crate) source: FindSource,
     pub(crate) error: SourceError,
@@ -459,6 +459,20 @@ pub(crate) fn scan_before_linking(
     addon_dir: &Path,
     flavor: GameFlavor,
 ) -> Result<(), LemonupError> {
+    rescan_addons(database, addon_dir, flavor).map_err(|error| {
+        LemonupError::InvalidArgument(format!(
+            "could not read the AddOns folder, so nothing was linked: {error}"
+        ))
+    })
+}
+
+/// `scan_before_linking` with the scan's own error, for callers that say
+/// what didn't happen themselves.
+pub(crate) fn rescan_addons(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    flavor: GameFlavor,
+) -> Result<(), LemonupError> {
     database
         .list_addons()
         .and_then(|tracked| {
@@ -466,11 +480,6 @@ pub(crate) fn scan_before_linking(
             database.reconcile_scan(&report)
         })
         .map(|_| ())
-        .map_err(|error| {
-            LemonupError::InvalidArgument(format!(
-                "could not read the AddOns folder, so nothing was linked: {error}"
-            ))
-        })
 }
 
 /// The candidates `lemonup find --link` links: every preselected (linkable `Exact`) one.
@@ -640,7 +649,10 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
 }
 
 mod human;
-pub(crate) use human::{LocalNames, Paint, human_closing, human_report, target_line};
+pub(crate) use human::{
+    LocalNames, Paint, choice_text, human_closing, human_report, linked_parts, listed_names,
+    problem_text, result_entry, target_line,
+};
 
 #[cfg(test)]
 mod tests;
