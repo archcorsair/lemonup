@@ -1102,6 +1102,15 @@ impl App {
                 )),
             ]
             .into_iter()
+            // `F` looks them all up at once.
+            .chain(std::iter::once(Line::from(vec![
+                Span::styled("Press ", muted),
+                Span::styled(
+                    "F",
+                    Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to find your addons online.", muted),
+            ])))
             // With one game, how to add another.
             .chain((self.games.games.len() == 1).then(|| {
                 Line::from(vec![

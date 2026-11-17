@@ -734,6 +734,28 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
 }
 
 #[test]
+fn the_welcome_card_offers_capital_f_next_to_p_at_80x24() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.dashboard = DashboardState::from_addons(vec![
+        AddonRecord::new("Alpha", "Alpha", SourceKind::Manual),
+        AddonRecord::new("Beta", "Beta", SourceKind::Manual),
+    ]);
+    app.games.games = two_test_games();
+    app.games.games.truncate(1);
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        assert!(
+            shown.contains("Press F to find your addons online."),
+            "{shown}"
+        );
+        assert!(shown.contains("Press p to add another game."), "{shown}");
+        assert!(shown.contains("d hide this"), "{shown}");
+        assert!(shown.contains("Alpha"), "{shown}");
+    }
+    assert!(app.key_table(138).iter().any(|hint| hint.key == "F"));
+}
+
+#[test]
 fn the_find_sheet_keeps_its_size_and_place_in_every_step() {
     let open = |app: &mut App| open_find(app);
     let steps: [super::sheets::SheetStep<'_>; 5] = [
