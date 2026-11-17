@@ -24,6 +24,10 @@ const WOWI_FILELIST_URL: &str = "https://api.mmoui.com/v4/game/WOW/filelist.json
 /// How long the WoWInterface file list is reused before it is downloaded again.
 pub(crate) const WOWI_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const WOWI_CACHE_FILE: &str = "wowinterface-filelist.json";
+/// The WoWInterface file list lists thousands of files (7405 in November 2026). A list shorter
+/// than this is a broken answer: it is a failure and is never cached, so it can't hide every
+/// addon from WoWInterface for an hour.
+pub(crate) const WOWI_MIN_FILES: usize = 1000;
 
 /// A source that could not answer, and why.
 #[derive(Debug, Clone)]
@@ -188,7 +192,8 @@ async fn download_wowi_filelist() -> Result<Vec<u8>, SourceError> {
 }
 
 /// The WoWInterface file list: the cached copy when it is younger than [`WOWI_CACHE_TTL`] at
-/// `now` and readable, else a fresh download (cached again once it reads).
+/// `now` and readable, else a fresh download (cached again once it reads). A list with fewer
+/// than [`WOWI_MIN_FILES`] files counts as unreadable.
 pub(crate) async fn load_wowi_files<F, Fut>(
     cache_file: &Path,
     now: SystemTime,
@@ -199,15 +204,27 @@ where
     Fut: Future<Output = Result<Vec<u8>, SourceError>>,
 {
     if let Some(bytes) = fresh_cache(cache_file, now)
-        && let Ok(files) = wire::parse_wowi_filelist(&bytes)
+        && let Ok(files) = read_wowi_list(&bytes)
     {
         return Ok(files);
     }
     let bytes = download().await?;
-    let files = wire::parse_wowi_filelist(&bytes)
+    let files = read_wowi_list(&bytes)
         .map_err(|detail| SourceError::new(SourceErrorKind::Other, detail))?;
     if let Err(error) = write_cache(cache_file, &bytes) {
         tracing::warn!(%error, "could not cache the WoWInterface file list");
+    }
+    Ok(files)
+}
+
+/// Reads the file list, refusing one with fewer than [`WOWI_MIN_FILES`] files.
+fn read_wowi_list(bytes: &[u8]) -> Result<Vec<WowiFile>, String> {
+    let files = wire::parse_wowi_filelist(bytes)?;
+    if files.len() < WOWI_MIN_FILES {
+        return Err(format!(
+            "WoWInterface sent a file list of only {} files",
+            files.len()
+        ));
     }
     Ok(files)
 }

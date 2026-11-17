@@ -6,12 +6,33 @@ use lemonup_core::{OwnedFolder, SourceKind, UpdateStatus};
 
 use super::*;
 
-const LIST_A: &str = r#"[{"id":1,"title":"A","version":"1","addons":[{"path":"A","addOnVersion":"1","apiVersion":"16001"}]}]"#;
-const LIST_B: &str = r#"[{"id":2,"title":"B","version":"2","addons":[{"path":"B","addOnVersion":"2","apiVersion":"16001"}]}]"#;
+/// A WoWInterface file list of `count` files, numbered from `first`.
+fn wowi_list(first: usize, count: usize) -> String {
+    let files = (first..first + count)
+        .map(|id| {
+            format!(
+                r#"{{"id":{id},"title":"A{id}","version":"1","addons":[{{"path":"A{id}","addOnVersion":"1","apiVersion":"16001"}}]}}"#
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", files.join(","))
+}
+
+fn list_a() -> String {
+    wowi_list(1, WOWI_MIN_FILES)
+}
+
+fn list_b() -> String {
+    wowi_list(5001, WOWI_MIN_FILES)
+}
 
 fn cached_list(dir: &Path, age: Duration) -> (PathBuf, SystemTime) {
+    write_cached(dir, &list_a(), age)
+}
+
+fn write_cached(dir: &Path, list: &str, age: Duration) -> (PathBuf, SystemTime) {
     let path = dir.join(WOWI_CACHE_FILE);
-    fs::write(&path, LIST_A).expect("cache");
+    fs::write(&path, list).expect("cache");
     let modified = SystemTime::now() - age;
     File::options()
         .write(true)
@@ -33,7 +54,7 @@ async fn the_wowinterface_list_is_reused_within_an_hour() {
     .await
     .expect("cached list");
 
-    assert_eq!(files.len(), 1);
+    assert_eq!(files.len(), WOWI_MIN_FILES);
     assert_eq!(files[0].id, "1");
 }
 
@@ -43,13 +64,43 @@ async fn an_hour_old_wowinterface_list_is_downloaded_again_and_cached() {
     let (path, modified) = cached_list(dir.path(), Duration::from_secs(2 * 60 * 60));
 
     let files = load_wowi_files(&path, modified + WOWI_CACHE_TTL, || async {
-        Ok(LIST_B.as_bytes().to_vec())
+        Ok(list_b().into_bytes())
     })
     .await
     .expect("downloaded list");
 
-    assert_eq!(files[0].id, "2");
-    assert_eq!(fs::read_to_string(&path).expect("cache"), LIST_B);
+    assert_eq!(files[0].id, "5001");
+    assert_eq!(fs::read_to_string(&path).expect("cache"), list_b());
+}
+
+#[tokio::test]
+async fn an_empty_or_short_wowinterface_list_is_an_error_and_is_not_cached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache").join(WOWI_CACHE_FILE);
+
+    for list in ["[]".to_string(), wowi_list(1, WOWI_MIN_FILES - 1)] {
+        let error = load_wowi_files(&path, SystemTime::now(), || async { Ok(list.into_bytes()) })
+            .await
+            .expect_err("too short");
+
+        assert_eq!(error.kind, SourceErrorKind::Other);
+        assert!(error.detail.contains("only"), "{}", error.detail);
+        assert!(!path.exists());
+    }
+}
+
+#[tokio::test]
+async fn a_short_cached_wowinterface_list_is_downloaded_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, modified) = write_cached(dir.path(), "[]", Duration::from_secs(60));
+
+    let files = load_wowi_files(&path, modified + Duration::from_secs(60), || async {
+        Ok(list_b().into_bytes())
+    })
+    .await
+    .expect("downloaded list");
+
+    assert_eq!(files[0].id, "5001");
 }
 
 #[tokio::test]
