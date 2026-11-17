@@ -932,6 +932,48 @@ fn a_likely_match_says_what_was_checked() {
 }
 
 #[test]
+fn names_never_show_doubled_spaces() {
+    // A stored name from before the title was cleaned up, and a source's own name.
+    let rows = [AddonRecord::new(
+        "Decursive  -Ace3-",
+        "Decursive",
+        SourceKind::Manual,
+    )];
+    let names = LocalNames::new(
+        &rows,
+        &FindInputs {
+            flavor: GameFlavor::Forever,
+            folders: Vec::new(),
+        },
+    );
+
+    let likely = |name: &str, folder: &str| {
+        let mut likely = found(FindSource::Wago, name, folder, "1.0", "1.0");
+        likely.label = FindLabel::Likely;
+        likely.likely_reason = Some(LikelyReason::TocNamesIt);
+        result_of(FindLabel::Likely, name, folder, vec![likely])
+    };
+    let report = FindReport {
+        results: vec![
+            likely("unused", "Decursive"),
+            likely(" Two   Words ", "Other"),
+        ],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+
+    let lines = human_report(&report, &[], &names, 0, Paint::PLAIN);
+
+    let shown = section_lines(&lines, "Likely matches (2)");
+    assert!(
+        shown[0].starts_with("  Decursive -Ace3-  Wago.io"),
+        "{shown:?}"
+    );
+    assert!(shown[1].starts_with("  Two Words  "), "{shown:?}");
+    assert!(!shown[1].contains("Two   Words"), "{shown:?}");
+}
+
+#[test]
 fn name_only_sections_group_curseforge_projects_and_wrap() {
     let lines = human_report(
         &full_report(),

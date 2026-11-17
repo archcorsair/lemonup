@@ -187,9 +187,9 @@ impl LocalNames {
             }
         }
         for row in rows {
-            let name = row.name.trim();
+            let name = collapse_spaces(&row.name);
             if !name.is_empty() {
-                names.insert(row.folder.to_lowercase(), name.to_string());
+                names.insert(row.folder.to_lowercase(), name);
             }
         }
         Self(names)
@@ -200,8 +200,13 @@ impl LocalNames {
         self.0
             .get(&folder.to_lowercase())
             .cloned()
-            .unwrap_or_else(|| fallback.to_string())
+            .unwrap_or_else(|| collapse_spaces(fallback))
     }
+}
+
+/// A name with runs of whitespace as one space, so a name never shows doubled spaces.
+fn collapse_spaces(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One addon line: name, source and version in columns, then lines under it.

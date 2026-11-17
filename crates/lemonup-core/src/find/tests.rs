@@ -137,6 +137,25 @@ fn inputs_skip_files_and_mark_symlinks_and_git_checkouts_as_developer_copies() {
 }
 
 #[test]
+fn a_title_with_a_color_code_in_the_middle_has_one_space() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Decursive",
+        &["## Title: Decursive |cff00ff00|r -Ace3-"],
+    );
+
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+
+    assert_eq!(
+        inputs
+            .get("Decursive")
+            .and_then(|local| local.title.as_deref()),
+        Some("Decursive -Ace3-")
+    );
+}
+
+#[test]
 fn toc_ids_and_version_follow_the_game_version() {
     let fixture = fixture();
     addon(
