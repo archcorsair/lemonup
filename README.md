@@ -66,6 +66,8 @@ Coming from LemonUp 1? Your settings and linked addons carry over on the first r
 - **Install** by name (Wago.io) or by pasting a GitHub, WoWInterface, TukUI or Wago.io link
 - **Find online:** press `f` on a "Not linked" addon to link it to its source, so LemonUp keeps
   it updated
+- **Edit .toc fields:** press `e` in Details to change the Title, Notes or Category the game shows
+  for an addon. Updates keep your values, and clearing one puts the original back
 - **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong
   to another addon are never replaced, and deletes can be undone with `z`
 - **Backups of your game settings** (the WTF folder) before updates, with restore
