@@ -221,6 +221,21 @@ fn report_for(sandbox: &Sandbox) -> FindReport {
     match_addons(&inputs, &rows, None, &lookups)
 }
 
+/// `--link` with `--plain`: what it prints, or the refusal.
+fn link_plain(
+    sandbox: &mut Sandbox,
+    report: &FindReport,
+    yes: bool,
+) -> Result<Vec<String>, LemonupError> {
+    plain_link_lines(link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        report,
+        yes,
+    )?)
+}
+
 #[test]
 fn find_lists_results_by_label_with_a_summary_and_source_problems() {
     let sandbox = sandbox();
@@ -241,7 +256,7 @@ fn find_lists_results_by_label_with_a_summary_and_source_problems() {
         "find summary: folders=4, addons=3, exact=2, likely=0, partial=0, choose_one=0, not_checked=1, curseforge_only=0, not_found=0, developer_copy=0"
     );
     assert!(lines[2].starts_with(
-        "find result: label=exact, addon=GatherMate2, folder=GatherMate2, source=wago, id=GM2, version=1.0, latest=1.0, folders=GatherMate2|GatherMate2Storage_Midnight, joining=GatherMate2Storage_Midnight (from GatherMate2Storage_Midnight)"
+        "find result: label=exact, addon=GatherMate2, folder=GatherMate2, source=wago, id=GM2, version=1.0, latest=1.0, folders=GatherMate2|GatherMate2Storage_Midnight, joining=GatherMate2Storage_Midnight (own addon)"
     ));
     assert!(lines[3].starts_with("find result: label=exact, addon=Pawn, folder=Pawn"));
     assert_eq!(
@@ -272,14 +287,7 @@ fn find_link_refuses_without_yes_when_an_exact_match_takes_other_folders() {
     let report = report_for(&sandbox);
     let before = sandbox.database.list_addons().expect("rows");
 
-    let error = link_exact_matches(
-        &mut sandbox.database,
-        &sandbox.addons,
-        GameFlavor::Forever,
-        &report,
-        false,
-    )
-    .expect_err("needs --yes");
+    let error = link_plain(&mut sandbox, &report, false).expect_err("needs --yes");
 
     let message = error.to_string();
     assert!(
@@ -298,14 +306,7 @@ fn find_link_with_yes_links_exact_matches_with_their_status_right_away() {
     let mut sandbox = sandbox();
     let report = report_for(&sandbox);
 
-    let lines = link_exact_matches(
-        &mut sandbox.database,
-        &sandbox.addons,
-        GameFlavor::Forever,
-        &report,
-        true,
-    )
-    .expect("linked");
+    let lines = link_plain(&mut sandbox, &report, true).expect("linked");
 
     assert_eq!(
         lines,
@@ -360,14 +361,7 @@ fn find_link_reports_every_pick_the_database_holds_when_one_folder_moves_between
     };
     let report = match_addons(&inputs, &rows, None, &lookups);
 
-    let lines = link_exact_matches(
-        &mut sandbox.database,
-        &sandbox.addons,
-        GameFlavor::Forever,
-        &report,
-        true,
-    )
-    .expect("linked");
+    let lines = link_plain(&mut sandbox, &report, true).expect("linked");
 
     assert_eq!(
         lines,
@@ -407,14 +401,7 @@ fn find_link_refuses_without_yes_even_before_the_addons_folder_was_scanned() {
     };
     let report = match_addons(&inputs, &[], None, &lookups);
 
-    let error = link_exact_matches(
-        &mut sandbox.database,
-        &sandbox.addons,
-        GameFlavor::Forever,
-        &report,
-        false,
-    )
-    .expect_err("needs --yes");
+    let error = link_plain(&mut sandbox, &report, false).expect_err("needs --yes");
 
     let message = error.to_string();
     assert!(
@@ -479,5 +466,550 @@ fn a_wago_answer_with_unreadable_entries_is_incomplete_and_reported() {
     assert_eq!(
         problems[0].error.detail,
         "Wago.io sent 2 matches LemonUp can't read"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The readable report.
+
+fn found(source: FindSource, name: &str, folder: &str, version: &str, latest: &str) -> FoundAddon {
+    FoundAddon {
+        label: FindLabel::Exact,
+        source,
+        source_id: "1".to_string(),
+        source_url: String::new(),
+        name: name.to_string(),
+        author: None,
+        parent_folder: folder.to_string(),
+        folders: vec![folder.to_string()],
+        matched_version: Some(version.to_string()),
+        latest_version: Some(latest.to_string()),
+        joining: Vec::new(),
+        leaving: Vec::new(),
+        missing: Vec::new(),
+        differing: Vec::new(),
+        blocked: Vec::new(),
+    }
+}
+
+fn result_of(
+    label: FindLabel,
+    name: &str,
+    folder: &str,
+    candidates: Vec<FoundAddon>,
+) -> FindResult {
+    FindResult {
+        label,
+        name: name.to_string(),
+        folder: folder.to_string(),
+        folders: vec![folder.to_string()],
+        candidates,
+        curseforge_id: None,
+        not_checked_by: Vec::new(),
+    }
+}
+
+fn exact(found: FoundAddon) -> FindResult {
+    result_of(
+        FindLabel::Exact,
+        &found.name.clone(),
+        &found.parent_folder.clone(),
+        vec![found],
+    )
+}
+
+fn only(label: FindLabel, name: &str) -> FindResult {
+    result_of(label, name, name, Vec::new())
+}
+
+fn folder_move(folder: &str, from: &str) -> lemonup_core::find::FolderMove {
+    lemonup_core::find::FolderMove {
+        folder: folder.to_string(),
+        from: from.to_string(),
+    }
+}
+
+/// A report with a result for every section.
+fn full_report() -> FindReport {
+    let mut gather = found(
+        FindSource::WowInterface,
+        "GatherMate 2",
+        "GatherMate2",
+        "1.52.7",
+        "1.52.7",
+    );
+    gather.joining = vec![
+        folder_move(
+            "GatherMate2Storage_Dragonflight",
+            "GatherMate2Storage_Dragonflight",
+        ),
+        folder_move("GatherMate2Storage_Midnight", "GatherMate2Storage_Midnight"),
+    ];
+    gather.leaving = vec!["GatherMate2_Data".to_string()];
+    gather.missing = vec!["GatherMate2Storage_Gone".to_string()];
+
+    let mut blocked = found(FindSource::Wago, "Details", "Details", "1.0", "1.0");
+    blocked.blocked = vec![lemonup_core::find::BlockedFolder {
+        folder: "Details_Shared".to_string(),
+        reason: lemonup_core::find::BlockReason::Linked {
+            addon: "Details Core".to_string(),
+        },
+    }];
+
+    let mut likely = found(
+        FindSource::WowInterface,
+        "Bartender4",
+        "Bartender4",
+        "4.0",
+        "4.1",
+    );
+    likely.label = FindLabel::Likely;
+    likely.matched_version = None;
+
+    let mut partial = found(FindSource::Wago, "Plater", "Plater", "2.0", "2.1");
+    partial.label = FindLabel::Partial;
+    partial.folders = vec!["Plater".to_string(), "Plater_Libs".to_string()];
+    partial.differing = vec!["Plater_Libs".to_string()];
+
+    let mut questie = found(FindSource::Wago, "Questie", "Questie", "9.0", "9.0");
+    questie.label = FindLabel::Partial;
+    questie.differing = vec!["QuestieDB".to_string()];
+    let mut questie_dev = found(FindSource::Wago, "QuestieDev", "Questie", "9.0", "9.0");
+    questie_dev.label = FindLabel::Likely;
+
+    let mut results = vec![
+        exact(found(
+            FindSource::Wago,
+            "Ask Mr Robot",
+            "AskMrRobot",
+            "v1003",
+            "v1003",
+        )),
+        exact(found(FindSource::Wago, "APR", "APR", "v7.7.1", "v7.8.0")),
+        exact(found(FindSource::Tukui, "ElvUI", "ElvUI", "16.01", "16.01")),
+        exact(gather),
+        exact(blocked),
+        result_of(FindLabel::Likely, "Bartender4", "Bartender4", vec![likely]),
+        result_of(FindLabel::Partial, "Plater", "Plater", vec![partial]),
+        result_of(
+            FindLabel::ChooseOne,
+            "Questie",
+            "Questie",
+            vec![questie, questie_dev],
+        ),
+    ];
+    let mut spy = only(FindLabel::NotChecked, "Spy");
+    spy.not_checked_by = vec![FindSource::WowInterface];
+    results.push(spy);
+    for folder in [
+        "ForeverAuras",
+        "ForeverAuras_Options",
+        "ForeverAuras_Libs",
+        "ForeverAuras_Media",
+        "ForeverAuras_Extra",
+    ] {
+        let mut result = only(FindLabel::CurseForgeOnly, folder);
+        result.curseforge_id = Some("9001".to_string());
+        results.push(result);
+    }
+    for name in [
+        "Forever Loot Sparkles",
+        "Leatrix Plus",
+        "Leatrix Sounds",
+        "OpenMap",
+        "Another Long Addon Name",
+        "Yet Another Addon",
+    ] {
+        let mut result = only(FindLabel::CurseForgeOnly, name);
+        result.curseforge_id = Some(format!("id-{name}"));
+        results.push(result);
+    }
+    results.push(only(FindLabel::NotFound, "AzerothGPS"));
+    results.push(only(FindLabel::NotFound, "DungeonJournal"));
+    results.push(only(FindLabel::DeveloperCopy, "WoW Butler"));
+    FindReport {
+        results,
+        failed: vec![FindSource::WowInterface],
+        skipped: Vec::new(),
+    }
+}
+
+/// Names LemonUp shows for the folders of [`full_report`].
+fn full_names() -> LocalNames {
+    let rows = [
+        ("Ask Mr. Robot Classic", "AskMrRobot"),
+        ("Azeroth Pilot Reloaded", "APR"),
+        ("ElvUI Forever", "ElvUI"),
+        ("GatherMate2", "GatherMate2"),
+    ]
+    .map(|(name, folder)| AddonRecord::new(name, folder, SourceKind::Manual));
+    LocalNames::new(
+        &rows,
+        &FindInputs {
+            flavor: GameFlavor::Forever,
+            folders: Vec::new(),
+        },
+    )
+}
+
+fn wowinterface_down() -> Vec<SourceProblem> {
+    vec![SourceProblem {
+        source: FindSource::WowInterface,
+        error: SourceError::new(SourceErrorKind::NoConnection, "timed out"),
+    }]
+}
+
+/// The lines of one section of the readable report, without its heading.
+fn section_lines<'a>(lines: &'a [String], heading: &str) -> Vec<&'a str> {
+    lines
+        .iter()
+        .skip_while(|line| line.as_str() != heading)
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn the_readable_report_has_a_section_for_each_label_in_order() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    assert_eq!(lines[0], "Sent 44 folder names and file hashes to Wago.io.");
+    assert_eq!(lines[1], "");
+    let headings = lines
+        .iter()
+        .filter(|line| !line.starts_with(' ') && line.ends_with(')'))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        headings,
+        [
+            "Ready to link (4)",
+            "Can't link yet (1)",
+            "Likely matches (1)",
+            "Partial matches (1)",
+            "Choose one in LemonUp (1)",
+            "Not checked (1)",
+            "On CurseForge only, LemonUp can't update these yet (11)",
+            "Not found (2)",
+            "Skipped, developer copy (1)",
+        ]
+    );
+    // One blank line between sections, none at the end, and no key=value lines.
+    assert_ne!(lines.last().expect("last"), "");
+    assert!(lines.iter().all(|line| !line.contains("find result")));
+    assert!(
+        lines
+            .windows(2)
+            .all(|pair| !(pair[0].is_empty() && pair[1].is_empty()))
+    );
+}
+
+#[test]
+fn ready_lines_use_the_name_lemonup_shows_and_align_their_columns() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    assert_eq!(
+        section_lines(&lines, "Ready to link (4)"),
+        [
+            "  Ask Mr. Robot Classic   Wago.io       v1003",
+            "  Azeroth Pilot Reloaded  Wago.io       v7.7.1, update ready (v7.8.0)",
+            "  ElvUI Forever           TukUI         16.01",
+            "  GatherMate2             WoWInterface  1.52.7",
+            "      also takes GatherMate2Storage_Dragonflight, GatherMate2Storage_Midnight",
+            "      GatherMate2_Data becomes its own addon",
+            "      GatherMate2Storage_Gone missing on disk",
+        ]
+    );
+    let text = lines.join("\n");
+    assert!(!text.contains("joins from"), "{text}");
+}
+
+#[test]
+fn a_match_that_cannot_be_linked_is_never_listed_as_ready() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    let ready = section_lines(&lines, "Ready to link (4)").join("\n");
+    assert!(!ready.contains("Details"), "{ready}");
+    assert_eq!(
+        section_lines(&lines, "Can't link yet (1)"),
+        [
+            "  Details  Wago.io  1.0",
+            "      It needs folders LemonUp won't take: Details_Shared belongs to Details Core",
+        ]
+    );
+}
+
+#[test]
+fn likely_partial_and_choose_one_say_why_they_are_not_linked() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    assert_eq!(
+        section_lines(&lines, "Likely matches (1)"),
+        ["  Bartender4  WoWInterface  the installed version differs from the release (4.1)"]
+    );
+    assert_eq!(
+        section_lines(&lines, "Partial matches (1)"),
+        ["  Plater  Wago.io  2.0, files differ in Plater_Libs"]
+    );
+    assert_eq!(
+        section_lines(&lines, "Choose one in LemonUp (1)"),
+        ["  Questie: Questie (QuestieDB differs from the release) or QuestieDev"]
+    );
+}
+
+#[test]
+fn name_only_sections_group_curseforge_projects_and_wrap() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    let curseforge = section_lines(
+        &lines,
+        "On CurseForge only, LemonUp can't update these yet (11)",
+    );
+    assert_eq!(
+        curseforge,
+        [
+            "  Another Long Addon Name, Forever Loot Sparkles, ForeverAuras (5 folders),",
+            "  Leatrix Plus, Leatrix Sounds, OpenMap, Yet Another Addon",
+        ]
+    );
+    assert!(curseforge.iter().all(|line| line.chars().count() <= 80));
+    assert_eq!(
+        section_lines(&lines, "Not found (2)"),
+        ["  AzerothGPS, DungeonJournal"]
+    );
+    assert_eq!(
+        section_lines(&lines, "Skipped, developer copy (1)"),
+        ["  WoW Butler"]
+    );
+}
+
+#[test]
+fn not_checked_names_the_failed_source_and_why() {
+    let lines = human_report(&full_report(), &wowinterface_down(), &full_names(), 44);
+
+    assert_eq!(
+        section_lines(&lines, "Not checked (1)"),
+        [
+            "  Spy",
+            "  WoWInterface: LemonUp couldn't reach WoWInterface. Check your internet",
+            "  connection and try again.",
+        ]
+    );
+}
+
+#[test]
+fn a_failed_source_that_left_nothing_unchecked_is_still_reported() {
+    let report = FindReport {
+        results: vec![only(FindLabel::NotFound, "Spy")],
+        failed: vec![FindSource::Tukui],
+        skipped: Vec::new(),
+    };
+    let problems = vec![SourceProblem {
+        source: FindSource::Tukui,
+        error: SourceError::new(SourceErrorKind::SlowDown, "429"),
+    }];
+
+    let lines = human_report(&report, &problems, &full_names(), 0);
+
+    assert_eq!(
+        section_lines(&lines, "Check failed (1)"),
+        ["  TukUI: TukUI asked LemonUp to slow down. Wait a few minutes, then try again."]
+    );
+}
+
+#[test]
+fn the_report_opens_with_what_was_sent_to_wago_or_that_a_key_finds_more() {
+    let report = full_report();
+    let names = full_names();
+
+    // A request that got no answer is not claimed as sent.
+    let unreachable = vec![SourceProblem {
+        source: FindSource::Wago,
+        error: SourceError::new(SourceErrorKind::NoConnection, "timed out"),
+    }];
+    assert_ne!(
+        human_report(&report, &unreachable, &names, 44)[0],
+        "Sent 44 folder names and file hashes to Wago.io."
+    );
+
+    let without_key = FindReport {
+        results: Vec::new(),
+        failed: Vec::new(),
+        skipped: vec![FindSource::Wago],
+    };
+    let lines = human_report(&without_key, &[], &names, 0);
+    assert_eq!(
+        lines[0],
+        "A Wago.io key finds more of your addons. Add one in Settings."
+    );
+    assert_eq!(lines.last().expect("last"), "No addons to look up.");
+}
+
+#[test]
+fn the_last_line_always_says_what_happened() {
+    let report = full_report();
+    let names = full_names();
+
+    assert_eq!(
+        human_closing(&report, &names, None).expect("closing"),
+        ["Nothing was changed. `lemonup find --link` links the 4 addons ready to link."]
+    );
+    let nothing_ready = FindReport {
+        results: vec![only(FindLabel::NotFound, "Spy")],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+    assert_eq!(
+        human_closing(&nothing_ready, &names, None).expect("closing"),
+        ["Nothing was changed."]
+    );
+    assert_eq!(
+        human_closing(&nothing_ready, &names, Some(LinkOutcome::NothingToLink)).expect("closing"),
+        ["Nothing was linked. No addon is ready to link."]
+    );
+}
+
+#[test]
+fn find_link_without_yes_prints_a_refusal_that_says_what_moves() {
+    let mut sandbox = sandbox();
+    let report = report_for(&sandbox);
+    let inputs = FindInputs::read(&sandbox.addons, GameFlavor::Forever).expect("inputs");
+    let names = LocalNames::new(&sandbox.database.list_addons().expect("rows"), &inputs);
+    let outcome = link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        &report,
+        false,
+    )
+    .expect("a refusal is an outcome");
+
+    let error = human_closing(&report, &names, Some(outcome)).expect_err("refused");
+
+    assert!(matches!(error, LemonupError::Refused(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "1 of these moves folders between addons: GatherMate2 also takes \
+         GatherMate2Storage_Midnight. Nothing was linked. Run `lemonup find --link --yes` \
+         to link the 2 addons ready to link."
+    );
+    assert!(!error.to_string().contains("invalid argument"));
+    assert!(!error.to_string().contains("joins from"));
+}
+
+#[test]
+fn a_refusal_names_folders_that_become_their_own_addon() {
+    let names = full_names();
+    let mut gather = found(
+        FindSource::WowInterface,
+        "GatherMate 2",
+        "GatherMate2",
+        "1.0",
+        "1.0",
+    );
+    gather.joining = vec![folder_move("GatherMate2Storage_Midnight", "Other")];
+    gather.leaving = vec!["GatherMate2_Data".to_string()];
+    let report = FindReport {
+        results: vec![exact(gather.clone())],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+
+    let error = human_closing(&report, &names, Some(LinkOutcome::NeedsYes(vec![gather])))
+        .expect_err("refused");
+
+    assert_eq!(
+        error.to_string(),
+        "1 of these moves folders between addons: GatherMate2 also takes \
+         GatherMate2Storage_Midnight; GatherMate2_Data becomes its own addon. Nothing was \
+         linked. Run `lemonup find --link --yes` to link the addon ready to link."
+    );
+}
+
+#[test]
+fn find_link_with_yes_ends_with_what_was_linked_and_what_is_ready_to_update() {
+    let mut sandbox = sandbox();
+    let report = report_for(&sandbox);
+    let names = full_names();
+    let outcome = link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        &report,
+        true,
+    )
+    .expect("linked");
+
+    assert_eq!(
+        human_closing(&report, &names, Some(outcome)).expect("closing"),
+        [
+            "Linked 2 addons: 1 up to date, 1 with an update ready (Pawn). \
+          `lemonup update-all` updates it."
+        ]
+    );
+}
+
+#[test]
+fn a_link_the_database_does_not_hold_is_said_not_claimed() {
+    let linked = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+    let outcome = LinkOutcome::Linked {
+        rows: vec![linked],
+        unconfirmed: vec!["Spy".to_string()],
+    };
+
+    let lines = human_closing(&full_report(), &full_names(), Some(outcome)).expect("closing");
+
+    assert!(lines[0].starts_with("Linked 1 addon: "), "{lines:?}");
+    assert_eq!(
+        lines[1],
+        "LemonUp could not confirm that these were also linked: Spy. \
+         Run `lemonup find` again to see where they stand."
+    );
+}
+
+#[test]
+fn plain_output_keeps_its_fields_and_fixes_the_three_lines() {
+    let mut sandbox = sandbox();
+    let report = report_for(&sandbox);
+
+    // A joining folder that has a row of its own is its own addon, not "from" itself.
+    let lines = report_lines(&report, &[], 4);
+    let gather = lines
+        .iter()
+        .find(|line| line.contains("addon=GatherMate2,"))
+        .expect("gathermate");
+    assert!(
+        gather.contains("joining=GatherMate2Storage_Midnight (own addon)"),
+        "{gather}"
+    );
+    // One grouped under another addon still says where it comes from.
+    let mut grouped = found(FindSource::Wago, "Pawn", "Pawn", "1.0", "1.0");
+    grouped.joining = vec![folder_move("Pawn_Options", "Other")];
+    let moved = candidate_fields(&grouped);
+    assert!(
+        moved.contains("joining=Pawn_Options (from Other)"),
+        "{moved}"
+    );
+    assert!(moved.starts_with("source=wago, id=1, version=1.0, latest=1.0, folders=Pawn"));
+
+    // The refusal has no "invalid argument" label.
+    let error = link_plain(&mut sandbox, &report, false).expect_err("needs --yes");
+    assert!(matches!(error, LemonupError::Refused(_)), "{error:?}");
+    assert!(!error.to_string().contains("invalid argument"), "{error}");
+
+    // Plain find always ends by saying nothing was changed.
+    let nothing_ready = FindReport {
+        results: vec![only(FindLabel::NotFound, "Spy")],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+    assert_eq!(
+        plain_closing(&nothing_ready, None).expect("closing"),
+        ["find detail: nothing was changed"]
+    );
+    assert_eq!(
+        plain_closing(&report, None).expect("closing"),
+        ["find detail: nothing was changed; `lemonup find --link` links the exact matches"]
     );
 }

@@ -101,9 +101,18 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(outcome) => ExitCode::from(outcome.exit_status()),
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("{}", error_text(error.as_ref()));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// What an error that ends a command prints. A refusal already says what happened and what to
+/// do next, so it prints as it is; anything else is labeled as an error.
+fn error_text(error: &(dyn std::error::Error + 'static)) -> String {
+    match error.downcast_ref::<LemonupError>() {
+        Some(LemonupError::Refused(message)) => message.clone(),
+        _ => format!("Error: {error}"),
     }
 }
 
@@ -176,7 +185,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             clear,
             yes,
         } => run_toc(paths, runtime, &addon, field, value, clear, yes)?,
-        Commands::Find { link, yes } => run_find(paths, runtime, link, yes).await?,
+        Commands::Find { link, yes, plain } => run_find(paths, runtime, link, yes, plain).await?,
     };
 
     Ok(outcome)
@@ -248,12 +257,14 @@ fn run_toc(
 
 /// `lemonup find`: lists where the Not linked addons come from, grouped by label, and changes
 /// nothing. `--link` links the exact matches (no download); the CLI never asks, so matches that
-/// take over folders beyond their own need `--yes`. Exits 1 when a source failed.
+/// take over folders beyond their own need `--yes`. `--plain` prints one key=value line per
+/// result instead of the readable report. Exits 1 when a source failed.
 async fn run_find(
     paths: AppPaths,
     runtime: AppRuntime,
     link: bool,
     yes: bool,
+    plain: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config_state = config_store.load()?;
@@ -300,27 +311,39 @@ async fn run_find(
     let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
     let wago_lookups = inputs.wago_lookups(&rows, None);
     let api_key = resolve_wago_api_key(&config_state);
-    if api_key.is_some() && !wago_lookups.is_empty() {
+    let sends_to_wago = api_key.is_some() && !wago_lookups.is_empty();
+    if plain && sends_to_wago {
         println!(
             "find note: sending {} folder names and file hashes to Wago.io",
             wago_lookups.len()
         );
     }
+    let names = crate::find::LocalNames::new(&rows, &inputs);
     let lookups =
         crate::find::lookup_sources(&wago_lookups, flavor, api_key.as_deref(), &paths.cache_dir)
             .await;
     let report = lemonup_core::find::match_addons(&inputs, &rows, None, &lookups.lookups);
-    for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
-        println!("{line}");
-    }
-    if link {
-        for line in
-            crate::find::link_exact_matches(&mut database, &addon_dir, flavor, &report, yes)?
-        {
+    let mut link_now =
+        || crate::find::link_exact_matches(&mut database, &addon_dir, flavor, &report, yes);
+    if plain {
+        for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
             println!("{line}");
         }
-    } else if report.results.iter().any(|result| result.preselected()) {
-        println!("find detail: nothing was changed; `lemonup find --link` links the exact matches");
+        let outcome = if link { Some(link_now()?) } else { None };
+        for line in crate::find::plain_closing(&report, outcome)? {
+            println!("{line}");
+        }
+    } else {
+        let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
+        for line in crate::find::human_report(&report, &lookups.problems, &names, wago_folders) {
+            println!("{line}");
+        }
+        println!();
+        let outcome = if link { Some(link_now()?) } else { None };
+        // A refusal leaves the report on screen and ends the run with what happened.
+        for line in crate::find::human_closing(&report, &names, outcome)? {
+            println!("{line}");
+        }
     }
     Ok(CommandOutcome::from_error_count(lookups.problems.len()))
 }
@@ -369,9 +392,9 @@ fn toc_command(
     let mut overrides = record.toc_overrides.clone();
     toc_edit::set_override(&mut overrides, field, value.as_deref())?;
     if record.source == lemonup_core::SourceKind::Manual && !yes {
-        return Err(LemonupError::InvalidArgument(format!(
+        return Err(LemonupError::Refused(format!(
             "{} is Not linked: LemonUp didn't install it, so changing its .toc files needs \
-             --yes. Its own lines are kept, and --clear puts them back.",
+             --yes. Its own lines are kept, and --clear puts them back. Nothing was changed.",
             record.name
         )));
     }
@@ -2217,13 +2240,15 @@ mod addon_dir_binding_tests {
     use std::path::{Path, PathBuf};
 
     use lemonup_core::{
-        AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, SourceKind, StateDatabase,
+        AddonRecord, AppConfig, AppPaths, ConfigStore, DEFAULT_PROFILE, LemonupError, SourceKind,
+        StateDatabase,
     };
     use tempfile::tempdir;
 
     use super::{
-        format_skipped_detail, format_sync_summary, guarded_dirs_of, leftover_staging_warnings,
-        run_import_addons, run_restore_backup, run_sync, run_update, toc_command,
+        error_text, format_skipped_detail, format_sync_summary, guarded_dirs_of,
+        leftover_staging_warnings, run_import_addons, run_restore_backup, run_sync, run_update,
+        toc_command,
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
@@ -2723,15 +2748,32 @@ mod addon_dir_binding_tests {
     }
 
     #[test]
+    fn only_a_refusal_prints_without_the_error_label() {
+        let refusal: Box<dyn std::error::Error> =
+            Box::new(LemonupError::Refused("Nothing was linked.".to_string()));
+        let failure: Box<dyn std::error::Error> =
+            Box::new(LemonupError::InvalidArgument("bad".to_string()));
+
+        assert_eq!(error_text(refusal.as_ref()), "Nothing was linked.");
+        assert_eq!(error_text(failure.as_ref()), "Error: invalid argument: bad");
+    }
+
+    #[test]
     fn toc_command_needs_yes_for_a_not_linked_addon_and_a_known_addon() {
         use lemonup_core::TocField;
         let temp = tempdir().expect("tempdir");
         let (addon_dir, mut database) = toc_fixture(temp.path());
         let change = || Some((TocField::Notes, Some("Mine".to_string())));
 
-        let error = toc_command(&mut database, &addon_dir, "Bar", change(), false)
-            .expect_err("needs --yes")
-            .to_string();
+        let refusal = toc_command(&mut database, &addon_dir, "Bar", change(), false)
+            .expect_err("needs --yes");
+        assert!(matches!(refusal, LemonupError::Refused(_)), "{refusal:?}");
+        // The run ends with the refusal as it is, not an "Error: invalid argument" label.
+        let printed = error_text(&refusal);
+        assert!(!printed.contains("invalid argument"), "{printed}");
+        assert!(!printed.starts_with("Error"), "{printed}");
+        assert!(printed.ends_with("Nothing was changed."), "{printed}");
+        let error = refusal.to_string();
         assert!(error.contains("Bar is Not linked"), "{error}");
         assert!(error.contains("--yes"), "{error}");
         let toc = std::fs::read_to_string(addon_dir.join("Bar/Bar.toc")).expect("toc");

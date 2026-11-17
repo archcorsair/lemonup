@@ -108,6 +108,9 @@ pub enum Commands {
         /// With --link, also link exact matches that take over folders of other addons
         #[arg(long, requires = "link")]
         yes: bool,
+        /// Print one key=value line per result, for scripts
+        #[arg(long)]
+        plain: bool,
     },
     /// Show an addon's Title, Notes and Category, or change one in its .toc files
     Toc {
@@ -395,7 +398,8 @@ mod tests {
             cli.command,
             Some(Commands::Find {
                 link: false,
-                yes: false
+                yes: false,
+                plain: false
             })
         ));
         let cli = Cli::try_parse_from(["lemonup", "find", "--link", "--yes"]).expect("link parses");
@@ -403,7 +407,17 @@ mod tests {
             cli.command,
             Some(Commands::Find {
                 link: true,
-                yes: true
+                yes: true,
+                plain: false
+            })
+        ));
+        let cli = Cli::try_parse_from(["lemonup", "find", "--plain"]).expect("plain parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Find {
+                link: false,
+                yes: false,
+                plain: true
             })
         ));
         assert!(Cli::try_parse_from(["lemonup", "find", "--yes"]).is_err());

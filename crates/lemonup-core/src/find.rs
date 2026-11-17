@@ -459,6 +459,14 @@ pub struct FolderMove {
     pub from: String,
 }
 
+impl FolderMove {
+    /// Whether the folder is an addon of its own now (its own row, or a folder with none), as
+    /// opposed to a folder grouped under another addon.
+    pub fn is_own_addon(&self) -> bool {
+        key(&self.folder) == key(&self.from)
+    }
+}
+
 /// One way to link an addon to a source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundAddon {

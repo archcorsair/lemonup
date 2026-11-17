@@ -291,7 +291,13 @@ fn candidate_fields(found: &FoundAddon) -> String {
         let joining = found
             .joining
             .iter()
-            .map(|moved| format!("{} (from {})", moved.folder, moved.from))
+            .map(|moved| {
+                if moved.is_own_addon() {
+                    format!("{} (own addon)", moved.folder)
+                } else {
+                    format!("{} (from {})", moved.folder, moved.from)
+                }
+            })
             .collect::<Vec<_>>();
         fields.push_str(&format!(", joining={}", joining.join("|")));
     }
@@ -436,42 +442,44 @@ pub(crate) fn exact_picks(report: &FindReport) -> Vec<FoundAddon> {
         .collect()
 }
 
+/// What `lemonup find --link` did.
+#[derive(Debug)]
+pub(crate) enum LinkOutcome {
+    /// No exact match can be linked.
+    NothingToLink,
+    /// Some exact matches move folders between addons and `--yes` was not given. Nothing was
+    /// linked; these are the matches that move folders.
+    NeedsYes(Vec<FoundAddon>),
+    /// The rows the database holds after linking, and the names of linked addons it doesn't
+    /// hold after all (a read of the AddOns folder after linking can drop one).
+    Linked {
+        rows: Vec<AddonRecord>,
+        unconfirmed: Vec<String>,
+    },
+}
+
 /// `lemonup find --link`: links the exact matches, then reads the AddOns folder again so
 /// folders that left a group are listed as their own Not linked addons. The CLI never asks, so
 /// when an exact match takes over folders beyond its own (folders joining from other addons or
-/// leaving this one) it names them and refuses without `--yes`.
+/// leaving this one) it refuses without `--yes` and links nothing.
 pub(crate) fn link_exact_matches(
     database: &mut StateDatabase,
     addon_dir: &Path,
     flavor: GameFlavor,
     report: &FindReport,
     yes: bool,
-) -> Result<Vec<String>, LemonupError> {
+) -> Result<LinkOutcome, LemonupError> {
     let picks = exact_picks(report);
     if picks.is_empty() {
-        return Ok(vec![
-            "find link: nothing to link, no exact match can be linked".to_string(),
-        ]);
+        return Ok(LinkOutcome::NothingToLink);
     }
     let regrouping = picks
         .iter()
         .filter(|pick| pick.regroups())
-        .map(|pick| {
-            let mut moves = pick
-                .joining
-                .iter()
-                .map(|moved| format!("{} joins from {}", moved.folder, moved.from))
-                .collect::<Vec<_>>();
-            moves.extend(pick.leaving.iter().map(|folder| format!("{folder} leaves")));
-            format!("{} ({})", pick.name, moves.join(", "))
-        })
+        .cloned()
         .collect::<Vec<_>>();
     if !regrouping.is_empty() && !yes {
-        return Err(LemonupError::InvalidArgument(format!(
-            "these exact matches take over folders beyond their own: {}. Nothing was linked. \
-             Run `lemonup find --link --yes` to link them.",
-            regrouping.join("; ")
-        )));
+        return Ok(LinkOutcome::NeedsYes(regrouping));
     }
 
     let linked = find::link_found_addons(database, addon_dir, flavor, &picks)?;
@@ -485,33 +493,92 @@ pub(crate) fn link_exact_matches(
     }
     // Only what the database holds now is reported as linked.
     let rows = database.list_addons()?;
-    let stored = linked
-        .iter()
-        .filter_map(|linked| {
-            rows.iter()
-                .find(|row| row.folder == linked.folder && row.source == linked.source)
-        })
-        .collect::<Vec<_>>();
-    let mut lines = stored
-        .iter()
-        .map(|stored| {
-            let (status, _) = crate::update::determine_update_status(stored);
-            format!(
-                "find linked: addon={}, source={}, version={}, latest={}, status={}, folders={}",
-                stored.name,
-                source_name_of(stored),
-                stored.version.as_deref().unwrap_or("<unknown>"),
-                stored.remote_version.as_deref().unwrap_or("<unknown>"),
-                crate::update::serialize_update_status(status),
-                std::iter::once(stored.folder.clone())
-                    .chain(stored.owned_folders.iter().map(|owned| owned.name.clone()))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            )
-        })
-        .collect::<Vec<_>>();
-    lines.push(format!("find link summary: linked={}", stored.len()));
-    Ok(lines)
+    let mut stored = Vec::new();
+    let mut unconfirmed = Vec::new();
+    for linked in &linked {
+        match rows
+            .iter()
+            .find(|row| row.folder == linked.folder && row.source == linked.source)
+        {
+            Some(row) => stored.push(row.clone()),
+            None => unconfirmed.push(linked.name.clone()),
+        }
+    }
+    Ok(LinkOutcome::Linked {
+        rows: stored,
+        unconfirmed,
+    })
+}
+
+/// The `--plain` lines that end the report: what `--link` did, or that nothing was changed.
+pub(crate) fn plain_closing(
+    report: &FindReport,
+    link: Option<LinkOutcome>,
+) -> Result<Vec<String>, LemonupError> {
+    match link {
+        Some(outcome) => plain_link_lines(outcome),
+        None if !exact_picks(report).is_empty() => Ok(vec![
+            "find detail: nothing was changed; `lemonup find --link` links the exact matches"
+                .to_string(),
+        ]),
+        None => Ok(vec!["find detail: nothing was changed".to_string()]),
+    }
+}
+
+/// The `--plain` lines for what `--link` did. A refusal is an error that prints as it is.
+fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
+    match outcome {
+        LinkOutcome::NothingToLink => Ok(vec![
+            "find link: nothing to link, no exact match can be linked".to_string(),
+        ]),
+        LinkOutcome::NeedsYes(regrouping) => {
+            let regrouping = regrouping
+                .iter()
+                .map(|pick| {
+                    let mut moves = pick
+                        .joining
+                        .iter()
+                        .map(|moved| format!("{} joins from {}", moved.folder, moved.from))
+                        .collect::<Vec<_>>();
+                    moves.extend(pick.leaving.iter().map(|folder| format!("{folder} leaves")));
+                    format!("{} ({})", pick.name, moves.join(", "))
+                })
+                .collect::<Vec<_>>();
+            Err(LemonupError::Refused(format!(
+                "these exact matches take over folders beyond their own: {}. Nothing was linked. \
+                 Run `lemonup find --link --yes` to link them.",
+                regrouping.join("; ")
+            )))
+        }
+        LinkOutcome::Linked { rows, unconfirmed } => {
+            let mut lines = rows
+                .iter()
+                .map(|stored| {
+                    let (status, _) = crate::update::determine_update_status(stored);
+                    format!(
+                        "find linked: addon={}, source={}, version={}, latest={}, status={}, folders={}",
+                        stored.name,
+                        source_name_of(stored),
+                        stored.version.as_deref().unwrap_or("<unknown>"),
+                        stored.remote_version.as_deref().unwrap_or("<unknown>"),
+                        crate::update::serialize_update_status(status),
+                        std::iter::once(stored.folder.clone())
+                            .chain(stored.owned_folders.iter().map(|owned| owned.name.clone()))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    )
+                })
+                .collect::<Vec<_>>();
+            lines.push(format!("find link summary: linked={}", rows.len()));
+            if !unconfirmed.is_empty() {
+                lines.push(format!(
+                    "find link warning: not_confirmed={}",
+                    join(&unconfirmed)
+                ));
+            }
+            Ok(lines)
+        }
+    }
 }
 
 fn source_name_of(record: &AddonRecord) -> &'static str {
@@ -523,6 +590,9 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
         lemonup_core::SourceKind::Manual => "manual",
     }
 }
+
+mod human;
+pub(crate) use human::{LocalNames, human_closing, human_report};
 
 #[cfg(test)]
 mod tests;
