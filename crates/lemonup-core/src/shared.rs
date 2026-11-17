@@ -26,8 +26,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -395,6 +396,34 @@ struct Migration {
 pub struct SharedSettingsStore {
     path: PathBuf,
     roots: ProfileRoots,
+    /// How long a save waits for another LemonUp that is saving.
+    lock_wait: Duration,
+}
+
+/// How long a save waits for another LemonUp's save before it gives up.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// How often a waiting save tries the lock again.
+const LOCK_RETRY: Duration = Duration::from_millis(10);
+
+/// Held while one LemonUp reads, merges and replaces `shared.toml` (and the profile config
+/// that goes with it, and any rollback), so two LemonUps (two windows, or a window and a
+/// command) save one after the other and neither drops the other's change. Released when
+/// dropped.
+///
+/// It locks a file of its own next to `shared.toml`, `shared.toml.lock`, never `shared.toml`
+/// itself: that file is replaced by a rename, which would leave the lock on the old file.
+/// The lock file is made when missing and never removed, so every LemonUp locks the same one.
+///
+/// Platform notes: on Unix this is `flock`, advisory: only code that takes the lock is held
+/// back, which is all of LemonUp's writers. The lock belongs to the open file, so a second
+/// lock taken in the same process also waits (code that holds the lock passes the guard down
+/// instead of locking again). On Windows it is `LockFileEx`, which is mandatory for the bytes
+/// it covers; nothing ever reads or writes this file, so nothing else is held back. Some
+/// network file systems don't support locks; then the save fails with the error from the
+/// system rather than going on unlocked.
+#[derive(Debug)]
+pub(crate) struct SharedLock {
+    _file: File,
 }
 
 impl SharedSettingsStore {
@@ -402,6 +431,41 @@ impl SharedSettingsStore {
         Self {
             path: roots.shared_settings_file(),
             roots: roots.clone(),
+            lock_wait: LOCK_WAIT,
+        }
+    }
+
+    /// The same store, giving up on the lock sooner. For tests.
+    #[cfg(test)]
+    pub(crate) fn with_lock_wait(mut self, wait: Duration) -> Self {
+        self.lock_wait = wait;
+        self
+    }
+
+    /// Waits a few seconds for the exclusive lock on the shared settings. When another
+    /// LemonUp keeps it that long, the save fails and changes nothing.
+    pub(crate) fn lock(&self) -> Result<SharedLock> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.path.with_file_name(name))?;
+        let give_up = Instant::now() + self.lock_wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(SharedLock { _file: file }),
+                Err(TryLockError::WouldBlock) if Instant::now() < give_up => {
+                    std::thread::sleep(LOCK_RETRY);
+                }
+                Err(TryLockError::WouldBlock) => return Err(LemonupError::SharedSettingsBusy),
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            }
         }
     }
 
@@ -444,15 +508,38 @@ impl SharedSettingsStore {
 
         let migration = self.migrate()?;
         let complete = migration.skipped.is_empty();
-        if writes == Writes::Never {
+        if writes == Writes::Allowed && migration.found_any && complete {
+            // Another LemonUp may create it first: under the lock, what it wrote stays.
+            let lock = self.lock()?;
+            return self.current_locked(&lock);
+        }
+        if !complete && writes == Writes::Allowed {
+            tracing::warn!(
+                skipped = ?migration.skipped,
+                "the settings shared by all games wait until every game's settings can be read"
+            );
+        }
+        Ok(CurrentShared {
+            settings: migration.settings,
+            on_disk: false,
+            waiting_for: migration.skipped,
+        })
+    }
+
+    /// [`Self::current`] for a caller that holds the lock: creates `shared.toml` when it
+    /// doesn't exist and every game's config can be read.
+    pub(crate) fn current_locked(&self, lock: &SharedLock) -> Result<CurrentShared> {
+        if let Some(settings) = self.read()? {
             return Ok(CurrentShared {
-                settings: migration.settings,
-                on_disk: false,
-                waiting_for: migration.skipped,
+                settings,
+                on_disk: true,
+                waiting_for: Vec::new(),
             });
         }
+        let migration = self.migrate()?;
+        let complete = migration.skipped.is_empty();
         if migration.found_any && complete {
-            self.write(&migration.settings)?;
+            self.write_locked(lock, &migration.settings)?;
             tracing::info!(path = %self.path.display(), "created the settings shared by all games");
         } else if !complete {
             tracing::warn!(
@@ -519,40 +606,46 @@ impl SharedSettingsStore {
         in_file: &SharedFields,
         writes: Writes,
     ) -> Result<SharedSettings> {
-        let current = self.current_with(writes)?;
-        let mut settings = current.settings;
-        if !current.on_disk || settings.profile_copies.get(profile) == Some(in_file) {
-            return Ok(settings);
+        let first = reconcile(self.current_with(writes)?, profile, in_file);
+        if !first.record || writes == Writes::Never {
+            return Ok(first.settings);
         }
-        // With no record yet, what the file holds now becomes the record.
-        let newer = settings
-            .profile_copies
-            .get(profile)
-            .map(|written| in_file.changed_since(written))
-            .unwrap_or_default();
-        newer.apply_to(&mut settings);
-        settings
-            .profile_copies
-            .insert(profile.to_string(), in_file.clone());
-        if writes == Writes::Never {
-            return Ok(settings);
-        }
-        match self.write(&settings) {
-            Ok(()) if !newer.is_empty() => {
-                tracing::info!(profile, "kept the shared settings an older LemonUp changed");
+        // Recording is best effort: without the lock it is made on a later load. Under the
+        // lock, `shared.toml` is read again, since it may have changed meanwhile.
+        match self.record_copy(profile, in_file) {
+            Ok(done) => {
+                if done.took_newer {
+                    tracing::info!(profile, "kept the shared settings an older LemonUp changed");
+                }
+                Ok(done.settings)
             }
-            Ok(()) => {}
             Err(error) => {
                 tracing::warn!(%error, profile, "couldn't record this game's shared settings");
+                Ok(first.settings)
             }
         }
-        Ok(settings)
+    }
+
+    fn record_copy(&self, profile: &str, in_file: &SharedFields) -> Result<Reconciled> {
+        let lock = self.lock()?;
+        let done = reconcile(self.current_locked(&lock)?, profile, in_file);
+        if done.record {
+            self.write_locked(&lock, &done.settings)?;
+        }
+        Ok(done)
     }
 
     /// Replaces `shared.toml` in one step (written beside it, then renamed), readable only by
     /// its owner on Unix because it can hold the Wago.io key. Refuses settings a newer
-    /// LemonUp saved: it could drop what this one doesn't know.
+    /// LemonUp saved: it could drop what this one doesn't know. Takes the lock for the write
+    /// alone: to change some of the settings, hold the lock through the read and use
+    /// [`Self::write_locked`].
     pub fn write(&self, settings: &SharedSettings) -> Result<()> {
+        let lock = self.lock()?;
+        self.write_locked(&lock, settings)
+    }
+
+    pub(crate) fn write_locked(&self, _lock: &SharedLock, settings: &SharedSettings) -> Result<()> {
         if settings.schema_version > SharedSettings::CURRENT_SCHEMA_VERSION {
             return Err(LemonupError::SettingsTooNew {
                 path: self.path.clone(),
@@ -563,10 +656,12 @@ impl SharedSettingsStore {
     }
 
     /// Puts back what `shared.toml` held before a save that couldn't finish: `previous`, or
-    /// no file. Best effort; the save already failed.
-    pub(crate) fn restore(&self, previous: Option<&SharedSettings>) {
+    /// no file. Best effort; the save already failed. The caller holds the lock, and puts
+    /// back only what its save changed: while it holds the lock nothing else wrote the file,
+    /// so `shared.toml` still is what that save wrote.
+    pub(crate) fn restore(&self, lock: &SharedLock, previous: Option<&SharedSettings>) {
         let restored = match previous {
-            Some(settings) => self.write(settings),
+            Some(settings) => self.write_locked(lock, settings),
             None => std::fs::remove_file(&self.path).map_err(LemonupError::from),
         };
         if let Err(error) = restored {
@@ -586,7 +681,7 @@ impl SharedSettingsStore {
     /// can't be read or written keeps its record as it is: a record without the key next to
     /// a config with it would bring the key back as an older LemonUp's change. Best effort;
     /// the save is already done.
-    pub(crate) fn clear_key_copies(&self, saved_by: &str) {
+    pub(crate) fn clear_key_copies(&self, lock: &SharedLock, saved_by: &str) {
         let Ok(Some(mut settings)) = self.read() else {
             return;
         };
@@ -605,7 +700,7 @@ impl SharedSettingsStore {
                 }
             }
         }
-        if cleared && let Err(error) = self.write(&settings) {
+        if cleared && let Err(error) = self.write_locked(lock, &settings) {
             tracing::warn!(%error, "couldn't record the Wago.io key removal for every game");
         }
     }
@@ -631,6 +726,10 @@ impl SharedSettingsStore {
     /// Wago.io key included. Best effort; the game is already removed.
     pub(crate) fn forget_profile(&self, profile: &str) {
         let forget = || -> Result<()> {
+            if !self.path.try_exists()? {
+                return Ok(());
+            }
+            let lock = self.lock()?;
             let Some(mut settings) = self.read()? else {
                 return Ok(());
             };
@@ -651,7 +750,7 @@ impl SharedSettingsStore {
             for name in gone {
                 settings.profile_copies.remove(&name);
             }
-            self.write(&settings)
+            self.write_locked(&lock, &settings)
         };
         if let Err(error) = forget() {
             tracing::warn!(%error, profile, "couldn't forget a removed game's shared settings");
@@ -662,18 +761,27 @@ impl SharedSettingsStore {
     /// settings yet: `shared.toml` is never made from the defaults alone.
     pub fn remember_last_used(&self, profile: &str) -> Result<()> {
         let current = self.current()?;
-        let mut settings = current.settings;
-        if !current.on_disk || settings.last_used_profile.as_deref() == Some(profile) {
+        if !current.on_disk || current.settings.last_used_profile.as_deref() == Some(profile) {
+            return Ok(());
+        }
+        // Read again under the lock: another LemonUp may have saved since.
+        let lock = self.lock()?;
+        let mut settings = self.current_locked(&lock)?.settings;
+        if settings.last_used_profile.as_deref() == Some(profile) {
             return Ok(());
         }
         settings.last_used_profile = Some(profile.to_string());
-        self.write(&settings)
+        self.write_locked(&lock, &settings)
     }
 
     /// After the v1 migration wrote the default profile's config from `config`: when
     /// `shared.toml` already exists, takes the key from `config` if it has none, and every
     /// other value it doesn't have. The values it has stay.
     pub fn adopt_v1_config(&self, config: &AppConfig) -> Result<()> {
+        if !self.path.try_exists()? {
+            return Ok(());
+        }
+        let lock = self.lock()?;
         let Some(mut settings) = self.read()? else {
             return Ok(());
         };
@@ -691,7 +799,44 @@ impl SharedSettingsStore {
         settings
             .profile_copies
             .insert(DEFAULT_PROFILE.to_string(), from_v1);
-        self.write(&settings)
+        self.write_locked(&lock, &settings)
+    }
+}
+
+/// What opening a game makes of the shared settings.
+struct Reconciled {
+    settings: SharedSettings,
+    /// `shared.toml` should be written: it has no record of what the game's config holds,
+    /// or the record differs.
+    record: bool,
+    /// An older LemonUp changed values in the game's config, and they are taken.
+    took_newer: bool,
+}
+
+/// The shared settings for opening `profile`, whose config holds `in_file`, from `current`.
+fn reconcile(current: CurrentShared, profile: &str, in_file: &SharedFields) -> Reconciled {
+    let mut settings = current.settings;
+    if !current.on_disk || settings.profile_copies.get(profile) == Some(in_file) {
+        return Reconciled {
+            settings,
+            record: false,
+            took_newer: false,
+        };
+    }
+    // With no record yet, what the file holds now becomes the record.
+    let newer = settings
+        .profile_copies
+        .get(profile)
+        .map(|written| in_file.changed_since(written))
+        .unwrap_or_default();
+    newer.apply_to(&mut settings);
+    settings
+        .profile_copies
+        .insert(profile.to_string(), in_file.clone());
+    Reconciled {
+        settings,
+        record: true,
+        took_newer: !newer.is_empty(),
     }
 }
 
@@ -1628,5 +1773,113 @@ mod tests {
         };
         assert_eq!(config.theme, ThemeMode::Light);
         assert!(fs::read(shared.path()).expect("read") == before, "written");
+    }
+
+    /// Two LemonUps saving at the same time, each from the settings it read before.
+    fn racing_saves(rounds: usize, block_first_profile_write: bool) -> usize {
+        let mut lost = 0;
+        for _ in 0..rounds {
+            let temp = tempdir().expect("tempdir");
+            let roots = test_roots(temp.path());
+            let first_paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+            let second_paths = roots.paths("forever").expect("paths");
+            let first = ConfigStore::for_profile(&first_paths);
+            let second = ConfigStore::for_profile(&second_paths);
+            first
+                .write_config(&AppConfig::new_unconfigured())
+                .expect("set up default");
+            second
+                .write_config(&AppConfig::new_unconfigured())
+                .expect("set up forever");
+            let mut first_config = loaded(&first);
+            let mut second_config = loaded(&second);
+            first_config.theme = ThemeMode::Light;
+            second_config.simple_symbols = true;
+            if block_first_profile_write {
+                // The first save writes `shared.toml`, then fails on its own config.
+                fs::create_dir_all(temp_path_for(&first_paths.config_file)).expect("block");
+            }
+
+            let barrier = std::sync::Barrier::new(2);
+            let first_done = std::thread::scope(|scope| {
+                let first_done = scope.spawn(|| {
+                    barrier.wait();
+                    first.write_config(&first_config)
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    second.write_config(&second_config).expect("second save");
+                });
+                first_done.join().expect("first thread")
+            });
+            assert_eq!(first_done.is_err(), block_first_profile_write);
+
+            let shared = SharedSettingsStore::for_roots(&roots)
+                .read()
+                .expect("read")
+                .expect("exists");
+            let second_kept = shared.simple_symbols
+                && shared.profile_copies.contains_key("forever")
+                && fs::read_to_string(&second_paths.config_file)
+                    .expect("config")
+                    .contains("simple_symbols = true");
+            let first_kept = block_first_profile_write
+                || (shared.theme == ThemeMode::Light
+                    && shared.profile_copies.contains_key(DEFAULT_PROFILE));
+            if !second_kept || !first_kept {
+                lost += 1;
+            }
+        }
+        lost
+    }
+
+    #[test]
+    fn two_saves_at_once_both_end_up_in_the_shared_file() {
+        assert_eq!(racing_saves(150, false), 0, "a save was lost");
+    }
+
+    #[test]
+    fn a_failed_save_never_puts_back_what_another_save_wrote() {
+        assert_eq!(racing_saves(150, true), 0, "a save was lost");
+    }
+
+    #[test]
+    fn a_save_that_cannot_get_the_lock_fails_and_changes_nothing() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths("forever").expect("paths");
+        let wait = std::time::Duration::from_millis(100);
+        let config = ConfigStore::for_profile(&paths).with_shared_lock_wait(wait);
+        config
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("set up");
+        let mut changed = loaded(&config);
+        changed.theme = ThemeMode::Light;
+        let shared_before = fs::read(roots.shared_settings_file()).expect("shared");
+        let config_before = fs::read(&paths.config_file).expect("config");
+
+        let store = SharedSettingsStore::for_roots(&roots).with_lock_wait(wait);
+        let held = store.lock().expect("another LemonUp's lock");
+        let error = config.write_config(&changed).expect_err("busy");
+        assert_eq!(
+            error.to_string(),
+            "another LemonUp is saving settings | nothing was changed | try again"
+        );
+        assert!(store.remember_last_used("forever").is_err());
+        assert!(store.write(&SharedSettings::default()).is_err());
+        assert_eq!(
+            fs::read(roots.shared_settings_file()).expect("shared"),
+            shared_before
+        );
+        assert_eq!(fs::read(&paths.config_file).expect("config"), config_before);
+
+        drop(held);
+        config
+            .write_config(&changed)
+            .expect("saves once it is free");
+        assert_eq!(
+            store.read().expect("read").expect("exists").theme,
+            ThemeMode::Light
+        );
     }
 }

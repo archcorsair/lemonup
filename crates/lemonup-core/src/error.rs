@@ -29,6 +29,8 @@ pub enum LemonupError {
         path.display()
     )]
     SettingsTooNew { path: PathBuf },
+    #[error("another LemonUp is saving settings | nothing was changed | try again")]
+    SharedSettingsBusy,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// A command declined to act and changed nothing. The message says what happened and what

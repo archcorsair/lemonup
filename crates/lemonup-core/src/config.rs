@@ -183,6 +183,15 @@ impl ConfigStore {
         &self.path
     }
 
+    /// The same store, giving up on the shared settings lock sooner. For tests.
+    #[cfg(test)]
+    pub(crate) fn with_shared_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        if let Some(link) = &mut self.shared {
+            link.store = link.store.clone().with_lock_wait(wait);
+        }
+        self
+    }
+
     pub fn shared_store(&self) -> Option<&SharedSettingsStore> {
         self.shared.as_ref().map(|link| &link.store)
     }
@@ -277,7 +286,10 @@ impl ConfigStore {
             return Ok(config.clone());
         };
 
-        let current = link.store.current()?;
+        // One LemonUp at a time from the read to the last write, the rollback included: two
+        // saves that read the same `shared.toml` would drop one of the changes.
+        let lock = link.store.lock()?;
+        let current = link.store.current_locked(&lock)?;
         let mut merged = current.settings.clone();
         merged.take_changes(config, link.seen().as_ref());
         let mut file_config = config.clone();
@@ -288,14 +300,14 @@ impl ConfigStore {
             merged
                 .profile_copies
                 .insert(link.profile.clone(), SharedFields::of(&merged));
-            link.store.write(&merged)?;
+            link.store.write_locked(&lock, &merged)?;
             if let Err(error) = write_private_file(&self.path, &rendered) {
                 link.store
-                    .restore(current.on_disk.then_some(&current.settings));
+                    .restore(&lock, current.on_disk.then_some(&current.settings));
                 return Err(error);
             }
             if current.settings.wago_api_key.is_some() && merged.wago_api_key.is_none() {
-                link.store.clear_key_copies(&link.profile);
+                link.store.clear_key_copies(&lock, &link.profile);
             }
         } else if SharedFields::of(&merged) != SharedFields::of(&current.settings) {
             return Err(LemonupError::SharedChangeWaits {
