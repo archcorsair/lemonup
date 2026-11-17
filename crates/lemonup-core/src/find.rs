@@ -1372,6 +1372,7 @@ pub fn link_found_addons(
 ) -> Result<Vec<AddonRecord>> {
     let mut seen = HashMap::<String, &str>::new();
     let now = OffsetDateTime::now_utc();
+    let rows_before = database.list_addons()?;
     let mut records = Vec::new();
     for pick in picks {
         if let Some(reason) = pick.not_linkable_reason() {
@@ -1405,7 +1406,25 @@ pub fn link_found_addons(
                 pick.name, pick.parent_folder
             ))
         })?;
-        records.push(link_record(pick, &parent, now));
+        let mut record = link_record(pick, &parent, now);
+        // A folder that moves out of another addon carries that addon's .toc overrides: they
+        // were written into its files too, and its next update must keep them.
+        for row in rows_before.iter().filter(|row| {
+            key(&row.folder) != key(&pick.parent_folder)
+                && pick.folders.iter().any(|folder| {
+                    row.owned_folders
+                        .iter()
+                        .any(|owned| key(&owned.name) == key(folder))
+                })
+        }) {
+            for (field, value) in &row.toc_overrides {
+                record
+                    .toc_overrides
+                    .entry(field.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        records.push(record);
     }
 
     database.record_managed_addons(&records, |rows| {

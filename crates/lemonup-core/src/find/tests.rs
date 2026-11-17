@@ -1221,3 +1221,62 @@ fn a_folder_linked_on_its_own_leaves_its_old_addon_which_links_later_without_los
         ]
     );
 }
+
+#[test]
+fn a_folder_that_moves_out_keeps_the_toc_overrides_of_the_addon_it_leaves() {
+    let mut fixture = fixture();
+    addon(&fixture.addons, "Group", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Group_Data", &["## Version: 1.0"]);
+    let mut group = manual_row("Group", &["Group_Data"]);
+    group.toc_overrides = BTreeMap::from([("Category".to_string(), "Mine".to_string())]);
+    fixture.database.upsert_addon(&group).expect("group");
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let rows = fixture.database.list_addons().expect("rows");
+    let mut project = wago(
+        "DATA",
+        "Group Data",
+        vec![("Group_Data".to_string(), hash_of(&inputs, "Group_Data"))],
+    );
+    project.matched_version = Some("1.0".to_string());
+    project.latest_version = Some("1.0".to_string());
+    let report = match_addons(
+        &inputs,
+        &rows,
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+    let pick = report
+        .results
+        .iter()
+        .filter_map(|result| result.found())
+        .find(|found| found.parent_folder == "Group_Data")
+        .expect("Group_Data pick")
+        .clone();
+
+    link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Forever,
+        &[pick],
+    )
+    .expect("link");
+
+    let rows = fixture.database.list_addons().expect("rows");
+    let data = rows
+        .iter()
+        .find(|row| row.folder == "Group_Data")
+        .expect("Group_Data row");
+    assert_eq!(data.source, SourceKind::Wago);
+    assert_eq!(
+        data.toc_overrides,
+        BTreeMap::from([("Category".to_string(), "Mine".to_string())])
+    );
+    let group = rows
+        .iter()
+        .find(|row| row.folder == "Group")
+        .expect("Group row");
+    assert_eq!(
+        group.toc_overrides,
+        BTreeMap::from([("Category".to_string(), "Mine".to_string())])
+    );
+}
