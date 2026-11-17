@@ -60,6 +60,7 @@ use time::{Duration, OffsetDateTime};
 
 mod dialog;
 mod direct_install;
+mod find_sheet;
 mod games;
 mod keymap;
 mod render_backup;
@@ -79,6 +80,7 @@ pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
     DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
 };
+pub(crate) use self::find_sheet::{FindAction, FindMessage, FindState, FindTaskEvent};
 pub(crate) use self::games::{GamesAction, GamesMessage, GamesState, OtherGameChecked};
 #[cfg(test)]
 use self::render_dashboard::{child_row_detail_prefix, child_row_prefix};
@@ -125,6 +127,8 @@ enum OverlayKind {
     Confirm,
     /// The Switch game sheet.
     Games,
+    /// Find your addons online.
+    Find,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -144,6 +148,7 @@ pub(crate) enum HelpContext {
     Backup,
     TocEdit,
     Games,
+    Find,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +252,8 @@ enum FooterHintId {
     FindOnline,
     /// `p`, the Switch game sheet.
     SwitchGame,
+    /// `F`, find your addons online.
+    FindAll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +277,8 @@ pub enum DetailMode {
     TocEdit,
     /// The Switch game sheet.
     Games,
+    /// Find your addons online.
+    Find,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,6 +520,7 @@ enum AppMessage {
     OnboardingBackspace,
     TocEdit(TocEditMessage),
     Games(GamesMessage),
+    Find(FindMessage),
     BackgroundTask(AppTaskEvent),
 }
 
@@ -543,6 +553,7 @@ enum AppTaskEvent {
         request: TocApplyRequest,
         result: std::result::Result<Option<AddonScanOutcome>, String>,
     },
+    Find(FindTaskEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2814,6 +2825,8 @@ pub struct App {
     /// app switches games, so a check that is running still lands.
     games_tx: mpsc::UnboundedSender<OtherGameChecked>,
     games_rx: mpsc::UnboundedReceiver<OtherGameChecked>,
+    /// Find your addons online: the sheet, its lookup and the linking.
+    find: FindState,
 }
 
 impl App {
@@ -2993,6 +3006,7 @@ impl App {
             games,
             games_tx,
             games_rx,
+            find: FindState::default(),
         };
         app.status_line = app.initial_status_line();
         if let Some(notice) = binding_notice {
@@ -3336,6 +3350,10 @@ impl App {
                 self.apply(action);
             }
         }
+        // Partial matches the Find sheet replaces, one install at a time.
+        for action in self.find_replacement_actions() {
+            self.apply(action);
+        }
     }
 
     fn messages_for_event(&self, event: &TerminalEvent) -> Vec<AppMessage> {
@@ -3523,6 +3541,7 @@ impl App {
             OverlayKind::Config => self.config_messages_for_key(key),
             OverlayKind::Backup => self.backup_messages_for_key(key),
             OverlayKind::Games => self.games_messages_for_key(key),
+            OverlayKind::Find => self.find_messages_for_key(key),
             OverlayKind::TocEdit if self.toc_pane.edit.is_some() => Some(vec![]),
             OverlayKind::TocEdit => self.toc_edit_messages_for_key(key),
             // Only a cursor in the results moves; with the box focused the
@@ -3625,6 +3644,10 @@ impl App {
         // move a cursor. In a focused text box Home and End have gone to the
         // box already.
         let sheet_open = self.shell_ui.overlay.active.is_some() && !docked_details;
+        // The Find sheet's page keys move its cursor.
+        if sheet_open && let Some(messages) = self.find_messages_for_key(key) {
+            return messages;
+        }
         if sheet_open && let Some(movement) = sheet_move_for_key(key.code, false) {
             return vec![AppMessage::SheetScroll(movement)];
         }
@@ -3731,6 +3754,7 @@ impl App {
             KeyCode::Char('f') if self.not_linked_current_item().is_some() => {
                 vec![AppMessage::FindOnline]
             }
+            KeyCode::Char('F') => vec![AppMessage::Find(FindMessage::Open)],
             _ => vec![],
         }
     }
@@ -4751,18 +4775,7 @@ impl App {
                 AppAction::SetSearchPaneState(self.search_pane.open_with_mode(mode)),
                 AppAction::SetDetailMode(DetailMode::Search),
             ],
-            AppMessage::FindOnline => match self.not_linked_current_item() {
-                Some(item) => {
-                    let pane = self.search_pane.open_prefilled(&item.name);
-                    let mut actions = vec![
-                        AppAction::SetDetailMode(DetailMode::Search),
-                        AppAction::SetSearchPaneState(pane.clone()),
-                    ];
-                    actions.extend(self.search_submit_actions(pane, self.wago_api_key.clone()));
-                    actions
-                }
-                None => vec![],
-            },
+            AppMessage::FindOnline => self.find_actions(FindMessage::OpenOne),
             AppMessage::SearchFocusBox => {
                 vec![AppAction::SetSearchPaneState(self.search_pane.focus_box())]
             }
@@ -5406,8 +5419,10 @@ impl App {
             }
             AppMessage::TocEdit(message) => self.toc_edit_actions(message),
             AppMessage::Games(message) => self.games_actions(message),
+            AppMessage::Find(message) => self.find_actions(message),
             AppMessage::BackgroundTask(event) => match event {
                 AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
+                AppTaskEvent::Find(event) => self.find_actions(FindMessage::Task(event)),
                 AppTaskEvent::TocApplyFinished {
                     addon_dir,
                     request,
@@ -5910,6 +5925,7 @@ impl App {
                         DetailMode::Backup => Some(OverlayKind::Backup),
                         DetailMode::TocEdit => Some(OverlayKind::TocEdit),
                         DetailMode::Games => Some(OverlayKind::Games),
+                        DetailMode::Find => Some(OverlayKind::Find),
                     };
                 }
             }
@@ -6124,6 +6140,7 @@ impl App {
                     DetailMode::Backup => Some(OverlayKind::Backup),
                     DetailMode::TocEdit => Some(OverlayKind::TocEdit),
                     DetailMode::Games => Some(OverlayKind::Games),
+                    DetailMode::Find => Some(OverlayKind::Find),
                 };
                 // Backups shows what is on disk, automatic backups included.
                 if detail_mode == DetailMode::Backup {
@@ -6159,6 +6176,7 @@ impl App {
             }
             AppAction::CancelAddingGame => self.cancel_adding_game(),
             AppAction::Games(action) => self.apply_games(action),
+            AppAction::Find(action) => self.apply_find(action),
             AppAction::LeaveOnboarding => {
                 // Back to the list as it was: nothing from setup is kept.
                 self.onboarding = self.onboarding.set_quit_question(false);
@@ -7038,7 +7056,7 @@ impl App {
                 }
             }
             // Backups draws its own sheet (`render_backup.rs`).
-            DetailMode::Backup | DetailMode::TocEdit | DetailMode::Games => {}
+            DetailMode::Backup | DetailMode::TocEdit | DetailMode::Games | DetailMode::Find => {}
         }
 
         lines
@@ -8564,6 +8582,7 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
         DetailMode::Backup => "Backups",
         DetailMode::TocEdit => "Edit .toc fields",
         DetailMode::Games => "Switch game",
+        DetailMode::Find => "Find your addons online",
     }
 }
 
@@ -8676,6 +8695,8 @@ mod tests {
         }
     }
 
+    mod find_sheet;
+
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         let config = AppConfig::new_unconfigured();
@@ -8774,6 +8795,7 @@ mod tests {
             games: crate::app::games::GamesState::default(),
             games_tx: mpsc::unbounded_channel().0,
             games_rx: mpsc::unbounded_channel().1,
+            find: crate::app::FindState::default(),
         }
     }
 
@@ -10210,7 +10232,7 @@ mod tests {
     }
 
     #[test]
-    fn f_opens_install_with_the_name_and_searches_right_away() {
+    fn f_looks_the_addon_up_before_searching_by_name() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard = DashboardState::from_addons(vec![AddonRecord::new(
             "Mythic Dungeon Tools",
@@ -10222,36 +10244,16 @@ mod tests {
 
         let actions = app.update(AppMessage::FindOnline);
         assert!(
-            actions.contains(&AppAction::SetDetailMode(DetailMode::Search)),
-            "{actions:?}"
-        );
-        assert!(
-            actions.contains(&AppAction::StartWagoSearch {
-                query: "Mythic Dungeon Tools".to_string(),
-                api_key: "test-wago-key".to_string(),
-            }),
+            !actions
+                .iter()
+                .any(|action| matches!(action, AppAction::StartWagoSearch { .. })),
             "{actions:?}"
         );
         for action in actions {
-            if !matches!(action, AppAction::StartWagoSearch { .. }) {
-                app.apply(action);
-            }
+            app.apply(action);
         }
-        assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
-        assert_eq!(app.search_pane.query, "Mythic Dungeon Tools");
-        assert_eq!(
-            app.search_pane.query.cursor(),
-            "Mythic Dungeon Tools".chars().count()
-        );
-        assert!(app.search_pane.in_progress);
-
-        // Without a key the key box asks for it, the name kept in the box.
-        app.wago_api_key = None;
-        app.search_pane = SearchPaneState::default();
-        apply_all(&mut app, AppMessage::DashboardCloseOverlay);
-        apply_all(&mut app, AppMessage::FindOnline);
-        assert!(app.search_pane.key_box.is_some());
-        assert_eq!(app.search_pane.query, "Mythic Dungeon Tools");
+        assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
+        assert_eq!(app.search_pane.query, "old text");
     }
 
     fn elvui_request() -> crate::app::direct_install::DirectInstallRequest {
@@ -17540,6 +17542,14 @@ mod tests {
                 (HelpContext::TocEdit, _) => toc_edit,
                 (HelpContext::Games, "Questions") => |app| questions_in(open_games, app),
                 (HelpContext::Games, _) => open_games,
+                (HelpContext::Find, "Picking and linking") => super::find_sheet::open_find_action,
+                (HelpContext::Find, "Questions") => {
+                    |app| questions_in(super::find_sheet::open_find_results, app)
+                }
+                (HelpContext::Find, "When the question lists many folders") => {
+                    super::find_sheet::open_find_question
+                }
+                (HelpContext::Find, _) => super::find_sheet::open_find_results,
             }
         }
 
@@ -17550,7 +17560,7 @@ mod tests {
             app.games.selected = 1;
         }
 
-        const HELP_CONTEXTS: [HelpContext; 8] = [
+        const HELP_CONTEXTS: [HelpContext; 9] = [
             HelpContext::Overview,
             HelpContext::Inspect,
             HelpContext::DetailsDocked,
@@ -17559,6 +17569,7 @@ mod tests {
             HelpContext::Backup,
             HelpContext::TocEdit,
             HelpContext::Games,
+            HelpContext::Find,
         ];
 
         fn help_test_app(context: HelpContext, title: &str, when: HelpWhen) -> App {

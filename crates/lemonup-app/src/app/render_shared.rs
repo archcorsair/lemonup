@@ -26,6 +26,7 @@ impl App {
             OverlayKind::TocEdit => "Edit .toc fields".to_string(),
             OverlayKind::Confirm => "Confirm".to_string(),
             OverlayKind::Games => "Switch game".to_string(),
+            OverlayKind::Find => "Find your addons online".to_string(),
         };
         let chrome = SheetChrome {
             title,
@@ -55,6 +56,9 @@ impl App {
             }),
             OverlayKind::Games => self.render_sheet(frame, region, header, kind, chrome, |room| {
                 self.games_sheet_body(room)
+            }),
+            OverlayKind::Find => self.render_sheet(frame, region, header, kind, chrome, |room| {
+                self.find_sheet_body(room)
             }),
             OverlayKind::TocEdit => {
                 self.render_sheet(frame, region, header, kind, chrome, |room| {

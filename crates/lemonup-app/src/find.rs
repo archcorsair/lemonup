@@ -30,7 +30,7 @@ const WOWI_CACHE_FILE: &str = "wowinterface-filelist.json";
 pub(crate) const WOWI_MIN_FILES: usize = 1000;
 
 /// A source that could not answer, and why.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceProblem {
     pub(crate) source: FindSource,
     pub(crate) error: SourceError,
@@ -640,7 +640,10 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
 }
 
 mod human;
-pub(crate) use human::{LocalNames, Paint, human_closing, human_report, target_line};
+pub(crate) use human::{
+    LocalNames, Paint, choice_text, human_closing, human_report, linked_parts, listed_names,
+    problem_text, result_entry, target_line,
+};
 
 #[cfg(test)]
 mod tests;

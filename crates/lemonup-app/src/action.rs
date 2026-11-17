@@ -6,8 +6,9 @@ use crate::app::text_input::TextInput;
 use crate::app::{
     BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
     DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
-    FooterKeyPulse, GamesAction, HelpContext, InstallPaneState, PendingWagoInstallRequest,
-    SearchPaneState, StatusMessage, TocApplyRequest, TocEditPane, WagoInstallConfirmation,
+    FindAction, FooterKeyPulse, GamesAction, HelpContext, InstallPaneState,
+    PendingWagoInstallRequest, SearchPaneState, StatusMessage, TocApplyRequest, TocEditPane,
+    WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -18,6 +19,8 @@ pub enum AppAction {
     /// What the Switch game sheet, adding a game and the background checks
     /// of other games do.
     Games(GamesAction),
+    /// What the Find your addons online sheet does.
+    Find(FindAction),
     /// Leaves setup that was adding a game, back to the Switch game sheet.
     CancelAddingGame,
     /// Opens or closes the "quit while updating?" question.

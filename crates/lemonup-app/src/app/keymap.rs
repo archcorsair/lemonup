@@ -271,6 +271,7 @@ const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
 const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
 const K_HELP: &[KeyEvent] = &[ch('?')];
 const K_FIND: &[KeyEvent] = &[ch('f')];
+const K_FIND_ALL: &[KeyEvent] = &[ch('F')];
 const K_EDIT: &[KeyEvent] = &[ch('e')];
 const K_CTRL_C: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
 const K_TEXT_MOVE: &[KeyEvent] = &[
@@ -384,6 +385,11 @@ static LIST_HELP: HelpPage = HelpPage {
                     K_FIND,
                 )
                 .when(HelpWhen::NotLinked),
+                HelpRow::key(
+                    "F",
+                    "find your addons online, or the selected ones",
+                    K_FIND_ALL,
+                ),
                 HelpRow::key("d", "hide the welcome card", &[ch('d')]).when(HelpWhen::FirstRunCard),
             ],
         },
@@ -470,6 +476,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                     K_FIND,
                 )
                 .when(HelpWhen::NotLinked),
+                HelpRow::key("F", "find your addons online", K_FIND_ALL),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
                 HelpRow::key(
                     "enter  esc  q",
@@ -761,6 +768,59 @@ static GAMES_HELP: HelpPage = HelpPage {
     ],
 };
 
+static FIND_HELP: HelpPage = HelpPage {
+    title: "Help: Find your addons online",
+    left: &[
+        HelpSection {
+            title: "Find your addons online",
+            rows: &[
+                HelpRow::key("↑ ↓  or  j k", "move", K_MOVE),
+                HelpRow::key("PgUp PgDn", "move a page", K_PAGE),
+                HelpRow::key("Home End  or  gg G", "first, last", K_ENDS_VIM),
+                HelpRow::key(
+                    "space",
+                    "select or unselect a match, or its replacement",
+                    &[ch(' ')],
+                ),
+            ],
+        },
+        HelpSection {
+            title: "Picking and linking",
+            rows: &[HelpRow::key(
+                "enter",
+                "start; pick in a \"Choose one\" row; on Link, ask first",
+                K_ENTER,
+            )],
+        },
+    ],
+    right: &[
+        QUESTIONS,
+        HelpSection {
+            title: "When the question lists many folders",
+            rows: &[HelpRow::key(
+                "↑ ↓  PgUp PgDn",
+                "scroll the folders",
+                &[
+                    press(KeyCode::Up),
+                    press(KeyCode::Down),
+                    ch('j'),
+                    ch('k'),
+                    press(KeyCode::PageUp),
+                    press(KeyCode::PageDown),
+                ],
+            )],
+        },
+        HelpSection {
+            title: "Everywhere",
+            rows: &[
+                HelpRow::key("esc  q", "close; stops a lookup, nothing changes", K_CLOSE),
+                THIS_HELP,
+                QUIT_ANYWHERE,
+            ],
+        },
+    ],
+};
+
 /// What Help shows for each context.
 pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
     match context {
@@ -772,6 +832,7 @@ pub(super) fn help_page(context: HelpContext) -> &'static HelpPage {
         HelpContext::Backup => &BACKUPS_HELP,
         HelpContext::TocEdit => &TOC_EDIT_HELP,
         HelpContext::Games => &GAMES_HELP,
+        HelpContext::Find => &FIND_HELP,
     }
 }
 
@@ -1137,8 +1198,82 @@ impl App {
                 hints.push(self.help_hint());
                 hints
             }
+            DetailMode::Find => self.find_key_table(),
             DetailMode::Overview => vec![KeyHint::key(Id::Close, "esc", "close", CLOSE)],
         }
+    }
+
+    /// The Find sheet: by step, and in the results by the row under the
+    /// cursor.
+    fn find_key_table(&self) -> Vec<KeyHint> {
+        use super::find_sheet::{FindFocus, FindStep};
+        use FooterHintId as Id;
+        match self.find.step.as_ref() {
+            Some(FindStep::Start) => vec![
+                KeyHint::key(Id::Run, "enter", "look up", ENTER).main(),
+                self.close_hint(),
+                self.help_hint(),
+            ],
+            Some(FindStep::Looking { .. }) => vec![
+                KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE),
+                self.help_hint(),
+            ],
+            Some(FindStep::Results(results)) => {
+                let mut hints = Vec::new();
+                if results.focusables(self.find_offers_search()).len() > 1 {
+                    hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", SCROLL));
+                }
+                if self.find_space_works() {
+                    let label = match results.cursor {
+                        FindFocus::Result(index) if results.picks[index].is_some() => "unselect",
+                        _ => "select",
+                    };
+                    hints.push(KeyHint::key(
+                        Id::Toggle,
+                        "space",
+                        label,
+                        &[KeyCode::Char(' ')],
+                    ));
+                }
+                if self.find_enter_works() {
+                    let label = match results.cursor {
+                        FindFocus::Result(_) => "pick".to_string(),
+                        FindFocus::Action if self.find_offers_search() => {
+                            "search by name".to_string()
+                        }
+                        FindFocus::Action => {
+                            let (links, replaces) = results.counts();
+                            match (links, replaces) {
+                                (_, 0) => "link".to_string(),
+                                (0, _) => "replace".to_string(),
+                                _ => "link and replace".to_string(),
+                            }
+                        }
+                    };
+                    hints.push(KeyHint::key(Id::Confirm, "enter", label, ENTER).main());
+                }
+                hints.push(self.close_hint());
+                hints.push(self.help_hint());
+                hints
+            }
+            Some(FindStep::Failed(_)) | None => vec![self.close_hint(), self.help_hint()],
+        }
+    }
+
+    /// `F`, while some addon is Not linked.
+    fn find_all_hint(&self) -> Option<KeyHint> {
+        self.dashboard
+            .items
+            .iter()
+            .any(|item| item.source == SourceKind::Manual)
+            .then(|| {
+                KeyHint::key(
+                    FooterHintId::FindAll,
+                    "F",
+                    "find all",
+                    &[KeyCode::Char('F')],
+                )
+            })
     }
 
     /// The .toc editor: moving and enter, or the box's keys while a field
@@ -1403,9 +1538,12 @@ impl App {
             let mut hints = vec![
                 self.find_online_hint(self.dashboard.selected_parent_count())
                     .main(),
+            ];
+            hints.extend(self.find_all_hint());
+            hints.extend([
                 details,
                 KeyHint::key(Id::Install, "i", "install", &[KeyCode::Char('i')]),
-            ];
+            ]);
             if wide {
                 hints.push(KeyHint::key(Id::Select, "space", "select", SELECT));
             }
@@ -1494,6 +1632,13 @@ impl App {
         };
         if let Some(find) = find {
             hints.insert(2, find);
+        }
+        if wide && let Some(find_all) = self.find_all_hint() {
+            let at = hints
+                .iter()
+                .position(|hint| hint.id == Some(Id::Help))
+                .unwrap_or(hints.len());
+            hints.insert(at, find_all);
         }
         hints
     }
