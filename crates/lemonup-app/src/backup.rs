@@ -52,7 +52,7 @@ pub struct BackupDeleteOutcome {
 /// game client (see [`client_backup_dir`]); archives directly in the root predate that
 /// split and are moved by [`adopt_legacy_backups`].
 pub fn backup_root(data_dir: &Path) -> PathBuf {
-    data_dir.join("backups").join("wtf")
+    lemonup_core::paths::backup_root(data_dir)
 }
 
 /// Name of the archive entry that records which client a backup was taken from.

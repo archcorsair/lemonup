@@ -695,6 +695,11 @@ mod tests {
             log_dir: v2_root.join("data").join("logs"),
             config_file: v2_root.join("config").join("config.toml"),
             state_db_file: v2_root.join("data").join("state.sqlite"),
+            roots: crate::paths::ProfileRoots::new(
+                v2_root.join("config"),
+                v2_root.join("data"),
+                v2_root.join("cache"),
+            ),
         };
 
         Fixture {

@@ -1,9 +1,12 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::paths::AppPaths;
+use crate::shared::{OtherGamesCheck, SharedSettingsStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +38,8 @@ pub struct AppConfig {
     pub simple_symbols: bool,
     /// A still symbol in place of the spinner, and no shimmer.
     pub reduce_motion: bool,
+    /// How often the games that aren't open are checked. Shared by all games.
+    pub check_other_games: OtherGamesCheck,
 }
 
 impl AppConfig {
@@ -56,6 +61,7 @@ impl AppConfig {
             hide_first_run_card: false,
             simple_symbols: false,
             reduce_motion: false,
+            check_other_games: OtherGamesCheck::default(),
         }
     }
 }
@@ -72,49 +78,126 @@ pub enum ConfigLoad {
     Loaded(AppConfig),
 }
 
+/// A profile's `config.toml`. Built with [`ConfigStore::for_profile`], it also reads the
+/// settings all games share from `shared.toml` (they win over the profile's copies) and
+/// writes them there; built with [`ConfigStore::new`], it is the bare file.
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
+    shared: Option<SharedSettingsStore>,
 }
 
 impl ConfigStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, shared: None }
+    }
+
+    /// The config of the profile at `paths`, with the settings all games share.
+    pub fn for_profile(paths: &AppPaths) -> Self {
+        Self {
+            path: paths.config_file.clone(),
+            shared: Some(SharedSettingsStore::for_roots(&paths.roots)),
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    pub fn shared_store(&self) -> Option<&SharedSettingsStore> {
+        self.shared.as_ref()
+    }
+
     pub fn load(&self) -> Result<ConfigLoad> {
-        if !self.path.exists() {
+        if !self.path.try_exists()? {
             return Ok(ConfigLoad::Missing(self.path.clone()));
         }
 
         let raw = fs::read_to_string(&self.path)?;
-        let config = toml::from_str::<AppConfig>(&raw)?;
+        let mut config = toml::from_str::<AppConfig>(&raw)?;
+        if let Some(shared) = &self.shared {
+            shared
+                .load_or_migrate(Some(&self.path))?
+                .apply_to(&mut config);
+        }
         Ok(ConfigLoad::Loaded(config))
     }
 
-    pub fn write_config(&self, config: &AppConfig) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+    /// The settings of a profile that isn't set up yet: the defaults, with the shared values.
+    pub fn unconfigured(&self) -> Result<AppConfig> {
+        let mut config = AppConfig::new_unconfigured();
+        if let Some(shared) = &self.shared {
+            shared.load_or_migrate(None)?.apply_to(&mut config);
         }
+        Ok(config)
+    }
 
-        let rendered = toml::to_string_pretty(config)?;
-        fs::write(&self.path, rendered)?;
-        // The config can hold API keys; keep it private to the owner on Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+    /// The loaded config, or [`ConfigStore::unconfigured`] when there is none.
+    pub fn effective(&self, state: &ConfigLoad) -> Result<AppConfig> {
+        match state {
+            ConfigLoad::Loaded(config) => Ok(config.clone()),
+            ConfigLoad::Missing(_) => self.unconfigured(),
         }
-        Ok(())
+    }
+
+    /// Saves `config`. The shared values go to `shared.toml` first; the profile's file still
+    /// gets every field, the shared ones included, so an older LemonUp can read it.
+    pub fn write_config(&self, config: &AppConfig) -> Result<()> {
+        if let Some(shared) = &self.shared {
+            let mut settings = shared.load_or_migrate(Some(&self.path))?;
+            settings.update_from(config);
+            shared.write(&settings)?;
+        }
+        let rendered = toml::to_string_pretty(config)?;
+        write_private_file(&self.path, &rendered)
     }
 
     pub fn write_new_config(&self, config: &AppConfig) -> Result<()> {
         self.write_config(config)
     }
+}
+
+/// Writes `contents` to `path` in one step: to a file beside it first, then renamed over it,
+/// so a crash or a full disk never leaves a half-written settings file. The file can hold
+/// API keys, so on Unix only its owner can read it.
+pub(crate) fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = temp_path_for(path);
+    let result = write_and_sync(&temp, contents).and_then(|()| fs::rename(&temp, path));
+    if result.is_err() && temp.is_file() {
+        let _ = fs::remove_file(&temp);
+    }
+    Ok(result?)
+}
+
+fn write_and_sync(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    // A leftover temp file keeps its old mode; make it private before the key goes in.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
+}
+
+/// The file a write of `path` goes to before it is renamed into place.
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 #[cfg(test)]

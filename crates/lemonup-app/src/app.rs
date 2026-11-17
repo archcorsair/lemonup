@@ -54,7 +54,7 @@ use crate::update::{
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
     environment_wago_api_key, inspect_wago_install_target, install_wago_addon_with_replace,
-    process_env, resolve_wago_api_key, search_wago_addons, wago_api_key_in_use,
+    process_env, search_wago_addons, wago_api_key_in_use,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -2774,7 +2774,7 @@ pub struct App {
 
 impl App {
     pub fn bootstrap(paths: AppPaths, runtime: AppRuntime) -> lemonup_core::Result<Self> {
-        let config_store = ConfigStore::new(paths.config_file);
+        let config_store = ConfigStore::for_profile(&paths);
         let config_state = config_store.load()?;
         let state_db_file = paths.state_db_file.clone();
         let trash_dir = paths.data_dir.join("trash");
@@ -2784,11 +2784,10 @@ impl App {
         let addons = database.list_addons()?;
         let config_present = matches!(config_state, ConfigLoad::Loaded(_));
         let wago_env_key = environment_wago_api_key(process_env);
-        let wago_api_key = resolve_wago_api_key(&config_state);
-        let loaded_config = match &config_state {
-            ConfigLoad::Loaded(config) => config.clone(),
-            ConfigLoad::Missing(_) => AppConfig::new_unconfigured(),
-        };
+        // A game that isn't set up yet starts from the settings all games share.
+        let loaded_config = config_store.effective(&config_state)?;
+        let wago_api_key =
+            wago_api_key_in_use(loaded_config.wago_api_key.clone(), wago_env_key.clone());
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
             ConfigLoad::Missing(_) => None,
@@ -14101,6 +14100,45 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_uses_the_settings_all_games_share() {
+        let temp = tempdir().expect("tempdir");
+        let roots = lemonup_core::ProfileRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("cache"),
+        );
+        // The default game's own file says dark and no key; the shared file says otherwise.
+        let mut own = AppConfig::new_unconfigured();
+        own.theme = ThemeMode::Dark;
+        ConfigStore::new(roots.default_config_file())
+            .write_config(&own)
+            .expect("write own config");
+        let shared = lemonup_core::SharedSettings {
+            theme: ThemeMode::Light,
+            reduce_motion: true,
+            wago_api_key: Some("shared-test-key".to_string()),
+            ..lemonup_core::SharedSettings::default()
+        };
+        lemonup_core::SharedSettingsStore::for_roots(&roots)
+            .write(&shared)
+            .expect("write shared");
+
+        for profile in [DEFAULT_PROFILE, "forever"] {
+            let app = App::bootstrap(
+                roots.paths(profile).expect("paths"),
+                AppRuntime::new(profile.to_string(), None, Vec::new()),
+            )
+            .expect("bootstrap");
+            assert_eq!(app.config_pane.draft.theme, ThemeMode::Light, "{profile}");
+            assert!(app.config_pane.draft.reduce_motion, "{profile}");
+            assert!(
+                app.wago_api_key.as_deref() == Some("shared-test-key"),
+                "{profile}"
+            );
+        }
+    }
+
+    #[test]
     fn bootstrap_rejects_invalid_addon_dir_override() {
         let temp = tempdir().expect("tempdir");
         let paths = AppPaths {
@@ -14111,6 +14149,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let error = match App::bootstrap(
@@ -14143,6 +14186,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let guarded = PathBuf::from("D:\\World of Warcraft\\_retail_\\Interface\\AddOns");
@@ -14181,6 +14229,11 @@ mod tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         let mut config = AppConfig::new_unconfigured();
         config.addon_dir = Some(clients[0].clone());
@@ -14571,6 +14624,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let config_store = ConfigStore::new(paths.config_file.clone());
@@ -14620,6 +14678,11 @@ mod tests {
             log_dir: temp.path().join("data").join("logs"),
             config_file: temp.path().join("config").join("config.toml"),
             state_db_file: temp.path().join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                temp.path().join("config"),
+                temp.path().join("data"),
+                temp.path().join("cache"),
+            ),
         };
 
         let config_store = ConfigStore::new(paths.config_file.clone());

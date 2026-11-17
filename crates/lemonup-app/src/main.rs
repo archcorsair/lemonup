@@ -191,6 +191,13 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     Ok(outcome)
 }
 
+/// A command's config: the profile's own settings with the ones all games share.
+fn load_profile_config(paths: &AppPaths) -> lemonup_core::Result<(ConfigStore, ConfigLoad)> {
+    let config_store = ConfigStore::for_profile(paths);
+    let config_state = config_store.load()?;
+    Ok((config_store, config_state))
+}
+
 /// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
 /// asks, so changing a "Not linked" addon needs `--yes`.
 fn run_toc(
@@ -213,8 +220,7 @@ fn run_toc(
             ))));
         }
     };
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -616,11 +622,10 @@ async fn run_check(
     runtime: AppRuntime,
     addons: Vec<String>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(paths.state_db_file)?;
     let show_details = !addons.is_empty();
-    let api_key = resolve_wago_api_key(&config_state);
+    let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -718,8 +723,7 @@ async fn run_update(
     force: bool,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     let installed = database.list_addons()?;
     let configured_addon_dir = match &config_state {
@@ -775,7 +779,7 @@ async fn run_update(
         }
         ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
             let addon_dir = effective_addon_dir.expect("checked above");
-            let api_key = resolve_wago_api_key(&config_state);
+            let api_key = resolve_wago_api_key(&config_store, &config_state)?;
             if !dry_run {
                 let backup_settings =
                     pre_update_backup_settings(&config_state, &paths.data_dir, &addon_dir);
@@ -849,8 +853,7 @@ fn run_sync(
     runtime: AppRuntime,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let mut outcome = CommandOutcome::Success;
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1002,8 +1005,7 @@ async fn run_import_addons(
     let input_path = input.unwrap_or(default_transfer_path()?);
     let transfer = parse_import_file(&input_path)?;
 
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1056,7 +1058,7 @@ async fn run_import_addons(
         )));
     };
 
-    let wago_api_key = resolve_wago_api_key(&config_state);
+    let wago_api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let summary = install_transfer_addons(
         &mut database,
         &addon_dir,
@@ -1090,8 +1092,7 @@ fn run_restore_backup(
     runtime: AppRuntime,
     archive: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1248,8 +1249,7 @@ async fn run_install_wago(
     stability: WagoStability,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1288,7 +1288,7 @@ async fn run_install_wago(
         !dry_run,
     )?;
 
-    let Some(api_key) = resolve_wago_api_key(&config_state) else {
+    let Some(api_key) = resolve_wago_api_key(&config_store, &config_state)? else {
         println!(
             "install skipped: profile={}, addon={}, reason=no Wago API key configured",
             runtime.profile_name, addon
@@ -1328,8 +1328,7 @@ async fn run_install_tukui(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1392,8 +1391,7 @@ async fn run_install_wowinterface(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1459,8 +1457,7 @@ async fn run_install_github(
     addon: &str,
     dry_run: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let config_store = ConfigStore::new(paths.config_file.clone());
-    let config_state = config_store.load()?;
+    let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1619,6 +1616,11 @@ mod tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         }
     }
 
@@ -2186,6 +2188,11 @@ mod v1_migration_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         }
     }
 
@@ -2296,6 +2303,11 @@ mod addon_dir_binding_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         paths.ensure().expect("ensure paths");
         let wow = temp.path().join("World of Warcraft");
@@ -2314,7 +2326,7 @@ mod addon_dir_binding_tests {
             addon_dir: Some(retail.clone()),
             ..AppConfig::default()
         };
-        ConfigStore::new(paths.config_file.clone())
+        ConfigStore::for_profile(&paths)
             .write_new_config(&config)
             .expect("write config");
         let database = StateDatabase::open(&paths.state_db_file).expect("open db");
@@ -2553,6 +2565,11 @@ mod addon_dir_binding_tests {
             log_dir: other_root.join("data").join("logs"),
             config_file: other_root.join("config").join("config.toml"),
             state_db_file: other_root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                other_root.join("config"),
+                other_root.join("data"),
+                other_root.join("cache"),
+            ),
         };
         other_paths.ensure().expect("ensure other");
         let error = run_sync(
@@ -2587,6 +2604,11 @@ mod addon_dir_binding_tests {
             log_dir: root.join("data").join("logs"),
             config_file: root.join("config").join("config.toml"),
             state_db_file: root.join("data").join("state.sqlite"),
+            roots: lemonup_core::ProfileRoots::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("cache"),
+            ),
         };
         assert_eq!(
             guarded_dirs_of(&paths).expect("guard"),

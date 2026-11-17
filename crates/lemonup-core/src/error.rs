@@ -6,6 +6,11 @@ pub enum LemonupError {
     PathsUnavailable,
     #[error("missing config file at {0}")]
     ConfigMissing(PathBuf),
+    #[error(
+        "couldn't read {}: {reason} | nothing was changed | fix or move that file, then run LemonUp again",
+        path.display()
+    )]
+    SettingsUnreadable { path: PathBuf, reason: String },
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// A command declined to act and changed nothing. The message says what happened and what

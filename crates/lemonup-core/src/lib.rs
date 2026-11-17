@@ -7,6 +7,7 @@ pub mod find;
 pub mod fingerprint;
 pub mod paths;
 pub mod scan;
+pub mod shared;
 pub mod storage;
 pub mod toc_conditions;
 pub mod toc_edit;
@@ -21,12 +22,13 @@ pub use domain::{
 };
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
-pub use paths::{AppPaths, DEFAULT_PROFILE, paths_match};
+pub use paths::{AppPaths, DEFAULT_PROFILE, ProfileRoots, paths_match};
 pub use scan::{
     ScanReport, ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
     UPDATE_STAGING_PREFIX, parse_toc_content, read_addon_toc_fields, scan_addons_dir,
     scan_addons_dir_report, scan_addons_dir_with_tracked, select_toc_file,
 };
+pub use shared::{OtherGamesCheck, SharedSettings, SharedSettingsStore};
 pub use storage::StateDatabase;
 pub use toc_edit::{TocField, TocFieldValues, TocValueSource};
 pub use transfer::{

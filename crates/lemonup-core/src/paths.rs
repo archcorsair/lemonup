@@ -7,6 +7,75 @@ use crate::error::{LemonupError, Result};
 
 pub const DEFAULT_PROFILE: &str = "default";
 
+/// Settings every game shares (Wago.io key, look, auto-check), next to the default
+/// profile's `config.toml`.
+pub const SHARED_SETTINGS_FILE: &str = "shared.toml";
+const CONFIG_FILE: &str = "config.toml";
+const STATE_DB_FILE: &str = "state.sqlite";
+const PROFILES_DIR: &str = "profiles";
+
+/// The base folders every profile lives under: the default profile uses them directly,
+/// any other profile uses `profiles/<name>` inside each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileRoots {
+    pub config_dir: PathBuf,
+    pub data_dir: PathBuf,
+    pub cache_dir: PathBuf,
+}
+
+impl ProfileRoots {
+    pub fn new(config_dir: PathBuf, data_dir: PathBuf, cache_dir: PathBuf) -> Self {
+        Self {
+            config_dir,
+            data_dir,
+            cache_dir,
+        }
+    }
+
+    pub fn discover() -> Result<Self> {
+        let project_dirs = ProjectDirs::from("org", "archcorsair", "lemonup")
+            .ok_or(LemonupError::PathsUnavailable)?;
+        Ok(Self::new(
+            project_dirs.config_dir().to_path_buf(),
+            project_dirs.data_dir().to_path_buf(),
+            project_dirs.cache_dir().to_path_buf(),
+        ))
+    }
+
+    /// The folders of `profile`, which must be a valid profile name.
+    pub fn paths(&self, profile: &str) -> Result<AppPaths> {
+        validate_profile_name(profile)?;
+        let config_dir = scoped_dir(&self.config_dir, profile);
+        let data_dir = scoped_dir(&self.data_dir, profile);
+        let cache_dir = scoped_dir(&self.cache_dir, profile);
+        let log_dir = data_dir.join("logs");
+
+        Ok(AppPaths {
+            profile: profile.to_string(),
+            config_file: config_dir.join(CONFIG_FILE),
+            state_db_file: data_dir.join(STATE_DB_FILE),
+            config_dir,
+            data_dir,
+            cache_dir,
+            log_dir,
+            roots: self.clone(),
+        })
+    }
+
+    pub fn shared_settings_file(&self) -> PathBuf {
+        self.config_dir.join(SHARED_SETTINGS_FILE)
+    }
+
+    pub fn default_config_file(&self) -> PathBuf {
+        self.config_dir.join(CONFIG_FILE)
+    }
+
+    /// The folder holding the config folders of every profile but the default.
+    pub fn profiles_config_dir(&self) -> PathBuf {
+        self.config_dir.join(PROFILES_DIR)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub profile: String,
@@ -16,30 +85,15 @@ pub struct AppPaths {
     pub log_dir: PathBuf,
     pub config_file: PathBuf,
     pub state_db_file: PathBuf,
+    /// The base folders this profile lives under, for the settings all games share.
+    pub roots: ProfileRoots,
 }
 
 impl AppPaths {
     pub fn discover(profile: impl Into<String>) -> Result<Self> {
         let profile = profile.into();
         validate_profile_name(&profile)?;
-
-        let project_dirs = ProjectDirs::from("org", "archcorsair", "lemonup")
-            .ok_or(LemonupError::PathsUnavailable)?;
-
-        let config_dir = scoped_dir(project_dirs.config_dir(), &profile);
-        let data_dir = scoped_dir(project_dirs.data_dir(), &profile);
-        let cache_dir = scoped_dir(project_dirs.cache_dir(), &profile);
-        let log_dir = data_dir.join("logs");
-
-        Ok(Self {
-            profile,
-            config_file: config_dir.join("config.toml"),
-            state_db_file: data_dir.join("state.sqlite"),
-            config_dir,
-            data_dir,
-            cache_dir,
-            log_dir,
-        })
+        ProfileRoots::discover()?.paths(&profile)
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -49,6 +103,16 @@ impl AppPaths {
         fs::create_dir_all(&self.log_dir)?;
         Ok(())
     }
+
+    /// Where this profile keeps its backups of game settings.
+    pub fn backup_root(&self) -> PathBuf {
+        backup_root(&self.data_dir)
+    }
+}
+
+/// The store of backups of game settings under a profile's data folder.
+pub fn backup_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("backups").join("wtf")
 }
 
 pub fn paths_match(left: &Path, right: &Path) -> bool {
@@ -74,7 +138,7 @@ fn comparable_folder(path: &Path) -> String {
     }
 }
 
-fn validate_profile_name(profile: &str) -> Result<()> {
+pub fn validate_profile_name(profile: &str) -> Result<()> {
     if profile.is_empty() {
         return Err(LemonupError::InvalidArgument(
             "profile name must not be empty".to_string(),
@@ -98,7 +162,7 @@ fn scoped_dir(base: &Path, profile: &str) -> PathBuf {
         return base.to_path_buf();
     }
 
-    base.join("profiles").join(profile)
+    base.join(PROFILES_DIR).join(profile)
 }
 
 fn normalize_for_compare(path: &Path) -> String {
