@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ pub enum ThemeMode {
     Terminal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub schema_version: u32,
@@ -44,6 +45,34 @@ pub struct AppConfig {
     pub reduce_motion: bool,
     /// How often the games that aren't open are checked. Shared by all games.
     pub check_other_games: OtherGamesCheck,
+}
+
+/// Debug output never shows the Wago.io key, so a log line or a failed
+/// assertion can't leak it.
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field("schema_version", &self.schema_version)
+            .field("addon_dir", &self.addon_dir)
+            .field("user_agent", &self.user_agent)
+            .field("check_interval_secs", &self.check_interval_secs)
+            .field("auto_check_enabled", &self.auto_check_enabled)
+            .field("auto_check_interval_secs", &self.auto_check_interval_secs)
+            .field("backup_wtf", &self.backup_wtf)
+            .field("backup_retention", &self.backup_retention)
+            .field("show_libs", &self.show_libs)
+            .field("theme", &self.theme)
+            .field(
+                "wago_api_key",
+                &self.wago_api_key.as_ref().map(|_| "<hidden>"),
+            )
+            .field("hide_first_run_card", &self.hide_first_run_card)
+            .field("simple_symbols", &self.simple_symbols)
+            .field("reduce_motion", &self.reduce_motion)
+            .field("check_other_games", &self.check_other_games)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -329,6 +358,17 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_output_hides_the_wago_key() {
+        let mut config = AppConfig::new_unconfigured();
+        config.wago_api_key = Some("super-secret-key".to_string());
+        let shown = format!("{config:?} {config:#?}");
+        assert!(!shown.contains("super-secret-key"), "{shown}");
+        assert!(shown.contains("<hidden>"));
+        let none = format!("{:?}", AppConfig::new_unconfigured());
+        assert!(none.contains("wago_api_key: None"), "{none}");
+    }
+
     use tempfile::tempdir;
 
     use super::{AppConfig, ConfigLoad, ConfigStore, ThemeMode};
