@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
 
-/// How deep the walk goes into an addon folder, so a symlink loop cannot recurse forever.
+/// How deep the walk goes into an addon folder.
 const MAX_DEPTH: usize = 32;
 
 /// The flavor suffixes Wago.io accepts after `<Folder>-` or `<Folder>_` in a root TOC name.
@@ -104,8 +104,11 @@ pub fn folder_fingerprint(addons_dir: &Path, folder: &str) -> io::Result<FolderF
     })
 }
 
-/// Collects every file under `directory`, following symlinks. Unreadable directories are
-/// skipped, as the reference walk does.
+/// Collects every file under `directory`. Unreadable directories are skipped, as the reference
+/// walk does. Symlinks inside the folder are skipped too (the reference follows them, but the
+/// game's files never need one): one pointing at `..` or `/` would walk far outside the addon,
+/// and one pointing at a file elsewhere would hash a file the addon doesn't have. Includes can
+/// then only reach files of this folder.
 fn walk(directory: &Path, components: &mut Vec<String>, files: &mut Vec<FolderFile>, depth: usize) {
     if depth > MAX_DEPTH {
         return;
@@ -117,9 +120,15 @@ fn walk(directory: &Path, components: &mut Vec<String>, files: &mut Vec<FolderFi
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         components.push(name);
-        if path.is_dir() {
+        if metadata.is_dir() {
             walk(&path, components, files, depth + 1);
         } else {
             files.push(FolderFile {
@@ -394,6 +403,33 @@ mod tests {
 
         assert_eq!(fingerprint.hash, "cd732e6b7bbc9c31207b18f9f7834baf");
         assert_eq!(fingerprint.files, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_inside_a_folder_are_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "Loop/Loop.toc",
+            "## Title: Loop\nmain.lua\nLibs/outside.lua\n",
+        );
+        write(dir.path(), "Loop/main.lua", "-- main\n");
+        let plain = folder_fingerprint(dir.path(), "Loop").expect("fingerprint");
+        let libs = dir.path().join("Loop").join("Libs");
+        fs::create_dir_all(&libs).expect("libs");
+        write(dir.path(), "Elsewhere/outside.lua", "-- not this addon's\n");
+        std::os::unix::fs::symlink("..", libs.join("up")).expect("loop");
+        std::os::unix::fs::symlink(
+            dir.path().join("Elsewhere").join("outside.lua"),
+            libs.join("outside.lua"),
+        )
+        .expect("file link");
+
+        let linked = folder_fingerprint(dir.path(), "Loop").expect("fingerprint");
+
+        assert_eq!(linked, plain);
+        assert_eq!(linked.files, 2);
     }
 
     #[test]
