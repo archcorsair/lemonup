@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use lemonup_core::toc_edit::{self, TocField, TocFieldValues, TocValueSource};
 
 use super::dialog::Question;
-use super::sheet::{SheetBody, wrap_lines};
+use super::sheet::{SheetBody, text_height, wrap_lines};
 use super::*;
 use crate::update_targets::{TocApplyError, apply_toc_overrides_now};
 
@@ -19,6 +19,9 @@ const LABEL_WIDTH: usize = 10;
 const BAR_WIDTH: usize = 2;
 /// The source column: the longest is "set by you, not in the files".
 const SOURCE_WIDTH: usize = 28;
+/// The most characters of your value the "not in the files" explanation
+/// repeats, so its height has a limit the sheet can reserve.
+const YOURS_WIDTH: usize = 40;
 
 /// The editor's state: whose fields, the row under the cursor, the box
 /// while a field is edited, and a save waiting for the "Not linked" question.
@@ -486,7 +489,20 @@ impl App {
     /// The editor: the addon, its three fields with where each value comes
     /// from, suggestions under the Category box, and the focused row
     /// explained at the bottom with the last result under it.
-    pub(super) fn toc_edit_sheet_body(&self, width: u16) -> SheetBody<'static> {
+    ///
+    /// The sheet keeps its size and place while it is open: it reserves the
+    /// rows of the longest explanation, a full list of suggestions and the
+    /// result line, and pads shorter states with blank rows at the bottom of
+    /// each area. A layout that fits under the header rows (`below_header`)
+    /// comes first, so the sheet only grows over the header when it has to;
+    /// with little room the blank rows go first, then the explanation is cut
+    /// to one line. Which one is the same in every state.
+    pub(super) fn toc_edit_sheet_body(
+        &self,
+        width: u16,
+        height: u16,
+        below_header: u16,
+    ) -> SheetBody<'static> {
         let roles = self.ui_theme.roles;
         let mut body = SheetBody::new();
         let Some(item) = self.toc_edit_item() else {
@@ -496,6 +512,8 @@ impl App {
             ))]);
             return body;
         };
+        let long_rows = self.toc_reserved_rows(item, width);
+        let (spaced, long) = Self::toc_layout(long_rows, height, below_header);
         let linked = if item.source == SourceKind::Manual {
             " · Not linked"
         } else {
@@ -507,29 +525,91 @@ impl App {
                 Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled(linked, Style::default().fg(roles.muted)),
-        ])])
-        .gap(1);
+        ])]);
+        if spaced {
+            body.gap(1);
+        }
         for (index, field) in TocField::ALL.into_iter().enumerate() {
             body.text(vec![self.toc_field_line(item, field, index, width)]);
             if index == self.toc_pane.selected.min(TocField::ALL.len() - 1) {
                 body.focus_last();
             }
-            if self
-                .toc_pane
-                .edit
-                .as_ref()
-                .is_some_and(|edit| edit.field == field && field == TocField::Category)
-            {
-                body.text(self.toc_suggestion_lines(width));
+            if field == TocField::Category {
+                // Room for a full list, whether or not one is showing.
+                let mut lines = self.toc_suggestion_lines(width);
+                lines.resize_with(SUGGESTION_LIMIT, Line::default);
+                body.text(lines);
             }
         }
-        let mut footer = vec![Line::default()];
-        footer.extend(wrap_lines(&[self.toc_explanation_line(item)], width));
-        if let Some(status) = self.toc_status_line(width) {
-            footer.push(status);
+        let mut footer = Vec::new();
+        if spaced {
+            footer.push(Line::default());
         }
+        let line = self.toc_explanation_line(item);
+        let mut explanation = wrap_lines(std::slice::from_ref(&line), width);
+        if long {
+            explanation.resize_with(usize::from(long_rows).max(explanation.len()), Line::default);
+        } else if explanation.len() > 1 {
+            let mut first = wrap_lines(std::slice::from_ref(&line), width.saturating_sub(1))
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            first.spans.push(Span::raw("…"));
+            explanation = vec![first];
+        }
+        footer.extend(explanation);
+        footer.push(self.toc_status_line(width).unwrap_or_default());
         body.footer(footer);
         body
+    }
+
+    /// Whether blank rows separate the parts and whether the explanation is
+    /// in full, for a sheet that reserves `long_rows` for the explanation.
+    fn toc_layout(long_rows: u16, height: u16, below_header: u16) -> (bool, bool) {
+        // The name, the three fields and the suggestions, then the
+        // explanation and the result line; spaced adds two blank rows.
+        let list = 1 + TocField::ALL.len() as u16 + SUGGESTION_LIMIT as u16;
+        let rows =
+            |spaced: bool, explanation: u16| list + explanation + 1 + if spaced { 2 } else { 0 };
+        if rows(true, long_rows) <= below_header {
+            (true, true)
+        } else if rows(false, long_rows) <= below_header {
+            (false, true)
+        } else if rows(false, 1) <= below_header {
+            (false, false)
+        } else if rows(true, long_rows) <= height {
+            (true, true)
+        } else if rows(false, long_rows) <= height {
+            (false, true)
+        } else {
+            (false, false)
+        }
+    }
+
+    /// Rows the long explanation reserves at `width`: the tallest one for
+    /// any row in any state. The one on screen counts too.
+    fn toc_reserved_rows(&self, item: &DashboardItem, width: u16) -> u16 {
+        let rows = |line: Line<'static>| text_height(&[line], width);
+        let mut most = rows(self.toc_explanation_line(item));
+        for tab_hint in [false, true] {
+            most = most.max(rows(self.toc_explanation(
+                TocField::Category,
+                TocValueSource::Addon,
+                Some(tab_hint),
+                "",
+            )));
+        }
+        let yours = "x".repeat(YOURS_WIDTH);
+        for field in TocField::ALL {
+            for source in [
+                TocValueSource::Addon,
+                TocValueSource::Override,
+                TocValueSource::OverrideNotApplied,
+            ] {
+                most = most.max(rows(self.toc_explanation(field, source, None, &yours)));
+            }
+        }
+        most
     }
 
     /// "▌ Category  Bags                       set by you", or the box.
@@ -649,19 +729,42 @@ impl App {
 
     /// What the focused row is, and what its keys do there.
     fn toc_explanation_line(&self, item: &DashboardItem) -> Line<'static> {
+        let field = self.toc_pane.selected_field();
+        let editing = self
+            .toc_pane
+            .edit
+            .as_ref()
+            .map(|edit| edit.field == TocField::Category && !self.toc_suggestions().is_empty());
+        let (_, source) = self.toc_field_state(item, field);
+        let yours = item
+            .toc_overrides
+            .get(field.name())
+            .map(|value| toc_edit::display_value(value))
+            .unwrap_or_default();
+        self.toc_explanation(field, source, editing, &yours)
+    }
+
+    /// The explanation of `field` with its value `source`, or of the box
+    /// while it is edited (`editing` says whether Tab has a suggestion to
+    /// fill in). `yours` is what the "not in the files" one quotes.
+    fn toc_explanation(
+        &self,
+        field: TocField,
+        source: TocValueSource,
+        editing: Option<bool>,
+        yours: &str,
+    ) -> Line<'static> {
         let roles = self.ui_theme.roles;
         let muted = Style::default().fg(roles.muted);
-        let field = self.toc_pane.selected_field();
-        if let Some(edit) = &self.toc_pane.edit {
+        if let Some(tab_hint) = editing {
             let mut text = "enter saves it and writes it to the addon's files, esc keeps what \
                             you had. An empty box gives back the addon's own."
                 .to_string();
-            if edit.field == TocField::Category && !self.toc_suggestions().is_empty() {
+            if tab_hint {
                 text.push_str(" tab fills in the next suggestion.");
             }
             return Line::from(Span::styled(text, muted));
         }
-        let (_, source) = self.toc_field_state(item, field);
         let mut spans = vec![Span::styled(
             field_meaning(field),
             Style::default().fg(roles.text),
@@ -673,11 +776,7 @@ impl App {
                 muted,
             )),
             TocValueSource::OverrideNotApplied => {
-                let yours = item
-                    .toc_overrides
-                    .get(field.name())
-                    .map(|value| toc_edit::display_value(value))
-                    .unwrap_or_default();
+                let yours = truncate_text(yours, YOURS_WIDTH);
                 spans.push(Span::styled(
                     format!(
                         " Your value \"{yours}\" is not in the files (another program may have \

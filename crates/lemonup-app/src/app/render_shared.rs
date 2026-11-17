@@ -59,8 +59,8 @@ impl App {
                 })
             }
             OverlayKind::TocEdit => {
-                self.render_sheet(frame, region, header, kind, chrome, |width, _| {
-                    self.toc_edit_sheet_body(width)
+                self.render_sheet(frame, region, header, kind, chrome, |width, height| {
+                    self.toc_edit_sheet_body(width, height, height.saturating_sub(header))
                 })
             }
             OverlayKind::Update | OverlayKind::Confirm => {

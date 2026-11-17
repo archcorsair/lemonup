@@ -17322,6 +17322,101 @@ mod tests {
                 assert!(text.contains("is not in the files"), "{text}");
             }
 
+            /// Where the editor's sheet and its parts are on screen: the
+            /// title row, the bottom border (or the last row of a full
+            /// screen sheet), and the rows of the first and last field.
+            fn editor_places(rows: &[String]) -> [usize; 4] {
+                let title = rows
+                    .iter()
+                    .position(|row| row.contains("Edit .toc fields") && row.contains("esc close"))
+                    .unwrap_or_else(|| panic!("no editor title:\n{}", rows.join("\n")));
+                let bottom = match rows[title].chars().position(|c| c == '╭') {
+                    Some(column) => (title + 1..rows.len())
+                        .find(|row| rows[*row].chars().nth(column) == Some('╰'))
+                        .unwrap_or_else(|| panic!("no bottom border:\n{}", rows.join("\n"))),
+                    None => rows.len() - 1,
+                };
+                let field = |label: &str| {
+                    (title + 1..=bottom)
+                        .find(|row| rows[*row].contains(&format!("{label}  ")))
+                        .unwrap_or_else(|| panic!("no {label} row:\n{}", rows.join("\n")))
+                };
+                [title, bottom, field("Title"), field("Category")]
+            }
+
+            #[test]
+            fn the_editor_keeps_its_size_and_place_while_you_edit() {
+                for (width, height) in [(138, 36), (120, 30), (80, 24)] {
+                    let mut app = app_for_tests(ShellMode::Dashboard);
+                    scanned(&mut app, Some("Mine"));
+                    // Notes is yours but not in the files: the longest
+                    // explanation, quoting your value.
+                    set_overrides(&mut app, "Second", &[("Notes", &"n".repeat(200))]);
+                    open_editor_on(&mut app, "Second");
+                    let first = render_rows(&mut app, width, height);
+                    let seen = editor_places(&first);
+                    let check = |app: &mut App, what: &str| {
+                        let rows = render_rows(app, width, height);
+                        assert_eq!(
+                            editor_places(&rows),
+                            seen,
+                            "{what} moved the editor at {width}x{height}:\n{}",
+                            rows.join("\n")
+                        );
+                        rows
+                    };
+
+                    for field in TocField::ALL {
+                        select(&mut app, field);
+                        check(&mut app, &format!("{field:?} row"));
+                    }
+
+                    select(&mut app, TocField::Title);
+                    press(&mut app, KeyCode::Enter);
+                    check(&mut app, "editing Title");
+                    press(&mut app, KeyCode::Esc);
+
+                    select(&mut app, TocField::Category);
+                    press(&mut app, KeyCode::Enter);
+                    for (typed, count) in [("zzzzzz", 0), ("Bags &", 1)] {
+                        for _ in 0..40 {
+                            press(&mut app, KeyCode::Backspace);
+                        }
+                        type_text(&mut app, typed);
+                        assert_eq!(app.toc_suggestions().len(), count, "{typed}");
+                        check(&mut app, &format!("{count} suggestions"));
+                    }
+                    for _ in 0..40 {
+                        press(&mut app, KeyCode::Backspace);
+                    }
+                    assert_eq!(app.toc_suggestions().len(), 5);
+                    let rows = check(&mut app, "5 suggestions");
+                    assert!(
+                        rows.iter().any(|row| row.contains("tab fills in")),
+                        "{}",
+                        rows.join("\n")
+                    );
+                    press(&mut app, KeyCode::Esc);
+
+                    for (kind, message) in [
+                        (StatusKind::Done, "Changed Second's Category"),
+                        (StatusKind::Problem, "Could not write the files"),
+                    ] {
+                        app.apply(AppAction::SetStatus(app.dashboard_status_for(
+                            kind,
+                            DetailMode::TocEdit,
+                            message,
+                        )));
+                        let rows = check(&mut app, message);
+                        assert!(
+                            rows.iter().any(|row| row.contains(message)),
+                            "{}",
+                            rows.join("\n")
+                        );
+                    }
+                }
+            }
+
             #[test]
             fn the_box_takes_every_letter_while_a_field_is_edited() {
                 let mut app = app_for_tests(ShellMode::Dashboard);
