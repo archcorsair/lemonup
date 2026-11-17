@@ -316,6 +316,11 @@ impl App {
                 ConfigField::WagoApiKey if editing => {
                     "enter saves it, esc keeps the one you had".to_string()
                 }
+                ConfigField::WagoApiKey
+                    if self.wago_key_from_environment(&self.config_pane.draft) =>
+                {
+                    "from WAGO_API_KEY, and a key you save here is used instead".to_string()
+                }
                 ConfigField::WagoApiKey => {
                     "needed to search Wago.io and to update addons from it".to_string()
                 }
@@ -374,6 +379,17 @@ impl App {
                 Span::styled("esc", key),
                 Span::styled(" keeps the one you had.", muted),
             ],
+            ConfigField::WagoApiKey if self.wago_key_from_environment(&self.config_pane.draft) => {
+                vec![
+                    Span::styled(
+                        "This key comes from the WAGO_API_KEY environment variable. A key you \
+                         save here is used instead. Press ",
+                        muted,
+                    ),
+                    Span::styled("enter", key),
+                    Span::styled(" to type or paste one.", muted),
+                ]
+            }
             ConfigField::WagoApiKey => vec![
                 Span::styled(
                     "Needed to search Wago.io and to update addons that came from it. Wago \
