@@ -378,8 +378,12 @@ static LIST_HELP: HelpPage = HelpPage {
                     .when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete this addon, or the selected ones", &[ch('x')]),
                 HelpRow::key("z", "undo the last delete", &[ch('z')]),
-                HelpRow::key("f", "find a \"Not linked\" addon online", K_FIND)
-                    .when(HelpWhen::NotLinked),
+                HelpRow::key(
+                    "f",
+                    "find the \"Not linked\" addon under the cursor online",
+                    K_FIND,
+                )
+                .when(HelpWhen::NotLinked),
                 HelpRow::key("d", "hide the welcome card", &[ch('d')]).when(HelpWhen::FirstRunCard),
             ],
         },
@@ -459,8 +463,12 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
-                HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
-                    .when(HelpWhen::NotLinked),
+                HelpRow::key(
+                    "f",
+                    "find this one online, so LemonUp keeps it updated",
+                    K_FIND,
+                )
+                .when(HelpWhen::NotLinked),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
                 HelpRow::key(
                     "enter  esc  q",
@@ -786,7 +794,18 @@ impl App {
     }
 
     /// `f`, shown only while the current addon is not linked.
-    fn find_online_hint(&self) -> KeyHint {
+    /// With addons selected, `u`, `c` and `x` act on all of them but `f` only
+    /// on the one under the cursor, so the label says so.
+    fn find_online_hint(&self, selected: usize) -> KeyHint {
+        if selected > 0 {
+            return KeyHint::primary(
+                FooterHintId::FindOnline,
+                "f",
+                "find this one online",
+                &[KeyCode::Char('f')],
+            )
+            .short("find this one");
+        }
         KeyHint::primary(
             FooterHintId::FindOnline,
             "f",
@@ -896,7 +915,7 @@ impl App {
             hints.push(update("update"));
         }
         if target.item.source == SourceKind::Manual {
-            hints.push(self.find_online_hint().main());
+            hints.push(self.find_online_hint(selected).main());
         }
         if idle && (selected > 0 || target.item.source != SourceKind::Manual) {
             let check = &[KeyCode::Char('c')];
@@ -1254,7 +1273,7 @@ impl App {
             } else {
                 "select"
             };
-            return vec![
+            let mut hints = vec![
                 KeyHint::text(format!("{selected} selected:")),
                 update.main(),
                 check,
@@ -1263,6 +1282,11 @@ impl App {
                 esc,
                 help,
             ];
+            // `f` still works on the addon under the cursor.
+            if self.not_linked_current_item().is_some() {
+                hints.insert(4, self.find_online_hint(selected));
+            }
+            return hints;
         }
         let settings = KeyHint::key(Id::Config, "s", "settings", SETTINGS);
         let quit = KeyHint::key(Id::Quit, "q", "quit", &[KeyCode::Char('q')]);
@@ -1294,7 +1318,8 @@ impl App {
         {
             // `f` links the addon under the cursor; installing is for new ones.
             let mut hints = vec![
-                self.find_online_hint().main(),
+                self.find_online_hint(self.dashboard.selected_parent_count())
+                    .main(),
                 details,
                 KeyHint::key(Id::Install, "i", "install", &[KeyCode::Char('i')]),
             ];
@@ -1333,7 +1358,7 @@ impl App {
         let select = KeyHint::key(Id::Select, "space", "select", SELECT);
         let find = self
             .not_linked_current_item()
-            .map(|_| self.find_online_hint());
+            .map(|_| self.find_online_hint(selected));
         if updates > 0 {
             let update_all = KeyHint::primary(
                 Id::UpdateAll,
