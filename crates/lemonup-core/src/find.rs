@@ -90,6 +90,8 @@ pub struct LocalFolder {
     /// The TOC Title and Version the game reads for this game version.
     pub title: Option<String>,
     pub version: Option<String>,
+    /// The addons its TOC requires (`Dependencies` or `RequiredDeps`).
+    pub required_deps: Vec<String>,
     pub ids: TocIds,
 }
 
@@ -163,9 +165,13 @@ impl FindInputs {
                 None
             });
             let field = |key: &str| toc.as_deref().and_then(|text| toc_field(text, key, flavor));
-            let title = toc
+            let parsed = toc
                 .as_deref()
-                .map(|text| crate::scan::parse_toc_content(text, &folder, Some(flavor)).title);
+                .map(|text| crate::scan::parse_toc_content(text, &folder, Some(flavor)));
+            let title = parsed.as_ref().map(|parsed| parsed.title.clone());
+            let required_deps = parsed
+                .map(|parsed| parsed.required_deps)
+                .unwrap_or_default();
             folders.push(LocalFolder {
                 version: field("Version"),
                 ids: TocIds {
@@ -175,6 +181,7 @@ impl FindInputs {
                     tukui: field("X-Tukui-ProjectID"),
                 },
                 title,
+                required_deps,
                 folder,
                 developer_copy,
                 fingerprint,
@@ -1172,17 +1179,37 @@ fn merge_same_projects(claims: Vec<Claim>) -> Vec<Claim> {
         .collect()
 }
 
-/// Picks the parent folder and works out what moves and what is blocked.
+/// Picks the parent folder and works out what moves and what is blocked. The parent is, in
+/// order: the folder named like the project; the folder the most other folders of the package
+/// require; the Not linked addon's own folder, then the shortest name.
 fn place(mut found: FoundAddon, inputs: &FindInputs, groups: &Groups<'_>) -> FoundAddon {
     let is_unit_parent = |folder: &str| {
         groups
             .unit_containing(folder)
             .is_some_and(|unit| key(&unit.folder) == key(folder))
     };
+    // How many of the package's other folders require `folder`: the main folder of a package
+    // is the one the others need.
+    let required_by_others = |folder: &str| {
+        found
+            .folders
+            .iter()
+            .filter(|other| key(other) != key(folder))
+            .filter(|other| {
+                inputs.get(other).is_some_and(|local| {
+                    local
+                        .required_deps
+                        .iter()
+                        .any(|required| key(required) == key(folder))
+                })
+            })
+            .count()
+    };
     let mut ranked = found.folders.clone();
     ranked.sort_by_key(|folder| {
         (
             normalize_name(folder) != normalize_name(&found.name),
+            std::cmp::Reverse(required_by_others(folder)),
             !is_unit_parent(folder),
             folder.len(),
             folder.to_lowercase(),

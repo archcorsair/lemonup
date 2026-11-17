@@ -1280,3 +1280,125 @@ fn a_folder_that_moves_out_keeps_the_toc_overrides_of_the_addon_it_leaves() {
         BTreeMap::from([("Category".to_string(), "Mine".to_string())])
     );
 }
+
+/// Deadly Boss Mods as one Wago.io package: DBM-Core is the folder the others require, though
+/// DBM-GUI has the shortest name.
+fn dbm_package(fixture: &Fixture) -> (FindInputs, Vec<AddonRecord>, WagoMatch) {
+    addon(
+        &fixture.addons,
+        "DBM-Core",
+        &["## Title: |cffffe00a<|r|cffff7d0aDBM Core|r|cffffe00a>|r |cff69ccf0Main Core|r"],
+    );
+    addon(
+        &fixture.addons,
+        "DBM-GUI",
+        &["## Title: <DBM Core> Options GUI"],
+    );
+    for folder in [
+        "DBM-Brawlers",
+        "DBM-Raids-Midnight",
+        "DBM-StatusBarTimers",
+        "DBM-VPVEM",
+    ] {
+        addon(&fixture.addons, folder, &["## Dependencies: DBM-Core"]);
+    }
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let folders = [
+        "DBM-Brawlers",
+        "DBM-Core",
+        "DBM-GUI",
+        "DBM-Raids-Midnight",
+        "DBM-StatusBarTimers",
+        "DBM-VPVEM",
+    ];
+    let rows = folders
+        .iter()
+        .map(|folder| manual_row(folder, &[]))
+        .collect();
+    let modules = folders
+        .iter()
+        .map(|folder| (folder.to_string(), hash_of(&inputs, folder)))
+        .collect();
+    (inputs, rows, wago("DBM", "Deadly Boss Mods", modules))
+}
+
+#[test]
+fn a_packages_main_folder_is_the_one_the_others_require() {
+    let fixture = fixture();
+    let (inputs, rows, project) = dbm_package(&fixture);
+
+    let report = match_addons(
+        &inputs,
+        &rows,
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+
+    assert_eq!(report.results.len(), 1, "{:#?}", report.results);
+    let found = &report.results[0];
+    assert_eq!(found.label, FindLabel::Exact);
+    assert_eq!(found.folder, "DBM-Core");
+    let candidate = found.found().expect("candidate");
+    assert_eq!(candidate.parent_folder, "DBM-Core");
+    assert_eq!(candidate.folders[0], "DBM-Core");
+}
+
+#[test]
+fn linking_a_package_lists_it_under_the_folder_the_others_require() {
+    let mut fixture = fixture();
+    let (inputs, rows, project) = dbm_package(&fixture);
+    let report = match_addons(
+        &inputs,
+        &rows,
+        None,
+        &lookups(SourceAnswer::Found(vec![project])),
+    );
+    let pick = report.results[0].found().expect("pick").clone();
+
+    let linked = link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Retail,
+        &[pick],
+    )
+    .expect("link");
+
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].folder, "DBM-Core");
+    assert_eq!(
+        linked[0]
+            .owned_folders
+            .iter()
+            .map(|owned| owned.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "DBM-Brawlers",
+            "DBM-GUI",
+            "DBM-Raids-Midnight",
+            "DBM-StatusBarTimers",
+            "DBM-VPVEM"
+        ]
+    );
+}
+
+#[test]
+fn a_folder_named_like_the_project_is_the_parent_before_any_requirement() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Bar", &["## Dependencies: Foo"]);
+    addon(&fixture.addons, "Foo", &[]);
+    addon(&fixture.addons, "FooBar", &["## Dependencies: Bar"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = ["Bar", "Foo", "FooBar"]
+        .iter()
+        .map(|folder| (folder.to_string(), hash_of(&inputs, folder)))
+        .collect();
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("FB", "Foo Bar", modules)])),
+    );
+
+    assert_eq!(report.results[0].folder, "FooBar");
+}
