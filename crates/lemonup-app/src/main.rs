@@ -375,6 +375,12 @@ async fn run_find(
     )?;
 
     let flavor = GameFlavor::for_addons_dir(&addon_dir);
+    let target = crate::find::FindTarget::new(
+        &runtime.profile_name,
+        &addon_dir,
+        flavor,
+        &list_profiles(&paths.roots).unwrap_or_default(),
+    );
     if link {
         crate::find::scan_before_linking(&mut database, &addon_dir, flavor)?;
     }
@@ -383,6 +389,9 @@ async fn run_find(
     let wago_lookups = inputs.wago_lookups(&rows, None);
     let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let sends_to_wago = api_key.is_some() && !wago_lookups.is_empty();
+    if plain {
+        println!("{}", crate::find::target_plain_line(&target));
+    }
     if plain && sends_to_wago {
         println!(
             "find note: sending {} folder names and file hashes to Wago.io",
@@ -410,6 +419,7 @@ async fn run_find(
         // about stderr.
         let theme_config = config_store.effective(&config_state)?;
         let paint = crate::find::Paint::for_stdout(&theme_config);
+        println!("{}", crate::find::target_line(&target, paint));
         for line in
             crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
         {

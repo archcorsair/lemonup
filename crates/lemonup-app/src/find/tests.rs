@@ -1778,3 +1778,100 @@ fn versions_never_show_doubled_spaces() {
     assert!(text.contains("Pawn 2.13.17"), "{text}");
     assert!(!text.contains("Pawn  2."), "{text}");
 }
+
+fn summary(name: &str, display_name: &str, flavor: GameFlavor) -> lemonup_core::ProfileSummary {
+    lemonup_core::ProfileSummary {
+        name: name.to_string(),
+        display_name: display_name.to_string(),
+        addon_dir: None,
+        flavor: Some(flavor),
+        addon_count: None,
+        problem: None,
+    }
+}
+
+fn target_of(profile: &str, game: &str) -> FindTarget {
+    FindTarget {
+        game: game.to_string(),
+        profile: profile.to_string(),
+        addon_dir: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+    }
+}
+
+#[test]
+fn the_target_line_names_the_game_and_folder_without_a_profile_for_the_default_one() {
+    let line = target_line(&target_of("default", "WoW Forever"), Paint::PLAIN);
+    assert_eq!(line, "WoW Forever  /games/wow/_forever_/Interface/AddOns");
+}
+
+#[test]
+fn the_target_line_names_a_profile_that_is_not_the_default() {
+    let line = target_line(&target_of("retail", "Retail"), Paint::PLAIN);
+    assert_eq!(
+        line,
+        "Retail  /games/wow/_forever_/Interface/AddOns  (profile retail)"
+    );
+}
+
+#[test]
+fn the_target_line_is_bold_game_then_muted_folder_and_profile_in_color() {
+    let line = target_line(&target_of("retail", "Retail"), Paint::terminal());
+    assert_eq!(
+        line,
+        format!(
+            "{BOLD}Retail{END}  {MUTED}/games/wow/_forever_/Interface/AddOns{END}  \
+             {MUTED}(profile retail){END}"
+        )
+    );
+    assert!(!target_line(&target_of("default", "Retail"), Paint::PLAIN).contains('\x1b'));
+}
+
+#[test]
+fn the_target_line_shortens_the_home_folder() {
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return;
+    };
+    if cfg!(windows) {
+        return;
+    }
+    let mut target = target_of("default", "Retail");
+    target.addon_dir = PathBuf::from(home).join("Games/AddOns");
+    assert_eq!(target_line(&target, Paint::PLAIN), "Retail  ~/Games/AddOns");
+}
+
+#[test]
+fn the_plain_target_line_has_profile_game_and_the_full_folder() {
+    assert_eq!(
+        target_plain_line(&target_of("forever", "WoW Forever")),
+        "find target: profile=forever, game=WoW Forever, \
+         addon_dir=/games/wow/_forever_/Interface/AddOns"
+    );
+}
+
+#[test]
+fn the_target_uses_the_name_profiles_lists_for_the_game() {
+    let dir = Path::new("/games/wow/_retail_/Interface/AddOns");
+    let profiles = vec![
+        summary("default", "Retail (default)", GameFlavor::Retail),
+        summary("retail2", "Retail (retail2)", GameFlavor::Retail),
+    ];
+    let target = FindTarget::new("retail2", dir, GameFlavor::Retail, &profiles);
+    assert_eq!(target.game, "Retail (retail2)");
+    assert_eq!(target.profile, "retail2");
+    assert_eq!(target.addon_dir, dir);
+}
+
+#[test]
+fn the_target_falls_back_to_the_version_of_the_folder() {
+    let dir = Path::new("/games/wow/_forever_/Interface/AddOns");
+    assert_eq!(
+        FindTarget::new("default", dir, GameFlavor::Forever, &[]).game,
+        "WoW Forever"
+    );
+    // An --addon-dir of another version than the profile's own.
+    let profiles = vec![summary("default", "Retail", GameFlavor::Retail)];
+    assert_eq!(
+        FindTarget::new("default", dir, GameFlavor::Forever, &profiles).game,
+        "WoW Forever"
+    );
+}

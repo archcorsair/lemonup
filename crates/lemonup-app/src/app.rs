@@ -8379,7 +8379,7 @@ fn expand_home(typed: &str) -> PathBuf {
     PathBuf::from(typed)
 }
 
-fn friendly_path(path: &Path) -> String {
+pub(crate) fn friendly_path(path: &Path) -> String {
     if !cfg!(windows)
         && let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
         && let Ok(rest) = path.strip_prefix(&home)

@@ -14,7 +14,7 @@ use lemonup_core::{AddonRecord, AppConfig, LemonupError, UpdateStatus, toc_edit}
 use ratatui::backend::IntoCrossterm;
 use ratatui::style::Color;
 
-use super::{LinkOutcome, SourceProblem, exact_picks};
+use super::{FindTarget, LinkOutcome, SourceProblem, exact_picks};
 use crate::source_error::SourceErrorKind;
 use crate::theme::{ColorRoles, DisplayEnv, UiTheme};
 
@@ -629,6 +629,21 @@ fn note(report: &FindReport, problems: &[SourceProblem], wago_folders: usize) ->
 
 /// What `lemonup find` prints for a report: a note, then a section for each way a result can
 /// be labeled that has results. `wago_folders` is how many folder names went to Wago.io.
+/// The first line of the readable report: the game and its AddOns folder, and the profile
+/// unless it is the default one.
+pub(crate) fn target_line(target: &FindTarget, paint: Paint) -> String {
+    let mut line = format!(
+        "{}  {}",
+        paint.bold(&target.game),
+        paint.muted(&crate::app::friendly_path(&target.addon_dir))
+    );
+    if target.profile != lemonup_core::DEFAULT_PROFILE {
+        line.push_str("  ");
+        line.push_str(&paint.muted(&format!("(profile {})", target.profile)));
+    }
+    line
+}
+
 pub(crate) fn human_report(
     report: &FindReport,
     problems: &[SourceProblem],

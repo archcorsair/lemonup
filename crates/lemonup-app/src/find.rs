@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lemonup_core::find::{
@@ -362,6 +362,48 @@ fn result_lines(result: &FindResult) -> Vec<String> {
     }
 }
 
+/// The game `lemonup find` works on: what the person sees first, so a `--link` with several
+/// games never leaves them guessing which one it changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FindTarget {
+    /// The name LemonUp shows for the game, as `lemonup profiles` and the TUI header do.
+    pub(crate) game: String,
+    pub(crate) profile: String,
+    pub(crate) addon_dir: PathBuf,
+}
+
+impl FindTarget {
+    /// The game of `profile` as `profiles` lists it, else the name of the version `addon_dir`
+    /// belongs to (a profile list that can't be read, or an `--addon-dir` of another version).
+    pub(crate) fn new(
+        profile: &str,
+        addon_dir: &Path,
+        flavor: GameFlavor,
+        profiles: &[lemonup_core::ProfileSummary],
+    ) -> Self {
+        let game = profiles
+            .iter()
+            .find(|summary| summary.name == profile && summary.flavor == Some(flavor))
+            .map(|summary| summary.display_name.clone())
+            .unwrap_or_else(|| lemonup_core::profiles::game_name(flavor).to_string());
+        Self {
+            game,
+            profile: profile.to_string(),
+            addon_dir: addon_dir.to_path_buf(),
+        }
+    }
+}
+
+/// The first line of `lemonup find --plain`.
+pub(crate) fn target_plain_line(target: &FindTarget) -> String {
+    format!(
+        "find target: profile={}, game={}, addon_dir={}",
+        target.profile,
+        target.game,
+        target.addon_dir.display()
+    )
+}
+
 /// What `lemonup find` prints for a report: problems, a summary by label, then every result
 /// grouped by label.
 pub(crate) fn report_lines(
@@ -598,7 +640,7 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
 }
 
 mod human;
-pub(crate) use human::{LocalNames, Paint, human_closing, human_report};
+pub(crate) use human::{LocalNames, Paint, human_closing, human_report, target_line};
 
 #[cfg(test)]
 mod tests;
