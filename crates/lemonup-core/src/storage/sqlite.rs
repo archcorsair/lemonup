@@ -69,6 +69,30 @@ impl StateDatabase {
         }
     }
 
+    /// How many addons (not libraries) the database at `path` lists, read without creating
+    /// or modifying anything: a missing file, or one without the addons table, lists none.
+    pub fn read_addon_count(path: &Path) -> Result<usize> {
+        if !path.is_file() {
+            return Ok(0);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM addons WHERE kind != 'library'",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        match count {
+            Ok(count) => Ok(usize::try_from(count).unwrap_or(0)),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("no such table") =>
+            {
+                Ok(0)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Milliseconds this connection waits on a locked database (test hook).
     #[cfg(test)]
     fn busy_timeout_millis(&self) -> i64 {

@@ -6,6 +6,7 @@ pub mod events;
 pub mod find;
 pub mod fingerprint;
 pub mod paths;
+pub mod profiles;
 pub mod scan;
 pub mod shared;
 pub mod storage;
@@ -23,6 +24,10 @@ pub use domain::{
 pub use error::{LemonupError, Result};
 pub use events::{OperationKind, OperationProgress, OperationStage};
 pub use paths::{AppPaths, DEFAULT_PROFILE, ProfileRoots, paths_match};
+pub use profiles::{
+    CreatedProfile, ProfileError, ProfileSummary, RemovedProfile, create_profile, game_name,
+    list_profiles, remember_last_used, remove_profile, tui_profile,
+};
 pub use scan::{
     ScanReport, ScanSummary, ScannedAddon, TocMetadata, TocSelectionConfidence, TocSelectionResult,
     UPDATE_STAGING_PREFIX, parse_toc_content, read_addon_toc_fields, scan_addons_dir,

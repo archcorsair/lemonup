@@ -117,7 +117,13 @@ To manage a second game version, or to keep separate setups, use a profile:
 
 ```sh
 lemonup --profile forever
+lemonup profiles
 ```
+
+`lemonup profiles` lists each profile with its game version, AddOns folder and addon count.
+Plain `lemonup` opens the game you used last. Other commands use the default profile unless you
+pass `--profile`. The Wago.io key, theme, symbols, motion and update checks are shared by every
+profile; the AddOns folder, addon list, backups and show libraries belong to each one.
 
 ## Troubleshooting
 
