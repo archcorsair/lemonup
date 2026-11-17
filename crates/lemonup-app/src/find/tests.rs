@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use lemonup_core::find::{FindInputs, match_addons};
+use lemonup_core::find::{FindInputs, LikelyReason, match_addons};
 use lemonup_core::{OwnedFolder, SourceKind, UpdateStatus};
 
 use super::*;
@@ -576,6 +576,11 @@ fn full_report() -> FindReport {
     );
     likely.label = FindLabel::Likely;
     likely.matched_version = None;
+    likely.likely_reason = Some(lemonup_core::find::LikelyReason::VersionDiffers {
+        folder: "Bartender4".to_string(),
+        installed: Some("4.0".to_string()),
+        listed: "4.1".to_string(),
+    });
 
     let mut partial = found(FindSource::Wago, "Plater", "Plater", "2.0", "2.1");
     partial.label = FindLabel::Partial;
@@ -838,7 +843,7 @@ fn likely_partial_and_choose_one_say_why_they_are_not_linked() {
 
     assert_eq!(
         section_lines(&lines, "Likely matches (1)"),
-        ["  Bartender4  WoWInterface  the installed version differs from the release (4.1)"]
+        ["  Bartender4  WoWInterface  installed 4.0, WoWInterface has 4.1"]
     );
     assert_eq!(
         section_lines(&lines, "Partial matches (1)"),
@@ -850,6 +855,79 @@ fn likely_partial_and_choose_one_say_why_they_are_not_linked() {
             "  QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from",
             "  the release)",
         ]
+    );
+}
+
+/// A report with one Likely result, drawn plain and wide.
+fn likely_line(source: FindSource, folder: &str, reason: Option<LikelyReason>) -> String {
+    let mut likely = found(source, folder, folder, "1.0", "1.0");
+    likely.label = FindLabel::Likely;
+    likely.likely_reason = reason;
+    let report = FindReport {
+        results: vec![result_of(FindLabel::Likely, folder, folder, vec![likely])],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
+    section_lines(&lines, "Likely matches (1)")
+        .first()
+        .map(|line| line.trim().to_string())
+        .expect("a likely line")
+}
+
+#[test]
+fn a_likely_match_says_what_was_checked() {
+    // Wago.io hashed the files and none matched a release.
+    assert_eq!(
+        likely_line(
+            FindSource::Wago,
+            "Hekili",
+            Some(LikelyReason::FilesMatchNoRelease)
+        ),
+        "Hekili  Wago.io  1.0, its .toc names it; its files match no release on Wago.io"
+    );
+    // The versions were compared.
+    assert_eq!(
+        likely_line(
+            FindSource::Tukui,
+            "ElvUI",
+            Some(LikelyReason::VersionDiffers {
+                folder: "ElvUI".to_string(),
+                installed: Some("v15.17".to_string()),
+                listed: "16.01".to_string(),
+            })
+        ),
+        "ElvUI Forever  TukUI  installed v15.17, TukUI has 16.01"
+    );
+    assert_eq!(
+        likely_line(
+            FindSource::WowInterface,
+            "Simulationcraft",
+            Some(LikelyReason::VersionDiffers {
+                folder: "Simulationcraft".to_string(),
+                installed: Some("1.52.3".to_string()),
+                listed: "1.52.7".to_string(),
+            })
+        ),
+        "Simulationcraft  WoWInterface  installed 1.52.3, WoWInterface has 1.52.7"
+    );
+    // A folder other than the listed one is the one that differs.
+    assert_eq!(
+        likely_line(
+            FindSource::Tukui,
+            "ElvUI",
+            Some(LikelyReason::VersionDiffers {
+                folder: "ElvUI_Options".to_string(),
+                installed: None,
+                listed: "16.01".to_string(),
+            })
+        ),
+        "ElvUI Forever  TukUI  no installed version in ElvUI_Options, TukUI has 16.01"
+    );
+    // Nothing was checked.
+    assert_eq!(
+        likely_line(FindSource::Wago, "Plater", Some(LikelyReason::TocNamesIt)),
+        "Plater  Wago.io  1.0, its .toc names it; its files weren't checked"
     );
 }
 

@@ -1504,3 +1504,81 @@ fn a_likely_match_beside_a_partial_one_is_still_a_choice() {
         ]
     );
 }
+
+fn likely_reason_of(report: &FindReport, folder: &str) -> Option<LikelyReason> {
+    let found = result(report, folder);
+    assert_eq!(found.label, FindLabel::Likely, "{:#?}", report.results);
+    found.found().expect("candidate").likely_reason.clone()
+}
+
+#[test]
+fn a_likely_match_says_what_was_checked_on_wago() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Hekili",
+        &["## Version: 1.0", "## X-Wago-ID: HK"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let modules = vec![("Hekili".to_string(), "0".repeat(32))];
+
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &lookups(SourceAnswer::Found(vec![wago("HK", "Hekili", modules)])),
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::FilesMatchNoRelease)
+    );
+
+    // Without a Wago.io answer nothing but the .toc names it.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::Skipped));
+    assert_eq!(
+        likely_reason_of(&report, "Hekili"),
+        Some(LikelyReason::TocNamesIt)
+    );
+}
+
+#[test]
+fn a_likely_match_says_which_versions_were_compared() {
+    let fixture = fixture();
+    addon(&fixture.addons, "ElvUI", &["## Version: v15.17"]);
+    addon(&fixture.addons, "Simulationcraft", &["## Version: 1.52.3"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let mut lookups = lookups(SourceAnswer::Skipped);
+    lookups.tukui = SourceAnswer::Found(vec![TukuiPackage {
+        id: "elvui".to_string(),
+        name: "ElvUI".to_string(),
+        version: "16.01".to_string(),
+        web_url: "https://tukui.org/elvui".to_string(),
+        author: None,
+        directories: vec!["ElvUI".to_string()],
+    }]);
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "7",
+        "Simulationcraft",
+        "1.52.7",
+        &[("Simulationcraft", "1.52.7")],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    assert_eq!(
+        likely_reason_of(&report, "ElvUI"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "ElvUI".to_string(),
+            installed: Some("v15.17".to_string()),
+            listed: "16.01".to_string(),
+        })
+    );
+    assert_eq!(
+        likely_reason_of(&report, "Simulationcraft"),
+        Some(LikelyReason::VersionDiffers {
+            folder: "Simulationcraft".to_string(),
+            installed: Some("1.52.3".to_string()),
+            listed: "1.52.7".to_string(),
+        })
+    );
+}
