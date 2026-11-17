@@ -470,7 +470,8 @@ pub struct FoundAddon {
     pub matched_version: Option<String>,
     /// The source's newest version.
     pub latest_version: Option<String>,
-    /// Folders that move in from other Not linked addons.
+    /// Folders it takes that are not part of the addon now: they move in from other Not linked
+    /// addons, folders LemonUp has no row for yet included.
     pub joining: Vec<FolderMove>,
     /// Folders grouped under the parent now that the source doesn't list; they become their own
     /// Not linked addons.
@@ -574,7 +575,6 @@ struct Unit {
     /// for example after a scan that failed. Linking this addon would take them, so it is
     /// refused until a scan sorts them out.
     held: Vec<String>,
-    has_row: bool,
 }
 
 /// Every Not linked addon, and who holds each folder.
@@ -622,7 +622,6 @@ impl<'a> Groups<'a> {
                 folder: folders[0].clone(),
                 folders,
                 held: held_folders,
-                has_row: true,
             });
         }
         for local in &inputs.folders {
@@ -638,7 +637,6 @@ impl<'a> Groups<'a> {
                 folder: local.folder.clone(),
                 folders: vec![local.folder.clone()],
                 held: Vec::new(),
-                has_row: false,
             });
         }
         Self {
@@ -1195,18 +1193,18 @@ fn place(mut found: FoundAddon, inputs: &FindInputs, groups: &Groups<'_>) -> Fou
     let own_held = own_unit.map(|unit| unit.held.clone()).unwrap_or_default();
     let contains =
         |folders: &[String], folder: &str| folders.iter().any(|known| key(known) == key(folder));
+    // Every folder it takes that isn't the addon's own joins, whether or not LemonUp has a row
+    // for it yet (a folder without one is its own Not linked addon). Held folders are blocked
+    // below instead.
     found.joining = found
         .folders
         .iter()
-        .filter(|folder| !contains(&own, folder))
-        .filter_map(|folder| {
-            groups
+        .filter(|folder| !contains(&own, folder) && groups.holder(folder).is_none())
+        .map(|folder| FolderMove {
+            folder: folder.clone(),
+            from: groups
                 .unit_containing(folder)
-                .filter(|unit| unit.has_row)
-                .map(|unit| FolderMove {
-                    folder: folder.clone(),
-                    from: unit.folder.clone(),
-                })
+                .map_or_else(|| folder.clone(), |unit| unit.folder.clone()),
         })
         .collect();
     found.leaving = own

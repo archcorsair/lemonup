@@ -352,6 +352,29 @@ pub(crate) fn report_lines(
     lines
 }
 
+/// `lemonup find --link` first reads the AddOns folder and brings the rows up to date, as a scan
+/// does, so linking starts from how the folders are grouped now (a scan that failed earlier can
+/// leave a row listing folders it no longer has). If that read fails, the rows stay as they are
+/// and nothing is linked. `lemonup find` without `--link` changes nothing, so it doesn't scan.
+pub(crate) fn scan_before_linking(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    flavor: GameFlavor,
+) -> Result<(), LemonupError> {
+    database
+        .list_addons()
+        .and_then(|tracked| {
+            let report = scan_addons_dir_report(addon_dir, flavor, &tracked)?;
+            database.reconcile_scan(&report)
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            LemonupError::InvalidArgument(format!(
+                "could not read the AddOns folder, so nothing was linked: {error}"
+            ))
+        })
+}
+
 /// The candidates `lemonup find --link` links: every preselected (linkable `Exact`) one.
 pub(crate) fn exact_picks(report: &FindReport) -> Vec<FoundAddon> {
     report

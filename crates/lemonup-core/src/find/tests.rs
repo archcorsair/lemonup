@@ -1027,3 +1027,45 @@ fn files_wago_says_differ_stay_a_partial_match_when_wowinterface_versions_match(
     assert_eq!(candidate.differing, ["Clique_Options"]);
     assert_eq!(report.results.len(), 1);
 }
+
+#[test]
+fn every_folder_a_match_takes_over_joins_whether_or_not_it_has_a_row() {
+    let fixture = fixture();
+    addon(&fixture.addons, "GatherMate2", &["## Version: 2.0"]);
+    addon(
+        &fixture.addons,
+        "GatherMate2Storage_Midnight",
+        &["## Version: 2.0"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let modules = vec![
+        ("GatherMate2".to_string(), hash_of(&inputs, "GatherMate2")),
+        (
+            "GatherMate2Storage_Midnight".to_string(),
+            hash_of(&inputs, "GatherMate2Storage_Midnight"),
+        ),
+    ];
+    let lookups = lookups(SourceAnswer::Found(vec![wago(
+        "GM2",
+        "GatherMate2",
+        modules,
+    )]));
+    let joining = [FolderMove {
+        folder: "GatherMate2Storage_Midnight".to_string(),
+        from: "GatherMate2Storage_Midnight".to_string(),
+    }];
+
+    // Not scanned yet: no rows at all.
+    let unscanned = match_addons(&inputs, &[], None, &lookups);
+    // Scanned: GatherMate2 has a row, the storage folder doesn't.
+    let partly = match_addons(&inputs, &[manual_row("GatherMate2", &[])], None, &lookups);
+
+    for report in [unscanned, partly] {
+        let candidate = result(&report, "GatherMate2")
+            .found()
+            .expect("candidate")
+            .clone();
+        assert_eq!(candidate.joining, joining);
+        assert!(candidate.regroups());
+    }
+}

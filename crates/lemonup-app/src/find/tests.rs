@@ -337,3 +337,71 @@ fn find_link_reports_every_pick_the_database_holds_when_one_folder_moves_between
         ]
     );
 }
+
+#[test]
+fn find_link_refuses_without_yes_even_before_the_addons_folder_was_scanned() {
+    let mut sandbox = sandbox();
+    addon(&sandbox.addons, "GatherMate2", "2.0");
+    addon(&sandbox.addons, "GatherMate2Storage_Midnight", "2.0");
+    let inputs = FindInputs::read(&sandbox.addons, GameFlavor::Forever).expect("inputs");
+    let lookups = SourceLookups {
+        wago: SourceAnswer::Found(vec![wago_match(
+            &inputs,
+            "GM2",
+            &["GatherMate2", "GatherMate2Storage_Midnight"],
+            "1.0",
+        )]),
+        wowinterface: SourceAnswer::Found(Vec::new()),
+        tukui: SourceAnswer::Found(Vec::new()),
+    };
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    let error = link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        &report,
+        false,
+    )
+    .expect_err("needs --yes");
+
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "GatherMate2 (GatherMate2Storage_Midnight joins from GatherMate2Storage_Midnight)"
+        ),
+        "{message}"
+    );
+    assert!(sandbox.database.list_addons().expect("rows").is_empty());
+}
+
+#[test]
+fn find_link_scans_first_and_a_failed_scan_keeps_the_rows_and_links_nothing() {
+    let mut sandbox = sandbox();
+    addon(&sandbox.addons, "Pawn", "1.0");
+    sandbox
+        .database
+        .upsert_addon(&manual("Spy", &[]))
+        .expect("row");
+    let before = sandbox.database.list_addons().expect("rows");
+
+    let error = scan_before_linking(
+        &mut sandbox.database,
+        &sandbox.addons.join("Missing"),
+        GameFlavor::Forever,
+    )
+    .expect_err("no AddOns folder");
+
+    assert!(error.to_string().contains("nothing was linked"), "{error}");
+    assert_eq!(sandbox.database.list_addons().expect("rows"), before);
+
+    scan_before_linking(&mut sandbox.database, &sandbox.addons, GameFlavor::Forever).expect("scan");
+    let folders = sandbox
+        .database
+        .list_addons()
+        .expect("rows")
+        .into_iter()
+        .map(|row| row.folder)
+        .collect::<Vec<_>>();
+    assert_eq!(folders, ["Pawn"]);
+}

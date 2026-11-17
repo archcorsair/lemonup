@@ -293,6 +293,9 @@ async fn run_find(
     )?;
 
     let flavor = GameFlavor::for_addons_dir(&addon_dir);
+    if link {
+        crate::find::scan_before_linking(&mut database, &addon_dir, flavor)?;
+    }
     let rows = database.list_addons()?;
     let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
     let wago_lookups = inputs.wago_lookups(&rows, None);
