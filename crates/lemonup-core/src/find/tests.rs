@@ -983,3 +983,47 @@ fn linking_never_deletes_a_linked_addons_row_a_not_linked_row_still_lists() {
     );
     assert_eq!(fixture.database.list_addons().expect("rows"), rows);
 }
+
+#[test]
+fn files_wago_says_differ_stay_a_partial_match_when_wowinterface_versions_match() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Clique", &["## Version: v5.1.5-release"]);
+    addon(
+        &fixture.addons,
+        "Clique_Options",
+        &["## Version: v5.1.5-release"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let mut project = wago(
+        "CLQ",
+        "Clique",
+        vec![
+            ("Clique".to_string(), hash_of(&inputs, "Clique")),
+            (
+                "Clique_Options".to_string(),
+                "00000000000000000000000000000000".to_string(),
+            ),
+        ],
+    );
+    project.wowinterface_id = Some("5108".to_string());
+    let mut lookups = lookups(SourceAnswer::Found(vec![project]));
+    lookups.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "5108",
+        "Clique",
+        "v5.1.5-release",
+        &[
+            ("Clique", "v5.1.5-release"),
+            ("Clique_Options", "v5.1.5-release"),
+        ],
+    )]);
+
+    let report = match_addons(&inputs, &[], None, &lookups);
+
+    let found = result(&report, "Clique");
+    assert_eq!(found.label, FindLabel::Partial);
+    assert!(!found.preselected());
+    let candidate = found.found().expect("candidate");
+    assert_eq!(candidate.source, FindSource::Wago);
+    assert_eq!(candidate.differing, ["Clique_Options"]);
+    assert_eq!(report.results.len(), 1);
+}

@@ -1087,7 +1087,8 @@ pub fn match_addons(
 
 /// One project found on two sources is one candidate: Wago.io's cross reference to
 /// WoWInterface, or two sources that both match the same folders exactly. The stronger label
-/// stays; on a tie, Wago.io, then TukUI, then WoWInterface.
+/// stays; on a tie, Wago.io, then TukUI, then WoWInterface. When Wago.io's hashes say some
+/// files differ, its candidate stays whatever WoWInterface says, so it is never Exact.
 fn merge_same_projects(claims: Vec<Claim>) -> Vec<Claim> {
     let folder_set = |found: &FoundAddon| {
         let mut folders = found
@@ -1131,8 +1132,18 @@ fn merge_same_projects(claims: Vec<Claim>) -> Vec<Claim> {
             if !(cross_referenced || both_exact) {
                 continue;
             }
-            let keep_left = (a.found.label, priority(a.found.source))
-                <= (b.found.label, priority(b.found.source));
+            // Wago.io's hashes say the files differ: a version that matches on WoWInterface
+            // doesn't make them the same, so the Wago.io candidate (and what differs) stays.
+            let wago_differs = |found: &FoundAddon| {
+                found.source == FindSource::Wago && !found.differing.is_empty()
+            };
+            let keep_left =
+                if cross_referenced && (wago_differs(&a.found) || wago_differs(&b.found)) {
+                    wago_differs(&a.found)
+                } else {
+                    (a.found.label, priority(a.found.source))
+                        <= (b.found.label, priority(b.found.source))
+                };
             if keep_left {
                 dropped[right] = true;
             } else {
