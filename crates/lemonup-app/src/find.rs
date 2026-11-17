@@ -598,7 +598,7 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
 }
 
 mod human;
-pub(crate) use human::{LocalNames, human_closing, human_report};
+pub(crate) use human::{LocalNames, Paint, human_closing, human_report};
 
 #[cfg(test)]
 mod tests;

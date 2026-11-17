@@ -335,13 +335,19 @@ async fn run_find(
         }
     } else {
         let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
-        for line in crate::find::human_report(&report, &lookups.problems, &names, wago_folders) {
+        // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
+        // about stderr.
+        let paint = crate::find::Paint::for_stdout();
+        for line in
+            crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
+        {
             println!("{line}");
         }
         println!();
         let outcome = if link { Some(link_now()?) } else { None };
         // A refusal leaves the report on screen and ends the run with what happened.
-        for line in crate::find::human_closing(&report, &names, outcome)? {
+        let error_paint = crate::find::Paint::for_stderr();
+        for line in crate::find::human_closing(&report, &names, outcome, paint, error_paint)? {
             println!("{line}");
         }
     }

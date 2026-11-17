@@ -3,17 +3,139 @@
 //! key=value lines from the parent module instead.
 
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 
-use lemonup_core::find::{FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon};
+use crossterm::Command;
+use crossterm::style::{Attribute, Colored, SetAttribute, SetForegroundColor};
+use lemonup_core::find::{
+    FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon,
+};
 use lemonup_core::{AddonRecord, LemonupError, UpdateStatus, toc_edit};
+use ratatui::backend::IntoCrossterm;
+use ratatui::style::Color;
 
 use super::{LinkOutcome, SourceProblem, exact_picks};
 use crate::source_error::SourceErrorKind;
+use crate::theme::{ColorRoles, DisplayEnv};
 
 /// Longest line of a wrapped list or sentence. Addon lines are never wrapped or cut.
 const WIDTH: usize = 78;
 const INDENT: &str = "  ";
 const SUB_INDENT: &str = "      ";
+
+/// What a section heading means, which picks its color role.
+#[derive(Clone, Copy)]
+enum Tone {
+    /// Ready to link: the success role.
+    Good,
+    /// Needs a look or a choice: the warning role.
+    Warn,
+    /// A source failed: the problem role.
+    Problem,
+    /// Nothing LemonUp can do: the muted role.
+    Quiet,
+}
+
+/// Whether this console understands escape codes. Windows needs them switched on first.
+#[cfg(windows)]
+fn ansi_supported() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+fn ansi_supported() -> bool {
+    true
+}
+
+/// Whether the report is drawn in color: a terminal, and `NO_COLOR` not set.
+pub(crate) fn color_wanted(is_terminal: bool, display: DisplayEnv) -> bool {
+    is_terminal && !display.no_color
+}
+
+/// How the readable report is drawn. Colors are the Terminal theme's color roles, so they follow
+/// the person's own terminal palette. It is a value, not a look at the environment, so tests
+/// render both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Paint(Option<ColorRoles>);
+
+impl Paint {
+    /// No escape codes at all.
+    pub(crate) const PLAIN: Self = Self(None);
+
+    /// The Terminal theme's colors.
+    pub(crate) fn terminal() -> Self {
+        // The decision to use color was made by the caller. Without this, crossterm would drop
+        // every color again whenever `NO_COLOR` is set in the environment it runs in.
+        Colored::set_ansi_color_disabled(false);
+        Self(Some(ColorRoles::terminal()))
+    }
+
+    /// Colored for a stream that `is_terminal` (and that `display` allows), else plain.
+    pub(crate) fn for_stream(is_terminal: bool, display: DisplayEnv) -> Self {
+        if color_wanted(is_terminal, display) {
+            Self::terminal()
+        } else {
+            Self::PLAIN
+        }
+    }
+
+    pub(crate) fn for_stdout() -> Self {
+        let colors = std::io::stdout().is_terminal() && ansi_supported();
+        Self::for_stream(colors, DisplayEnv::detect())
+    }
+
+    pub(crate) fn for_stderr() -> Self {
+        let colors = std::io::stderr().is_terminal() && ansi_supported();
+        Self::for_stream(colors, DisplayEnv::detect())
+    }
+
+    fn apply(self, text: &str, pick: fn(&ColorRoles) -> Color, bold: bool) -> String {
+        let Some(roles) = self.0 else {
+            return text.to_string();
+        };
+        let color = pick(&roles);
+        if text.is_empty() || (color == Color::Reset && !bold) {
+            return text.to_string();
+        }
+        let mut out = String::new();
+        if bold {
+            let _ = SetAttribute(Attribute::Bold).write_ansi(&mut out);
+        }
+        if color != Color::Reset {
+            let _ = SetForegroundColor(color.into_crossterm()).write_ansi(&mut out);
+        }
+        out.push_str(text);
+        let _ = SetAttribute(Attribute::Reset).write_ansi(&mut out);
+        out
+    }
+
+    fn text(self, text: &str) -> String {
+        self.apply(text, |roles| roles.text, false)
+    }
+
+    fn muted(self, text: &str) -> String {
+        self.apply(text, |roles| roles.muted, false)
+    }
+
+    /// The role of "Update ready" in the TUI.
+    fn update_ready(self, text: &str) -> String {
+        self.apply(text, |roles| roles.amber, false)
+    }
+
+    pub(crate) fn bold(self, text: &str) -> String {
+        self.apply(text, |roles| roles.text, true)
+    }
+
+    fn heading(self, tone: Tone, text: &str) -> String {
+        let pick: fn(&ColorRoles) -> Color = match tone {
+            Tone::Good => |roles| roles.green,
+            Tone::Warn => |roles| roles.amber,
+            Tone::Problem => |roles| roles.red,
+            Tone::Quiet => |roles| roles.muted,
+        };
+        self.apply(text, pick, true)
+    }
+}
 
 /// The names LemonUp shows for the addons in the AddOns folder, by parent folder: the name of
 /// its row (its .toc Title, or the one the person set), else the Title of its folder.
@@ -55,6 +177,8 @@ struct Entry {
     name: String,
     source: String,
     version: String,
+    /// "update ready (x)", shown after the version in its own color.
+    update: Option<String>,
     notes: Vec<String>,
 }
 
@@ -64,7 +188,7 @@ fn pad(text: &str, width: usize) -> String {
 }
 
 /// The lines of a section's addons, sorted by name, with the name and source columns aligned.
-fn table(mut entries: Vec<Entry>) -> Vec<String> {
+fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
     entries.sort_by_key(|entry| entry.name.to_lowercase());
     let name_width = entries
         .iter()
@@ -78,27 +202,37 @@ fn table(mut entries: Vec<Entry>) -> Vec<String> {
         .unwrap_or(0);
     let mut lines = Vec::new();
     for entry in entries {
+        let mut version = paint.text(&entry.version);
+        if let Some(update) = &entry.update {
+            version.push_str(&paint.text(", "));
+            version.push_str(&paint.update_ready(update));
+        }
         lines.push(format!(
-            "{INDENT}{}  {}  {}",
-            pad(&entry.name, name_width),
-            pad(&entry.source, source_width),
-            entry.version
+            "{INDENT}{}  {}  {version}",
+            paint.text(&pad(&entry.name, name_width)),
+            paint.muted(&pad(&entry.source, source_width)),
         ));
-        lines.extend(entry.notes.iter().map(|note| format!("{SUB_INDENT}{note}")));
+        for note in &entry.notes {
+            lines.extend(
+                wrap_words(SUB_INDENT, note)
+                    .iter()
+                    .map(|line| paint.muted(line)),
+            );
+        }
     }
     lines
 }
 
-/// Fills lines of at most [`WIDTH`] columns with `units`, each kept whole.
-fn wrap_units(units: &[String]) -> Vec<String> {
+/// Fills lines of at most [`WIDTH`] columns with `units`, each kept whole, after `indent`.
+fn wrap_units(indent: &str, units: &[String]) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for unit in units {
         if line.is_empty() {
-            line = format!("{INDENT}{unit}");
+            line = format!("{indent}{unit}");
         } else if line.chars().count() + 1 + unit.chars().count() > WIDTH {
             lines.push(std::mem::take(&mut line));
-            line = format!("{INDENT}{unit}");
+            line = format!("{indent}{unit}");
         } else {
             line.push(' ');
             line.push_str(unit);
@@ -124,16 +258,22 @@ fn wrapped_list(items: Vec<String>) -> Vec<String> {
             }
         })
         .collect::<Vec<_>>();
-    wrap_units(&units)
+    wrap_units(INDENT, &units)
 }
 
-fn wrapped_text(text: &str) -> Vec<String> {
+/// `text` wrapped at spaces, every line after `indent`.
+fn wrap_words(indent: &str, text: &str) -> Vec<String> {
     wrap_units(
+        indent,
         &text
             .split_whitespace()
             .map(str::to_string)
             .collect::<Vec<_>>(),
     )
+}
+
+fn wrapped_text(text: &str) -> Vec<String> {
+    wrap_words(INDENT, text)
 }
 
 fn capitalize(text: &str) -> String {
@@ -164,14 +304,28 @@ fn update_ready(found: &FoundAddon) -> Option<&str> {
     }
 }
 
-fn notes_for_moves(found: &FoundAddon) -> Vec<String> {
+/// Whether `moved` is the addon's own folder, which another row holds now.
+fn is_own_folder(found: &FoundAddon, moved: &FolderMove) -> bool {
+    moved.folder.to_lowercase() == found.parent_folder.to_lowercase()
+}
+
+fn notes_for_moves(found: &FoundAddon, names: &LocalNames) -> Vec<String> {
     let mut notes = Vec::new();
-    if !found.joining.is_empty() {
-        let folders = found
-            .joining
-            .iter()
-            .map(|moved| moved.folder.as_str())
-            .collect::<Vec<_>>();
+    for moved in &found.joining {
+        if is_own_folder(found, moved) && !moved.is_own_addon() {
+            notes.push(format!(
+                "moves out of {}",
+                names.name(&moved.from, &moved.from)
+            ));
+        }
+    }
+    let folders = found
+        .joining
+        .iter()
+        .filter(|moved| !is_own_folder(found, moved))
+        .map(|moved| moved.folder.as_str())
+        .collect::<Vec<_>>();
+    if !folders.is_empty() {
         notes.push(format!("also takes {}", folders.join(", ")));
     }
     notes.extend(
@@ -192,19 +346,17 @@ fn notes_for_missing(found: &FoundAddon) -> Vec<String> {
 }
 
 fn ready_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
-    let mut version = found
+    let version = found
         .matched_version
         .clone()
         .unwrap_or_else(|| "unknown version".to_string());
-    if let Some(latest) = update_ready(found) {
-        version.push_str(&format!(", update ready ({latest})"));
-    }
-    let mut notes = notes_for_moves(found);
+    let mut notes = notes_for_moves(found, names);
     notes.extend(notes_for_missing(found));
     Entry {
         name: names.name(&found.parent_folder, &found.name),
         source: found.source.name().to_string(),
         version,
+        update: update_ready(found).map(|latest| format!("update ready ({latest})")),
         notes,
     }
 }
@@ -248,6 +400,7 @@ fn likely_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
             Some(installed) => format!("{installed}, {reason}"),
             None => reason,
         },
+        update: None,
         notes,
     }
 }
@@ -275,31 +428,45 @@ fn partial_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         name: names.name(&found.parent_folder, &found.name),
         source: found.source.name().to_string(),
         version,
+        update: None,
         notes,
     }
 }
 
-/// `Questie: Questie (QuestieDB differs from the release) or QuestieDev`.
-fn choose_one_line(result: &FindResult, names: &LocalNames) -> String {
+/// Why a candidate is one of the choices, in a few words.
+fn choice_why(candidate: &FoundAddon) -> Option<String> {
+    if !candidate.differing.is_empty() {
+        return Some(format!(
+            "{} {} from the release",
+            candidate.differing.join(", "),
+            plural(candidate.differing.len(), "differs", "differ")
+        ));
+    }
+    match candidate.label {
+        FindLabel::Exact => Some("exact match".to_string()),
+        FindLabel::Likely => Some(format!("likely, same {} project", candidate.source.name())),
+        _ => None,
+    }
+}
+
+/// `QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from the release)`,
+/// wrapped. The choices are named by their folders.
+fn choose_one_lines(result: &FindResult) -> Vec<String> {
     let mut seen = HashSet::new();
     let repeated = result
         .candidates
         .iter()
-        .any(|candidate| !seen.insert(candidate.name.to_lowercase()));
+        .any(|candidate| !seen.insert(candidate.parent_folder.to_lowercase()));
     let candidates = result
         .candidates
         .iter()
         .map(|candidate| {
-            let mut text = candidate.name.clone();
+            let mut text = candidate.parent_folder.clone();
             if repeated {
                 text.push_str(&format!(" on {}", candidate.source.name()));
             }
-            if !candidate.differing.is_empty() {
-                text.push_str(&format!(
-                    " ({} {} from the release)",
-                    candidate.differing.join(", "),
-                    plural(candidate.differing.len(), "differs", "differ")
-                ));
+            if let Some(why) = choice_why(candidate) {
+                text.push_str(&format!(" ({why})"));
             }
             text
         })
@@ -309,10 +476,7 @@ fn choose_one_line(result: &FindResult, names: &LocalNames) -> String {
         [only] => only.clone(),
         [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     };
-    format!(
-        "{INDENT}{}: {joined}",
-        names.name(&result.folder, &result.name)
-    )
+    wrap_words(INDENT, &joined)
 }
 
 /// The names of name-only results, sorted. Results that share one CurseForge project are one
@@ -372,11 +536,22 @@ fn found_of<'a>(results: &[&'a FindResult]) -> Vec<&'a FoundAddon> {
     results.iter().filter_map(|result| result.found()).collect()
 }
 
-fn section(lines: &mut Vec<String>, title: &str, count: usize, body: Vec<String>) {
+fn section(
+    lines: &mut Vec<String>,
+    paint: Paint,
+    tone: Tone,
+    title: &str,
+    count: usize,
+    body: Vec<String>,
+) {
     if !lines.is_empty() {
         lines.push(String::new());
     }
-    lines.push(format!("{title} ({count})"));
+    lines.push(format!(
+        "{} {}",
+        paint.heading(tone, title),
+        paint.muted(&format!("({count})"))
+    ));
     lines.extend(body);
 }
 
@@ -400,10 +575,11 @@ pub(crate) fn human_report(
     problems: &[SourceProblem],
     names: &LocalNames,
     wago_folders: usize,
+    paint: Paint,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(note) = note(report, problems, wago_folders) {
-        lines.push(note);
+        lines.push(paint.muted(&note));
     }
     let with = |label: FindLabel| {
         report
@@ -421,14 +597,28 @@ pub(crate) fn human_report(
             .into_iter()
             .map(|found| ready_entry(found, names))
             .collect::<Vec<_>>();
-        section(&mut lines, "Ready to link", entries.len(), table(entries));
+        section(
+            &mut lines,
+            paint,
+            Tone::Good,
+            "Ready to link",
+            entries.len(),
+            table(entries, paint),
+        );
     }
     if !blocked.is_empty() {
         let entries = found_of(&blocked)
             .into_iter()
             .map(|found| cant_link_entry(found, names))
             .collect::<Vec<_>>();
-        section(&mut lines, "Can't link yet", entries.len(), table(entries));
+        section(
+            &mut lines,
+            paint,
+            Tone::Warn,
+            "Can't link yet",
+            entries.len(),
+            table(entries, paint),
+        );
     }
     let likely = with(FindLabel::Likely);
     if !likely.is_empty() {
@@ -436,7 +626,14 @@ pub(crate) fn human_report(
             .into_iter()
             .map(|found| likely_entry(found, names))
             .collect::<Vec<_>>();
-        section(&mut lines, "Likely matches", entries.len(), table(entries));
+        section(
+            &mut lines,
+            paint,
+            Tone::Warn,
+            "Likely matches",
+            entries.len(),
+            table(entries, paint),
+        );
     }
     let partial = with(FindLabel::Partial);
     if !partial.is_empty() {
@@ -444,7 +641,14 @@ pub(crate) fn human_report(
             .into_iter()
             .map(|found| partial_entry(found, names))
             .collect::<Vec<_>>();
-        section(&mut lines, "Partial matches", entries.len(), table(entries));
+        section(
+            &mut lines,
+            paint,
+            Tone::Warn,
+            "Partial matches",
+            entries.len(),
+            table(entries, paint),
+        );
     }
     let choose = with(FindLabel::ChooseOne);
     if !choose.is_empty() {
@@ -453,16 +657,18 @@ pub(crate) fn human_report(
             .map(|result| {
                 (
                     names.name(&result.folder, &result.name).to_lowercase(),
-                    choose_one_line(result, names),
+                    choose_one_lines(result),
                 )
             })
             .collect::<Vec<_>>();
         body.sort();
         section(
             &mut lines,
+            paint,
+            Tone::Warn,
             "Choose one in LemonUp",
             choose.len(),
-            body.into_iter().map(|(_, line)| line).collect(),
+            body.into_iter().flat_map(|(_, lines)| lines).collect(),
         );
     }
     let not_checked = with(FindLabel::NotChecked);
@@ -478,7 +684,14 @@ pub(crate) fn human_report(
         {
             body.extend(problem_line(problem));
         }
-        section(&mut lines, "Not checked", not_checked.len(), body);
+        section(
+            &mut lines,
+            paint,
+            Tone::Problem,
+            "Not checked",
+            not_checked.len(),
+            body,
+        );
     }
     let unexplained = problems
         .iter()
@@ -489,7 +702,14 @@ pub(crate) fn human_report(
             .iter()
             .flat_map(|problem| problem_line(problem))
             .collect();
-        section(&mut lines, "Check failed", unexplained.len(), body);
+        section(
+            &mut lines,
+            paint,
+            Tone::Problem,
+            "Check failed",
+            unexplained.len(),
+            body,
+        );
     }
     for (label, title) in [
         (
@@ -503,6 +723,8 @@ pub(crate) fn human_report(
         if !results.is_empty() {
             section(
                 &mut lines,
+                paint,
+                Tone::Quiet,
                 title,
                 results.len(),
                 wrapped_list(name_list(&results, names)),
@@ -591,12 +813,21 @@ fn moves_text(regrouping: &[FoundAddon], names: &LocalNames) -> String {
     let mut clauses = Vec::new();
     for pick in regrouping {
         let name = names.name(&pick.parent_folder, &pick.name);
-        if !pick.joining.is_empty() {
-            let folders = pick
-                .joining
-                .iter()
-                .map(|moved| moved.folder.as_str())
-                .collect::<Vec<_>>();
+        for moved in &pick.joining {
+            if is_own_folder(pick, moved) && !moved.is_own_addon() {
+                clauses.push(format!(
+                    "{name} moves out of {}",
+                    names.name(&moved.from, &moved.from)
+                ));
+            }
+        }
+        let folders = pick
+            .joining
+            .iter()
+            .filter(|moved| !is_own_folder(pick, moved))
+            .map(|moved| moved.folder.as_str())
+            .collect::<Vec<_>>();
+        if !folders.is_empty() {
             clauses.push(format!("{name} also takes {}", folders.join(", ")));
         }
         match pick.leaving.as_slice() {
@@ -615,6 +846,19 @@ pub(crate) fn human_closing(
     report: &FindReport,
     names: &LocalNames,
     link: Option<LinkOutcome>,
+    paint: Paint,
+    error_paint: Paint,
+) -> Result<Vec<String>, LemonupError> {
+    let lines = closing_text(report, names, link, error_paint)?;
+    Ok(lines.iter().map(|line| paint.bold(line)).collect())
+}
+
+/// The closing lines as text. `error_paint` draws the refusal, which goes to stderr.
+fn closing_text(
+    report: &FindReport,
+    names: &LocalNames,
+    link: Option<LinkOutcome>,
+    error_paint: Paint,
 ) -> Result<Vec<String>, LemonupError> {
     let ready = exact_picks(report).len();
     let Some(outcome) = link else {
@@ -635,18 +879,20 @@ pub(crate) fn human_closing(
         LinkOutcome::NothingToLink => Ok(vec![
             "Nothing was linked. No addon is ready to link.".to_string(),
         ]),
-        LinkOutcome::NeedsYes(regrouping) => Err(LemonupError::Refused(format!(
-            "{} of these {} folders between addons: {}. Nothing was linked. \
+        LinkOutcome::NeedsYes(regrouping) => {
+            Err(LemonupError::Refused(error_paint.bold(&format!(
+                "{} of these {} folders between addons: {}. Nothing was linked. \
              Run `lemonup find --link --yes` to link the {}.",
-            regrouping.len(),
-            plural(regrouping.len(), "moves", "move"),
-            moves_text(&regrouping, names),
-            if ready == 1 {
-                "addon ready to link".to_string()
-            } else {
-                format!("{ready} addons ready to link")
-            }
-        ))),
+                regrouping.len(),
+                plural(regrouping.len(), "moves", "move"),
+                moves_text(&regrouping, names),
+                if ready == 1 {
+                    "addon ready to link".to_string()
+                } else {
+                    format!("{ready} addons ready to link")
+                }
+            ))))
+        }
         LinkOutcome::Linked { rows, unconfirmed } => Ok(linked_summary(&rows, &unconfirmed)),
     }
 }
