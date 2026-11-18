@@ -684,14 +684,11 @@ impl App {
             if wide {
                 spans.push(Span::styled(
                     format!("{}: ", game.display_name),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 ));
                 spans.push(Span::styled(format!("↑{ready} Update ready"), amber));
             } else {
-                spans.push(Span::styled(
-                    format!("{} ", game.display_name),
-                    Style::default().fg(roles.muted),
-                ));
+                spans.push(Span::styled(format!("{} ", game.display_name), roles.muted));
                 spans.push(Span::styled(format!("↑{ready}"), amber));
             }
         }
@@ -705,7 +702,7 @@ impl App {
     pub(super) fn games_sheet_body(&self, room: &SheetRoom) -> SheetBody<'static> {
         let width = room.width;
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let games = &self.games.games;
         let selected = self.games.selected.min(games.len());
         let intro = vec![Line::from(Span::styled(
@@ -800,7 +797,7 @@ impl App {
             ),
             None => Span::styled(
                 format!("{:<UPDATES_WIDTH$}", "Not checked yet"),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ),
         };
         let mut spans = vec![
@@ -816,7 +813,7 @@ impl App {
             updates,
         ];
         if in_use {
-            spans.push(Span::styled("current", Style::default().fg(roles.muted)));
+            spans.push(Span::styled("current", roles.muted));
         }
         Line::from(spans)
     }
@@ -824,7 +821,7 @@ impl App {
     /// What the keys do on the row under the cursor.
     fn games_hint_line(&self, selected: usize, width: u16) -> Line<'static> {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let key = |label: &'static str| {
             Span::styled(
                 label,
