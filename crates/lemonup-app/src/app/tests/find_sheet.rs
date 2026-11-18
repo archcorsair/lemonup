@@ -2254,7 +2254,10 @@ fn a_wide_rail_puts_needs_a_key_and_check_failed_on_the_sources_line() {
     }
     // The words keep their colors.
     let roles = app.ui_theme.roles;
-    assert_eq!(cell_at(&mut app, 138, 36, "Needs a key", 0).fg, roles.muted);
+    assert_eq!(
+        cell_at(&mut app, 138, 36, "Needs a key", 0).fg,
+        roles.muted.fg.expect("muted has a color")
+    );
     assert_eq!(cell_at(&mut app, 138, 36, "Check failed", 0).fg, roles.red);
 }
 
@@ -2360,21 +2363,24 @@ fn the_rail_colors_come_from_the_theme_roles() {
     // A narrow rail, in a floating sheet.
     let (width, height) = (100, 30);
     let sources = cell_at(&mut app, width, height, "Sources", 0);
-    assert_eq!(sources.fg, roles.muted);
+    assert_eq!(sources.fg, roles.muted.fg.expect("muted has a color"));
     assert!(sources.modifier.contains(Modifier::BOLD));
     // On: a blue number, a lemon box, the name in text, the count muted.
     let on = "1 [x] Wago.io        3";
     assert_eq!(cell_at(&mut app, width, height, on, 0).fg, roles.blue);
     assert_eq!(cell_at(&mut app, width, height, on, 2).fg, roles.lemon);
     assert_eq!(cell_at(&mut app, width, height, on, 6).fg, roles.text);
-    assert_eq!(cell_at(&mut app, width, height, on, 21).fg, roles.muted);
+    assert_eq!(
+        cell_at(&mut app, width, height, on, 21).fg,
+        roles.muted.fg.expect("muted has a color")
+    );
     // Off: the box, the name and "off" muted.
     let off = "2 [ ] WoWInterface off";
     assert_eq!(cell_at(&mut app, width, height, off, 0).fg, roles.blue);
     for offset in [2, 6, 19] {
         assert_eq!(
             cell_at(&mut app, width, height, off, offset).fg,
-            roles.muted
+            roles.muted.fg.expect("muted has a color")
         );
     }
     // Failed: "Check failed" in red.
@@ -2392,12 +2398,18 @@ fn the_rail_colors_come_from_the_theme_roles() {
     // Needs a key: a muted number, a dim box, the name and the words muted.
     app.wago_api_key = None;
     let key = "1 [-] Wago.io";
-    assert_eq!(cell_at(&mut app, width, height, key, 0).fg, roles.muted);
+    assert_eq!(
+        cell_at(&mut app, width, height, key, 0).fg,
+        roles.muted.fg.expect("muted has a color")
+    );
     assert_eq!(cell_at(&mut app, width, height, key, 2).fg, roles.dim);
-    assert_eq!(cell_at(&mut app, width, height, key, 6).fg, roles.muted);
+    assert_eq!(
+        cell_at(&mut app, width, height, key, 6).fg,
+        roles.muted.fg.expect("muted has a color")
+    );
     assert_eq!(
         cell_at(&mut app, width, height, "Needs a key", 0).fg,
-        roles.muted
+        roles.muted.fg.expect("muted has a color")
     );
 }
 
@@ -2833,7 +2845,7 @@ fn the_wago_notice_shows_the_first_time_wago_is_asked_and_never_again() {
     }
     assert_eq!(
         cell_at(&mut app, 120, 30, "Sends folder names", 0).fg,
-        app.ui_theme.roles.muted
+        app.ui_theme.roles.muted.fg.expect("muted has a color")
     );
     assert!(shared.wago_hash_notice_shown());
     // It stays in this sheet while Wago.io is on.

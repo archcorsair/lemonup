@@ -736,7 +736,7 @@ impl App {
                 )
                 .render(area, buffer);
         }
-        let arrow_style = Style::default().fg(roles.muted).bg(roles.sheet);
+        let arrow_style = roles.muted.bg(roles.sheet);
         if show_up {
             let line = Line::from(Span::styled(
                 format!("↑ {} more", hidden_above + 1),
@@ -781,7 +781,7 @@ impl App {
             .fg(if chrome.danger { roles.red } else { roles.text })
             .add_modifier(Modifier::BOLD);
         let key_style = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
-        let label_style = Style::default().fg(roles.muted);
+        let label_style = roles.muted;
         let outer = geometry.outer;
         let width = usize::from(outer.width);
 

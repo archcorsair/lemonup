@@ -188,19 +188,13 @@ impl App {
         value: impl Into<String>,
     ) -> Line<'static> {
         Line::from(vec![
-            Span::styled(
-                format!("{}: ", label.into()),
-                Style::default().fg(self.ui_theme.roles.muted),
-            ),
+            Span::styled(format!("{}: ", label.into()), self.ui_theme.roles.muted),
             Span::raw(value.into()),
         ])
     }
 
     pub(super) fn overlay_hint_line(&self, text: &str) -> Line<'static> {
-        Line::from(Span::styled(
-            text.to_string(),
-            Style::default().fg(self.ui_theme.roles.muted),
-        ))
+        Line::from(Span::styled(text.to_string(), self.ui_theme.roles.muted))
     }
 }
 

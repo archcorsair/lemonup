@@ -1279,7 +1279,7 @@ const END: &str = "\x1b[0m";
 const GREEN: &str = "\x1b[38;5;2m";
 const AMBER: &str = "\x1b[38;5;3m";
 const RED: &str = "\x1b[38;5;1m";
-const MUTED: &str = "\x1b[38;5;8m";
+const MUTED: &str = "\x1b[2m";
 
 fn colored_report() -> Vec<String> {
     human_report(
@@ -1724,7 +1724,7 @@ fn the_report_uses_the_colors_of_the_chosen_theme() {
     let dark = report_in_theme(ThemeMode::Dark, DisplayEnv::FULL);
     let roles = ColorRoles::dark();
     assert!(
-        dark.contains(&rgb(roles.muted)),
+        dark.contains(&rgb(roles.muted.fg.expect("a color"))),
         "dark muted missing: {dark:?}"
     );
     assert!(
@@ -1733,13 +1733,33 @@ fn the_report_uses_the_colors_of_the_chosen_theme() {
     );
 
     let light = report_in_theme(ThemeMode::Light, DisplayEnv::FULL);
-    assert!(light.contains(&rgb(ColorRoles::light().muted)), "{light:?}");
+    assert!(
+        light.contains(&rgb(ColorRoles::light().muted.fg.expect("a color"))),
+        "{light:?}"
+    );
 
     let terminal = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL);
     assert!(terminal.contains('\u{1b}'), "{terminal:?}");
     assert!(
         !terminal.contains("38;2;"),
         "terminal theme used 24-bit: {terminal:?}"
+    );
+}
+
+#[test]
+fn the_terminal_theme_writes_muted_text_as_dim_with_the_default_color() {
+    use crate::theme::DisplayEnv;
+    use lemonup_core::ThemeMode;
+
+    let report = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL);
+    assert!(
+        report.contains("\u{1b}[2mSent 44 folder names and file hashes to Wago.io.\u{1b}[0m"),
+        "{report:?}"
+    );
+    assert!(!report.contains("\u{1b}[90m"), "bright black: {report:?}");
+    assert!(
+        !report.contains("\u{1b}[38;5;8m"),
+        "bright black: {report:?}"
     );
 }
 

@@ -12,7 +12,7 @@ use lemonup_core::find::{
 };
 use lemonup_core::{AddonRecord, AppConfig, LemonupError, UpdateStatus, toc_edit};
 use ratatui::backend::IntoCrossterm;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use super::{FindTarget, LinkOutcome, SourceProblem, exact_picks};
 use crate::source_error::SourceErrorKind;
@@ -121,17 +121,22 @@ impl Paint {
         Self::for_stream(colors, DisplayEnv::detect(), config)
     }
 
-    fn apply(self, text: &str, pick: fn(&ColorRoles) -> Color, bold: bool) -> String {
+    fn apply(self, text: &str, pick: fn(&ColorRoles) -> Style, bold: bool) -> String {
         let Some(roles) = self.0 else {
             return text.to_string();
         };
-        let color = pick(&roles);
-        if text.is_empty() || (color == Color::Reset && !bold) {
+        let style = pick(&roles);
+        let color = style.fg.unwrap_or(Color::Reset);
+        let dim = style.add_modifier.contains(Modifier::DIM);
+        if text.is_empty() || (color == Color::Reset && !bold && !dim) {
             return text.to_string();
         }
         let mut out = String::new();
         if bold {
             let _ = SetAttribute(Attribute::Bold).write_ansi(&mut out);
+        }
+        if dim {
+            let _ = SetAttribute(Attribute::Dim).write_ansi(&mut out);
         }
         if color != Color::Reset {
             let _ = SetForegroundColor(color.into_crossterm()).write_ansi(&mut out);
@@ -142,7 +147,7 @@ impl Paint {
     }
 
     fn text(self, text: &str) -> String {
-        self.apply(text, |roles| roles.text, false)
+        self.apply(text, |roles| Style::new().fg(roles.text), false)
     }
 
     fn muted(self, text: &str) -> String {
@@ -151,19 +156,19 @@ impl Paint {
 
     /// The role of "Update ready" in the TUI.
     fn update_ready(self, text: &str) -> String {
-        self.apply(text, |roles| roles.amber, false)
+        self.apply(text, |roles| Style::new().fg(roles.amber), false)
     }
 
     pub(crate) fn bold(self, text: &str) -> String {
-        self.apply(text, |roles| roles.text, true)
+        self.apply(text, |roles| Style::new().fg(roles.text), true)
     }
 
     fn heading(self, tone: Tone, text: &str) -> String {
-        let pick: fn(&ColorRoles) -> Color = match tone {
-            Tone::Good => |roles| roles.green,
-            Tone::Warn => |roles| roles.amber,
-            Tone::Problem => |roles| roles.red,
-            Tone::Quiet => |roles| roles.text,
+        let pick: fn(&ColorRoles) -> Style = match tone {
+            Tone::Good => |roles| Style::new().fg(roles.green),
+            Tone::Warn => |roles| Style::new().fg(roles.amber),
+            Tone::Problem => |roles| Style::new().fg(roles.red),
+            Tone::Quiet => |roles| Style::new().fg(roles.text),
         };
         self.apply(text, pick, true)
     }
