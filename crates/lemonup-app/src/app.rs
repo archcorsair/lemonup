@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding, rebind_addon_dir};
+use lemonup_core::curseforge::CurseForgeManaged;
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
@@ -2292,11 +2293,13 @@ enum SearchInstallState {
     },
     /// A direct install found its folders already in AddOns (say a "Not
     /// linked" copy): the replace question is open. `name` is the addon
-    /// already there when known, `folders` what a yes replaces.
+    /// already there when known, `folders` what a yes replaces, and
+    /// `curseforge` whether CurseForge also manages one of them.
     ConfirmDirectReplace {
         request: DirectInstallRequest,
         name: String,
         folders: Vec<String>,
+        curseforge: bool,
     },
     /// `addon_name` is `None` when the search itself failed.
     Error {
@@ -2606,7 +2609,14 @@ impl SearchPaneState {
         next
     }
 
-    fn require_direct_replace(&self, request: DirectInstallRequest, clash: &FolderClash) -> Self {
+    /// Asks before replacing the clash's folders. `curseforge` is what
+    /// CurseForge manages now, read once for this question.
+    fn require_direct_replace(
+        &self,
+        request: DirectInstallRequest,
+        clash: &FolderClash,
+        curseforge: CurseForgeManaged,
+    ) -> Self {
         let mut next = self.clone();
         next.install_state = SearchInstallState::ConfirmDirectReplace {
             name: clash
@@ -2614,20 +2624,22 @@ impl SearchPaneState {
                 .clone()
                 .unwrap_or_else(|| request.name()),
             request,
+            curseforge: curseforge.manages_any(clash.replaceable.iter().map(String::as_str)),
             folders: clash.replaceable.clone(),
         };
         next
     }
 
-    /// The open replace question: the request, the addon's name and the
-    /// folders a yes replaces.
-    fn pending_direct_replace(&self) -> Option<(&DirectInstallRequest, &str, &[String])> {
+    /// The open replace question: the request, the addon's name, the
+    /// folders a yes replaces and whether CurseForge also manages one.
+    fn pending_direct_replace(&self) -> Option<(&DirectInstallRequest, &str, &[String], bool)> {
         match &self.install_state {
             SearchInstallState::ConfirmDirectReplace {
                 request,
                 name,
                 folders,
-            } => Some((request, name.as_str(), folders.as_slice())),
+                curseforge,
+            } => Some((request, name.as_str(), folders.as_slice(), *curseforge)),
             _ => None,
         }
     }
@@ -2739,6 +2751,8 @@ pub struct PendingWagoInstallRequest {
 pub struct WagoInstallConfirmation {
     request: PendingWagoInstallRequest,
     inspection: WagoInstallInspection,
+    /// CurseForge also manages a folder the question replaces.
+    curseforge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2783,6 +2797,11 @@ pub struct App {
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
+    /// Where CurseForge's record may be; read only, once per action.
+    curseforge_files: Vec<PathBuf>,
+    /// What CurseForge manages in the AddOns folder, as of the last scan or
+    /// the last time Details opened. Details reads it; nothing else does.
+    curseforge: CurseForgeManaged,
     wago_install_in_progress: bool,
     direct_install_in_progress: bool,
     auto_check_in_progress: bool,
@@ -2983,6 +3002,8 @@ impl App {
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
+            curseforge_files: lemonup_core::curseforge::record_files(),
+            curseforge: CurseForgeManaged::default(),
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -4874,7 +4895,8 @@ impl App {
                 self.search_pane.cancel_direct_install(),
             )],
             AppMessage::SearchConfirmReplace => {
-                if let Some((request, name, folders)) = self.search_pane.pending_direct_replace() {
+                if let Some((request, name, folders, _)) = self.search_pane.pending_direct_replace()
+                {
                     self.start_direct_install_actions(
                         request.clone(),
                         folders.to_vec(),
@@ -5742,6 +5764,9 @@ impl App {
                         AppAction::SetWagoInstallInProgress(false),
                         AppAction::SetPendingWagoInstallConfirmation(Some(
                             WagoInstallConfirmation {
+                                curseforge: self.curseforge_now().manages_any(
+                                    inspection.existing_folders.iter().map(String::as_str),
+                                ),
                                 request,
                                 inspection,
                             },
@@ -5772,7 +5797,10 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
-                            &format!("{} is installed", outcome.summary.addon_name),
+                            &self.with_curseforge_note(
+                                format!("{} is installed", outcome.summary.addon_name),
+                                outcome.summary.installed_folders.iter().map(String::as_str),
+                            ),
                         )),
                     ]
                 }
@@ -5825,10 +5853,22 @@ impl App {
                     result: Ok(outcome),
                     ..
                 } => {
-                    let mut status = format!(
-                        "{} is installed from {}",
-                        outcome.addon_name,
-                        request.provider.label()
+                    let folders = outcome
+                        .sync
+                        .addons
+                        .iter()
+                        .find(|row| row.folder == outcome.parent_folder)
+                        .map(|row| row.owned_folders.iter().map(|owned| owned.name.as_str()))
+                        .into_iter()
+                        .flatten()
+                        .chain([outcome.parent_folder.as_str()]);
+                    let mut status = self.with_curseforge_note(
+                        format!(
+                            "{} is installed from {}",
+                            outcome.addon_name,
+                            request.provider.label()
+                        ),
+                        folders,
                     );
                     if let Some(warning) = &outcome.warning {
                         status.push_str(&format!(" | {warning}"));
@@ -5862,6 +5902,7 @@ impl App {
                         AppAction::SetSearchPaneState(self.search_pane.require_direct_replace(
                             request,
                             &error.clash.clone().unwrap_or_default(),
+                            self.curseforge_now(),
                         )),
                         AppAction::SetDirectInstallInProgress(false),
                     ]
@@ -5935,6 +5976,9 @@ impl App {
             AppAction::SetFooterKeyPulse(pulse) => self.shell_ui.footer_pulse = pulse,
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
+                if active {
+                    self.curseforge = self.curseforge_now();
+                }
             }
             AppAction::SetSheetOffset(offset) => {
                 let mut scroll = self.sheet_scroll.get();
@@ -6677,6 +6721,7 @@ impl App {
                     path: path.clone(),
                     summary: summary.clone(),
                 };
+                self.curseforge = self.curseforge_now();
                 // Looking through the folder ends with nothing to say.
                 self.status_line = self.dashboard_status_for(
                     StatusKind::Quiet,
@@ -7129,6 +7174,29 @@ impl App {
 
     fn with_base_status(&self, kind: StatusKind, message: &str) -> StatusMessage {
         StatusMessage::new(kind, format!("{message} | {}", self.base_status_line()))
+    }
+
+    /// What CurseForge manages in the AddOns folder right now: reads its
+    /// record once. Nothing when LemonUp doesn't know the folder yet.
+    fn curseforge_now(&self) -> CurseForgeManaged {
+        self.effective_addon_dir
+            .as_deref()
+            .map(|addon_dir| CurseForgeManaged::read(addon_dir, &self.curseforge_files))
+            .unwrap_or_default()
+    }
+
+    /// `text` with ". CurseForge also manages it" when it manages any of
+    /// `folders`: the short form that fits the status line.
+    fn with_curseforge_note<'a>(
+        &self,
+        text: String,
+        folders: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        if self.curseforge_now().manages_any(folders) {
+            format!("{text}. CurseForge also manages it")
+        } else {
+            text
+        }
     }
 
     fn dashboard_status_for(
@@ -8760,6 +8828,42 @@ mod tests {
 
     mod find_sheet;
 
+    /// A synthetic `_retail_` game folder with a `.curseclient`, and a
+    /// CurseForge record next to it whose instance has that GUID and
+    /// manages `managed` (not ignored). Returns the temp dir, the AddOns
+    /// folder and the record file.
+    fn curseforge_game(managed: &[&str]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        const GUID: &str = "00000000-0000-4000-8000-0000000000aa";
+        let temp = tempdir().expect("temp");
+        let flavor = temp.path().join("World of Warcraft").join("_retail_");
+        let addons = flavor.join("Interface").join("AddOns");
+        fs::create_dir_all(&addons).expect("addons");
+        fs::write(flavor.join(".curseclient"), GUID).expect("client");
+        let modules = managed
+            .iter()
+            .map(|folder| serde_json::json!({ "foldername": folder }))
+            .collect::<Vec<_>>();
+        let record = serde_json::json!([{
+            "guid": GUID,
+            "installPath": flavor,
+            "installedAddons": [{
+                "preferenceIsIgnored": false,
+                "installedFile": { "modules": modules },
+            }],
+        }]);
+        let file = temp.path().join("AddonGameInstance.json");
+        fs::write(&file, serde_json::to_vec(&record).expect("json")).expect("record");
+        (temp, addons, file)
+    }
+
+    /// Points `app` at a [`curseforge_game`]; keep the returned dir alive.
+    fn use_curseforge(app: &mut App, managed: &[&str]) -> tempfile::TempDir {
+        let (temp, addons, file) = curseforge_game(managed);
+        app.effective_addon_dir = Some(addons);
+        app.curseforge_files = vec![file];
+        temp
+    }
+
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         let config = AppConfig::new_unconfigured();
@@ -8825,6 +8929,9 @@ mod tests {
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
+            // Tests never read the real CurseForge record.
+            curseforge_files: Vec::new(),
+            curseforge: lemonup_core::curseforge::CurseForgeManaged::default(),
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -9400,6 +9507,7 @@ mod tests {
                 existing_folders: vec!["WeakAuras".to_string()],
                 tracked_parent: Some("WeakAuras".to_string()),
             },
+            curseforge: false,
         }
     }
 
@@ -9902,6 +10010,42 @@ mod tests {
     }
 
     #[test]
+    fn details_says_when_curseforge_also_manages_a_linked_addon() {
+        let select = |app: &mut App, folder: &str| {
+            let index = (0..app.dashboard.rows.len())
+                .find(|index| {
+                    app.dashboard.list_state.select(Some(*index));
+                    app.inspect_resolved_target()
+                        .is_some_and(|target| target.item.folder == folder)
+                })
+                .unwrap_or_else(|| panic!("no row for {folder}"));
+            app.dashboard.list_state.select(Some(index));
+        };
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        // Second's own folder is Second_Config; First is Not linked.
+        let _game = use_curseforge(&mut app, &["second_config", "First"]);
+        select(&mut app, "Second");
+        app.apply(AppAction::SetInspectOverlay(true));
+        for (width, height) in [(80, 24), (160, 40)] {
+            let rows = render_rows(&mut app, width, height).join("\n");
+            assert!(
+                rows.contains("CurseForge also"),
+                "{width}x{height}:\n{rows}"
+            );
+            assert!(rows.contains("Ignored there"), "{width}x{height}:\n{rows}");
+        }
+
+        // A Not linked addon, and a linked one CurseForge doesn't manage.
+        for folder in ["First", "Third"] {
+            select(&mut app, folder);
+            for (width, height) in [(80, 24), (160, 40)] {
+                let rows = render_rows(&mut app, width, height).join("\n");
+                assert!(!rows.contains("CurseForge"), "{folder}:\n{rows}");
+            }
+        }
+    }
+
+    #[test]
     fn details_arrows_and_jk_move_to_the_previous_or_next_addon() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
@@ -10374,6 +10518,7 @@ mod tests {
                 source: "TukUI",
                 direct: true,
                 folders: vec!["ElvUI".to_string(), "ElvUI_Options".to_string()],
+                curseforge: false,
             })
         );
         app.note_question_shown(Instant::now());
@@ -10392,6 +10537,7 @@ mod tests {
         app.search_pane = app.search_pane.require_direct_replace(
             elvui_request(),
             &folders_in_the_way(&["ElvUI"], None).clash.expect("clash"),
+            lemonup_core::curseforge::CurseForgeManaged::default(),
         );
         app.note_question_shown(Instant::now());
         assert_eq!(
@@ -10400,6 +10546,47 @@ mod tests {
         );
         apply_all(&mut app, AppMessage::SearchCancelReplace);
         assert_eq!(app.active_question(), None);
+    }
+
+    #[test]
+    fn a_direct_replace_question_says_when_curseforge_also_manages_a_folder() {
+        let mut app = installing_elvui();
+        let _game = use_curseforge(&mut app, &["elvui_options"]);
+        apply_all(
+            &mut app,
+            AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                request: elvui_request(),
+                result: Err(folders_in_the_way(
+                    &["ElvUI", "ElvUI_Options"],
+                    Some("ElvUI"),
+                )),
+            }),
+        );
+        assert!(matches!(
+            app.active_question(),
+            Some(crate::app::dialog::Question::ReplaceAddon {
+                curseforge: true,
+                ..
+            })
+        ));
+
+        // CurseForge manages something else: no note.
+        let mut app = installing_elvui();
+        let _game = use_curseforge(&mut app, &["Details"]);
+        apply_all(
+            &mut app,
+            AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                request: elvui_request(),
+                result: Err(folders_in_the_way(&["ElvUI"], Some("ElvUI"))),
+            }),
+        );
+        assert!(matches!(
+            app.active_question(),
+            Some(crate::app::dialog::Question::ReplaceAddon {
+                curseforge: false,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -11890,6 +12077,7 @@ mod tests {
                 existing_folders: vec!["WeakAuras".to_string()],
                 tracked_parent: Some("WeakAuras".to_string()),
             },
+            curseforge: false,
         });
         app.note_question_shown(Instant::now());
 
@@ -12063,6 +12251,55 @@ mod tests {
             app.tracked_wago_result_folder(&result).as_deref(),
             Some("WeakAuras")
         );
+    }
+
+    fn weakauras_installed() -> AppMessage {
+        AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+            WagoInstallTaskOutcome::Installed(WagoInstallOutcome {
+                summary: WagoInstallSummary {
+                    addon_id: "VBNBxKx5".to_string(),
+                    addon_name: "WeakAuras".to_string(),
+                    parent_folder: "WeakAuras".to_string(),
+                    installed_folders: vec![
+                        "WeakAuras".to_string(),
+                        "WeakAurasOptions".to_string(),
+                    ],
+                    stability: crate::wago::WagoStability::Stable,
+                    version: Some("5.21.1".to_string()),
+                    dry_run: false,
+                },
+                sync: AddonScanOutcome {
+                    path: PathBuf::from("/sandbox/AddOns"),
+                    summary: ScanSummary::default(),
+                    addons: Vec::new(),
+                    drift_report: DriftReport::empty(),
+                },
+            }),
+        )))
+    }
+
+    #[test]
+    fn the_install_result_line_says_when_curseforge_also_manages_the_addon() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let _game = use_curseforge(&mut app, &["WeakAurasOptions"]);
+        apply_all(&mut app, weakauras_installed());
+        let (text, kind) = app.status_line_message().expect("result line");
+        assert_eq!(kind, StatusKind::Done);
+        assert_eq!(text, "WeakAuras is installed. CurseForge also manages it");
+        let rows = render_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("WeakAuras is installed. CurseForge also manages it")),
+            "{}",
+            rows.join("\n")
+        );
+
+        // Not managed: the line says only what happened.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let _game = use_curseforge(&mut app, &["Details"]);
+        apply_all(&mut app, weakauras_installed());
+        let (text, _) = app.status_line_message().expect("result line");
+        assert_eq!(text, "WeakAuras is installed");
     }
 
     #[test]
@@ -19274,6 +19511,55 @@ mod tests {
         }
 
         #[test]
+        fn the_replace_question_says_when_curseforge_also_manages_it_and_fits_at_80x24() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _game = use_curseforge(&mut app, &["weakauras_part07"]);
+            let confirmation = pending_wago_confirmation();
+            let mut inspection = confirmation.inspection;
+            inspection.existing_folders = (1..=14)
+                .map(|index| format!("WeakAuras_Part{index:02}"))
+                .collect();
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::NeedsConfirmation {
+                        request: confirmation.request,
+                        inspection: inspection.clone(),
+                    },
+                ))),
+            );
+            assert_dialog(
+                &mut app,
+                "Replace your copy of WeakAuras?",
+                &[
+                    "These folders are replaced:",
+                    "WeakAuras_Part01",
+                    "more",
+                    "CurseForge also manages this addon.",
+                    "(Install Settings).",
+                    "y  replace it",
+                    "n  leave it alone",
+                ],
+            );
+
+            // CurseForge manages none of these folders: no note.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _game = use_curseforge(&mut app, &["Details"]);
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::NeedsConfirmation {
+                        request: pending_wago_confirmation().request,
+                        inspection,
+                    },
+                ))),
+            );
+            assert!(app.active_question().is_some());
+            let rows = render_rows(&mut app, 80, 24).join("\n");
+            assert!(!rows.contains("CurseForge"), "{rows}");
+        }
+
+        #[test]
         fn the_replace_question_lists_its_folders_and_fits_at_80x24() {
             let mut app = app_for_tests(ShellMode::Dashboard);
             let mut confirmation = pending_wago_confirmation();
@@ -19389,6 +19675,7 @@ mod tests {
                     source: "Wago.io",
                     direct: false,
                     folders: Vec::new(),
+                    curseforge: false,
                 }
                 .danger()
             );

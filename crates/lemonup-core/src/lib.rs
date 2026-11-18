@@ -1,5 +1,6 @@
 pub mod binding;
 pub mod config;
+pub mod curseforge;
 pub mod domain;
 pub mod error;
 pub mod events;

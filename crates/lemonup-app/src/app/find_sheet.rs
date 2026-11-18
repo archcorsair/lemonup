@@ -91,6 +91,8 @@ pub(crate) struct FindLinkOutcome {
     pub(crate) rows: Vec<AddonRecord>,
     /// Linked addons the database doesn't hold after all.
     pub(crate) unconfirmed: Vec<String>,
+    /// The linked addons CurseForge also manages.
+    pub(crate) curseforge: Vec<String>,
     /// The list after the rescan; `None` when that read failed.
     pub(super) sync: Option<AddonScanOutcome>,
 }
@@ -123,6 +125,8 @@ pub(crate) struct FindState {
     pub(crate) generation: u64,
     /// The link question is open.
     pub(crate) question: bool,
+    /// The picked addons CurseForge also manages, read when the question opened.
+    pub(crate) question_curseforge: Vec<String>,
     pub(crate) question_offset: u16,
     /// How far the open question's folder list scrolls, as last drawn.
     pub(crate) question_max: std::cell::Cell<u16>,
@@ -855,7 +859,14 @@ impl App {
                     self.find.step = Some(step);
                 }
             }
-            FindAction::SetQuestion(open) => self.find.question = open,
+            FindAction::SetQuestion(open) => {
+                self.find.question = open;
+                self.find.question_curseforge = if open {
+                    self.find_picks_curseforge_manages()
+                } else {
+                    Vec::new()
+                };
+            }
             FindAction::SetQuestionOffset(offset) => self.find.question_offset = offset,
             FindAction::StartLink {
                 links,
@@ -876,9 +887,11 @@ impl App {
                 self.apply(status);
                 let sender = self.task_events_tx.clone();
                 let state_db_file = self.state_db_file.clone();
+                let curseforge_files = self.curseforge_files.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        link_found(&state_db_file, &addon_dir, &links).map(Box::new)
+                        link_found(&state_db_file, &addon_dir, &links, &curseforge_files)
+                            .map(Box::new)
                     })
                     .await
                     .unwrap_or_else(|error| Err(error.to_string()));
@@ -971,6 +984,23 @@ impl App {
         });
     }
 
+    /// The names of the picked addons CurseForge also manages: reads its
+    /// record once.
+    fn find_picks_curseforge_manages(&self) -> Vec<String> {
+        let Some(results) = self.find.results() else {
+            return Vec::new();
+        };
+        let managed = self.curseforge_now();
+        results
+            .picked()
+            .into_iter()
+            .filter(|(candidate, _)| {
+                managed.manages_any(candidate.folders.iter().map(String::as_str))
+            })
+            .map(|(candidate, _)| candidate.name.clone())
+            .collect()
+    }
+
     /// The question enter on "Link" asks, while it is open.
     pub(super) fn find_question(&self) -> Option<dialog::Question> {
         if !self.find.question {
@@ -1002,6 +1032,7 @@ impl App {
             taken,
             replaced,
             added,
+            curseforge: self.find.question_curseforge.clone(),
             offset: self.find.question_offset,
         })
     }
@@ -1479,6 +1510,7 @@ pub(crate) fn link_found(
     state_db_file: &Path,
     addon_dir: &Path,
     links: &[FoundAddon],
+    curseforge_files: &[PathBuf],
 ) -> std::result::Result<FindLinkOutcome, String> {
     let flavor = GameFlavor::for_addons_dir(addon_dir);
     let linked = {
@@ -1508,9 +1540,21 @@ pub(crate) fn link_found(
             None => unconfirmed.push(linked.name.clone()),
         }
     }
+    let managed = CurseForgeManaged::read(addon_dir, curseforge_files);
+    let curseforge = stored
+        .iter()
+        .filter(|row| {
+            managed.manages_any(
+                std::iter::once(row.folder.as_str())
+                    .chain(row.owned_folders.iter().map(|owned| owned.name.as_str())),
+            )
+        })
+        .map(|row| row.name.clone())
+        .collect();
     Ok(FindLinkOutcome {
         rows: stored,
         unconfirmed,
+        curseforge,
         sync,
     })
 }
@@ -1525,6 +1569,12 @@ pub(crate) fn linked_status(outcome: &FindLinkOutcome) -> (StatusKind, String) {
             addon_count_label(outcome.rows.len()),
             parts.join(", ")
         );
+    }
+    if !outcome.curseforge.is_empty() {
+        text.push_str(&format!(
+            " CurseForge also manages {}.",
+            outcome.curseforge.join(", ")
+        ));
     }
     if !outcome.unconfirmed.is_empty() {
         if !text.is_empty() {

@@ -1007,6 +1007,16 @@ fn closing_text(
                 }
             ))))
         }
-        LinkOutcome::Linked { rows, unconfirmed } => Ok(linked_summary(&rows, &unconfirmed)),
+        LinkOutcome::Linked {
+            rows,
+            unconfirmed,
+            curseforge,
+        } => {
+            let mut lines = linked_summary(&rows, &unconfirmed);
+            if !curseforge.is_empty() {
+                lines.push(lemonup_core::curseforge::hint_naming(&curseforge));
+            }
+            Ok(lines)
+        }
     }
 }
