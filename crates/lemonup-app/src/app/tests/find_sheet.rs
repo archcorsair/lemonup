@@ -188,7 +188,10 @@ fn capital_f_opens_the_sheet_and_starts_looking_at_once() {
     assert_eq!(app.find.jobs, vec![FindJob::Read]);
     let shown = screen(&mut app, 120, 30);
     assert!(shown.contains("Find your addons online"), "{shown}");
-    assert!(shown.contains("Reading 1 folders"), "{shown}");
+    assert!(
+        shown.contains("Reading 1 folder") && !shown.contains("Reading 1 folders"),
+        "{shown}"
+    );
     assert!(!shown.contains("Look for"), "{shown}");
 
     // Help lists F on the list and beside docked Details.
@@ -324,7 +327,11 @@ fn esc_while_looking_changes_nothing_and_a_late_answer_is_dropped() {
     open_find(&mut app);
     let generation = app.find.generation;
     let before = app.dashboard.items.clone();
-    assert!(screen(&mut app, 120, 30).contains("Reading 1 folders"));
+    let shown = screen(&mut app, 120, 30);
+    assert!(
+        shown.contains("Reading 1 folder") && !shown.contains("Reading 1 folders"),
+        "{shown}"
+    );
 
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.shell_ui.overlay.active, None);

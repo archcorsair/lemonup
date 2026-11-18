@@ -1498,7 +1498,10 @@ impl App {
                 body.rail(rail.width(), self.find_rail(rail));
                 if self.find.read.is_none() {
                     body.text(vec![Line::from(Span::styled(
-                        format!("Reading {folders} folders{ellipsis}"),
+                        format!(
+                            "Reading {folders} folder{}{ellipsis}",
+                            plural_suffix(*folders)
+                        ),
                         text,
                     ))]);
                 }
