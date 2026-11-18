@@ -10,8 +10,8 @@
 
 [![Test](https://github.com/archcorsair/lemonup/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/archcorsair/lemonup/actions/workflows/test.yml)
 
-**LemonUp** finds your WoW install, shows every addon and whether it has an update, and keeps
-them up to date from GitHub, WoWInterface, TukUI and Wago.io. It runs in your terminal as a TUI,
+**LemonUp** finds your WoW install, shows every addon and whether it has an update, and updates
+them from GitHub, WoWInterface, TukUI and Wago.io. It runs in your terminal as a TUI,
 with a CLI for scripts, and ships as one binary for Linux, macOS and Windows.
 
 ![LemonUp updating addons](https://lemonup.org/demos/lemonup-manage.gif)
@@ -103,16 +103,15 @@ lemonup update-all --dry-run
 ```
 
 Find where the addons LemonUp didn't install come from (Wago.io, WoWInterface and TukUI), then
-link the exact matches so LemonUp keeps them updated. Nothing is downloaded:
+link the exact matches. Linking downloads nothing:
 
 ```sh
 lemonup find
 lemonup find --link
 ```
 
-`lemonup find` prints a readable report: what is ready to link, what is only a likely match, and
-what was not found, ending with what was changed (nothing, unless you pass `--link`). Add
-`--plain` for one `key=value` line per result, for scripts.
+`lemonup find` prints a report: what is ready to link, what is only a likely match, and what was
+not found. Add `--plain` for one `key=value` line per result.
 
 `--source` limits which sources are asked, as a comma separated list of `wago`, `wowinterface` and
 `tukui` (default: all of them; the choice the TUI remembers is not used):
@@ -136,8 +135,7 @@ settings and backups stay on disk.
 
 Plain `lemonup` opens the game you used last. The header shows when another game has updates
 ready: while LemonUp is open it checks your other games in the background (Settings, "Check other
-games", from Off to every 3 days; once a day by default). It only checks them and never updates
-or changes them.
+games", from Off to every 3 days; once a day by default). It doesn't update them.
 
 Settings shows what all games share (the Wago.io key, theme, symbols, motion and update checks)
 apart from what belongs to the game you're using (backups, show libraries and the game folder).
