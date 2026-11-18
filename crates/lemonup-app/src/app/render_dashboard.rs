@@ -1480,7 +1480,7 @@ impl App {
                 Style::default().fg(roles.dim),
             ));
         }
-        // "backed up your game settings first", once the backup ran.
+        // "settings backed up", once the backup ran.
         if let Some(note) = self.dashboard.job_note() {
             spans.push(Span::raw("   "));
             spans.push(Span::styled(

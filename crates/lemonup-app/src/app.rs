@@ -19763,9 +19763,7 @@ mod tests {
             std::fs::remove_file(&older).expect("prune");
             send(
                 &mut app,
-                step(DashboardJobStep::BackedUp(
-                    "backed up your game settings first".to_string(),
-                )),
+                step(DashboardJobStep::BackedUp("settings backed up".to_string())),
             );
             assert_eq!(names(&app), vec!["WTF-20260402T120000.000Z.zip"]);
 
@@ -19794,9 +19792,7 @@ mod tests {
             assert_eq!(status(&app, "Third"), RowStatus::Waiting);
             send(
                 &mut app,
-                step(DashboardJobStep::BackedUp(
-                    "backed up your game settings first".to_string(),
-                )),
+                step(DashboardJobStep::BackedUp("settings backed up".to_string())),
             );
             send(
                 &mut app,
@@ -19810,10 +19806,7 @@ mod tests {
             assert_eq!(status(&app, "Third"), RowStatus::Updating);
             let line = line_text(&app.dashboard_status_line(120));
             assert!(line.contains("Updating 2 of 2 · Third"), "{line}");
-            assert!(
-                line.contains("backed up your game settings first"),
-                "{line}"
-            );
+            assert!(line.contains("settings backed up"), "{line}");
             send(
                 &mut app,
                 step(DashboardJobStep::Updated {
