@@ -11257,7 +11257,7 @@ mod tests {
 
         press_text_key(&mut app, KeyEvent::from(KeyCode::Esc));
         let rows = render_rows(&mut app, 80, 24).join("\n");
-        assert!(rows.contains("back to my addons"), "{rows}");
+        assert!(rows.contains("y  back"), "{rows}");
         press_text_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
         assert_eq!(app.shell_mode, ShellMode::Dashboard);
         assert_eq!(app.effective_addon_dir, Some(forever));
@@ -13990,8 +13990,8 @@ mod tests {
         assert!(app.onboarding.quit_question);
         let rows = render_rows(&mut app, 80, 24).join("\n");
         assert!(rows.contains("Quit setup?"), "{rows}");
-        assert!(rows.contains("quit LemonUp"), "{rows}");
-        assert!(rows.contains("keep setting up"), "{rows}");
+        assert!(rows.contains("y  quit"), "{rows}");
+        assert!(rows.contains("n  continue"), "{rows}");
         assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Down)), vec![]);
         press(&mut app, KeyCode::Char('n'));
         assert!(!app.onboarding.quit_question);
@@ -17031,8 +17031,8 @@ mod tests {
                 assert!(text.contains("Delete this backup?"), "{text}");
                 assert!(text.contains("Backup from "), "{text}");
                 assert!(text.contains("(8 days ago)"), "{text}");
-                assert!(text.contains("y  delete it"), "{text}");
-                assert!(text.contains("n  keep it"), "{text}");
+                assert!(text.contains("y  delete"), "{text}");
+                assert!(text.contains("n  keep"), "{text}");
             }
         }
 
@@ -19052,8 +19052,8 @@ mod tests {
                     &name,
                     "Your settings for this addon are not touched.",
                     "You can undo the delete with z.",
-                    "y  delete it",
-                    "n  keep it",
+                    "y  delete",
+                    "n  keep",
                 ],
             );
 
@@ -19076,8 +19076,8 @@ mod tests {
                     "Addon00",
                     "more",
                     "You can undo the delete with z.",
-                    "y  delete them",
-                    "n  keep them",
+                    "y  delete",
+                    "n  keep",
                 ],
             );
             let rows = render_rows(&mut app, 80, 24).join("\n");
@@ -19104,7 +19104,7 @@ mod tests {
                     "(2 hours ago)",
                     "Close the game first",
                     "y  restore",
-                    "n  keep what I have now",
+                    "n  keep",
                 ],
             );
             press_key(&mut app, KeyCode::Esc);
@@ -19257,7 +19257,7 @@ mod tests {
             assert_dialog(
                 &mut app,
                 "Delete this backup?",
-                &["This can't be undone.", "y  delete it", "n  keep it"],
+                &["This can't be undone.", "y  delete", "n  keep"],
             );
             press_key(&mut app, KeyCode::Char('q'));
             assert!(app.backup_pane.pending_delete.is_none());
@@ -19283,8 +19283,8 @@ mod tests {
                     "WeakAuras is already installed.",
                     "This folder is replaced:",
                     "Your WeakAuras settings are kept.",
-                    "y  replace it",
-                    "n  leave it alone",
+                    "y  replace",
+                    "n  keep",
                 ],
             );
         }
@@ -19304,8 +19304,8 @@ mod tests {
                     "These folders are replaced:",
                     "WeakAuras_Part01",
                     "more",
-                    "y  replace it",
-                    "n  leave it alone",
+                    "y  replace",
+                    "n  keep",
                 ],
             );
         }
@@ -19333,7 +19333,7 @@ mod tests {
             assert_dialog(
                 &mut app,
                 "Quit while LemonUp is still updating?",
-                &["2 of 4 addons are done.", "y  quit", "n  keep going"],
+                &["2 of 4 addons are done.", "y  quit", "n  continue"],
             );
 
             // n keeps going.
