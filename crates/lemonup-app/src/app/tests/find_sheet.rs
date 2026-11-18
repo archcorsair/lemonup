@@ -1,17 +1,18 @@
 //! The Find your addons online sheet (`F`, and `f` on one addon). Lookups are
-//! injected as finished reports; nothing here asks the network.
+//! injected as finished reports or as the answers of single sources; the jobs the sheet
+//! starts are recorded, not run, so nothing here reads a folder or asks the network.
 
 use super::*;
 use crate::app::dialog::Question;
 use crate::app::find_sheet::{
-    FindFocus, FindLinkOutcome, FindOutcome, FindResults, FindStep, link_found, read_find_inputs,
-    search_name,
+    FindFocus, FindJob, FindLinkOutcome, FindOutcome, FindRead, FindResults, FindStep,
+    WAGO_HASH_NOTICE, link_found, read_find_inputs, search_name,
 };
 use crate::app::{FindAction, FindMessage, FindTaskEvent};
 use crate::find::{LocalNames, SourceProblem};
 use lemonup_core::GameFlavor;
 use lemonup_core::find::{
-    FindChoice, FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon, LocalFolder,
+    FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon, LocalFolder,
     SourceAnswer, SourceLookups, TocIds, TukuiPackage,
 };
 
@@ -155,11 +156,6 @@ pub(super) fn open_find_results(app: &mut App) {
     set_results(app, report());
 }
 
-/// The Start step, every source checked.
-pub(super) fn open_find_start(app: &mut App) {
-    open_find(app);
-}
-
 /// The results with the cursor on the action, something picked.
 pub(super) fn open_find_action(app: &mut App) {
     open_find_results(app);
@@ -178,7 +174,7 @@ fn results(app: &App) -> &FindResults {
 }
 
 #[test]
-fn capital_f_opens_the_sheet_and_says_what_goes_to_wago() {
+fn capital_f_opens_the_sheet_and_starts_looking_at_once() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     assert_eq!(
         app.messages_for_key(KeyEvent::from(KeyCode::Char('F'))),
@@ -186,23 +182,13 @@ fn capital_f_opens_the_sheet_and_says_what_goes_to_wago() {
     );
     open_find(&mut app);
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
-    assert_eq!(app.find.step, Some(FindStep::Start));
+    // No step before the lookup: the folders are read at once.
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
+    assert_eq!(app.find.jobs, vec![FindJob::Read]);
     let shown = screen(&mut app, 120, 30);
     assert!(shown.contains("Find your addons online"), "{shown}");
-    assert!(shown.contains("Look for 1 Not linked addon on"), "{shown}");
-    assert!(
-        shown.contains("Sends folder names and file hashes to Wago.io."),
-        "{shown}"
-    );
-    assert!(!shown.contains("Add a Wago.io key"), "{shown}");
-
-    app.wago_api_key = None;
-    let shown = screen(&mut app, 120, 30);
-    assert!(
-        shown.contains("Add a Wago.io key in Settings to look there too."),
-        "{shown}"
-    );
-    assert!(!shown.contains("Sends folder names"), "{shown}");
+    assert!(shown.contains("Reading 1 folders"), "{shown}");
+    assert!(!shown.contains("Look for"), "{shown}");
 
     // Help lists F on the list and beside docked Details.
     for context in [HelpContext::Overview, HelpContext::DetailsDocked] {
@@ -251,7 +237,7 @@ fn capital_f_with_a_selection_looks_up_only_the_selected_not_linked_addons() {
     select(&mut app, "Alpha");
     open_find(&mut app);
     assert_eq!(app.find.scope, Some(vec!["Alpha".to_string()]));
-    assert!(screen(&mut app, 120, 30).contains("Look for 1 Not linked addon on"));
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
 
     // With none selected, every Not linked addon.
     let mut app = app_for_tests(ShellMode::Dashboard);
@@ -259,106 +245,133 @@ fn capital_f_with_a_selection_looks_up_only_the_selected_not_linked_addons() {
     assert_eq!(app.find.scope, None);
 }
 
+/// What the lookup read: no rows, and `folders` as read from disk.
+fn read_of(inputs: FindInputs) -> Box<FindRead> {
+    Box::new(FindRead {
+        rows: Vec::new(),
+        inputs,
+    })
+}
+
+fn no_folders() -> FindInputs {
+    FindInputs {
+        flavor: GameFlavor::Retail,
+        folders: Vec::new(),
+    }
+}
+
+/// The answer of `source` alone: the others not asked.
+fn answer_of(source: FindSource, lookups: SourceLookups) -> Box<crate::find::Lookups> {
+    let mut only = SourceLookups::not_asked();
+    only.take_answer(source, lookups);
+    Box::new(crate::find::Lookups {
+        lookups: only,
+        problems: Vec::new(),
+    })
+}
+
+fn nothing_found() -> SourceLookups {
+    SourceLookups {
+        wago: SourceAnswer::Found(Vec::new()),
+        wowinterface: SourceAnswer::Found(Vec::new()),
+        tukui: SourceAnswer::Found(Vec::new()),
+    }
+}
+
+fn deliver(app: &mut App, event: FindTaskEvent) {
+    apply_all(app, AppMessage::BackgroundTask(AppTaskEvent::Find(event)));
+}
+
+fn deliver_read(app: &mut App, inputs: FindInputs) {
+    let generation = app.find.generation;
+    deliver(
+        app,
+        FindTaskEvent::Read {
+            generation,
+            read: Ok(read_of(inputs)),
+        },
+    );
+}
+
+fn deliver_answer(app: &mut App, source: FindSource, lookups: SourceLookups) {
+    let generation = app.find.generation;
+    deliver(
+        app,
+        FindTaskEvent::Answered {
+            generation,
+            source,
+            lookups: answer_of(source, lookups),
+        },
+    );
+}
+
+/// The sources the sheet asked, one request each, in order.
+fn asked(app: &App) -> Vec<FindSource> {
+    app.find
+        .jobs
+        .iter()
+        .filter_map(|job| match job {
+            FindJob::Ask(source) => Some(*source),
+            FindJob::Read => None,
+        })
+        .collect()
+}
+
 #[test]
 fn esc_while_looking_changes_nothing_and_a_late_answer_is_dropped() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find(&mut app);
-    // As enter on Start leaves it, without the network.
-    app.find.generation = 1;
-    app.find.step = Some(FindStep::Looking {
-        folders: 3,
-        asking: Vec::new(),
-    });
+    let generation = app.find.generation;
     let before = app.dashboard.items.clone();
-    assert!(screen(&mut app, 120, 30).contains("Reading 3 folders"));
-    apply_all(
-        &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Read {
-            generation: 1,
-            folders: 3,
-            asking: vec![
-                FindSource::Wago,
-                FindSource::WowInterface,
-                FindSource::Tukui,
-            ],
-        })),
-    );
-    let shown = screen(&mut app, 120, 30);
-    assert!(
-        shown.contains("Asking Wago.io, WoWInterface, TukUI"),
-        "{shown}"
-    );
+    assert!(screen(&mut app, 120, 30).contains("Reading 1 folders"));
 
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.shell_ui.overlay.active, None);
     assert_eq!(app.find.step, None);
     for event in [
         FindTaskEvent::Read {
-            generation: 1,
-            folders: 3,
-            asking: Vec::new(),
+            generation,
+            read: Ok(read_of(no_folders())),
         },
-        FindTaskEvent::Looked {
-            generation: 1,
-            result: Ok(Box::new(outcome(report()))),
+        FindTaskEvent::Answered {
+            generation,
+            source: FindSource::Tukui,
+            lookups: answer_of(FindSource::Tukui, nothing_found()),
         },
     ] {
-        apply_all(
-            &mut app,
-            AppMessage::BackgroundTask(AppTaskEvent::Find(event)),
-        );
+        deliver(&mut app, event);
     }
     assert_eq!(app.find.step, None);
     assert_eq!(app.shell_ui.overlay.active, None);
     assert_eq!(app.dashboard.items, before);
+    assert!(asked(&app).is_empty());
 
-    // A new lookup started since: the old answer still lands nowhere.
+    // A new lookup started since: the old answers still land nowhere.
     open_find(&mut app);
-    app.find.generation += 1;
-    app.find.step = Some(FindStep::Looking {
-        folders: 3,
-        asking: Vec::new(),
-    });
-    apply_all(
+    deliver(
         &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Looked {
-            generation: 1,
-            result: Ok(Box::new(outcome(report()))),
-        })),
+        FindTaskEvent::Read {
+            generation,
+            read: Err("old".to_string()),
+        },
     );
-    apply_all(
+    deliver(
         &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Read {
-            generation: 1,
-            folders: 9,
-            asking: vec![FindSource::Tukui],
-        })),
+        FindTaskEvent::Answered {
+            generation,
+            source: FindSource::Tukui,
+            lookups: answer_of(FindSource::Tukui, nothing_found()),
+        },
     );
-    assert_eq!(
-        app.find.step,
-        Some(FindStep::Looking {
-            folders: 3,
-            asking: Vec::new(),
-        })
-    );
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
+    assert!(app.find.answered.is_empty());
 }
 
 #[test]
 fn results_are_grouped_like_the_report_and_only_ready_rows_start_selected() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find(&mut app);
-    app.find.generation = 4;
-    app.find.step = Some(FindStep::Looking {
-        folders: 9,
-        asking: Vec::new(),
-    });
-    apply_all(
-        &mut app,
-        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Looked {
-            generation: 4,
-            result: Ok(Box::new(outcome(report()))),
-        })),
-    );
+    set_results(&mut app, report());
     let picks = &results(&app).picks;
     // Only Clique (Exact, linkable) is selected.
     assert_eq!(picks[2], Some(0));
@@ -664,36 +677,33 @@ fn the_report_comes_from_the_core_matcher_with_injected_lookups() {
         }],
     };
     let rows = vec![AddonRecord::new("ElvUI", "ElvUI", SourceKind::Manual)];
-    let lookups = crate::find::Lookups {
-        lookups: SourceLookups {
-            wago: SourceAnswer::Skipped,
-            wowinterface: SourceAnswer::Found(Vec::new()),
-            tukui: SourceAnswer::Found(vec![TukuiPackage {
-                id: "-2".to_string(),
-                name: "ElvUI".to_string(),
-                version: "13.80".to_string(),
-                web_url: "https://tukui.org/elvui".to_string(),
-                author: None,
-                directories: vec!["ElvUI".to_string()],
-            }]),
-        },
-        problems: Vec::new(),
-    };
-    let outcome = crate::app::find_sheet::find_outcome(&inputs, &rows, None, lookups);
     let mut app = app_for_tests(ShellMode::Dashboard);
+    app.wago_api_key = None;
     open_find(&mut app);
-    app.find.generation = 2;
-    app.find.step = Some(FindStep::Looking {
-        folders: 1,
-        asking: Vec::new(),
-    });
-    apply_all(
+    let generation = app.find.generation;
+    deliver(
         &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Looked {
-            generation: 2,
-            result: Ok(Box::new(outcome)),
-        })),
+        FindTaskEvent::Read {
+            generation,
+            read: Ok(Box::new(FindRead { rows, inputs })),
+        },
     );
+    // Without a key Wago.io is not asked.
+    assert_eq!(
+        asked(&app),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+    // The first answer shows the results; the other source is still asked.
+    let mut tukui = nothing_found();
+    tukui.tukui = SourceAnswer::Found(vec![TukuiPackage {
+        id: "-2".to_string(),
+        name: "ElvUI".to_string(),
+        version: "13.80".to_string(),
+        web_url: "https://tukui.org/elvui".to_string(),
+        author: None,
+        directories: vec!["ElvUI".to_string()],
+    }]);
+    deliver_answer(&mut app, FindSource::Tukui, tukui);
     let shown = screen(&mut app, 138, 36);
     assert!(shown.contains("Ready to link (1)"), "{shown}");
     assert!(shown.contains("A Wago.io key finds more"), "{shown}");
@@ -723,8 +733,8 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
     key(&mut app, KeyCode::Char('f'));
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
     assert_eq!(app.find.scope, Some(vec!["DBM-Core".to_string()]));
-    assert_eq!(app.find.step, Some(FindStep::Start));
-    assert!(screen(&mut app, 120, 30).contains("Sends folder names and file hashes"));
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
+    assert_eq!(app.find.jobs, vec![FindJob::Read]);
 
     // Found by its files: the result, no name search.
     let found_report = FindReport {
@@ -806,16 +816,11 @@ fn the_find_sheet_keeps_its_size_and_place_in_every_step() {
     let open = |app: &mut App| open_find(app);
     let steps: [super::sheets::SheetStep<'_>; 5] = [
         ("Reading 4 folders", &|app: &mut App| {
-            app.find.step = Some(FindStep::Looking {
-                folders: 4,
-                asking: Vec::new(),
-            })
+            app.find.step = Some(FindStep::Looking { folders: 4 })
         }),
-        ("Asking Wago.io", &|app: &mut App| {
-            app.find.step = Some(FindStep::Looking {
-                folders: 4,
-                asking: vec![FindSource::Wago, FindSource::WowInterface],
-            })
+        ("2 WoWInterface", &|app: &mut App| {
+            app.find.read = Some(read_of(no_folders()));
+            app.find.asking = vec![FindSource::Wago, FindSource::WowInterface];
         }),
         ("Ready to link", &|app: &mut App| set_results(app, report())),
         ("Nothing selected", &|app: &mut App| {
@@ -1004,7 +1009,7 @@ fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
 }
 
 #[test]
-fn start_waits_for_a_job_that_changes_the_addons() {
+fn capital_f_waits_for_a_job_that_changes_the_addons() {
     for (busy, note) in [
         (
             (|app: &mut App| app.dashboard.update_in_progress = true) as fn(&mut App),
@@ -1020,19 +1025,14 @@ fn start_waits_for_a_job_that_changes_the_addons() {
         ),
     ] {
         let mut app = app_for_tests(ShellMode::Dashboard);
-        open_find(&mut app);
+        app.effective_addon_dir = Some(std::env::temp_dir().join("lemonup-find-test/AddOns"));
         busy(&mut app);
         let generation = app.find.generation;
-        let actions = app.update(AppMessage::Find(FindMessage::Start));
-        assert!(
-            !actions.contains(&AppAction::Find(FindAction::StartLookup)),
-            "{actions:?}"
-        );
-        for action in actions {
-            app.apply(action);
-        }
-        assert_eq!(app.find.step, Some(FindStep::Start));
+        apply_all(&mut app, AppMessage::Find(FindMessage::Open));
+        assert_eq!(app.find.step, None);
+        assert_eq!(app.shell_ui.overlay.active, None);
         assert_eq!(app.find.generation, generation);
+        assert!(app.find.jobs.is_empty());
         assert!(
             app.status_line.text.contains(note),
             "{}",
@@ -1121,18 +1121,16 @@ fn a_failed_lookup_says_what_couldnt_be_read() {
     // The sheet shows the reason as it is.
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find(&mut app);
-    app.find.generation = 3;
-    app.find.step = Some(FindStep::Looking {
-        folders: 1,
-        asking: Vec::new(),
-    });
-    apply_all(
+    let generation = app.find.generation;
+    deliver(
         &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Looked {
-            generation: 3,
-            result: Err("LemonUp couldn't read its list of your addons: locked".to_string()),
-        })),
+        FindTaskEvent::Read {
+            generation,
+            read: Err("LemonUp couldn't read its list of your addons: locked".to_string()),
+        },
     );
+    // Nothing to ask without the folders.
+    assert!(asked(&app).is_empty());
     let shown = screen(&mut app, 120, 30);
     assert!(
         shown.contains("LemonUp couldn't read its list of your addons: locked"),
@@ -1446,17 +1444,7 @@ fn f_opens_the_sheet_after_a_lookup_closed_with_nothing_picked() {
     ]);
     app.dashboard.list_state.select(Some(0));
     key(&mut app, KeyCode::Char('F'));
-    assert_eq!(app.find.step, Some(FindStep::Start));
-    // Enter starts the lookup; here without the network.
-    assert_eq!(
-        app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
-        vec![AppMessage::Find(FindMessage::Start)]
-    );
-    app.find.generation += 1;
-    app.find.step = Some(FindStep::Looking {
-        folders: 4,
-        asking: Vec::new(),
-    });
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 4 }));
     // Every source failed: nothing to link.
     let mut lookup = report();
     lookup.results.retain(|result| {
@@ -1468,14 +1456,7 @@ fn f_opens_the_sheet_after_a_lookup_closed_with_nothing_picked() {
                 | FindLabel::DeveloperCopy
         )
     });
-    let generation = app.find.generation;
-    apply_all(
-        &mut app,
-        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Looked {
-            generation,
-            result: Ok(Box::new(outcome(lookup))),
-        })),
-    );
+    set_results(&mut app, lookup);
     assert!(app.find.results().is_some());
     for code in [
         KeyCode::Char('G'),
@@ -1496,7 +1477,7 @@ fn f_opens_the_sheet_after_a_lookup_closed_with_nothing_picked() {
         .expect("a row under the cursor");
     key(&mut app, KeyCode::Char('f'));
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
-    assert_eq!(app.find.step, Some(FindStep::Start));
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
     assert_eq!(app.find.scope, Some(vec![under]));
 }
 
@@ -1889,53 +1870,47 @@ fn help_says_the_arrows_scroll_past_the_last_row() {
     );
 }
 
-const CHIPS: &str = "1 ● Wago.io    2 ● WoWInterface    3 ● TukUI";
-const SIMPLE_CHIPS: &str = "1 [x] Wago.io    2 [x] WoWInterface    3 [x] TukUI";
-
-/// The Start step's lines as drawn inside the sheet's border, blanks kept, from "Look for"
-/// down. Whatever shows beside the sheet is cut off.
-fn start_lines(shown: &str) -> Vec<String> {
-    let rows = shown
+/// The chip line as drawn, from the first chip to the sheet's right edge.
+fn chip_line(shown: &str) -> String {
+    let row = shown
         .lines()
-        .map(|row| row.chars().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let is_border = |c: &char| "│|".contains(*c);
-    let (first, column) = rows
-        .iter()
-        .enumerate()
-        .find_map(|(index, row)| {
-            let text = row.iter().collect::<String>();
-            let at = text[..text.find("Look for")?].chars().count();
-            Some((index, at))
-        })
-        .unwrap_or_else(|| panic!("{shown}"));
-    // A sheet over the list has a border; a full screen one does not.
-    let left = rows[first][..column].iter().rposition(is_border);
-    let right = rows[first][column..]
-        .iter()
-        .position(is_border)
-        .map_or(rows[first].len(), |at| column + at);
-    rows[first..]
-        .iter()
-        .map(|row| {
-            let end = right.min(row.len());
-            row[left.map_or(0, |left| left + 1).min(end)..end]
-                .iter()
-                .collect::<String>()
-                .trim()
-                .to_string()
-        })
-        .collect()
+        .find(|row| row.contains("1 Wago.io"))
+        .unwrap_or_else(|| panic!("no chips:\n{shown}"));
+    let from = &row[row.find("1 Wago.io").expect("chip")..];
+    from.split(['│', '|'])
+        .next()
+        .unwrap_or(from)
+        .trim_end()
+        .to_string()
 }
 
-/// The key colors of the first cell of `text` on the screen, `offset` characters in.
-fn color_at(
+/// The row of the screen under the chip line, from the chips' left edge.
+fn under_chips(shown: &str) -> String {
+    let rows = shown.lines().collect::<Vec<_>>();
+    let at = rows
+        .iter()
+        .position(|row| row.contains("1 Wago.io"))
+        .unwrap_or_else(|| panic!("no chips:\n{shown}"));
+    let column = rows[at][..rows[at].find("1 Wago.io").expect("chip")]
+        .chars()
+        .count();
+    let below = rows[at + 1].chars().skip(column).collect::<String>();
+    below
+        .split(['│', '|'])
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_string()
+}
+
+/// The cell of the screen `offset` characters into the first `text` on it.
+fn cell_at(
     app: &mut App,
     width: u16,
     height: u16,
     text: &str,
     offset: u16,
-) -> ratatui::style::Color {
+) -> ratatui::buffer::Cell {
     use ratatui::{Terminal, backend::TestBackend};
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal.draw(|frame| app.draw(frame)).expect("draw");
@@ -1946,291 +1921,9 @@ fn color_at(
                 .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>();
             let column = row[..row.find(text)?].chars().count();
-            Some(buffer[(u16::try_from(column).expect("column") + offset, y)].fg)
+            Some(buffer[(u16::try_from(column).expect("column") + offset, y)].clone())
         })
         .unwrap_or_else(|| panic!("{text}"))
-}
-
-#[test]
-fn start_shows_the_sources_as_chips_on_one_line_for_one_addon() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find(&mut app);
-    app.find.single = Some("ForeverAuras".to_string());
-    for (width, height) in [(80, 24), (120, 30), (138, 36)] {
-        let shown = screen(&mut app, width, height);
-        let lines = start_lines(&shown);
-        assert_eq!(lines[0], "Look for ForeverAuras on", "{shown}");
-        assert_eq!(lines[1], "", "{shown}");
-        assert_eq!(lines[2], CHIPS, "{shown}");
-        assert_eq!(lines[3], "", "{shown}");
-        assert_eq!(
-            lines[4], "Sends folder names and file hashes to Wago.io.",
-            "{shown}"
-        );
-        // The only sentences: nothing about what is linked.
-        assert!(!shown.contains("Nothing is linked"), "{shown}");
-        assert!(!shown.contains("Nothing changes until"), "{shown}");
-        assert!(
-            shown.contains("1 2 3 check   enter look   esc close"),
-            "{shown}"
-        );
-    }
-}
-
-#[test]
-fn start_counts_the_not_linked_addons_for_several() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.dashboard = DashboardState::from_addons(vec![
-        AddonRecord::new("Alpha", "Alpha", SourceKind::Manual),
-        AddonRecord::new("Beta", "Beta", SourceKind::Manual),
-        AddonRecord::new("Gamma", "Gamma", SourceKind::Manual),
-    ]);
-    open_find(&mut app);
-    let shown = screen(&mut app, 80, 24);
-    let lines = start_lines(&shown);
-    assert_eq!(lines[0], "Look for 3 Not linked addons on", "{shown}");
-    assert_eq!(lines[2], CHIPS, "{shown}");
-}
-
-#[test]
-fn start_draws_the_check_boxes_plain_with_simple_symbols() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
-    open_find(&mut app);
-    key(&mut app, KeyCode::Char('3'));
-    for (width, height) in [(80, 24), (138, 36)] {
-        let shown = screen(&mut app, width, height);
-        let lines = start_lines(&shown);
-        assert_eq!(
-            lines[2], "1 [x] Wago.io    2 [x] WoWInterface    3 [ ] TukUI",
-            "{shown}"
-        );
-        // Every cell of the sheet is plain ASCII.
-        let sheet = lines.join("\n");
-        assert!(sheet.is_ascii(), "{sheet}");
-    }
-    key(&mut app, KeyCode::Char('3'));
-    assert!(screen(&mut app, 80, 24).contains(SIMPLE_CHIPS));
-}
-
-#[test]
-fn the_chip_line_wraps_between_chips_instead_of_cutting_a_name() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find(&mut app);
-    let room = app.find_source_chips(30);
-    let rows = room
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 3, "{rows:?}");
-    assert_eq!(rows[0], "  1 ● Wago.io");
-    assert_eq!(rows[1], "  2 ● WoWInterface");
-    assert_eq!(rows[2], "  3 ● TukUI");
-    // At the real width of the sheet at 80x24 they share one line.
-    assert_eq!(app.find_source_chips(76).len(), 1);
-}
-
-#[test]
-fn a_chip_has_the_key_color_the_accent_mark_and_muted_when_unchecked() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find(&mut app);
-    key(&mut app, KeyCode::Char('3'));
-    let roles = app.ui_theme.roles;
-    assert_ne!(roles.blue, roles.muted);
-    assert_ne!(roles.lemon, roles.muted);
-    // Number, mark, name of a checked chip.
-    assert_eq!(color_at(&mut app, 120, 30, CHIPS_START, 0), roles.blue);
-    assert_eq!(color_at(&mut app, 120, 30, CHIPS_START, 2), roles.lemon);
-    assert_eq!(color_at(&mut app, 120, 30, CHIPS_START, 4), roles.text);
-    // The unchecked one: key color on the number, muted mark and name.
-    assert_eq!(color_at(&mut app, 120, 30, "3 ○ TukUI", 0), roles.blue);
-    assert_eq!(color_at(&mut app, 120, 30, "3 ○ TukUI", 2), roles.muted);
-    assert_eq!(color_at(&mut app, 120, 30, "3 ○ TukUI", 4), roles.muted);
-
-    // Wago.io without a key: all muted, its number too (the key does nothing).
-    app.wago_api_key = None;
-    for offset in [0, 2, 4] {
-        assert_eq!(
-            color_at(&mut app, 120, 30, "1 ○ Wago.io", offset),
-            roles.muted,
-            "{offset}"
-        );
-    }
-    assert_eq!(
-        color_at(&mut app, 120, 30, "2 ● WoWInterface", 0),
-        roles.blue
-    );
-}
-
-const CHIPS_START: &str = "1 ● Wago.io";
-
-#[test]
-fn without_a_key_wago_is_dimmed_unchecked_and_its_key_does_nothing() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.wago_api_key = None;
-    open_find(&mut app);
-    let shown = screen(&mut app, 80, 24);
-    let lines = start_lines(&shown);
-    assert_eq!(
-        lines[2], "1 ○ Wago.io    2 ● WoWInterface    3 ● TukUI",
-        "{shown}"
-    );
-    assert_eq!(lines[4], "Add a Wago.io key in Settings to look there too.");
-    assert!(!shown.contains("needs a key"), "{shown}");
-    assert!(!shown.contains("Sends folder names"), "{shown}");
-
-    // Key 1 does nothing, and neither the sheet nor the key line offers it.
-    assert_eq!(
-        app.messages_for_key(KeyEvent::from(KeyCode::Char('1'))),
-        vec![]
-    );
-    let table = app.key_table(80);
-    assert!(
-        table
-            .iter()
-            .any(|hint| hint.key == "2 3" && hint.label == "check")
-    );
-    assert!(!table.iter().any(|hint| hint.key.contains('1')));
-    assert!(
-        shown.contains("2 3 check   enter look   esc close"),
-        "{shown}"
-    );
-    assert!(!shown.contains("1 2 3 check"), "{shown}");
-    key(&mut app, KeyCode::Char('1'));
-    assert!(app.find.sources.wants(FindSource::Wago));
-    assert!(!app.find_checked(FindSource::Wago));
-}
-
-#[test]
-fn keys_1_2_3_check_and_uncheck_the_sources_and_the_arrows_do_nothing() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find(&mut app);
-    for (code, source) in [
-        ('1', FindSource::Wago),
-        ('2', FindSource::WowInterface),
-        ('3', FindSource::Tukui),
-    ] {
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(KeyCode::Char(code))),
-            vec![AppMessage::Find(FindMessage::ToggleSource(source))]
-        );
-        key(&mut app, KeyCode::Char(code));
-        assert!(!app.find_checked(source), "{code}");
-        key(&mut app, KeyCode::Char(code));
-        assert!(app.find_checked(source), "{code}");
-    }
-    key(&mut app, KeyCode::Char('2'));
-    let shown = screen(&mut app, 80, 24);
-    assert_eq!(
-        start_lines(&shown)[2],
-        "1 ● Wago.io    2 ○ WoWInterface    3 ● TukUI",
-        "{shown}"
-    );
-    // No cursor, so no arrow keys.
-    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
-        assert_eq!(
-            app.messages_for_key(KeyEvent::from(code)),
-            vec![],
-            "{code:?}"
-        );
-    }
-    // The digits do nothing once results are showing.
-    set_results(&mut app, report());
-    assert_eq!(
-        app.messages_for_key(KeyEvent::from(KeyCode::Char('1'))),
-        vec![]
-    );
-}
-
-#[test]
-fn with_nothing_checked_enter_does_nothing_and_the_line_says_to_check_one() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find(&mut app);
-    for code in ['1', '2', '3'] {
-        key(&mut app, KeyCode::Char(code));
-    }
-    let shown = screen(&mut app, 80, 24);
-    let lines = start_lines(&shown);
-    assert_eq!(
-        lines[2], "1 ○ Wago.io    2 ○ WoWInterface    3 ○ TukUI",
-        "{shown}"
-    );
-    assert_eq!(lines[4], "Check at least one source.", "{shown}");
-    assert!(!shown.contains("Sends folder names"), "{shown}");
-    // No hint for a key that does nothing.
-    assert!(shown.contains("1 2 3 check   esc close"), "{shown}");
-    assert!(!shown.contains("enter look"), "{shown}");
-    assert!(!app.key_table(80).iter().any(|hint| hint.key == "enter"));
-    assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
-    assert!(app.update(AppMessage::Find(FindMessage::Start)).is_empty());
-    assert_eq!(app.find.step, Some(FindStep::Start));
-
-    // Without a key, with the other two unchecked, it says the same.
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.wago_api_key = None;
-    open_find(&mut app);
-    key(&mut app, KeyCode::Char('2'));
-    key(&mut app, KeyCode::Char('3'));
-    let shown = screen(&mut app, 80, 24);
-    assert_eq!(
-        start_lines(&shown)[4],
-        "Check at least one source.",
-        "{shown}"
-    );
-    assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
-}
-
-#[test]
-fn enter_with_wowinterface_unchecked_asks_only_the_others() {
-    let temp = tempdir().expect("tempdir");
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.config_store = ConfigStore::new(temp.path().join("config.toml"));
-    open_find(&mut app);
-    key(&mut app, KeyCode::Char('2'));
-    assert_eq!(app.find_asked(), vec![FindSource::Wago, FindSource::Tukui]);
-    assert_eq!(
-        app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
-        vec![AppMessage::Find(FindMessage::Start)]
-    );
-    let actions = app.update(AppMessage::Find(FindMessage::Start));
-    assert!(actions.contains(&AppAction::Find(FindAction::StartLookup)));
-    // What the Looking step then says it asks.
-    let asking = crate::find::asking(app.find.sources, true, true);
-    app.find.generation = 1;
-    app.find.step = Some(FindStep::Looking {
-        folders: 3,
-        asking: Vec::new(),
-    });
-    apply_all(
-        &mut app,
-        AppMessage::Find(FindMessage::Task(FindTaskEvent::Read {
-            generation: 1,
-            folders: 3,
-            asking,
-        })),
-    );
-    let shown = screen(&mut app, 120, 30);
-    assert!(shown.contains("Asking Wago.io, TukUI"), "{shown}");
-    assert!(!shown.contains("WoWInterface"), "{shown}");
-}
-
-/// Presses enter on Start: applies everything but the lookup, which needs the network.
-/// Returns whether the lookup started.
-fn enter_on_start(app: &mut App) -> bool {
-    let mut looked = false;
-    for action in app.update(AppMessage::Find(FindMessage::Start)) {
-        if action == AppAction::Find(FindAction::StartLookup) {
-            looked = true;
-        } else {
-            app.apply(action);
-        }
-    }
-    looked
 }
 
 fn saved_find_sources(path: &std::path::Path) -> Option<Vec<String>> {
@@ -2244,155 +1937,766 @@ fn names(list: &[&str]) -> Vec<String> {
     list.iter().map(|name| name.to_string()).collect()
 }
 
-#[test]
-fn the_choice_is_saved_for_this_game_on_enter_and_restored_next_time() {
+/// An app whose config is saved in its own folder, so saving the sources touches no other test.
+fn app_with_config() -> (tempfile::TempDir, std::path::PathBuf, App) {
     let temp = tempdir().expect("tempdir");
     let path = temp.path().join("config.toml");
     let mut app = app_for_tests(ShellMode::Dashboard);
     app.config_store = ConfigStore::new(path.clone());
-    open_find(&mut app);
-    // Missing means all.
-    assert_eq!(app.find.sources, FindChoice::all());
+    (temp, path, app)
+}
 
-    // Toggling does not save.
+/// An AddOns folder with Spy (and Spy_Extra), Clique and Lonely, as the lookup reads it.
+fn spy_inputs() -> (tempfile::TempDir, FindInputs) {
+    let temp = tempdir().expect("tempdir");
+    let addons = temp.path().join("AddOns");
+    for folder in ["Spy", "Spy_Extra", "Clique", "Lonely"] {
+        let path = addons.join(folder);
+        std::fs::create_dir_all(&path).expect("folder");
+        std::fs::write(
+            path.join(format!("{folder}.toc")),
+            format!("## Title: {folder}\n## Version: 1.0\nmain.lua\n"),
+        )
+        .expect("toc");
+        std::fs::write(path.join("main.lua"), format!("-- {folder}\n")).expect("lua");
+    }
+    let inputs = FindInputs::read(&addons, GameFlavor::Forever).expect("inputs");
+    (temp, inputs)
+}
+
+/// Wago.io knows Spy and Clique by their files.
+fn wago_answer(inputs: &FindInputs) -> SourceLookups {
+    let lookups = inputs.wago_lookups(&[], None);
+    let hash = |folder: &str| {
+        lookups
+            .iter()
+            .find(|lookup| lookup.folder == folder)
+            .map(|lookup| lookup.hash.clone())
+            .expect("hash")
+    };
+    let project = |id: &str, folder: &str| lemonup_core::find::WagoMatch {
+        id: id.to_string(),
+        name: folder.to_string(),
+        website_url: Some(format!("https://addons.wago.io/addons/{id}")),
+        author: None,
+        modules: vec![(folder.to_string(), hash(folder))],
+        matched_version: Some("1.0".to_string()),
+        latest_version: Some("1.0".to_string()),
+        wowinterface_id: None,
+    };
+    let mut answer = nothing_found();
+    answer.wago = SourceAnswer::Found(vec![project("spy", "Spy"), project("clq", "Clique")]);
+    answer
+}
+
+/// WoWInterface has a fork of Spy that matches it too, with Spy_Extra: a "Choose one" with
+/// Wago.io's Spy.
+fn wowinterface_answer() -> SourceLookups {
+    let folder = |name: &str| lemonup_core::find::WowiFolder {
+        folder: name.to_string(),
+        version: Some("1.0".to_string()),
+        api_version: Some("16001".to_string()),
+    };
+    let mut answer = nothing_found();
+    answer.wowinterface = SourceAnswer::Found(vec![lemonup_core::find::WowiFile {
+        id: "99".to_string(),
+        title: "Spy fork".to_string(),
+        version: "1.0".to_string(),
+        author: None,
+        folders: vec![folder("Spy"), folder("Spy_Extra")],
+    }]);
+    answer
+}
+
+fn index_of(app: &App, folder: &str) -> usize {
+    results(app)
+        .report
+        .results
+        .iter()
+        .position(|result| result.folder == folder)
+        .unwrap_or_else(|| panic!("{folder}"))
+}
+
+fn label_of(app: &App, folder: &str) -> FindLabel {
+    results(app).report.results[index_of(app, folder)].label
+}
+
+fn pick_of(app: &App, folder: &str) -> Option<FindSource> {
+    let results = results(app);
+    let index = index_of(app, folder);
+    results.picks[index].map(|pick| results.report.results[index].candidates[pick].source)
+}
+
+/// Picks the candidate of `folder` from `source`.
+fn pick(app: &mut App, folder: &str, source: FindSource) {
+    let index = index_of(app, folder);
+    let Some(FindStep::Results(results)) = app.find.step.as_mut() else {
+        panic!("results");
+    };
+    results.picks[index] = results.report.results[index]
+        .candidates
+        .iter()
+        .position(|candidate| candidate.source == source);
+}
+
+#[test]
+fn f_opens_straight_into_looking_and_asks_only_the_sources_that_are_on() {
+    let (_config, _path, mut app) = app_with_config();
+    let (_addons, inputs) = spy_inputs();
+    app.config_pane.persisted.find_sources = Some(names(&["wowinterface"]));
+    app.dashboard =
+        DashboardState::from_addons(vec![AddonRecord::new("Spy", "Spy", SourceKind::Manual)]);
+    app.dashboard.list_state.select(Some(0));
+    app.effective_addon_dir = Some(std::env::temp_dir().join("lemonup-find-test/AddOns"));
+    key(&mut app, KeyCode::Char('f'));
+    assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
+    assert_eq!(app.find.jobs, vec![FindJob::Read]);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("2 WoWInterface  ⠋"), "{shown}");
+    assert!(shown.contains("1 Wago.io  off"), "{shown}");
+
+    // While the folders are read, 3 turns TukUI on; it is asked with the others once they are.
     key(&mut app, KeyCode::Char('3'));
-    assert!(!path.exists());
-    assert!(enter_on_start(&mut app));
+    assert!(asked(&app).is_empty());
+    deliver_read(&mut app, inputs);
+    assert_eq!(
+        asked(&app),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+    // Looking until one of them answers.
+    assert!(app.find.looking());
+    deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(
+        chip_line(&shown),
+        "1 Wago.io  off    2 WoWInterface  1    3 TukUI  ⠋",
+        "{shown}"
+    );
+    deliver_answer(&mut app, FindSource::Tukui, nothing_found());
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  off    2 WoWInterface  1    3 TukUI  0"
+    );
+    assert_eq!(asked(&app).len(), 2);
+}
+
+#[test]
+fn chips_show_counts_off_a_spinner_failed_and_needs_a_key() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    app.shell_ui.motion.tick_count = 0;
+    // TukUI's request failed in this report.
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  3    2 WoWInterface  3    3 TukUI  failed"
+    );
+    app.find.sources.toggle(FindSource::WowInterface);
+    app.find.asking = vec![FindSource::Tukui];
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  3    2 WoWInterface  off    3 TukUI  ⠋"
+    );
+    app.wago_api_key = None;
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  needs a key    2 WoWInterface  off    3 TukUI  ⠋"
+    );
+}
+
+#[test]
+fn a_chip_that_is_on_is_filled_and_one_that_is_off_is_muted() {
+    use ratatui::style::Modifier;
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    app.find.sources.toggle(FindSource::WowInterface);
+    let roles = app.ui_theme.roles;
+    assert_ne!(roles.lemon, roles.muted);
+    // On: the accent behind readable text, the number too.
+    for offset in [0, 2, 11] {
+        let cell = cell_at(&mut app, 120, 30, "1 Wago.io  3", offset);
+        assert_eq!(cell.bg, roles.lemon, "{offset}");
+        assert_eq!(cell.fg, roles.background, "{offset}");
+    }
+    // Off: not filled, muted.
+    for offset in [0, 2] {
+        let cell = cell_at(&mut app, 120, 30, "2 WoWInterface  off", offset);
+        assert_ne!(cell.bg, roles.lemon, "{offset}");
+        assert_eq!(cell.fg, roles.muted, "{offset}");
+    }
+    // Wago.io without a key: muted, its number too.
+    app.wago_api_key = None;
+    let cell = cell_at(&mut app, 120, 30, "1 Wago.io  needs a key", 0);
+    assert_ne!(cell.bg, roles.lemon);
+    assert_eq!(cell.fg, roles.muted);
+
+    // The Terminal theme has no background color to fill with, and NO_COLOR none at all:
+    // reverse video.
+    app.wago_api_key = Some("test-wago-key".to_string());
+    for no_color in [false, true] {
+        app.ui_theme = UiTheme::from_mode(ThemeMode::Terminal);
+        app.ui_theme.no_color = no_color;
+        let on = cell_at(&mut app, 120, 30, "1 Wago.io  3", 0);
+        assert!(on.modifier.contains(Modifier::REVERSED), "{no_color}");
+        let off = cell_at(&mut app, 120, 30, "2 WoWInterface  off", 0);
+        assert!(!off.modifier.contains(Modifier::REVERSED), "{no_color}");
+    }
+}
+
+#[test]
+fn chips_are_plain_with_simple_symbols() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
+    open_find_results(&mut app);
+    app.shell_ui.motion.tick_count = 1;
+    app.find.asking = vec![FindSource::WowInterface];
+    app.find.hash_notice = true;
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        let chips = chip_line(&shown);
+        assert_eq!(
+            chips, "1 Wago.io  3    2 WoWInterface  /    3 TukUI  failed",
+            "{shown}"
+        );
+        assert!(chips.is_ascii(), "{chips}");
+        assert_eq!(under_chips(&shown), WAGO_HASH_NOTICE, "{shown}");
+    }
+}
+
+#[test]
+fn the_chips_fit_at_80x24_and_wrap_between_chips() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    app.wago_api_key = None;
+    // The widest the chips get, on one line in the sheet at 80x24.
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  needs a key    2 WoWInterface  3    3 TukUI  failed"
+    );
+    app.wago_api_key = Some("test-wago-key".to_string());
+    let rows = |width| {
+        app.find_source_chips(width)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(30),
+        vec!["  1 Wago.io  3", "  2 WoWInterface  3", "  3 TukUI  failed"]
+    );
+    assert_eq!(
+        rows(40),
+        vec!["  1 Wago.io  3    2 WoWInterface  3", "  3 TukUI  failed"]
+    );
+}
+
+#[test]
+fn turning_a_source_off_works_the_report_out_again_and_on_brings_it_back() {
+    let (_config, _path, mut app) = app_with_config();
+    let (_addons, inputs) = spy_inputs();
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    assert_eq!(asked(&app), FindSource::ALL.to_vec());
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
+    deliver_answer(&mut app, FindSource::Tukui, nothing_found());
+    assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
+    assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
+    let shown = screen(&mut app, 120, 30);
+    assert!(shown.contains("Not found (1)"), "{shown}");
+    assert!(!shown.contains("Not found on"), "{shown}");
+
+    // The WoWInterface copy of Spy is picked: turning WoWInterface off drops that pick and
+    // keeps the others. Spy is a single match from Wago.io now.
+    pick(&mut app, "Spy", FindSource::WowInterface);
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(label_of(&app, "Spy"), FindLabel::Exact);
+    assert_eq!(pick_of(&app, "Spy"), None);
+    assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
+    let shown = screen(&mut app, 120, 30);
+    assert_eq!(
+        chip_line(&shown),
+        "1 Wago.io  2    2 WoWInterface  off    3 TukUI  0"
+    );
+    // Not found names the sources that are on.
+    assert!(
+        shown.contains("Not found on Wago.io and TukUI (2)"),
+        "{shown}"
+    );
+
+    // On again: its matches are back at once, with no new request.
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(asked(&app).len(), 3);
+    assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
+    assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
+    assert!(screen(&mut app, 120, 30).contains("Not found (1)"));
+
+    // A pick whose match stays is kept.
+    pick(&mut app, "Spy", FindSource::Wago);
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(pick_of(&app, "Spy"), Some(FindSource::Wago));
+    assert_eq!(asked(&app).len(), 3);
+}
+
+#[test]
+fn turning_on_a_source_never_asked_asks_it_once_and_works_the_report_out_when_it_answers() {
+    let (_config, path, mut app) = app_with_config();
+    let (_addons, inputs) = spy_inputs();
+    app.config_pane.persisted.find_sources = Some(names(&["wago", "tukui"]));
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    // No request for a source that is off.
+    assert_eq!(asked(&app), vec![FindSource::Wago, FindSource::Tukui]);
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    deliver_answer(&mut app, FindSource::Tukui, nothing_found());
+    assert_eq!(label_of(&app, "Spy"), FindLabel::Exact);
+    app.shell_ui.motion.tick_count = 0;
+
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(
+        asked(&app),
+        vec![
+            FindSource::Wago,
+            FindSource::Tukui,
+            FindSource::WowInterface
+        ]
+    );
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  2    2 WoWInterface  ⠋    3 TukUI  0"
+    );
+    // The report waits for the answer.
+    assert_eq!(label_of(&app, "Spy"), FindLabel::Exact);
+    // Off and on again while it is asked: no second request.
+    key(&mut app, KeyCode::Char('2'));
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(asked(&app).len(), 3);
+
+    deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
+    assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
+    assert_eq!(
+        chip_line(&screen(&mut app, 80, 24)),
+        "1 Wago.io  2    2 WoWInterface  1    3 TukUI  0"
+    );
+    assert_eq!(
+        saved_find_sources(&path),
+        Some(names(&["wago", "wowinterface", "tukui"]))
+    );
+}
+
+#[test]
+fn the_choice_is_saved_for_this_game_and_the_sheet_opens_with_it() {
+    let (_config, path, mut app) = app_with_config();
+    open_find_results(&mut app);
+    key(&mut app, KeyCode::Char('3'));
     assert_eq!(
         saved_find_sources(&path),
         Some(names(&["wago", "wowinterface"]))
     );
-    let raw = std::fs::read_to_string(&path).expect("config");
-    assert!(raw.contains("find_sources"), "{raw}");
-
-    // Next time the sheet opens with that choice, in this session and from the file.
     key(&mut app, KeyCode::Esc);
     open_find(&mut app);
+    assert!(!app.find.sources.wants(FindSource::Tukui));
+    deliver_read(&mut app, no_folders());
     assert_eq!(
-        app.find_asked(),
+        asked(&app),
         vec![FindSource::Wago, FindSource::WowInterface]
     );
-    assert!(screen(&mut app, 80, 24).contains("3 ○ TukUI"));
+
+    // From the file, in a new session.
     let mut fresh = app_for_tests(ShellMode::Dashboard);
-    fresh.config_store = ConfigStore::new(path.clone());
     fresh.config_pane =
         fresh
             .config_pane
-            .mark_saved(match fresh.config_store.load().expect("load") {
+            .mark_saved(match ConfigStore::new(path.clone()).load().expect("load") {
                 ConfigLoad::Loaded(config) => config,
                 ConfigLoad::Missing(_) => panic!("saved"),
             });
     open_find(&mut fresh);
     assert!(!fresh.find.sources.wants(FindSource::Tukui));
 
-    // An unchanged choice writes nothing.
-    std::fs::remove_file(&path).expect("remove");
-    assert!(enter_on_start(&mut app));
-    assert!(!path.exists());
-}
-
-#[test]
-fn saved_names_this_version_does_not_know_are_ignored() {
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    app.config_pane.persisted.find_sources = Some(names(&["tukui", "curseforge", "WOWI"]));
-    open_find(&mut app);
-    assert_eq!(
-        app.find.sources,
-        FindChoice::only(&[FindSource::WowInterface, FindSource::Tukui])
-    );
-    // Only unknown names: all.
-    app.config_pane.persisted.find_sources = Some(names(&["curseforge"]));
-    open_find(&mut app);
-    assert_eq!(app.find.sources, FindChoice::all());
-}
-
-#[test]
-fn no_wago_key_is_never_saved_as_unchecking_wago_and_a_key_later_checks_it_again() {
+    // A save that fails says so; the sheet goes on.
     let temp = tempdir().expect("tempdir");
-    let path = temp.path().join("config.toml");
+    let blocker = temp.path().join("blocker");
+    std::fs::write(&blocker, "x").expect("file");
     let mut app = app_for_tests(ShellMode::Dashboard);
-    app.config_store = ConfigStore::new(path.clone());
-    app.wago_api_key = None;
-    open_find(&mut app);
-    // The person unchecks TukUI; Wago.io is only unavailable.
+    app.config_store = ConfigStore::new(blocker.join("config.toml"));
+    open_find_results(&mut app);
     key(&mut app, KeyCode::Char('3'));
-    assert!(enter_on_start(&mut app));
+    assert!(!app.find.sources.wants(FindSource::Tukui));
+    assert!(
+        app.status_line
+            .text
+            .contains("Couldn't remember which sources"),
+        "{}",
+        app.status_line.text
+    );
+}
+
+#[test]
+fn without_a_key_wago_is_never_saved_as_off_and_its_number_does_nothing() {
+    let (_config, path, mut app) = app_with_config();
+    app.wago_api_key = None;
+    app.config_pane.persisted.wago_api_key = None;
+    app.config_pane.draft.wago_api_key = None;
+    open_find_results(&mut app);
+    assert_eq!(
+        app.messages_for_key(KeyEvent::from(KeyCode::Char('1'))),
+        vec![]
+    );
+    let table = app.key_table(160);
+    assert!(
+        table
+            .iter()
+            .any(|hint| hint.key == "2 3" && hint.label == "sources")
+    );
+    assert!(!table.iter().any(|hint| hint.key.contains('1')));
+    key(&mut app, KeyCode::Char('3'));
     assert_eq!(
         saved_find_sources(&path),
         Some(names(&["wago", "wowinterface"]))
     );
-
-    // A key added later: Wago.io is checked again.
-    app.wago_api_key = Some("key".to_string());
-    open_find(&mut app);
-    assert!(app.find_checked(FindSource::Wago));
-    let shown = screen(&mut app, 80, 24);
+    // WoWInterface is the only source on: its number does nothing either.
     assert_eq!(
-        start_lines(&shown)[2],
-        "1 ● Wago.io    2 ● WoWInterface    3 ○ TukUI",
-        "{shown}"
+        app.messages_for_key(KeyEvent::from(KeyCode::Char('2'))),
+        vec![]
     );
 
-    // Unless the person unchecked it themselves.
-    key(&mut app, KeyCode::Char('1'));
-    assert!(enter_on_start(&mut app));
-    assert_eq!(saved_find_sources(&path), Some(names(&["wowinterface"])));
-    app.wago_api_key = None;
-    open_find(&mut app);
+    // With a key later, Wago.io is on again.
     app.wago_api_key = Some("key".to_string());
-    assert!(!app.find_checked(FindSource::Wago));
+    open_find(&mut app);
+    assert!(app.find_on(FindSource::Wago));
+
+    // Only Wago.io saved and no key: the others are on, and nothing is saved until changed.
+    let (_config, path, mut app) = app_with_config();
+    app.wago_api_key = None;
+    app.config_pane.persisted.find_sources = Some(names(&["wago"]));
+    open_find(&mut app);
+    deliver_read(&mut app, no_folders());
+    assert_eq!(
+        asked(&app),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+    assert!(!path.exists());
+}
+
+/// A game whose settings are saved, so `shared.toml` exists.
+fn shared_game(base: &std::path::Path) -> (lemonup_core::ProfileRoots, ConfigStore) {
+    let roots =
+        lemonup_core::ProfileRoots::new(base.join("config"), base.join("data"), base.join("cache"));
+    let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+    let store = ConfigStore::for_profile(&paths);
+    store
+        .write_config(&AppConfig::new_unconfigured())
+        .expect("config");
+    (roots, store)
+}
+
+fn app_in(store: ConfigStore) -> App {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.config_store = store;
+    app
 }
 
 #[test]
-fn a_save_that_fails_says_so_and_the_lookup_still_starts() {
+fn the_wago_notice_shows_the_first_time_wago_is_asked_and_never_again() {
     let temp = tempdir().expect("tempdir");
-    let mut app = app_for_tests(ShellMode::Dashboard);
-    // A file where the config's folder should be: the write fails.
-    let blocker = temp.path().join("blocker");
-    std::fs::write(&blocker, "x").expect("file");
-    app.config_store = ConfigStore::new(blocker.join("config.toml"));
+    let (roots, store) = shared_game(temp.path());
+    let (_addons, inputs) = spy_inputs();
+    let shared = lemonup_core::SharedSettingsStore::for_roots(&roots);
+    let mut app = app_in(store.clone());
+
+    // Nothing to send to Wago.io: no notice yet.
     open_find(&mut app);
-    key(&mut app, KeyCode::Char('3'));
-    let actions = app.update(AppMessage::Find(FindMessage::Start));
-    assert!(actions.contains(&AppAction::Find(FindAction::StartLookup)));
+    deliver_read(&mut app, no_folders());
+    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(!shared.wago_hash_notice_shown());
+
+    // Folders to send: one muted line under the chips.
+    key(&mut app, KeyCode::Esc);
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    assert!(asked(&app).contains(&FindSource::Wago));
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        assert_eq!(under_chips(&shown), WAGO_HASH_NOTICE, "{shown}");
+    }
+    assert_eq!(
+        cell_at(&mut app, 120, 30, WAGO_HASH_NOTICE, 0).fg,
+        app.ui_theme.roles.muted
+    );
+    assert!(shared.wago_hash_notice_shown());
+    // It stays in this sheet while Wago.io is on.
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    assert!(screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    key(&mut app, KeyCode::Char('1'));
+    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+
+    // Never again: in this session, nor in a new one.
+    key(&mut app, KeyCode::Esc);
+    app.config_pane.persisted.find_sources = None;
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    assert!(asked(&app).contains(&FindSource::Wago));
+    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    let mut fresh = app_in(store);
+    open_find(&mut fresh);
+    deliver_read(&mut fresh, inputs);
+    assert!(!screen(&mut fresh, 80, 24).contains(WAGO_HASH_NOTICE));
+
+    // Help keeps a row about it.
     assert!(
-        actions
-            .iter()
-            .any(|action| matches!(action, AppAction::SetStatus(status)
-            if status.text.contains("Couldn't remember which sources"))),
-        "{actions:?}"
+        crate::app::keymap::help_page(HelpContext::Find)
+            .sections()
+            .flat_map(|section| section.rows.iter())
+            .any(|row| row.text.contains("sends folder names and file hashes"))
     );
 }
 
 #[test]
-fn help_lists_the_source_keys_and_the_key_line_shows_them_from_the_same_table() {
-    let help = crate::app::keymap::help_page(HelpContext::Find);
-    let keys = help
-        .sections()
-        .flat_map(|section| section.rows.iter())
-        .flat_map(|row| row.keys.iter().copied())
-        .collect::<Vec<_>>();
-    for digit in ['1', '2', '3'] {
-        assert!(
-            keys.contains(&KeyEvent::from(KeyCode::Char(digit))),
-            "{digit}"
+fn a_wago_notice_that_cannot_be_saved_still_shows_and_the_lookup_goes_on() {
+    let temp = tempdir().expect("tempdir");
+    let (roots, store) = shared_game(temp.path());
+    // The lock beside shared.toml is a folder: nothing can be saved there.
+    let lock = roots
+        .shared_settings_file()
+        .with_file_name("shared.toml.lock");
+    let _ = std::fs::remove_file(&lock);
+    std::fs::create_dir_all(&lock).expect("block the lock");
+    let (_addons, inputs) = spy_inputs();
+    let mut app = app_in(store.clone());
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    assert!(screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    assert_eq!(label_of(&app, "Clique"), FindLabel::Exact);
+    // Not saved: a new session shows it again, which is fine.
+    assert!(!lemonup_core::SharedSettingsStore::for_roots(&roots).wago_hash_notice_shown());
+    let mut fresh = app_in(store);
+    open_find(&mut fresh);
+    deliver_read(&mut fresh, inputs);
+    assert!(screen(&mut fresh, 80, 24).contains(WAGO_HASH_NOTICE));
+}
+
+#[test]
+fn the_name_column_fits_the_longest_name_when_there_is_room() {
+    let long = "HandyNotes: The War Within Treasures";
+    assert_eq!(long.chars().count(), 36);
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    set_results(
+        &mut app,
+        FindReport {
+            results: vec![
+                result(
+                    FindLabel::Exact,
+                    "HandyNotes_TheWarWithin",
+                    vec![found(
+                        FindLabel::Exact,
+                        FindSource::Wago,
+                        long,
+                        &["HandyNotes_TheWarWithin"],
+                    )],
+                ),
+                result(
+                    FindLabel::Exact,
+                    "Clique",
+                    vec![found(
+                        FindLabel::Exact,
+                        FindSource::WowInterface,
+                        "Clique",
+                        &["Clique"],
+                    )],
+                ),
+            ],
+            failed: Vec::new(),
+            skipped: Vec::new(),
+            not_asked: Vec::new(),
+        },
+    );
+    for (width, height) in [(120, 30), (80, 24)] {
+        let shown = screen(&mut app, width, height);
+        let row = shown
+            .lines()
+            .find(|row| row.contains("HandyNotes"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(row.contains(&format!("{long}  Wago.io")), "{shown}");
+        // The versions line up under each other.
+        let column = |row: &str| row[..row.find("1.0").expect("version")].chars().count();
+        let clique = shown
+            .lines()
+            .find(|row| row.contains("Clique") && row.contains("1.0"))
+            .expect("Clique");
+        assert_eq!(column(row), column(clique), "{shown}");
+    }
+}
+
+#[test]
+fn the_action_lines_up_with_the_names_under_a_blank_line() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    for (width, height) in [(120, 30), (80, 24)] {
+        let shown = screen(&mut app, width, height);
+        let rows = shown.lines().collect::<Vec<_>>();
+        let column = |row: &str, text: &str| row[..row.find(text).expect("text")].chars().count();
+        let action = rows
+            .iter()
+            .position(|row| row.contains("Link 1 addon"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        let clique = rows
+            .iter()
+            .find(|row| row.contains("Clique") && row.contains("1.0"))
+            .expect("Clique");
+        assert_eq!(
+            column(rows[action], "Link 1 addon"),
+            column(clique, "Clique"),
+            "{shown}"
         );
+        let above = rows[action - 1].replace(['│', '▌'], "");
+        assert!(above.trim().is_empty(), "{shown}");
     }
 
+    // A short report: exactly one blank line between the last group and the action.
+    set_results(
+        &mut app,
+        FindReport {
+            results: vec![result(
+                FindLabel::Exact,
+                "Clique",
+                vec![found(
+                    FindLabel::Exact,
+                    FindSource::WowInterface,
+                    "Clique",
+                    &["Clique"],
+                )],
+            )],
+            failed: Vec::new(),
+            skipped: Vec::new(),
+            not_asked: Vec::new(),
+        },
+    );
+    for (width, height) in [(120, 30), (80, 24)] {
+        let shown = screen(&mut app, width, height);
+        let rows = shown.lines().collect::<Vec<_>>();
+        let action = rows
+            .iter()
+            .position(|row| row.contains("Link 1 addon"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(
+            rows[action - 1].replace('│', "").trim().is_empty(),
+            "{shown}"
+        );
+        assert!(
+            !rows[action - 2].replace('│', "").trim().is_empty(),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
+fn the_sheet_shows_no_key_hints_of_its_own() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find(&mut app);
-    let table = app.key_table(138);
-    let check = table
-        .iter()
-        .find(|hint| hint.label == "check")
-        .expect("check hint");
-    assert_eq!(check.key, "1 2 3");
-    assert!(
-        table
+    let looking = render_rows(&mut app, 120, 30);
+    set_results(&mut app, report());
+    let on_result = render_rows(&mut app, 120, 30);
+    apply_all(&mut app, AppMessage::Find(FindMessage::Last));
+    let on_action = render_rows(&mut app, 120, 30);
+    app.find.step = Some(FindStep::Failed("It broke.".to_string()));
+    let failed = render_rows(&mut app, 120, 30);
+    for rows in [looking, on_result, on_action, failed] {
+        let (key_line, sheet) = rows.split_last().expect("rows");
+        // Below the title, which every sheet has.
+        let sheet = sheet
             .iter()
-            .any(|hint| hint.key == "enter" && hint.label == "look")
+            .filter(|row| !row.contains("Find your addons online"))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        for hint in [
+            "esc",
+            "space",
+            "enter",
+            "nothing changes",
+            "asks before",
+            "selects",
+            "press space",
+        ] {
+            assert!(!sheet.contains(hint), "{hint}:\n{sheet}");
+        }
+        assert!(key_line.contains("esc"), "{key_line}");
+    }
+}
+
+#[test]
+fn the_key_line_shows_the_keys_of_the_row_under_the_cursor() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    let pairs = |app: &App| {
+        app.key_table(200)
+            .iter()
+            .map(|hint| format!("{} {}", hint.key, hint.label))
+            .collect::<Vec<_>>()
+    };
+    // Looking: the sources and esc.
+    let looking = pairs(&app);
+    assert!(
+        looking.contains(&"1 2 3 sources".to_string()),
+        "{looking:?}"
     );
-    // Pressing a source key pulses the hint that answers to it.
+    assert!(looking.contains(&"esc cancel".to_string()), "{looking:?}");
+    assert!(
+        !looking.iter().any(|pair| pair.starts_with("enter")),
+        "{looking:?}"
+    );
+
+    // A match: move, space, the sources, close; enter does nothing there.
+    set_results(&mut app, report());
+    let on_match = pairs(&app);
+    for expected in ["↑/↓ move", "space unselect", "1 2 3 sources", "esc close"] {
+        assert!(on_match.contains(&expected.to_string()), "{on_match:?}");
+    }
+    assert!(
+        !on_match.iter().any(|pair| pair.starts_with("enter")),
+        "{on_match:?}"
+    );
+
+    // A "Choose one" row: enter picks.
+    let choose = index_of(&app, "QuestieDev");
+    let Some(FindStep::Results(results)) = app.find.step.as_mut() else {
+        panic!("results");
+    };
+    results.cursor = FindFocus::Result(choose);
+    let on_choice = pairs(&app);
+    assert!(
+        on_choice.contains(&"enter pick".to_string()),
+        "{on_choice:?}"
+    );
+    assert!(
+        !on_choice.iter().any(|pair| pair.starts_with("space")),
+        "{on_choice:?}"
+    );
+
+    // The action: enter links.
+    apply_all(&mut app, AppMessage::Find(FindMessage::Last));
+    let on_action = pairs(&app);
+    assert!(
+        on_action.contains(&"enter link".to_string()),
+        "{on_action:?}"
+    );
+    assert!(
+        on_action.contains(&"1 2 3 sources".to_string()),
+        "{on_action:?}"
+    );
+    assert!(
+        !on_action.iter().any(|pair| pair.starts_with("space")),
+        "{on_action:?}"
+    );
+
+    // Each number pulses the hint that answers to it.
     for digit in ['1', '2', '3'] {
         assert!(
             app.footer_hint_for_key(KeyEvent::from(KeyCode::Char(digit)))
@@ -2400,7 +2704,29 @@ fn help_lists_the_source_keys_and_the_key_line_shows_them_from_the_same_table() 
             "{digit}"
         );
     }
-    // Help opened from Start lists them.
+}
+
+#[test]
+fn help_lists_the_source_keys() {
+    let help = crate::app::keymap::help_page(HelpContext::Find);
+    let rows = help
+        .sections()
+        .flat_map(|section| section.rows.iter())
+        .collect::<Vec<_>>();
+    for (digit, text) in [
+        ('1', "Wago.io on or off"),
+        ('2', "WoWInterface on or off"),
+        ('3', "TukUI on or off"),
+    ] {
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == [KeyEvent::from(KeyCode::Char(digit))]
+                    && row.text.starts_with(text)),
+            "{digit}"
+        );
+    }
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
     key(&mut app, KeyCode::Char('?'));
     let shown = screen(&mut app, 138, 36);
     for line in [
@@ -2410,23 +2736,7 @@ fn help_lists_the_source_keys_and_the_key_line_shows_them_from_the_same_table() 
     ] {
         assert!(shown.contains(line), "{shown}");
     }
-}
-
-#[test]
-fn start_and_looking_keep_the_same_size_and_place() {
-    let open = |app: &mut App| open_find(app);
-    let steps: [super::sheets::SheetStep<'_>; 2] = [
-        ("Look for", &|app: &mut App| {
-            app.find.step = Some(FindStep::Start)
-        }),
-        ("Asking TukUI", &|app: &mut App| {
-            app.find.step = Some(FindStep::Looking {
-                folders: 4,
-                asking: vec![FindSource::Tukui],
-            })
-        }),
-    ];
-    super::sheets::assert_sheet_holds_still(&[(138, 36), (120, 30), (80, 24)], &open, &steps);
+    assert!(!shown.contains("look up the sources"), "{shown}");
 }
 
 fn only_not_found(not_asked: Vec<FindSource>) -> FindReport {

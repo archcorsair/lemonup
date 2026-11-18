@@ -257,6 +257,13 @@ pub struct SharedSettings {
     /// there that differ were changed by an older LemonUp.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_copies: BTreeMap<String, SharedFields>,
+    /// The Find sheet said once, on this machine, what it sends to Wago.io.
+    #[serde(skip_serializing_if = "is_false")]
+    pub wago_hash_notice_shown: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl SharedSettings {
@@ -276,6 +283,7 @@ impl SharedSettings {
             check_other_games: config.check_other_games,
             last_used_profile: None,
             profile_copies: BTreeMap::new(),
+            wago_hash_notice_shown: false,
         }
     }
 
@@ -351,6 +359,7 @@ impl fmt::Debug for SharedSettings {
             .field("check_other_games", &self.check_other_games)
             .field("last_used_profile", &self.last_used_profile)
             .field("profile_copies", &self.profile_copies)
+            .field("wago_hash_notice_shown", &self.wago_hash_notice_shown)
             .finish()
     }
 }
@@ -771,6 +780,29 @@ impl SharedSettingsStore {
             return Ok(());
         }
         settings.last_used_profile = Some(profile.to_string());
+        self.write_locked(&lock, &settings)
+    }
+
+    /// Whether the Find sheet already said, on this machine, what it sends to Wago.io. Never
+    /// writes; a file that can't be read says no, so the sheet says it again.
+    pub fn wago_hash_notice_shown(&self) -> bool {
+        matches!(self.read(), Ok(Some(settings)) if settings.wago_hash_notice_shown)
+    }
+
+    /// Remembers that the Find sheet said what it sends to Wago.io. Writes nothing while no
+    /// game has settings yet: `shared.toml` is never made from the defaults alone.
+    pub fn remember_wago_hash_notice(&self) -> Result<()> {
+        let current = self.current()?;
+        if !current.on_disk || current.settings.wago_hash_notice_shown {
+            return Ok(());
+        }
+        // Read again under the lock: another LemonUp may have saved since.
+        let lock = self.lock()?;
+        let mut settings = self.current_locked(&lock)?.settings;
+        if settings.wago_hash_notice_shown {
+            return Ok(());
+        }
+        settings.wago_hash_notice_shown = true;
         self.write_locked(&lock, &settings)
     }
 
@@ -1881,5 +1913,46 @@ mod tests {
             store.read().expect("read").expect("exists").theme,
             ThemeMode::Light
         );
+    }
+
+    #[test]
+    fn the_wago_hash_notice_is_remembered_once_and_kept_across_saves() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let store = SharedSettingsStore::for_roots(&roots);
+        // No settings yet: nothing is written, and the notice counts as not shown.
+        store.remember_wago_hash_notice().expect("remember");
+        assert!(!store.path().exists());
+        assert!(!store.wago_hash_notice_shown());
+
+        let paths = roots.paths("forever").expect("paths");
+        let config = ConfigStore::for_profile(&paths);
+        config
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("set up");
+        assert!(!store.wago_hash_notice_shown());
+        let raw = fs::read_to_string(store.path()).expect("shared");
+        assert!(!raw.contains("wago_hash_notice_shown"), "{raw}");
+
+        store.remember_wago_hash_notice().expect("remember");
+        assert!(store.wago_hash_notice_shown());
+        let raw = fs::read_to_string(store.path()).expect("shared");
+        assert!(raw.contains("wago_hash_notice_shown = true"), "{raw}");
+        // A settings save keeps it.
+        config
+            .write_config(&AppConfig::new_unconfigured())
+            .expect("save");
+        assert!(store.wago_hash_notice_shown());
+    }
+
+    #[test]
+    fn an_unreadable_shared_file_says_the_wago_hash_notice_was_not_shown() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let store = SharedSettingsStore::for_roots(&roots);
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        fs::write(store.path(), "wago_hash_notice_shown = [").expect("write");
+        assert!(!store.wago_hash_notice_shown());
+        assert!(store.remember_wago_hash_notice().is_err());
     }
 }

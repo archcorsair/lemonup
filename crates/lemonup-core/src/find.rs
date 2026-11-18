@@ -414,7 +414,55 @@ pub struct SourceLookups {
     pub tukui: SourceAnswer<TukuiPackage>,
 }
 
+impl Default for SourceLookups {
+    fn default() -> Self {
+        Self::not_asked()
+    }
+}
+
 impl SourceLookups {
+    /// No source asked yet.
+    pub fn not_asked() -> Self {
+        Self {
+            wago: SourceAnswer::NotAsked,
+            wowinterface: SourceAnswer::NotAsked,
+            tukui: SourceAnswer::NotAsked,
+        }
+    }
+
+    /// Takes `source`'s answer from `other`; the other sources keep theirs.
+    pub fn take_answer(&mut self, source: FindSource, other: SourceLookups) {
+        match source {
+            FindSource::Wago => self.wago = other.wago,
+            FindSource::WowInterface => self.wowinterface = other.wowinterface,
+            FindSource::Tukui => self.tukui = other.tukui,
+        }
+    }
+
+    /// These answers with every source not in `keep` read as not asked, so a report made from
+    /// them shows only what the kept sources found, and matches across sources (a "Choose
+    /// one", a match that outweighs another) are worked out again for those alone.
+    pub fn only(&self, keep: &[FindSource]) -> Self {
+        let kept = |source| keep.contains(&source);
+        Self {
+            wago: if kept(FindSource::Wago) {
+                self.wago.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+            wowinterface: if kept(FindSource::WowInterface) {
+                self.wowinterface.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+            tukui: if kept(FindSource::Tukui) {
+                self.tukui.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+        }
+    }
+
     fn failed(&self) -> Vec<FindSource> {
         let mut failed = Vec::new();
         if self.wago.failed() {
@@ -717,6 +765,19 @@ pub struct FindReport {
 }
 
 impl FindReport {
+    /// How many results have a match from `source`, one to pick or one of a "Choose one".
+    pub fn found_on(&self, source: FindSource) -> usize {
+        self.results
+            .iter()
+            .filter(|result| {
+                result
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.source == source)
+            })
+            .count()
+    }
+
     /// The sources the lookup asked, in their usual order.
     pub fn asked(&self) -> Vec<FindSource> {
         FindSource::ALL

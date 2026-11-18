@@ -107,6 +107,14 @@ impl<'a> SheetBody<'a> {
         self
     }
 
+    /// Drops a gap the body ends with, so the footer alone sets the space above it.
+    pub(super) fn trim_trailing_gap(&mut self) -> &mut Self {
+        if matches!(self.parts.last(), Some(SheetPart::Gap(_))) {
+            self.parts.pop();
+        }
+        self
+    }
+
     pub(super) fn widget(
         &mut self,
         height: u16,

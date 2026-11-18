@@ -46,21 +46,8 @@ pub(crate) fn cli_choice(sources: &[FindSource]) -> FindChoice {
     }
 }
 
-/// The sources a lookup asks: the checked ones, Wago.io only with a key and folders to send.
-pub(crate) fn asking(
-    choice: FindChoice,
-    has_wago_key: bool,
-    wago_has_folders: bool,
-) -> Vec<FindSource> {
-    let mut asking = choice.asked(has_wago_key);
-    if !wago_has_folders {
-        asking.retain(|source| *source != FindSource::Wago);
-    }
-    asking
-}
-
 /// What the sources answered, ready for `lemonup_core::find::match_addons`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lookups {
     pub(crate) lookups: SourceLookups,
     pub(crate) problems: Vec<SourceProblem>,

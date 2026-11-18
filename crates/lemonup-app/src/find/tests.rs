@@ -2013,27 +2013,6 @@ async fn find_without_source_asks_all_and_ignores_what_the_tui_remembers() {
 }
 
 #[test]
-fn the_sources_asked_are_the_checked_ones_and_wago_needs_a_key_and_folders() {
-    let without_wowinterface = FindChoice::only(&[FindSource::Wago, FindSource::Tukui]);
-    assert_eq!(
-        asking(without_wowinterface, true, true),
-        vec![FindSource::Wago, FindSource::Tukui]
-    );
-    assert_eq!(
-        asking(without_wowinterface, false, true),
-        vec![FindSource::Tukui]
-    );
-    assert_eq!(
-        asking(without_wowinterface, true, false),
-        vec![FindSource::Tukui]
-    );
-    assert_eq!(
-        asking(FindChoice::all(), true, true),
-        FindSource::ALL.to_vec()
-    );
-}
-
-#[test]
 fn a_left_out_wago_leaves_no_key_note_in_the_report() {
     let lookups = SourceLookups {
         wago: SourceAnswer::NotAsked,

@@ -1,31 +1,35 @@
 //! "Find your addons online": the `F` sheet (and `f` on one addon).
 //!
-//! Three steps in one sheet that keeps its size: Start chooses the sources
-//! to look at, Looking reads the folders and asks them in the background,
-//! and Results lists what was found the way `lemonup find` does. Linking
-//! asks one question first; partial matches are replaced through the normal
-//! Wago.io install, one at a time. Matching and linking live in
-//! `lemonup_core::find`; the lookups in `crate::find`.
+//! The sheet opens looking: it reads the folders, then asks each source that is on for this
+//! game, one request each. Chips on top show every source with its number; `1`, `2` and `3`
+//! turn one on or off. Every answer is kept for the life of the sheet and the report is worked
+//! out again from the answers of the sources that are on, so a source is asked only the first
+//! time it is on. Results list what was found the way `lemonup find` does. Linking asks one
+//! question first; partial matches are replaced through the normal Wago.io install, one at a
+//! time. Matching and linking live in `lemonup_core::find`; the lookups in `crate::find`.
 
 use std::collections::VecDeque;
 
 use lemonup_core::find::{
     FindChoice, FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon,
+    SourceAnswer, SourceLookups,
 };
 
-use super::render_dashboard::fit_spans;
 use super::sheet::{SheetBody, SheetMove, SheetRoom};
 use super::*;
-use crate::find::{LocalNames, SourceProblem};
+use crate::find::{LocalNames, Lookups, SourceProblem};
 
 /// Rows a page key moves in the results.
 const PAGE_ROWS: usize = 8;
-/// The widest the name column of the results gets.
-const NAME_WIDTH_MAX: usize = 28;
+/// The name column of the results gets at least this wide when a name needs it, even when
+/// long versions leave less room.
+const NAME_WIDTH_MIN: usize = 28;
 /// The width of the source column of the results.
 const SOURCE_WIDTH: usize = 14;
 /// The index of "Not checked" in [`GROUPS`].
 const NOT_CHECKED_GROUP: usize = 5;
+/// Under the chips, the first time Wago.io is asked on this machine.
+pub(crate) const WAGO_HASH_NOTICE: &str = "Sends folder names and file hashes to Wago.io.";
 
 /// `lines` word wrapped at `width`, each row after a line's first indented
 /// by `indent`, so a long row continues under its own text and never at the
@@ -37,12 +41,9 @@ fn hanging(lines: Vec<Line<'static>>, width: u16, indent: usize) -> Vec<Line<'st
 /// What the sheet shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FindStep {
-    /// The sources to look at, checked with `1`, `2` and `3`; enter looks.
-    Start,
-    /// Reading the folders (`asking` empty), then asking the sources.
+    /// Reading the folders, then asking the sources, until one that is on answers.
     Looking {
         folders: usize,
-        asking: Vec<FindSource>,
     },
     /// The lookup couldn't run; nothing changed.
     Failed(String),
@@ -97,19 +98,36 @@ pub(crate) struct FindLinkOutcome {
     pub(super) sync: Option<AddonScanOutcome>,
 }
 
+/// What the lookup reads first: LemonUp's rows and the AddOns folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FindRead {
+    pub(crate) rows: Vec<AddonRecord>,
+    pub(crate) inputs: FindInputs,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FindTaskEvent {
-    /// The folders are read; these sources are asked now.
+    /// The folders are read, or couldn't be.
     Read {
         generation: u64,
-        folders: usize,
-        asking: Vec<FindSource>,
+        read: std::result::Result<Box<FindRead>, String>,
     },
-    Looked {
+    /// One source answered.
+    Answered {
         generation: u64,
-        result: std::result::Result<Box<FindOutcome>, String>,
+        source: FindSource,
+        lookups: Box<Lookups>,
     },
     Linked(std::result::Result<Box<FindLinkOutcome>, String>),
+}
+
+/// Work the sheet does in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FindJob {
+    /// Reads LemonUp's rows and the AddOns folder.
+    Read,
+    /// Asks one source: one request.
+    Ask(FindSource),
 }
 
 /// The sheet, the background jobs and the replacements still to run.
@@ -117,8 +135,26 @@ pub(crate) enum FindTaskEvent {
 pub(crate) struct FindState {
     /// `None` while the sheet is closed.
     pub(crate) step: Option<FindStep>,
-    /// The sources checked on the Start step: this game's saved choice when the sheet opened.
+    /// The sources wanted: this game's saved choice when the sheet opened, changed with `1`,
+    /// `2` and `3`. Wago.io stays wanted without a key; it is on only with one.
     pub(crate) sources: FindChoice,
+    /// What the lookup read, once it is read.
+    pub(crate) read: Option<Box<FindRead>>,
+    /// Every answer, kept for the life of the sheet: a source turned off and on again is not
+    /// asked again.
+    pub(crate) answers: SourceLookups,
+    /// The sources that answered, and the problems their answers came with.
+    pub(crate) answered: Vec<FindSource>,
+    pub(crate) problems: Vec<SourceProblem>,
+    /// The sources asked that haven't answered yet.
+    pub(crate) asking: Vec<FindSource>,
+    /// The Wago.io notice shows in this sheet.
+    pub(crate) hash_notice: bool,
+    /// The Wago.io notice was shown on this machine, so it never shows again.
+    pub(crate) hash_notice_shown: bool,
+    /// The jobs the sheet started, in place of starting them.
+    #[cfg(test)]
+    pub(crate) jobs: Vec<FindJob>,
     /// The parent folders looked up; `None` for every Not linked addon.
     pub(crate) scope: Option<Vec<String>>,
     /// `f` on one addon: the name to search Wago.io for when nothing is found.
@@ -157,9 +193,7 @@ pub(crate) enum FindMessage {
     Open,
     /// `f`: the Not linked addon under the cursor.
     OpenOne,
-    /// Enter on Start.
-    Start,
-    /// `1`, `2` or `3` on Start: checks or unchecks a source.
+    /// `1`, `2` or `3`: turns a source on or off.
     ToggleSource(FindSource),
     /// Esc or q: closes, and cancels a lookup.
     Close,
@@ -183,9 +217,20 @@ pub(crate) enum FindAction {
         single: Option<String>,
     },
     Close,
-    StartLookup,
-    /// Checks or unchecks a source on the Start step.
+    /// Starts work in the background.
+    Spawn(FindJob),
+    /// Turns a source on or off.
     ToggleSource(FindSource),
+    /// The folders are read.
+    StoreRead(Box<FindRead>),
+    /// These sources are asked now.
+    Asking(Vec<FindSource>),
+    /// A source answered.
+    StoreAnswer(FindSource, Box<Lookups>),
+    /// Works the report out again from the answers of the sources that are on.
+    Refresh,
+    /// Shows the Wago.io notice in this sheet, and remembers it was shown.
+    ShowHashNotice,
     SetStep(FindStep),
     SetQuestion(bool),
     SetQuestionOffset(u16),
@@ -264,6 +309,67 @@ impl FindResults {
             .copied()
             .unwrap_or(FindFocus::Action);
         results
+    }
+
+    /// The results of a report worked out again: a pick stays while its match is still there
+    /// and is dropped when it is not; a result the old report didn't have, or whose matches
+    /// changed while nothing was picked, starts as a new one would. The cursor stays on its
+    /// row while it can be picked. `search` is whether the sheet looked up one addon.
+    pub(crate) fn carried(outcome: FindOutcome, old: &FindResults, search: bool) -> Self {
+        let mut next = Self::new(outcome);
+        let same = |a: &FoundAddon, b: &FoundAddon| {
+            a.source == b.source
+                && a.source_id == b.source_id
+                && a.parent_folder.eq_ignore_ascii_case(&b.parent_folder)
+        };
+        for index in 0..next.report.results.len() {
+            let result = &next.report.results[index];
+            let Some(before) = old
+                .report
+                .results
+                .iter()
+                .position(|was| was.folder.eq_ignore_ascii_case(&result.folder))
+            else {
+                continue;
+            };
+            let was = &old.report.results[before];
+            next.picks[index] = match old.picks[before] {
+                Some(pick) => was.candidates.get(pick).and_then(|picked| {
+                    result
+                        .candidates
+                        .iter()
+                        .position(|candidate| same(candidate, picked))
+                }),
+                None if was.candidates.len() == result.candidates.len()
+                    && was
+                        .candidates
+                        .iter()
+                        .zip(&result.candidates)
+                        .all(|(a, b)| same(a, b)) =>
+                {
+                    None
+                }
+                None => next.picks[index],
+            };
+        }
+        let search = search && !next.any_selectable();
+        let focus = next.focusables(search);
+        let kept = match old.cursor {
+            FindFocus::Result(index) => {
+                let folder = &old.report.results[index].folder;
+                next.report
+                    .results
+                    .iter()
+                    .position(|result| result.folder.eq_ignore_ascii_case(folder))
+                    .map(FindFocus::Result)
+            }
+            FindFocus::Action => Some(FindFocus::Action),
+        };
+        next.cursor = kept
+            .filter(|cursor| focus.contains(cursor))
+            .or_else(|| focus.first().copied())
+            .unwrap_or(FindFocus::Action);
+        next
     }
 
     /// The results of group `index` of [`GROUPS`], in the report's order.
@@ -425,13 +531,13 @@ impl App {
         match (step, key.code) {
             (_, KeyCode::Char('?')) => Some(vec![AppMessage::DashboardOpenHelp]),
             (_, KeyCode::Esc | KeyCode::Char('q')) => message(FindMessage::Close),
-            (FindStep::Start, KeyCode::Enter) if self.find_start_works() => {
-                message(FindMessage::Start)
-            }
-            // The sources have a number each; there is no cursor on this step.
-            (FindStep::Start, KeyCode::Char(number @ '1'..='3')) => {
+            // Each source has a number that turns it on or off.
+            (
+                FindStep::Looking { .. } | FindStep::Results(_),
+                KeyCode::Char(number @ '1'..='3'),
+            ) => {
                 let source = FindSource::ALL[usize::from(number as u8 - b'1')];
-                if self.find_source_available(source) {
+                if self.find_toggle_works(source) {
                     message(FindMessage::ToggleSource(source))
                 } else {
                     Some(vec![])
@@ -482,30 +588,35 @@ impl App {
         }
     }
 
-    /// Whether a source can be checked: Wago.io needs a key.
+    /// Whether a source can be on: Wago.io needs a key.
     pub(super) fn find_source_available(&self, source: FindSource) -> bool {
         source != FindSource::Wago || self.wago_api_key.is_some()
     }
 
-    /// Whether a source is checked as the Start step shows it. Wago.io without a key never is,
-    /// though the saved choice keeps it for when there is one.
-    pub(super) fn find_checked(&self, source: FindSource) -> bool {
+    /// Whether a source is on. Wago.io without a key never is, though the saved choice keeps
+    /// it for when there is one.
+    pub(super) fn find_on(&self, source: FindSource) -> bool {
         self.find.sources.wants(source) && self.find_source_available(source)
     }
 
-    /// The sources enter on Start asks.
-    pub(super) fn find_asked(&self) -> Vec<FindSource> {
+    /// The sources that are on, in their usual order.
+    pub(super) fn find_on_sources(&self) -> Vec<FindSource> {
         self.find.sources.asked(self.wago_api_key.is_some())
     }
 
-    /// Enter on Start looks up only with a source checked.
-    pub(super) fn find_start_works(&self) -> bool {
-        !self.find_asked().is_empty()
+    /// Whether the number of `source` does something: while looking or on the results, for a
+    /// source that can be on, and never for the last one that is on.
+    pub(super) fn find_toggle_works(&self, source: FindSource) -> bool {
+        matches!(
+            self.find.step,
+            Some(FindStep::Looking { .. } | FindStep::Results(_))
+        ) && self.find_source_available(source)
+            && !(self.find_on(source) && self.find_on_sources().len() == 1)
     }
 
-    /// The keys that check a source, as the key line and the sheet show them: Wago.io's key
-    /// only while it can be checked.
-    pub(super) fn find_check_keys(&self) -> (&'static str, super::keymap::KeyCodes) {
+    /// The keys that turn a source on or off, as the key line shows them: Wago.io's only
+    /// while it can be on.
+    pub(super) fn find_source_keys(&self) -> (&'static str, super::keymap::KeyCodes) {
         if self.wago_api_key.is_some() {
             (
                 "1 2 3",
@@ -545,41 +656,17 @@ impl App {
     pub(super) fn find_actions(&self, message: FindMessage) -> Vec<AppAction> {
         match message {
             FindMessage::Open => match self.find_scope() {
-                Ok(scope) => vec![AppAction::Find(FindAction::Open {
-                    scope,
-                    single: None,
-                })],
+                Ok(scope) => self.find_open_actions(scope, None),
                 Err(note) => vec![self.find_note(StatusKind::Note, note)],
             },
             FindMessage::OpenOne => match self.not_linked_current_item() {
-                Some(item) => vec![AppAction::Find(FindAction::Open {
-                    scope: Some(vec![item.folder.clone()]),
-                    single: Some(item.name.clone()),
-                })],
+                Some(item) => {
+                    self.find_open_actions(Some(vec![item.folder.clone()]), Some(item.name.clone()))
+                }
                 None => vec![],
             },
-            FindMessage::Start => {
-                if self.effective_addon_dir.is_none() {
-                    return vec![
-                        self.set_find_step(FindStep::Failed(
-                            "LemonUp has no AddOns folder for this game yet. Pick one in Settings."
-                                .to_string(),
-                        )),
-                    ];
-                }
-                // An update, install or other job that changes the addons runs.
-                if let Some(note) = self.switch_busy_note() {
-                    return vec![self.find_note(StatusKind::Note, note)];
-                }
-                if !self.find_start_works() {
-                    return vec![];
-                }
-                let mut actions = self.find_remember_actions();
-                actions.push(AppAction::Find(FindAction::StartLookup));
-                actions
-            }
-            FindMessage::ToggleSource(source) if self.find_source_available(source) => {
-                vec![AppAction::Find(FindAction::ToggleSource(source))]
+            FindMessage::ToggleSource(source) if self.find_toggle_works(source) => {
+                self.find_toggle_actions(source)
             }
             FindMessage::ToggleSource(_) => vec![],
             FindMessage::Close => vec![AppAction::Find(FindAction::Close)],
@@ -634,15 +721,86 @@ impl App {
         }
     }
 
-    /// Saves the sources checked in this game's config, when they differ from what it holds.
-    /// A save that fails says so; the lookup still runs.
-    fn find_remember_actions(&self) -> Vec<AppAction> {
+    /// Opens the sheet and starts looking at once.
+    fn find_open_actions(
+        &self,
+        scope: Option<Vec<String>>,
+        single: Option<String>,
+    ) -> Vec<AppAction> {
+        // An update, install or other job that changes the addons runs.
+        if let Some(note) = self.switch_busy_note() {
+            return vec![self.find_note(StatusKind::Note, note)];
+        }
+        vec![
+            AppAction::Find(FindAction::Open { scope, single }),
+            if self.effective_addon_dir.is_none() {
+                self.set_find_step(FindStep::Failed(
+                    "LemonUp has no AddOns folder for this game yet. Pick one in Settings."
+                        .to_string(),
+                ))
+            } else {
+                AppAction::Find(FindAction::Spawn(FindJob::Read))
+            },
+        ]
+    }
+
+    /// Turns `source` on or off, saves the choice for this game, asks a source turned on that
+    /// was never asked, and works the report out again.
+    fn find_toggle_actions(&self, source: FindSource) -> Vec<AppAction> {
+        let mut next = self.find.sources;
+        next.toggle(source);
+        let mut actions = vec![AppAction::Find(FindAction::ToggleSource(source))];
+        actions.extend(self.find_remember_actions(next));
+        // While the folders are read, the sources that are on get asked once they are.
+        if next.wants(source)
+            && let Some(read) = self.find.read.as_deref()
+        {
+            actions.extend(self.find_ask_actions(read, &[source]));
+        }
+        actions.push(AppAction::Find(FindAction::Refresh));
+        actions
+    }
+
+    /// Asks each of `sources` that was never asked, one request each. The first time folder
+    /// names and file hashes go to Wago.io on this machine, the sheet says so.
+    fn find_ask_actions(&self, read: &FindRead, sources: &[FindSource]) -> Vec<AppAction> {
+        let ask = sources
+            .iter()
+            .copied()
+            .filter(|source| {
+                !self.find.answered.contains(source) && !self.find.asking.contains(source)
+            })
+            .collect::<Vec<_>>();
+        if ask.is_empty() {
+            return vec![];
+        }
+        let mut actions = vec![AppAction::Find(FindAction::Asking(ask.clone()))];
+        actions.extend(
+            ask.iter()
+                .map(|source| AppAction::Find(FindAction::Spawn(FindJob::Ask(*source)))),
+        );
+        if ask.contains(&FindSource::Wago)
+            && !self.find.hash_notice_shown
+            && self.wago_api_key.is_some()
+            && !read
+                .inputs
+                .wago_lookups(&read.rows, self.find.scope.as_deref())
+                .is_empty()
+        {
+            actions.push(AppAction::Find(FindAction::ShowHashNotice));
+        }
+        actions
+    }
+
+    /// Saves `choice` in this game's config, when it differs from what it holds. A save that
+    /// fails says so; the sheet goes on.
+    fn find_remember_actions(&self, choice: FindChoice) -> Vec<AppAction> {
         let persisted = &self.config_pane.persisted;
-        if FindChoice::from_config(persisted.find_sources.as_deref()) == self.find.sources {
+        if FindChoice::from_config(persisted.find_sources.as_deref()) == choice {
             return vec![];
         }
         let mut saved = persisted.clone();
-        saved.find_sources = Some(self.find.sources.to_config());
+        saved.find_sources = Some(choice.to_config());
         match self.config_store.write_config(&saved) {
             Ok(saved) => {
                 let pane = self.config_pane.mark_saved(saved.clone());
@@ -754,23 +912,29 @@ impl App {
 
     fn find_task_actions(&self, event: FindTaskEvent) -> Vec<AppAction> {
         match event {
-            FindTaskEvent::Read {
-                generation,
-                folders,
-                asking,
-            } if generation == self.find.generation && self.find.looking() => {
-                vec![self.set_find_step(FindStep::Looking { folders, asking })]
-            }
-            FindTaskEvent::Looked { generation, result }
+            FindTaskEvent::Read { generation, read }
                 if generation == self.find.generation && self.find.looking() =>
             {
-                vec![self.set_find_step(match result {
-                    Ok(outcome) => FindStep::Results(FindResults::new(*outcome)),
-                    Err(error) => FindStep::Failed(error),
-                })]
+                match read {
+                    Ok(read) => {
+                        let mut actions = self.find_ask_actions(&read, &self.find_on_sources());
+                        actions.insert(0, AppAction::Find(FindAction::StoreRead(read)));
+                        actions.push(AppAction::Find(FindAction::Refresh));
+                        actions
+                    }
+                    Err(error) => vec![self.set_find_step(FindStep::Failed(error))],
+                }
             }
+            FindTaskEvent::Answered {
+                generation,
+                source,
+                lookups,
+            } if generation == self.find.generation && self.find.step.is_some() => vec![
+                AppAction::Find(FindAction::StoreAnswer(source, lookups)),
+                AppAction::Find(FindAction::Refresh),
+            ],
             // A lookup that was cancelled: its answer changes nothing.
-            FindTaskEvent::Read { .. } | FindTaskEvent::Looked { .. } => vec![],
+            FindTaskEvent::Read { .. } | FindTaskEvent::Answered { .. } => vec![],
             FindTaskEvent::Linked(result) => {
                 let mut actions = vec![AppAction::Find(FindAction::LinkFinished)];
                 match result {
@@ -918,27 +1082,81 @@ impl App {
     pub(super) fn apply_find(&mut self, action: FindAction) {
         match action {
             FindAction::Open { scope, single } => {
-                self.find.step = Some(FindStep::Start);
-                self.find.sources =
+                // A lookup still running answers into nothing.
+                self.find.generation += 1;
+                let mut sources =
                     FindChoice::from_config(self.config_pane.persisted.find_sources.as_deref());
+                // Only Wago.io is wanted and there is no key: the others are on until changed.
+                if sources.asked(self.wago_api_key.is_some()).is_empty() {
+                    for source in [FindSource::WowInterface, FindSource::Tukui] {
+                        sources.toggle(source);
+                    }
+                }
+                self.find.sources = sources;
                 self.find.scope = scope;
                 self.find.single = single;
                 self.find.question = false;
+                self.find.read = None;
+                self.find.answers = SourceLookups::not_asked();
+                self.find.answered.clear();
+                self.find.problems.clear();
+                self.find.asking.clear();
+                self.find.hash_notice = false;
+                if !self.find.hash_notice_shown {
+                    self.find.hash_notice_shown = self
+                        .config_store
+                        .shared_store()
+                        .is_some_and(|store| store.wago_hash_notice_shown());
+                }
+                let folders = self
+                    .find_scope_items()
+                    .iter()
+                    .map(|item| 1 + item.owned_folders.len())
+                    .sum();
+                self.find.step = Some(FindStep::Looking { folders });
                 self.apply(AppAction::SetDetailMode(DetailMode::Find));
             }
             FindAction::Close => {
                 // A lookup still running answers into nothing.
-                if self.find.looking() {
-                    self.find.generation += 1;
-                }
+                self.find.generation += 1;
                 self.find.step = None;
                 self.find.question = false;
+                self.find.asking.clear();
                 if self.dashboard.detail_mode == DetailMode::Find {
                     self.apply(AppAction::SetDetailMode(DetailMode::Overview));
                 }
             }
-            FindAction::StartLookup => self.start_find_lookup(),
+            FindAction::Spawn(job) => self.spawn_find_job(job),
             FindAction::ToggleSource(source) => self.find.sources.toggle(source),
+            FindAction::StoreRead(read) => self.find.read = Some(read),
+            FindAction::Asking(sources) => self.find.asking.extend(sources),
+            FindAction::StoreAnswer(source, lookups) => {
+                self.find.asking.retain(|asking| *asking != source);
+                if !self.find.answered.contains(&source) {
+                    self.find.answered.push(source);
+                }
+                let Lookups { lookups, problems } = *lookups;
+                self.find
+                    .problems
+                    .retain(|problem| problem.source != source);
+                self.find.problems.extend(
+                    problems
+                        .into_iter()
+                        .filter(|problem| problem.source == source),
+                );
+                self.find.answers.take_answer(source, lookups);
+            }
+            FindAction::Refresh => self.refresh_find(),
+            FindAction::ShowHashNotice => {
+                self.find.hash_notice = true;
+                self.find.hash_notice_shown = true;
+                // A flag that can't be saved shows the notice again next time, which is fine.
+                if let Some(store) = self.config_store.shared_store()
+                    && let Err(error) = store.remember_wago_hash_notice()
+                {
+                    tracing::warn!(%error, "couldn't remember that the Wago.io notice was shown");
+                }
+            }
             FindAction::SetStep(step) => {
                 if self.find.step.is_some() {
                     self.find.step = Some(step);
@@ -990,72 +1208,114 @@ impl App {
         }
     }
 
-    fn start_find_lookup(&mut self) {
-        let Some(addon_dir) = self.effective_addon_dir.clone() else {
+    /// Works the report out again from the answers of the sources that are on. The results show
+    /// once the folders are read and a source that is on answered.
+    fn refresh_find(&mut self) {
+        let Some(read) = self.find.read.as_deref() else {
             return;
         };
-        self.find.generation += 1;
-        let generation = self.find.generation;
-        let folders = self
-            .find_scope_items()
+        if !matches!(
+            self.find.step,
+            Some(FindStep::Looking { .. } | FindStep::Results(_))
+        ) {
+            return;
+        }
+        let answered = self
+            .find_on_sources()
+            .into_iter()
+            .filter(|source| self.find.answered.contains(source))
+            .collect::<Vec<_>>();
+        if answered.is_empty() {
+            // Nothing that is on has answered yet.
+            let folders = read.inputs.folders.len();
+            self.find.step = Some(FindStep::Looking { folders });
+            return;
+        }
+        let mut lookups = self.find.answers.only(&answered);
+        // Wago.io is wanted but there is no key: the report says a key finds more.
+        if self.find.sources.wants(FindSource::Wago) && self.wago_api_key.is_none() {
+            lookups.wago = SourceAnswer::Skipped;
+        }
+        let problems = self
+            .find
+            .problems
             .iter()
-            .map(|item| 1 + item.owned_folders.len())
-            .sum();
-        self.find.step = Some(FindStep::Looking {
-            folders,
-            asking: Vec::new(),
-        });
+            .filter(|problem| answered.contains(&problem.source))
+            .cloned()
+            .collect();
+        let outcome = find_outcome(
+            &read.inputs,
+            &read.rows,
+            self.find.scope.as_deref(),
+            Lookups { lookups, problems },
+        );
+        let next = match self.find.results() {
+            Some(old) => FindResults::carried(outcome, old, self.find.single.is_some()),
+            None => FindResults::new(outcome),
+        };
+        self.find.step = Some(FindStep::Results(next));
+    }
+
+    /// Records the job instead of starting it, so a test never reads a folder or asks a source.
+    #[cfg(test)]
+    fn spawn_find_job(&mut self, job: FindJob) {
+        self.find.jobs.push(job);
+    }
+
+    /// Reads the folders, or asks one source, in the background. The answer carries the
+    /// sheet's generation, so one that comes after the sheet closed is dropped.
+    #[cfg(not(test))]
+    fn spawn_find_job(&mut self, job: FindJob) {
+        let generation = self.find.generation;
         let sender = self.task_events_tx.clone();
-        let state_db_file = self.state_db_file.clone();
-        let scope = self.find.scope.clone();
-        let api_key = self.wago_api_key.clone();
-        let choice = self.find.sources;
-        let cache_dir = self
-            .roots
-            .paths(&self.runtime.profile_name)
-            .map(|paths| paths.cache_dir)
-            .unwrap_or_else(|_| self.data_dir.join("cache"));
-        tokio::spawn(async move {
-            let read_sender = sender.clone();
-            let read_scope = scope.clone();
-            let read_dir = addon_dir.clone();
-            let read =
-                tokio::task::spawn_blocking(move || read_find_inputs(&state_db_file, &read_dir))
+        match job {
+            FindJob::Read => {
+                let Some(addon_dir) = self.effective_addon_dir.clone() else {
+                    return;
+                };
+                let state_db_file = self.state_db_file.clone();
+                tokio::spawn(async move {
+                    let read = tokio::task::spawn_blocking(move || {
+                        read_find_inputs(&state_db_file, &addon_dir)
+                    })
                     .await
                     .unwrap_or_else(|error| {
                         Err(format!("The lookup stopped unexpectedly: {error}"))
-                    });
-            let (rows, inputs) = match read {
-                Ok(read) => read,
-                Err(error) => {
-                    let _ = sender.send(AppTaskEvent::Find(FindTaskEvent::Looked {
-                        generation,
-                        result: Err(error),
-                    }));
+                    })
+                    .map(|(rows, inputs)| Box::new(FindRead { rows, inputs }));
+                    let _ =
+                        sender.send(AppTaskEvent::Find(FindTaskEvent::Read { generation, read }));
+                });
+            }
+            FindJob::Ask(source) => {
+                let Some(read) = self.find.read.clone() else {
                     return;
-                }
-            };
-            let wago_lookups = inputs.wago_lookups(&rows, read_scope.as_deref());
-            let asking = crate::find::asking(choice, api_key.is_some(), !wago_lookups.is_empty());
-            let _ = read_sender.send(AppTaskEvent::Find(FindTaskEvent::Read {
-                generation,
-                folders: inputs.folders.len(),
-                asking,
-            }));
-            let lookups = crate::find::lookup_sources(
-                &wago_lookups,
-                inputs.flavor,
-                api_key.as_deref(),
-                &cache_dir,
-                choice,
-            )
-            .await;
-            let outcome = find_outcome(&inputs, &rows, scope.as_deref(), lookups);
-            let _ = sender.send(AppTaskEvent::Find(FindTaskEvent::Looked {
-                generation,
-                result: Ok(Box::new(outcome)),
-            }));
-        });
+                };
+                let scope = self.find.scope.clone();
+                let api_key = self.wago_api_key.clone();
+                let cache_dir = self
+                    .roots
+                    .paths(&self.runtime.profile_name)
+                    .map(|paths| paths.cache_dir)
+                    .unwrap_or_else(|_| self.data_dir.join("cache"));
+                tokio::spawn(async move {
+                    let wago_lookups = read.inputs.wago_lookups(&read.rows, scope.as_deref());
+                    let lookups = crate::find::lookup_sources(
+                        &wago_lookups,
+                        read.inputs.flavor,
+                        api_key.as_deref(),
+                        &cache_dir,
+                        FindChoice::only(&[source]),
+                    )
+                    .await;
+                    let _ = sender.send(AppTaskEvent::Find(FindTaskEvent::Answered {
+                        generation,
+                        source,
+                        lookups: Box::new(lookups),
+                    }));
+                });
+            }
+        }
     }
 
     /// The question enter on "Link" asks, while it is open.
@@ -1105,56 +1365,15 @@ impl App {
         let ellipsis = self.ui_theme.symbols.ellipsis;
         match self.find.step.as_ref() {
             None => {}
-            Some(FindStep::Start) => {
-                let what = match &self.find.single {
-                    Some(name) => name.clone(),
-                    None => {
-                        let count = self.find_scope_items().len();
-                        format!(
-                            "{count} Not linked {}",
-                            if count == 1 { "addon" } else { "addons" }
-                        )
-                    }
-                };
-                body.text(vec![Line::from(Span::styled(
-                    format!("Look for {what} on"),
-                    text,
-                ))]);
-                body.gap(1);
-                body.text(self.find_source_chips(width));
-                // One line under the chips, only when it applies.
-                let note = if !self.find_start_works() {
-                    Some(("Check at least one source.", text))
-                } else if self.wago_api_key.is_none() {
-                    Some(("Add a Wago.io key in Settings to look there too.", muted))
-                } else if self.find_checked(FindSource::Wago) {
-                    Some(("Sends folder names and file hashes to Wago.io.", muted))
-                } else {
-                    None
-                };
-                if let Some((note, style)) = note {
+            Some(FindStep::Looking { folders }) => {
+                self.find_chip_lines(&mut body, width);
+                if self.find.read.is_none() {
                     body.gap(1);
-                    body.text(vec![Line::from(Span::styled(note, style))]);
+                    body.text(vec![Line::from(Span::styled(
+                        format!("Reading {folders} folders{ellipsis}"),
+                        text,
+                    ))]);
                 }
-                body.footer(self.find_hint_footer(self.find_start_hints(), width));
-            }
-            Some(FindStep::Looking { folders, asking }) => {
-                let line = if asking.is_empty() {
-                    format!("Reading {folders} folders{ellipsis}")
-                } else {
-                    format!(
-                        "Asking {}{ellipsis}",
-                        asking
-                            .iter()
-                            .map(|source| source.name())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                body.text(vec![Line::from(Span::styled(line, text))]);
-                body.footer(
-                    self.find_hint_footer(vec![("esc", " cancel, nothing changes")], width),
-                );
             }
             Some(FindStep::Failed(error)) => {
                 body.text(vec![Line::from(Span::styled(
@@ -1166,62 +1385,81 @@ impl App {
                     "Nothing was changed.",
                     muted,
                 ))]);
-                body.footer(self.find_hint_footer(vec![("esc", " close")], width));
             }
-            Some(FindStep::Results(results)) => self.find_results_body(&mut body, results, width),
+            Some(FindStep::Results(results)) => {
+                self.find_chip_lines(&mut body, width);
+                body.gap(1);
+                self.find_results_body(&mut body, results, width);
+            }
         }
         body
     }
 
-    /// The three sources on one line, each with its number: a checked one is filled and in
-    /// bold, one that is not is hollow and muted. Wago.io without a key is all muted, its
-    /// number too: the key does nothing. A line that is too narrow wraps between chips.
+    /// The chips, and under them the Wago.io notice while it shows and Wago.io is on.
+    fn find_chip_lines(&self, body: &mut SheetBody<'static>, width: u16) {
+        body.text(self.find_source_chips(width));
+        if self.find.hash_notice && self.find_on(FindSource::Wago) {
+            body.text(vec![Line::from(Span::styled(
+                format!("  {WAGO_HASH_NOTICE}"),
+                Style::default().fg(self.ui_theme.roles.muted),
+            ))]);
+        }
+    }
+
+    /// The three sources as chips: the number, the name, then how many addons it found, `off`,
+    /// a spinner while it is asked, `failed`, or `needs a key`. A source that is on is filled
+    /// (reverse video where the theme has no background color); one that is off is muted, and
+    /// so is Wago.io without a key, whose number does nothing. A line too narrow wraps between
+    /// chips, never inside one.
     pub(super) fn find_source_chips(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        let symbols = self.ui_theme.symbols;
         let muted = Style::default().fg(roles.muted);
+        let filled = if roles.reverse_cursor {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(roles.background)
+                .bg(roles.lemon)
+                .add_modifier(Modifier::BOLD)
+        };
+        let results = self.find.results();
         let indent = "  ";
         let gap = "    ";
         let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
         let mut used = 0;
         for (index, source) in FindSource::ALL.into_iter().enumerate() {
-            let checked = self.find_checked(source);
-            let number_style = if self.find_source_available(source) {
-                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD)
+            let state = if !self.find_source_available(source) {
+                "needs a key".to_string()
+            } else if !self.find.sources.wants(source) {
+                "off".to_string()
+            } else if self.find.asking.contains(&source) {
+                self.spinner_frame().to_string()
             } else {
-                muted
+                match results {
+                    Some(results)
+                        if results
+                            .problems
+                            .iter()
+                            .any(|problem| problem.source == source) =>
+                    {
+                        "failed".to_string()
+                    }
+                    Some(results) => results.report.found_on(source).to_string(),
+                    // The folders are still read.
+                    None => self.spinner_frame().to_string(),
+                }
             };
-            let (mark, mark_style) = if checked {
-                (symbols.checked, Style::default().fg(roles.lemon))
-            } else {
-                (symbols.unchecked, muted)
-            };
-            let name_style = if checked {
-                Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
-            } else {
-                muted
-            };
-            let chip = vec![
-                Span::styled((index + 1).to_string(), number_style),
-                Span::raw(" "),
-                Span::styled(mark, mark_style),
-                Span::raw(" "),
-                Span::styled(source.name(), name_style),
-            ];
-            let chip_width = chip
-                .iter()
-                .map(|span| span.content.chars().count())
-                .sum::<usize>();
+            let chip = format!("{} {}  {state}", index + 1, source.name());
+            let chip_width = chip.chars().count();
+            let chip = Span::styled(chip, if self.find_on(source) { filled } else { muted });
             match lines.last_mut() {
                 Some(line) if used + gap.len() + chip_width <= usize::from(width) => {
                     line.push(Span::raw(gap));
-                    line.extend(chip);
+                    line.push(chip);
                     used += gap.len() + chip_width;
                 }
                 _ => {
-                    let mut line = vec![Span::raw(indent)];
-                    line.extend(chip);
-                    lines.push(line);
+                    lines.push(vec![Span::raw(indent), chip]);
                     used = indent.len() + chip_width;
                 }
             }
@@ -1229,53 +1467,30 @@ impl App {
         lines.into_iter().map(Line::from).collect()
     }
 
-    /// The keys of the Start step, as the sheet's footer shows them: the key line's entries
-    /// with the same conditions.
-    fn find_start_hints(&self) -> Vec<(&'static str, &'static str)> {
-        let mut hints = vec![(self.find_check_keys().0, " check   ")];
-        if self.find_start_works() {
-            hints.push(("enter", " look   "));
-        }
-        hints.push(("esc", " close"));
-        hints
-    }
-
-    fn find_hint_footer(
-        &self,
-        keys: Vec<(&'static str, &'static str)>,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let roles = self.ui_theme.roles;
-        let mut spans = Vec::new();
-        for (key, text) in keys {
-            spans.push(Span::styled(
-                key,
-                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(text, Style::default().fg(roles.muted)));
-        }
-        vec![
-            Line::from(""),
-            Line::from(fit_spans(spans, usize::from(width))),
-        ]
-    }
-
     fn find_results_body(&self, body: &mut SheetBody<'static>, results: &FindResults, width: u16) {
         let roles = self.ui_theme.roles;
         let text = Style::default().fg(roles.text);
         let muted = Style::default().fg(roles.muted);
         let names = &results.names;
-        let name_width = results
-            .report
+        let report = &results.report;
+        let entries = report
             .results
             .iter()
-            .enumerate()
-            .filter(|(_, result)| result.found().is_some())
-            .map(|(index, _)| results.name_of(index).chars().count())
+            .filter_map(|result| crate::find::result_entry(result, names))
+            .collect::<Vec<_>>();
+        let longest = entries
+            .iter()
+            .map(|entry| entry.name.chars().count())
             .max()
-            .unwrap_or(0)
-            .min(NAME_WIDTH_MAX);
-        let report = &results.report;
+            .unwrap_or(0);
+        let version_width = entries
+            .iter()
+            .map(|entry| entry.version.chars().count())
+            .max()
+            .unwrap_or(0);
+        // The names get the room the cursor, the mark, the source and the versions leave.
+        let room = usize::from(width).saturating_sub(3 + 2 + SOURCE_WIDTH + version_width);
+        let name_width = longest.min(room.max(NAME_WIDTH_MIN));
         if report.skipped.contains(&FindSource::Wago) {
             body.text(vec![Line::from(Span::styled(
                 "A Wago.io key finds more of your addons. Add one in Settings.",
@@ -1367,7 +1582,9 @@ impl App {
             }
             body.gap(1);
         }
-        body.footer(self.find_results_footer(results, width));
+        // One blank line above the action, from the footer.
+        body.trim_trailing_gap();
+        body.footer(self.find_results_footer(results));
     }
 
     /// "Check failed": the sources that failed without leaving an addon
@@ -1470,7 +1687,7 @@ impl App {
             notes.push(if picked {
                 "Replace with the source's copy: yes".to_string()
             } else {
-                "Replace with the source's copy: press space".to_string()
+                "Replace with the source's copy: no".to_string()
             });
         }
         if !notes.is_empty() {
@@ -1552,8 +1769,8 @@ impl App {
         body.text(hanging(lines, width, 6));
     }
 
-    /// The action row and what the keys do on the row under the cursor.
-    fn find_results_footer(&self, results: &FindResults, width: u16) -> Vec<Line<'static>> {
+    /// The action under the results, one blank line above it, its text in line with the names.
+    fn find_results_footer(&self, results: &FindResults) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
         let on_action = results.cursor == FindFocus::Action;
         let (links, replaces) = results.counts();
@@ -1575,29 +1792,15 @@ impl App {
         if on_action {
             style = style.add_modifier(Modifier::BOLD);
         }
+        // The cursor's column, then the mark's two, as on a result row.
         let action = Line::from(vec![
             Span::styled(
-                if on_action && active { "▌ " } else { "  " },
+                if on_action && active { "▌  " } else { "   " },
                 Style::default().fg(roles.lemon),
             ),
             Span::styled(label, style),
         ]);
-        let hint: Vec<(&'static str, &'static str)> = match results.cursor {
-            FindFocus::Action if self.find_offers_search() => {
-                vec![("enter", " search Wago.io for this addon's name")]
-            }
-            FindFocus::Action if active => vec![("enter", " asks before anything changes")],
-            FindFocus::Action => vec![("space", " on a match selects it")],
-            FindFocus::Result(index)
-                if results.report.results[index].label == FindLabel::ChooseOne =>
-            {
-                vec![("enter", " picks the next one, or none")]
-            }
-            FindFocus::Result(_) => vec![("space", " selects or unselects it")],
-        };
-        let mut lines = vec![Line::from(""), action];
-        lines.extend(self.find_hint_footer(hint, width).into_iter().skip(1));
-        lines
+        vec![Line::from(""), action]
     }
 }
 

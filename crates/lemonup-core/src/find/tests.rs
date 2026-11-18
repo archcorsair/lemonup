@@ -1833,3 +1833,47 @@ fn the_report_records_every_source_that_was_not_asked() {
     );
     assert_eq!(left_out.not_found_title(), "Not found on TukUI");
 }
+
+#[test]
+fn turning_a_source_off_works_the_matches_out_again_without_it() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Spy", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Spy_Extra", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let mut answers = SourceLookups::not_asked();
+    answers.take_answer(
+        FindSource::Wago,
+        lookups(SourceAnswer::Found(vec![wago(
+            "SPY",
+            "Spy",
+            vec![("Spy".to_string(), hash_of(&inputs, "Spy"))],
+        )])),
+    );
+    let mut wowinterface = SourceLookups::not_asked();
+    wowinterface.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "99",
+        "Spy fork",
+        "1.0",
+        &[("Spy", "1.0"), ("Spy_Extra", "1.0")],
+    )]);
+    answers.take_answer(FindSource::WowInterface, wowinterface);
+    // Taking one source's answer leaves the others as they were.
+    assert_eq!(answers.tukui, SourceAnswer::NotAsked);
+    assert!(matches!(answers.wago, SourceAnswer::Found(_)));
+
+    let both = match_addons(&inputs, &[], None, &answers.only(&FindSource::ALL));
+    assert_eq!(result(&both, "Spy").label, FindLabel::ChooseOne);
+    assert_eq!(both.found_on(FindSource::Wago), 1);
+    assert_eq!(both.found_on(FindSource::WowInterface), 1);
+    assert_eq!(both.found_on(FindSource::Tukui), 0);
+
+    let wago_only = match_addons(&inputs, &[], None, &answers.only(&[FindSource::Wago]));
+    let spy = result(&wago_only, "Spy");
+    assert_eq!(spy.label, FindLabel::Exact);
+    assert_eq!(spy.found().expect("match").source, FindSource::Wago);
+    assert_eq!(wago_only.found_on(FindSource::WowInterface), 0);
+    assert_eq!(
+        wago_only.not_asked,
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+}

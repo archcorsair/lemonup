@@ -795,12 +795,16 @@ static FIND_HELP: HelpPage = HelpPage {
             ],
         },
         HelpSection {
-            title: "Before the lookup",
+            title: "Sources",
             rows: &[
-                HelpRow::key("1", "Wago.io on or off", &[ch('1')]).when(HelpWhen::HasWagoKey),
+                HelpRow::key(
+                    "1",
+                    "Wago.io on or off; sends folder names and file hashes",
+                    &[ch('1')],
+                )
+                .when(HelpWhen::HasWagoKey),
                 HelpRow::key("2", "WoWInterface on or off", &[ch('2')]),
                 HelpRow::key("3", "TukUI on or off", &[ch('3')]),
-                HelpRow::key("enter", "look up the sources", K_ENTER),
             ],
         },
         HelpSection {
@@ -1228,18 +1232,8 @@ impl App {
         use super::find_sheet::{FindFocus, FindStep};
         use FooterHintId as Id;
         match self.find.step.as_ref() {
-            Some(FindStep::Start) => {
-                let (keys, codes) = self.find_check_keys();
-                let mut hints = vec![KeyHint::key(Id::Toggle, keys, "check", codes)];
-                // With nothing checked, enter does nothing.
-                if self.find_start_works() {
-                    hints.push(KeyHint::key(Id::Run, "enter", "look", ENTER).main());
-                }
-                hints.push(self.close_hint());
-                hints.push(self.help_hint());
-                hints
-            }
             Some(FindStep::Looking { .. }) => vec![
+                self.find_sources_hint(),
                 KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE),
                 self.help_hint(),
             ],
@@ -1280,12 +1274,19 @@ impl App {
                     };
                     hints.push(KeyHint::key(Id::Confirm, "enter", label, ENTER).main());
                 }
+                hints.push(self.find_sources_hint());
                 hints.push(self.close_hint());
                 hints.push(self.help_hint());
                 hints
             }
             Some(FindStep::Failed(_)) | None => vec![self.close_hint(), self.help_hint()],
         }
+    }
+
+    /// The numbers of the sources: Wago.io's only while it can be on.
+    fn find_sources_hint(&self) -> KeyHint {
+        let (keys, codes) = self.find_source_keys();
+        KeyHint::key(FooterHintId::Sources, keys, "sources", codes)
     }
 
     /// `F`, while some addon is Not linked.

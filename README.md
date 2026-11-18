@@ -68,7 +68,8 @@ Coming from LemonUp 1? Your settings and linked addons carry over on the first r
   ones) on Wago.io, WoWInterface and TukUI by its files, see what matched, and link the ones you
   pick after one question. Partial matches can be replaced with the source's copy. `f` does the
   same for one addon, and offers a Wago.io name search when nothing matches. Keys `1`, `2` and `3`
-  choose which sources to look at, and LemonUp remembers the choice for each game
+  turn a source on or off while you look at the results, and LemonUp remembers the choice for
+  each game
 - **Edit .toc fields:** press `e` in Details to change the Title, Notes or Category the game shows
   for an addon. Updates keep your values, and clearing one puts the original back
 - **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong

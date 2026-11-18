@@ -254,6 +254,8 @@ enum FooterHintId {
     SwitchGame,
     /// `F`, find your addons online.
     FindAll,
+    /// `1`, `2` and `3` in the Find sheet: a source on or off.
+    Sources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17605,7 +17607,6 @@ mod tests {
                 (HelpContext::TocEdit, _) => toc_edit,
                 (HelpContext::Games, "Questions") => |app| questions_in(open_games, app),
                 (HelpContext::Games, _) => open_games,
-                (HelpContext::Find, "Before the lookup") => super::find_sheet::open_find_start,
                 (HelpContext::Find, "Picking and linking") => super::find_sheet::open_find_action,
                 (HelpContext::Find, "Questions") => {
                     |app| questions_in(super::find_sheet::open_find_results, app)
