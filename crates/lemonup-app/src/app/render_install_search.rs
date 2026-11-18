@@ -659,7 +659,10 @@ impl App {
         header.push(Cell::from(Span::styled("Downloads", heading)));
         header.push(Cell::from(Span::styled("Version", heading)));
         header.push(Cell::from(""));
-        let longest_version = pane.results[window_start..window_end]
+        // Every result, not just the visible window, so the column keeps
+        // its width while the list scrolls.
+        let longest_version = pane
+            .results
             .iter()
             .map(|result| result.version.as_deref().map_or(0, |v| v.chars().count()))
             .max()

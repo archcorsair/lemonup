@@ -16066,6 +16066,21 @@ mod tests {
         }
 
         #[test]
+        fn the_version_column_keeps_its_width_while_the_list_scrolls() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            // Only the last result, off screen at first, has a long version.
+            app.search_pane.results[29].version = Some("v1.6.0-forever".to_string());
+            let header = |rows: &[String]| row_of(rows, "Downloads").to_string();
+            let top = render_rows(&mut app, 100, 30);
+            assert!(!top.join("\n").contains("Result Addon 29"));
+            app.search_pane.selected_result = Some(29);
+            let bottom = render_rows(&mut app, 100, 30);
+            assert!(bottom.join("\n").contains("v1.6.0-forever"));
+            assert_eq!(header(&top), header(&bottom));
+        }
+
+        #[test]
         fn at_80_by_24_a_long_version_is_cut_and_the_addon_column_keeps_16() {
             let mut app = app_with_long_versions();
             // Not the selected row, so it does not scroll.
