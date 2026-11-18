@@ -818,7 +818,7 @@ fn the_find_sheet_keeps_its_size_and_place_in_every_step() {
         ("Reading 4 folders", &|app: &mut App| {
             app.find.step = Some(FindStep::Looking { folders: 4 })
         }),
-        ("2 WoWInterface", &|app: &mut App| {
+        ("[x] WoWInterface", &|app: &mut App| {
             app.find.read = Some(read_of(no_folders()));
             app.find.asking = vec![FindSource::Wago, FindSource::WowInterface];
         }),
@@ -1224,11 +1224,13 @@ fn a_partial_choice_says_picking_it_replaces_your_copy() {
             .to_string()
     };
     assert!(
-        line("QuestieDev on Wago.io")
-            .contains("(QuestieDev differs from the release; picking it replaces your copy"),
+        line("QuestieDev on Wago.io").contains("(QuestieDev differs from the release; picking"),
         "{shown}"
     );
-    assert!(shown.contains("with the one from Wago.io)"), "{shown}");
+    assert!(
+        shown.contains("it replaces your copy with the one from Wago.io)"),
+        "{shown}"
+    );
     assert!(
         !line("QuestieDev on WoWInterface").contains("picking it replaces"),
         "{shown}"
@@ -1870,37 +1872,63 @@ fn help_says_the_arrows_scroll_past_the_last_row() {
     );
 }
 
-/// The chip line as drawn, from the first chip to the sheet's right edge.
-fn chip_line(shown: &str) -> String {
-    let row = shown
-        .lines()
-        .find(|row| row.contains("1 Wago.io"))
-        .unwrap_or_else(|| panic!("no chips:\n{shown}"));
-    let from = &row[row.find("1 Wago.io").expect("chip")..];
-    from.split(['│', '|'])
-        .next()
-        .unwrap_or(from)
-        .trim_end()
-        .to_string()
+/// The source rail as drawn: its lines from "Sources" down, from its text's left edge.
+fn rail_of(shown: &str) -> Vec<String> {
+    let rows = shown.lines().collect::<Vec<_>>();
+    let border = |row: &str, column: usize| matches!(row.chars().nth(column), Some('│' | '|'));
+    let (at, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(at, row)| {
+            let column = row[..row.find("Sources")?].chars().count();
+            (column >= 2 && border(row, column - 2)).then_some((at, column))
+        })
+        .unwrap_or_else(|| panic!("no rail:\n{shown}"));
+    rows[at..]
+        .iter()
+        .take_while(|row| border(row, column - 2))
+        .map(|row| {
+            row.chars()
+                .skip(column)
+                .take(22)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
 }
 
-/// The row of the screen under the chip line, from the chips' left edge.
-fn under_chips(shown: &str) -> String {
-    let rows = shown.lines().collect::<Vec<_>>();
-    let at = rows
+/// The rail's lines of the three sources.
+fn rail_sources(shown: &str) -> Vec<String> {
+    rail_of(shown)
+        .into_iter()
+        .filter(|line| line.contains(" ["))
+        .collect()
+}
+
+/// The Wago.io notice in the rail, its lines joined: the lines after the rail's blank line.
+fn rail_notice(shown: &str) -> String {
+    let rail = rail_of(shown);
+    let blank = rail
         .iter()
-        .position(|row| row.contains("1 Wago.io"))
-        .unwrap_or_else(|| panic!("no chips:\n{shown}"));
-    let column = rows[at][..rows[at].find("1 Wago.io").expect("chip")]
-        .chars()
-        .count();
-    let below = rows[at + 1].chars().skip(column).collect::<String>();
-    below
-        .split(['│', '|'])
-        .next()
-        .unwrap_or("")
-        .trim_end()
-        .to_string()
+        .position(String::is_empty)
+        .unwrap_or_else(|| panic!("no notice:\n{shown}"));
+    rail[blank + 1..].join(" ")
+}
+
+fn has_notice(shown: &str) -> bool {
+    let rail = rail_of(shown);
+    rail.iter()
+        .position(String::is_empty)
+        .is_some_and(|blank| rail[blank + 1..].join(" ") == WAGO_HASH_NOTICE)
+}
+
+/// The rail's line for `name`.
+fn rail_line(shown: &str, name: &str) -> String {
+    rail_of(shown)
+        .into_iter()
+        .find(|line| line.contains(name))
+        .unwrap_or_else(|| panic!("no {name} in the rail:\n{shown}"))
 }
 
 /// The cell of the screen `offset` characters into the first `text` on it.
@@ -2052,8 +2080,16 @@ fn f_opens_straight_into_looking_and_asks_only_the_sources_that_are_on() {
     assert_eq!(app.find.step, Some(FindStep::Looking { folders: 1 }));
     assert_eq!(app.find.jobs, vec![FindJob::Read]);
     let shown = screen(&mut app, 80, 24);
-    assert!(shown.contains("2 WoWInterface  ⠋"), "{shown}");
-    assert!(shown.contains("1 Wago.io  off"), "{shown}");
+    assert_eq!(
+        rail_line(&shown, "WoWInterface"),
+        "2 [x] WoWInterface   ⠋",
+        "{shown}"
+    );
+    assert_eq!(
+        rail_line(&shown, "Wago.io"),
+        "1 [ ] Wago.io      off",
+        "{shown}"
+    );
 
     // While the folders are read, 3 turns TukUI on; it is asked with the others once they are.
     key(&mut app, KeyCode::Char('3'));
@@ -2068,130 +2104,312 @@ fn f_opens_straight_into_looking_and_asks_only_the_sources_that_are_on() {
     deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
     let shown = screen(&mut app, 80, 24);
     assert_eq!(
-        chip_line(&shown),
-        "1 Wago.io  off    2 WoWInterface  1    3 TukUI  ⠋",
+        rail_sources(&shown),
+        [
+            "1 [ ] Wago.io      off",
+            "2 [x] WoWInterface   1",
+            "3 [x] TukUI          ⠋"
+        ],
         "{shown}"
     );
     deliver_answer(&mut app, FindSource::Tukui, nothing_found());
     assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  off    2 WoWInterface  1    3 TukUI  0"
+        rail_sources(&screen(&mut app, 80, 24)),
+        [
+            "1 [ ] Wago.io      off",
+            "2 [x] WoWInterface   1",
+            "3 [x] TukUI          0"
+        ]
     );
     assert_eq!(asked(&app).len(), 2);
 }
 
 #[test]
-fn chips_show_counts_off_a_spinner_failed_and_needs_a_key() {
+fn the_rail_shows_each_source_with_its_state() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find_results(&mut app);
     app.shell_ui.motion.tick_count = 0;
-    // TukUI's request failed in this report.
-    assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  3    2 WoWInterface  3    3 TukUI  failed"
-    );
+    for (width, height) in [(80, 24), (138, 36)] {
+        // TukUI's request failed in this report.
+        let shown = screen(&mut app, width, height);
+        assert_eq!(
+            rail_of(&shown),
+            [
+                "Sources",
+                "1 [x] Wago.io        3",
+                "2 [x] WoWInterface   3",
+                "3 [x] TukUI",
+                "      Check failed",
+            ],
+            "{shown}"
+        );
+        // "Sources" is on the row of the first group heading.
+        let row = shown
+            .lines()
+            .find(|row| row.contains("Sources"))
+            .expect("Sources");
+        assert!(row.contains("Ready to link"), "{shown}");
+    }
     app.find.sources.toggle(FindSource::WowInterface);
     app.find.asking = vec![FindSource::Tukui];
-    assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  3    2 WoWInterface  off    3 TukUI  ⠋"
-    );
     app.wago_api_key = None;
-    assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  needs a key    2 WoWInterface  off    3 TukUI  ⠋"
-    );
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        assert_eq!(
+            rail_of(&shown),
+            [
+                "Sources",
+                "1 [-] Wago.io",
+                "      Needs a key",
+                "2 [ ] WoWInterface off",
+                "3 [x] TukUI          ⠋",
+            ],
+            "{shown}"
+        );
+    }
 }
 
 #[test]
-fn a_chip_that_is_on_is_filled_and_one_that_is_off_is_muted() {
+fn the_rail_shows_while_looking() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    app.shell_ui.motion.tick_count = 0;
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        assert_eq!(
+            rail_sources(&shown),
+            [
+                "1 [x] Wago.io        ⠋",
+                "2 [x] WoWInterface   ⠋",
+                "3 [x] TukUI          ⠋",
+            ],
+            "{shown}"
+        );
+        let row = shown
+            .lines()
+            .find(|row| row.contains("Sources"))
+            .expect("Sources");
+        assert!(row.contains("Reading"), "{shown}");
+    }
+}
+
+#[test]
+fn the_rail_colors_come_from_the_theme_roles() {
     use ratatui::style::Modifier;
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find_results(&mut app);
     app.find.sources.toggle(FindSource::WowInterface);
     let roles = app.ui_theme.roles;
-    assert_ne!(roles.lemon, roles.muted);
-    // On: the accent behind readable text, the number too.
-    for offset in [0, 2, 11] {
-        let cell = cell_at(&mut app, 120, 30, "1 Wago.io  3", offset);
-        assert_eq!(cell.bg, roles.lemon, "{offset}");
-        assert_eq!(cell.fg, roles.background, "{offset}");
+    let sources = cell_at(&mut app, 120, 30, "Sources", 0);
+    assert_eq!(sources.fg, roles.muted);
+    assert!(sources.modifier.contains(Modifier::BOLD));
+    // On: a blue number, a lemon box, the name in text, the count muted.
+    let on = "1 [x] Wago.io        3";
+    assert_eq!(cell_at(&mut app, 120, 30, on, 0).fg, roles.blue);
+    assert_eq!(cell_at(&mut app, 120, 30, on, 2).fg, roles.lemon);
+    assert_eq!(cell_at(&mut app, 120, 30, on, 6).fg, roles.text);
+    assert_eq!(cell_at(&mut app, 120, 30, on, 21).fg, roles.muted);
+    // Off: the box, the name and "off" muted.
+    let off = "2 [ ] WoWInterface off";
+    assert_eq!(cell_at(&mut app, 120, 30, off, 0).fg, roles.blue);
+    for offset in [2, 6, 19] {
+        assert_eq!(cell_at(&mut app, 120, 30, off, offset).fg, roles.muted);
     }
-    // Off: not filled, muted.
-    for offset in [0, 2] {
-        let cell = cell_at(&mut app, 120, 30, "2 WoWInterface  off", offset);
-        assert_ne!(cell.bg, roles.lemon, "{offset}");
-        assert_eq!(cell.fg, roles.muted, "{offset}");
-    }
-    // Wago.io without a key: muted, its number too.
+    // Failed: "Check failed" in red.
+    assert_eq!(cell_at(&mut app, 120, 30, "Check failed", 0).fg, roles.red);
+    // Asking: the spinner in lemon.
+    app.find.asking = vec![FindSource::Tukui];
+    app.shell_ui.motion.tick_count = 0;
+    assert_eq!(
+        cell_at(&mut app, 120, 30, "3 [x] TukUI          ⠋", 21).fg,
+        roles.lemon
+    );
+    // Needs a key: a muted number, a dim box, the name and the words muted.
     app.wago_api_key = None;
-    let cell = cell_at(&mut app, 120, 30, "1 Wago.io  needs a key", 0);
-    assert_ne!(cell.bg, roles.lemon);
-    assert_eq!(cell.fg, roles.muted);
+    let key = "1 [-] Wago.io";
+    assert_eq!(cell_at(&mut app, 120, 30, key, 0).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, 120, 30, key, 2).fg, roles.dim);
+    assert_eq!(cell_at(&mut app, 120, 30, key, 6).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, 120, 30, "Needs a key", 0).fg, roles.muted);
+}
 
-    // The Terminal theme has no background color to fill with, and NO_COLOR none at all:
-    // reverse video.
-    app.wago_api_key = Some("test-wago-key".to_string());
+#[test]
+fn the_rail_reads_the_same_without_color_and_is_plain_with_simple_symbols() {
+    let expected = [
+        "Sources",
+        "1 [-] Wago.io",
+        "      Needs a key",
+        "2 [ ] WoWInterface off",
+        "3 [x] TukUI          /",
+    ];
     for no_color in [false, true] {
+        let mut app = app_for_tests(ShellMode::Dashboard);
         app.ui_theme = UiTheme::from_mode(ThemeMode::Terminal);
         app.ui_theme.no_color = no_color;
-        let on = cell_at(&mut app, 120, 30, "1 Wago.io  3", 0);
-        assert!(on.modifier.contains(Modifier::REVERSED), "{no_color}");
-        let off = cell_at(&mut app, 120, 30, "2 WoWInterface  off", 0);
-        assert!(!off.modifier.contains(Modifier::REVERSED), "{no_color}");
+        app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
+        open_find_results(&mut app);
+        app.shell_ui.motion.tick_count = 1;
+        app.find.sources.toggle(FindSource::WowInterface);
+        app.find.asking = vec![FindSource::Tukui];
+        app.wago_api_key = None;
+        for (width, height) in [(80, 24), (138, 36)] {
+            let shown = screen(&mut app, width, height);
+            let rail = rail_of(&shown);
+            assert_eq!(rail, expected, "{no_color}:\n{shown}");
+            assert!(rail.iter().all(|line| line.is_ascii()), "{shown}");
+        }
+        // A source that failed reads "Check failed".
+        app.find.asking.clear();
+        let shown = screen(&mut app, 80, 24);
+        assert_eq!(
+            rail_of(&shown)[3..],
+            [
+                "2 [ ] WoWInterface off",
+                "3 [x] TukUI",
+                "      Check failed"
+            ],
+            "{shown}"
+        );
     }
 }
 
 #[test]
-fn chips_are_plain_with_simple_symbols() {
+fn the_wago_notice_is_in_the_rail_wrapped_to_its_width() {
     let mut app = app_for_tests(ShellMode::Dashboard);
-    app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
     open_find_results(&mut app);
-    app.shell_ui.motion.tick_count = 1;
-    app.find.asking = vec![FindSource::WowInterface];
     app.find.hash_notice = true;
     for (width, height) in [(80, 24), (138, 36)] {
         let shown = screen(&mut app, width, height);
-        let chips = chip_line(&shown);
+        let rail = rail_of(&shown);
         assert_eq!(
-            chips, "1 Wago.io  3    2 WoWInterface  /    3 TukUI  failed",
+            rail[5..],
+            ["", "Sends folder names and", "file hashes to", "Wago.io."],
             "{shown}"
         );
-        assert!(chips.is_ascii(), "{chips}");
-        assert_eq!(under_chips(&shown), WAGO_HASH_NOTICE, "{shown}");
+        // Nowhere else.
+        assert!(!shown.contains(WAGO_HASH_NOTICE), "{shown}");
+    }
+    // Not while Wago.io is off.
+    app.find.sources.toggle(FindSource::Wago);
+    assert!(!has_notice(&screen(&mut app, 80, 24)));
+}
+
+/// A report with an update ready and a likely match, as `lemonup find` words them.
+fn versions_report() -> FindReport {
+    let mut clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
+    clique.latest_version = Some("2.0".to_string());
+    let mut pawn = found(
+        FindLabel::Likely,
+        FindSource::WowInterface,
+        "Pawn",
+        &["Pawn"],
+    );
+    pawn.likely_reason = Some(lemonup_core::find::LikelyReason::TocNamesIt);
+    FindReport {
+        results: vec![
+            result(FindLabel::Exact, "Clique", vec![clique]),
+            result(FindLabel::Likely, "Pawn", vec![pawn]),
+        ],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        not_asked: Vec::new(),
     }
 }
 
 #[test]
-fn the_chips_fit_at_80x24_and_wrap_between_chips() {
+fn rows_show_the_version_only_when_the_sheet_is_wide() {
     let mut app = app_for_tests(ShellMode::Dashboard);
-    open_find_results(&mut app);
-    app.wago_api_key = None;
-    // The widest the chips get, on one line in the sheet at 80x24.
-    assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  needs a key    2 WoWInterface  3    3 TukUI  failed"
-    );
-    app.wago_api_key = Some("test-wago-key".to_string());
-    let rows = |width| {
-        app.find_source_chips(width)
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
+    open_find(&mut app);
+    set_results(&mut app, versions_report());
+    let pawn = &results(&app).report.results[1];
+    let reason = crate::find::result_entry(pawn, &LocalNames::default())
+        .expect("entry")
+        .version;
+    let row = |shown: &str, name: &str| {
+        shown
+            .lines()
+            .position(|row| row.contains(name))
+            .unwrap_or_else(|| panic!("{name}:\n{shown}"))
     };
-    assert_eq!(
-        rows(30),
-        vec!["  1 Wago.io  3", "  2 WoWInterface  3", "  3 TukUI  failed"]
+
+    // At 80 columns: the name, the source, then the note.
+    let shown = screen(&mut app, 80, 24);
+    let rows = shown.lines().collect::<Vec<_>>();
+    let clique = rows[row(&shown, "Clique")];
+    assert!(
+        clique.contains("Clique  Wago.io       Update ready (2.0)"),
+        "{shown}"
     );
-    assert_eq!(
-        rows(40),
-        vec!["  1 Wago.io  3    2 WoWInterface  3", "  3 TukUI  failed"]
+    assert!(!clique.contains("1.0"), "{shown}");
+    // A likely match keeps what its version says, on the line under it.
+    let pawn = row(&shown, "Pawn");
+    assert!(!rows[pawn].contains(reason.as_str()), "{shown}");
+    let first = reason.split(';').next().expect("reason");
+    assert!(
+        rows[pawn + 1].trim_start().starts_with(first),
+        "{reason}:\n{shown}"
     );
+
+    // Wide: the version between the source and the note.
+    let shown = screen(&mut app, 138, 36);
+    let rows = shown.lines().collect::<Vec<_>>();
+    assert!(
+        rows[row(&shown, "Clique")].contains("Clique  Wago.io       1.0  Update ready (2.0)"),
+        "{shown}"
+    );
+    assert!(rows[row(&shown, "Pawn")].contains(first), "{shown}");
+}
+
+#[test]
+fn the_action_stays_on_the_last_row_of_the_sheet_while_the_report_scrolls() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_tall_report(&mut app, true);
+    for (width, height) in [(80, 24), (138, 36)] {
+        let shown = screen(&mut app, width, height);
+        let rows = shown.lines().collect::<Vec<_>>();
+        let action = rows
+            .iter()
+            .position(|row| row.contains("Link 1 addon"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert_last_inner_row(&rows, action, width, &shown);
+        assert_eq!(rail_of(&shown)[0], "Sources", "{shown}");
+        // Longer than the sheet at 80x24.
+        if width == 80 {
+            assert!(app.sheet_scroll.get().max_offset > 0, "{shown}");
+            assert!(shown.contains("↓"), "{shown}");
+        }
+    }
+    // Scrolled to the end, the action and the rail stay in place, and the cursor's row shows.
+    let mut shown = String::new();
+    for _ in 0..200 {
+        shown = press_and_draw(&mut app, KeyCode::Down);
+    }
+    assert!(shown.contains("ZzLastCopy"), "{shown}");
+    let rows = shown.lines().collect::<Vec<_>>();
+    let action = rows
+        .iter()
+        .position(|row| row.contains("Link 1 addon"))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert_last_inner_row(&rows, action, 80, &shown);
+    assert!(rows[action].contains('▌'), "{shown}");
+    assert_eq!(rail_of(&shown)[0], "Sources", "{shown}");
+}
+
+/// `action` is the sheet's last inner row: the full screen sheet's rule is right under it, a
+/// floating sheet's bottom border one blank row under it.
+fn assert_last_inner_row(rows: &[&str], action: usize, width: u16, shown: &str) {
+    if width < 100 {
+        assert!(
+            rows[action + 1].trim().chars().all(|ch| ch == '─'),
+            "{shown}"
+        );
+    } else {
+        assert!(
+            rows[action + 1].replace('│', "").trim().is_empty(),
+            "{shown}"
+        );
+        assert!(rows[action + 2].contains('╰'), "{shown}");
+    }
 }
 
 #[test]
@@ -2219,8 +2437,13 @@ fn turning_a_source_off_works_the_report_out_again_and_on_brings_it_back() {
     assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
     let shown = screen(&mut app, 120, 30);
     assert_eq!(
-        chip_line(&shown),
-        "1 Wago.io  2    2 WoWInterface  off    3 TukUI  0"
+        rail_sources(&shown),
+        [
+            "1 [x] Wago.io        2",
+            "2 [ ] WoWInterface off",
+            "3 [x] TukUI          0"
+        ],
+        "{shown}"
     );
     // Not found names the sources that are on.
     assert!(
@@ -2266,8 +2489,12 @@ fn turning_on_a_source_never_asked_asks_it_once_and_works_the_report_out_when_it
         ]
     );
     assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  2    2 WoWInterface  ⠋    3 TukUI  0"
+        rail_sources(&screen(&mut app, 80, 24)),
+        [
+            "1 [x] Wago.io        2",
+            "2 [x] WoWInterface   ⠋",
+            "3 [x] TukUI          0"
+        ]
     );
     // The report waits for the answer.
     assert_eq!(label_of(&app, "Spy"), FindLabel::Exact);
@@ -2279,8 +2506,12 @@ fn turning_on_a_source_never_asked_asks_it_once_and_works_the_report_out_when_it
     deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
     assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
     assert_eq!(
-        chip_line(&screen(&mut app, 80, 24)),
-        "1 Wago.io  2    2 WoWInterface  1    3 TukUI  0"
+        rail_sources(&screen(&mut app, 80, 24)),
+        [
+            "1 [x] Wago.io        2",
+            "2 [x] WoWInterface   1",
+            "3 [x] TukUI          0"
+        ]
     );
     assert_eq!(
         saved_find_sources(&path),
@@ -2351,7 +2582,7 @@ fn without_a_key_wago_is_never_saved_as_off_and_its_number_does_nothing() {
     assert!(
         table
             .iter()
-            .any(|hint| hint.key == "2 3" && hint.label == "sources")
+            .any(|hint| hint.key == "2 3" && hint.label == "turn on or off")
     );
     assert!(!table.iter().any(|hint| hint.key.contains('1')));
     key(&mut app, KeyCode::Char('3'));
@@ -2412,28 +2643,28 @@ fn the_wago_notice_shows_the_first_time_wago_is_asked_and_never_again() {
     // Nothing to send to Wago.io: no notice yet.
     open_find(&mut app);
     deliver_read(&mut app, no_folders());
-    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(!has_notice(&screen(&mut app, 80, 24)));
     assert!(!shared.wago_hash_notice_shown());
 
-    // Folders to send: one muted line under the chips.
+    // Folders to send: muted lines at the bottom of the rail, under a blank line.
     key(&mut app, KeyCode::Esc);
     open_find(&mut app);
     deliver_read(&mut app, inputs.clone());
     assert!(asked(&app).contains(&FindSource::Wago));
     for (width, height) in [(80, 24), (138, 36)] {
         let shown = screen(&mut app, width, height);
-        assert_eq!(under_chips(&shown), WAGO_HASH_NOTICE, "{shown}");
+        assert_eq!(rail_notice(&shown), WAGO_HASH_NOTICE, "{shown}");
     }
     assert_eq!(
-        cell_at(&mut app, 120, 30, WAGO_HASH_NOTICE, 0).fg,
+        cell_at(&mut app, 120, 30, "Sends folder names", 0).fg,
         app.ui_theme.roles.muted
     );
     assert!(shared.wago_hash_notice_shown());
     // It stays in this sheet while Wago.io is on.
     deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
-    assert!(screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(has_notice(&screen(&mut app, 80, 24)));
     key(&mut app, KeyCode::Char('1'));
-    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(!has_notice(&screen(&mut app, 80, 24)));
 
     // Never again: in this session, nor in a new one.
     key(&mut app, KeyCode::Esc);
@@ -2441,11 +2672,11 @@ fn the_wago_notice_shows_the_first_time_wago_is_asked_and_never_again() {
     open_find(&mut app);
     deliver_read(&mut app, inputs.clone());
     assert!(asked(&app).contains(&FindSource::Wago));
-    assert!(!screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(!has_notice(&screen(&mut app, 80, 24)));
     let mut fresh = app_in(store);
     open_find(&mut fresh);
     deliver_read(&mut fresh, inputs);
-    assert!(!screen(&mut fresh, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(!has_notice(&screen(&mut fresh, 80, 24)));
 
     // Help keeps a row about it.
     assert!(
@@ -2470,7 +2701,7 @@ fn a_wago_notice_that_cannot_be_saved_still_shows_and_the_lookup_goes_on() {
     let mut app = app_in(store.clone());
     open_find(&mut app);
     deliver_read(&mut app, inputs.clone());
-    assert!(screen(&mut app, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(has_notice(&screen(&mut app, 80, 24)));
     deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
     assert_eq!(label_of(&app, "Clique"), FindLabel::Exact);
     // Not saved: a new session shows it again, which is fine.
@@ -2478,7 +2709,7 @@ fn a_wago_notice_that_cannot_be_saved_still_shows_and_the_lookup_goes_on() {
     let mut fresh = app_in(store);
     open_find(&mut fresh);
     deliver_read(&mut fresh, inputs);
-    assert!(screen(&mut fresh, 80, 24).contains(WAGO_HASH_NOTICE));
+    assert!(has_notice(&screen(&mut fresh, 80, 24)));
 }
 
 #[test]
@@ -2517,7 +2748,8 @@ fn the_name_column_fits_the_longest_name_when_there_is_room() {
             not_asked: Vec::new(),
         },
     );
-    for (width, height) in [(120, 30), (80, 24)] {
+    let column = |row: &str, text: &str| row[..row.find(text).expect("text")].chars().count();
+    for (width, height) in [(138, 36), (120, 30)] {
         let shown = screen(&mut app, width, height);
         let row = shown
             .lines()
@@ -2525,13 +2757,31 @@ fn the_name_column_fits_the_longest_name_when_there_is_room() {
             .unwrap_or_else(|| panic!("{shown}"));
         assert!(row.contains(&format!("{long}  Wago.io")), "{shown}");
         // The versions line up under each other.
-        let column = |row: &str| row[..row.find("1.0").expect("version")].chars().count();
         let clique = shown
             .lines()
             .find(|row| row.contains("Clique") && row.contains("1.0"))
             .expect("Clique");
-        assert_eq!(column(row), column(clique), "{shown}");
+        assert_eq!(column(row, "1.0"), column(clique, "1.0"), "{shown}");
     }
+    // At 80 columns the rail leaves the name 34 columns; the sources line up.
+    let shown = screen(&mut app, 80, 24);
+    let row = shown
+        .lines()
+        .find(|row| row.contains("HandyNotes"))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(
+        row.contains("HandyNotes: The War Within Treasu…  Wago.io"),
+        "{shown}"
+    );
+    let clique = shown
+        .lines()
+        .find(|row| row.contains("Clique"))
+        .expect("Clique");
+    assert_eq!(
+        column(row, "Wago.io"),
+        column(clique, "WoWInterface"),
+        "{shown}"
+    );
 }
 
 #[test]
@@ -2548,7 +2798,7 @@ fn the_action_lines_up_with_the_names_under_a_blank_line() {
             .unwrap_or_else(|| panic!("{shown}"));
         let clique = rows
             .iter()
-            .find(|row| row.contains("Clique") && row.contains("1.0"))
+            .find(|row| row.contains("Clique") && row.contains("WoWInterface"))
             .expect("Clique");
         assert_eq!(
             column(rows[action], "Link 1 addon"),
@@ -2559,7 +2809,7 @@ fn the_action_lines_up_with_the_names_under_a_blank_line() {
         assert!(above.trim().is_empty(), "{shown}");
     }
 
-    // A short report: exactly one blank line between the last group and the action.
+    // A short report: the action stays on the sheet's last row, a blank line above it.
     set_results(
         &mut app,
         FindReport {
@@ -2589,10 +2839,7 @@ fn the_action_lines_up_with_the_names_under_a_blank_line() {
             rows[action - 1].replace('│', "").trim().is_empty(),
             "{shown}"
         );
-        assert!(
-            !rows[action - 2].replace('│', "").trim().is_empty(),
-            "{shown}"
-        );
+        assert_last_inner_row(&rows, action, width, &shown);
     }
 }
 
@@ -2644,7 +2891,7 @@ fn the_key_line_shows_the_keys_of_the_row_under_the_cursor() {
     // Looking: the sources and esc.
     let looking = pairs(&app);
     assert!(
-        looking.contains(&"1 2 3 sources".to_string()),
+        looking.contains(&"1 2 3 turn on or off".to_string()),
         "{looking:?}"
     );
     assert!(looking.contains(&"esc cancel".to_string()), "{looking:?}");
@@ -2656,7 +2903,12 @@ fn the_key_line_shows_the_keys_of_the_row_under_the_cursor() {
     // A match: move, space, the sources, close; enter does nothing there.
     set_results(&mut app, report());
     let on_match = pairs(&app);
-    for expected in ["↑/↓ move", "space unselect", "1 2 3 sources", "esc close"] {
+    for expected in [
+        "↑/↓ move",
+        "space unselect",
+        "1 2 3 turn on or off",
+        "esc close",
+    ] {
         assert!(on_match.contains(&expected.to_string()), "{on_match:?}");
     }
     assert!(
@@ -2688,7 +2940,7 @@ fn the_key_line_shows_the_keys_of_the_row_under_the_cursor() {
         "{on_action:?}"
     );
     assert!(
-        on_action.contains(&"1 2 3 sources".to_string()),
+        on_action.contains(&"1 2 3 turn on or off".to_string()),
         "{on_action:?}"
     );
     assert!(
@@ -2727,6 +2979,20 @@ fn help_lists_the_source_keys() {
     }
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find_results(&mut app);
+    // The key line names what the numbers do, and Help has a row for each of them.
+    let hint = app
+        .key_table(200)
+        .into_iter()
+        .find(|hint| hint.label == "turn on or off")
+        .expect("the sources hint");
+    assert_eq!(hint.key, "1 2 3");
+    for digit in ['1', '2', '3'] {
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == [KeyEvent::from(KeyCode::Char(digit))]),
+            "{digit}"
+        );
+    }
     key(&mut app, KeyCode::Char('?'));
     let shown = screen(&mut app, 138, 36);
     for line in [

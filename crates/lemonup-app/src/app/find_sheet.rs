@@ -1,10 +1,10 @@
 //! "Find your addons online": the `F` sheet (and `f` on one addon).
 //!
 //! The sheet opens looking: it reads the folders, then asks each source that is on for this
-//! game, one request each. Chips on top show every source with its number; `1`, `2` and `3`
-//! turn one on or off. Every answer is kept for the life of the sheet and the report is worked
-//! out again from the answers of the sources that are on, so a source is asked only the first
-//! time it is on. Results list what was found the way `lemonup find` does. Linking asks one
+//! game, one request each. A rail on the right shows every source with its number; `1`, `2`
+//! and `3` turn one on or off. Every answer is kept for the life of the sheet and the report is
+//! worked out again from the answers of the sources that are on, so a source is asked only the
+//! first time it is on. Results list what was found the way `lemonup find` does. Linking asks one
 //! question first; partial matches are replaced through the normal Wago.io install, one at a
 //! time. Matching and linking live in `lemonup_core::find`; the lookups in `crate::find`.
 
@@ -24,11 +24,23 @@ const PAGE_ROWS: usize = 8;
 /// The name column of the results gets at least this wide when a name needs it, even when
 /// long versions leave less room.
 const NAME_WIDTH_MIN: usize = 28;
+/// In rows without the version column, the name column gets at least this wide when a name
+/// needs it, even when long notes leave less room: at 80 columns that still leaves room for a
+/// note such as "Update ready (1.2.3)" on the row.
+const NAME_WIDTH_NARROW_MIN: usize = 14;
 /// The width of the source column of the results.
 const SOURCE_WIDTH: usize = 14;
+/// The results show the version column from this width on. Narrower, a row is the name, the
+/// source and the note, so every source and note fits beside the rail.
+const VERSION_COLUMN_FROM: usize = 70;
+/// The columns the source rail takes on the right of the sheet: a gap, its left border, a
+/// space, then [`RAIL_TEXT`] columns of text.
+const RAIL_WIDTH: u16 = 25;
+/// The text width of the source rail.
+const RAIL_TEXT: u16 = 22;
 /// The index of "Not checked" in [`GROUPS`].
 const NOT_CHECKED_GROUP: usize = 5;
-/// Under the chips, the first time Wago.io is asked on this machine.
+/// In the rail, the first time Wago.io is asked on this machine.
 pub(crate) const WAGO_HASH_NOTICE: &str = "Sends folder names and file hashes to Wago.io.";
 
 /// `lines` word wrapped at `width`, each row after a line's first indented
@@ -1366,9 +1378,8 @@ impl App {
         match self.find.step.as_ref() {
             None => {}
             Some(FindStep::Looking { folders }) => {
-                self.find_chip_lines(&mut body, width);
+                body.rail(RAIL_WIDTH, self.find_rail());
                 if self.find.read.is_none() {
-                    body.gap(1);
                     body.text(vec![Line::from(Span::styled(
                         format!("Reading {folders} folders{ellipsis}"),
                         text,
@@ -1387,53 +1398,40 @@ impl App {
                 ))]);
             }
             Some(FindStep::Results(results)) => {
-                self.find_chip_lines(&mut body, width);
-                body.gap(1);
+                body.rail(RAIL_WIDTH, self.find_rail());
+                let width = width.saturating_sub(RAIL_WIDTH).max(1);
                 self.find_results_body(&mut body, results, width);
             }
         }
         body
     }
 
-    /// The chips, and under them the Wago.io notice while it shows and Wago.io is on.
-    fn find_chip_lines(&self, body: &mut SheetBody<'static>, width: u16) {
-        body.text(self.find_source_chips(width));
-        if self.find.hash_notice && self.find_on(FindSource::Wago) {
-            body.text(vec![Line::from(Span::styled(
-                format!("  {WAGO_HASH_NOTICE}"),
-                Style::default().fg(self.ui_theme.roles.muted),
-            ))]);
+    /// The rail of sources: under "Sources", one line per source with its number, a box that
+    /// says whether it is on, its name, then how many addons it found, a spinner while it is
+    /// asked, or `off`. "Needs a key" or "Check failed" goes on the line under a source, and
+    /// the Wago.io notice under them all while it shows and Wago.io is on.
+    fn find_rail(&self) -> Vec<Line<'static>> {
+        enum Shown {
+            NeedsKey,
+            Off,
+            Asking,
+            Failed,
+            Found(usize),
         }
-    }
-
-    /// The three sources as chips: the number, the name, then how many addons it found, `off`,
-    /// a spinner while it is asked, `failed`, or `needs a key`. A source that is on is filled
-    /// (reverse video where the theme has no background color); one that is off is muted, and
-    /// so is Wago.io without a key, whose number does nothing. A line too narrow wraps between
-    /// chips, never inside one.
-    pub(super) fn find_source_chips(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
         let muted = Style::default().fg(roles.muted);
-        let filled = if roles.reverse_cursor {
-            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(roles.background)
-                .bg(roles.lemon)
-                .add_modifier(Modifier::BOLD)
-        };
         let results = self.find.results();
-        let indent = "  ";
-        let gap = "    ";
-        let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
-        let mut used = 0;
+        let mut lines = vec![Line::from(Span::styled(
+            "Sources",
+            muted.add_modifier(Modifier::BOLD),
+        ))];
         for (index, source) in FindSource::ALL.into_iter().enumerate() {
-            let state = if !self.find_source_available(source) {
-                "needs a key".to_string()
+            let shown = if !self.find_source_available(source) {
+                Shown::NeedsKey
             } else if !self.find.sources.wants(source) {
-                "off".to_string()
+                Shown::Off
             } else if self.find.asking.contains(&source) {
-                self.spinner_frame().to_string()
+                Shown::Asking
             } else {
                 match results {
                     Some(results)
@@ -1442,29 +1440,64 @@ impl App {
                             .iter()
                             .any(|problem| problem.source == source) =>
                     {
-                        "failed".to_string()
+                        Shown::Failed
                     }
-                    Some(results) => results.report.found_on(source).to_string(),
+                    Some(results) => Shown::Found(results.report.found_on(source)),
                     // The folders are still read.
-                    None => self.spinner_frame().to_string(),
+                    None => Shown::Asking,
                 }
             };
-            let chip = format!("{} {}  {state}", index + 1, source.name());
-            let chip_width = chip.chars().count();
-            let chip = Span::styled(chip, if self.find_on(source) { filled } else { muted });
-            match lines.last_mut() {
-                Some(line) if used + gap.len() + chip_width <= usize::from(width) => {
-                    line.push(Span::raw(gap));
-                    line.push(chip);
-                    used += gap.len() + chip_width;
-                }
-                _ => {
-                    lines.push(vec![Span::raw(indent), chip]);
-                    used = indent.len() + chip_width;
-                }
+            let digit = match shown {
+                Shown::NeedsKey => muted,
+                _ => Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
+            };
+            let (mark, mark_style) = match shown {
+                Shown::NeedsKey => ("[-]", Style::default().fg(roles.dim)),
+                _ if self.find_on(source) => ("[x]", Style::default().fg(roles.lemon)),
+                _ => ("[ ]", muted),
+            };
+            let name = match shown {
+                Shown::NeedsKey | Shown::Off => muted,
+                _ => Style::default().fg(roles.text),
+            };
+            let (status, status_style) = match shown {
+                Shown::Found(count) => (count.to_string(), muted),
+                Shown::Asking => (
+                    self.spinner_frame().to_string(),
+                    Style::default().fg(roles.lemon),
+                ),
+                Shown::Off => ("off".to_string(), muted),
+                Shown::NeedsKey | Shown::Failed => (String::new(), muted),
+            };
+            lines.push(Line::from(vec![
+                Span::styled((index + 1).to_string(), digit),
+                Span::raw(" "),
+                Span::styled(mark, mark_style),
+                Span::raw(" "),
+                Span::styled(format!("{:<12}", source.name()), name),
+                Span::styled(format!("{status:>4}"), status_style),
+            ]));
+            // Under the name.
+            let under = match shown {
+                Shown::NeedsKey => Some(("Needs a key", muted)),
+                Shown::Failed => Some(("Check failed", Style::default().fg(roles.red))),
+                _ => None,
+            };
+            if let Some((text, style)) = under {
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(text, style),
+                ]));
             }
         }
-        lines.into_iter().map(Line::from).collect()
+        if self.find.hash_notice && self.find_on(FindSource::Wago) {
+            lines.push(Line::from(""));
+            lines.extend(super::sheet::wrap_lines(
+                &[Line::from(Span::styled(WAGO_HASH_NOTICE, muted))],
+                RAIL_TEXT,
+            ));
+        }
+        lines
     }
 
     fn find_results_body(&self, body: &mut SheetBody<'static>, results: &FindResults, width: u16) {
@@ -1483,14 +1516,27 @@ impl App {
             .map(|entry| entry.name.chars().count())
             .max()
             .unwrap_or(0);
-        let version_width = entries
-            .iter()
-            .map(|entry| entry.version.chars().count())
-            .max()
-            .unwrap_or(0);
-        // The names get the room the cursor, the mark, the source and the versions leave.
-        let room = usize::from(width).saturating_sub(3 + 2 + SOURCE_WIDTH + version_width);
-        let name_width = longest.min(room.max(NAME_WIDTH_MIN));
+        let versions = usize::from(width) >= VERSION_COLUMN_FROM;
+        let name_width = if versions {
+            let version_width = entries
+                .iter()
+                .map(|entry| entry.version.chars().count())
+                .max()
+                .unwrap_or(0);
+            // The names get the room the cursor, the mark, the source and the versions leave.
+            let room = usize::from(width).saturating_sub(3 + 2 + SOURCE_WIDTH + version_width);
+            longest.min(room.max(NAME_WIDTH_MIN))
+        } else {
+            let note_width = entries
+                .iter()
+                .filter_map(|entry| entry.update.as_ref())
+                .map(|update| update.chars().count())
+                .max()
+                .unwrap_or(0);
+            // The names get the room the cursor, the mark, the source and the notes leave.
+            let room = usize::from(width).saturating_sub(3 + 2 + SOURCE_WIDTH + note_width);
+            longest.min(room.max(NAME_WIDTH_NARROW_MIN))
+        };
         if report.skipped.contains(&FindSource::Wago) {
             body.text(vec![Line::from(Span::styled(
                 "A Wago.io key finds more of your addons. Add one in Settings.",
@@ -1541,7 +1587,7 @@ impl App {
             match label {
                 FindLabel::Exact | FindLabel::Likely | FindLabel::Partial => {
                     for index in members {
-                        self.find_entry_lines(body, results, index, name_width, width);
+                        self.find_entry_lines(body, results, index, name_width, versions, width);
                     }
                 }
                 FindLabel::ChooseOne => {
@@ -1584,7 +1630,8 @@ impl App {
         }
         // One blank line above the action, from the footer.
         body.trim_trailing_gap();
-        body.footer(self.find_results_footer(results));
+        body.footer(self.find_results_footer(results))
+            .footer_at_bottom();
     }
 
     /// "Check failed": the sources that failed without leaving an addon
@@ -1636,6 +1683,7 @@ impl App {
         results: &FindResults,
         index: usize,
         name_width: usize,
+        versions: bool,
         width: u16,
     ) {
         let roles = self.ui_theme.roles;
@@ -1663,11 +1711,25 @@ impl App {
             ),
             Span::styled(format!("{name:<name_width$}  "), name_style),
             Span::styled(format!("{:<SOURCE_WIDTH$}", entry.source), muted),
-            Span::styled(entry.version.clone(), Style::default().fg(roles.text)),
         ];
+        // Without the version column, a Likely or Partial match keeps the reason its version
+        // carries on the line under it.
+        let mut notes = Vec::new();
+        if versions {
+            spans.push(Span::styled(
+                entry.version.clone(),
+                Style::default().fg(roles.text),
+            ));
+        } else if result.label != FindLabel::Exact {
+            notes.push(entry.version.clone());
+        }
         if let Some(update) = &entry.update {
             spans.push(Span::styled(
-                format!("  {update}"),
+                format!(
+                    "{}{}",
+                    if versions { "  " } else { "" },
+                    crate::find::capitalize(update)
+                ),
                 Style::default().fg(roles.amber),
             ));
         }
@@ -1682,7 +1744,7 @@ impl App {
         if cursor {
             body.focus_last();
         }
-        let mut notes = entry.notes.clone();
+        notes.extend(entry.notes.iter().cloned());
         if result.label == FindLabel::Partial && selectable {
             notes.push(if picked {
                 "Replace with the source's copy: yes".to_string()

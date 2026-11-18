@@ -369,7 +369,7 @@ fn wrapped_text(text: &str, width: usize) -> Vec<String> {
     wrap_words(INDENT, text, width)
 }
 
-fn capitalize(text: &str) -> String {
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),

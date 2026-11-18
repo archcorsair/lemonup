@@ -1286,7 +1286,7 @@ impl App {
     /// The numbers of the sources: Wago.io's only while it can be on.
     fn find_sources_hint(&self) -> KeyHint {
         let (keys, codes) = self.find_source_keys();
-        KeyHint::key(FooterHintId::Sources, keys, "sources", codes)
+        KeyHint::key(FooterHintId::Sources, keys, "turn on or off", codes)
     }
 
     /// `F`, while some addon is Not linked.
