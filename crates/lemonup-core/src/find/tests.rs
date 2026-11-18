@@ -1612,6 +1612,49 @@ fn a_link_stores_the_sources_name_cleaned() {
     assert_eq!(row.display_name(), "Deadly Boss Mods & Co");
 }
 
+/// A Not linked row that still holds an old project's name (stored before it was unlinked) and
+/// is linked again by the Wago.io ID its TOC names shows its TOC Title, not the old name.
+#[test]
+fn relinking_by_the_toc_drops_an_old_projects_name() {
+    let mut fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Hekili",
+        &[
+            "## Version: 1.0",
+            "## Title: Hekili TOC",
+            "## X-Wago-ID: HK",
+        ],
+    );
+    let mut stale = manual_row("Hekili", &[]);
+    stale.name = "Hekili TOC".to_string();
+    stale.source_name = Some("Old Project".to_string());
+    fixture.database.upsert_addon(&stale).expect("stale row");
+    let rows = fixture.database.list_addons().expect("rows");
+    assert_eq!(rows[0].source_name.as_deref(), Some("Old Project"));
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(&inputs, &rows, None, &lookups(SourceAnswer::Skipped));
+    let pick = result(&report, "Hekili").found().expect("pick").clone();
+    assert_eq!(pick.likely_reason, Some(LikelyReason::TocNamesIt));
+
+    link_found_addons(
+        &mut fixture.database,
+        &fixture.addons,
+        GameFlavor::Retail,
+        &[pick],
+    )
+    .expect("link");
+
+    let row = fixture
+        .database
+        .get_addon_by_folder("Hekili")
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.source, SourceKind::Wago);
+    assert_eq!(row.source_name, None);
+    assert_eq!(row.display_name(), "Hekili TOC");
+}
+
 #[test]
 fn a_link_the_toc_names_stores_no_source_name() {
     let mut fixture = fixture();

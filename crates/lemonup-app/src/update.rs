@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use lemonup_core::{
@@ -831,7 +831,7 @@ pub(crate) fn refresh_managed_update_state_for_selectors(
     let scanned_by_folder = scanned
         .iter()
         .map(|addon| (addon.folder.as_str(), addon))
-        .collect::<HashMap<_, _>>();
+        .collect::<std::collections::HashMap<_, _>>();
 
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?;
@@ -918,25 +918,12 @@ pub(crate) fn resolve_selected_addons<'a>(
         return Ok(installed.iter().collect());
     }
 
-    let by_name_or_folder = installed
-        .iter()
-        .flat_map(|addon| {
-            // The shown name (the source's name for a linked addon) and the TOC Title both work.
-            [
-                (normalize_selector(&addon.folder), addon),
-                (normalize_selector(addon.display_name()), addon),
-                (normalize_selector(&addon.name), addon),
-            ]
-        })
-        .collect::<HashMap<_, _>>();
-
     let mut selected = Vec::new();
     let mut seen_folders = HashSet::new();
     let mut missing = Vec::new();
 
     for selector in selectors {
-        let normalized = normalize_selector(selector);
-        let Some(addon) = by_name_or_folder.get(&normalized).copied() else {
+        let Some(addon) = resolve_one_addon(installed, selector)? else {
             missing.push(selector.clone());
             continue;
         };
@@ -959,6 +946,43 @@ pub(crate) fn resolve_selected_addons<'a>(
     }
 
     Ok(selected)
+}
+
+/// The addon `selector` names, ignoring case: the one whose folder it is, else the one whose
+/// shown name (the source's name for a linked addon) or TOC Title it is. `None` when no addon
+/// matches; an error when it names more than one addon and no folder, so a command never acts
+/// on a guess.
+pub(crate) fn resolve_one_addon<'a>(
+    installed: &'a [AddonRecord],
+    selector: &str,
+) -> Result<Option<&'a AddonRecord>, LemonupError> {
+    let normalized = normalize_selector(selector);
+    if let Some(addon) = installed
+        .iter()
+        .find(|addon| normalize_selector(&addon.folder) == normalized)
+    {
+        return Ok(Some(addon));
+    }
+    let named = installed
+        .iter()
+        .filter(|addon| {
+            normalize_selector(addon.display_name()) == normalized
+                || normalize_selector(&addon.name) == normalized
+        })
+        .collect::<Vec<_>>();
+    match named.as_slice() {
+        [] => Ok(None),
+        [addon] => Ok(Some(addon)),
+        several => Err(LemonupError::InvalidArgument(format!(
+            "More than one addon is named {}: {}. Use the folder name instead.",
+            selector.trim(),
+            several
+                .iter()
+                .map(|addon| addon.folder.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 fn normalize_selector(value: &str) -> String {
@@ -1017,6 +1041,63 @@ mod tests {
             );
         }
         assert!(resolve_selected_addons(&installed, &["Deadly Boss".to_string()]).is_err());
+    }
+
+    /// A Not linked `Details` folder and a plugin whose Wago.io name is "Details": the folder
+    /// wins, whatever the order of the rows.
+    #[test]
+    fn a_folder_selector_wins_over_another_addons_name() {
+        let mut plugin = AddonRecord::new("Details Streamer", "Details_Streamer", SourceKind::Wago);
+        plugin.source_name = Some("Details".to_string());
+        let details = AddonRecord::new("Details! Damage Meter", "Details", SourceKind::Manual);
+        for installed in [
+            vec![plugin.clone(), details.clone()],
+            vec![details.clone(), plugin.clone()],
+        ] {
+            let selected =
+                resolve_selected_addons(&installed, &["details".to_string()]).expect("select");
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].folder, "Details");
+        }
+    }
+
+    /// A name two addons have is refused for `lemonup check` and `lemonup update`, and the
+    /// message names both folders; `lemonup toc` is covered in `main.rs`.
+    #[tokio::test]
+    async fn a_name_two_addons_have_is_refused_for_check_and_update() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let one = AddonRecord::new("Twin", "One", SourceKind::Manual);
+        let mut two = AddonRecord::new("Two Toc", "Two", SourceKind::Wago);
+        two.source_name = Some("Twin".to_string());
+        database.upsert_addon(&one).expect("one");
+        database.upsert_addon(&two).expect("two");
+        let installed = database.list_addons().expect("list");
+        let selectors = ["twin".to_string()];
+
+        let check = super::build_update_checks(&installed, &selectors).expect_err("check");
+        let update = apply_live_updates(
+            &mut database,
+            temp.path(),
+            &selectors,
+            None,
+            false,
+            true,
+            |_, _, _| {},
+        )
+        .await
+        .expect_err("update");
+        for message in [check.to_string(), update.to_string()] {
+            assert!(
+                message.contains("More than one addon is named twin: One, Two."),
+                "{message}"
+            );
+            assert!(message.contains("Use the folder name instead"), "{message}");
+        }
+
+        // A name only one addon has still works.
+        let selected = resolve_selected_addons(&installed, &["two toc".to_string()]).expect("one");
+        assert_eq!(selected[0].folder, "Two");
     }
 
     #[test]

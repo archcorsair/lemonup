@@ -449,9 +449,9 @@ fn toc_command(
     use lemonup_core::toc_edit;
 
     let installed = database.list_addons()?;
-    let record = crate::update::resolve_selected_addons(&installed, &[selector.to_string()])
-        .ok()
-        .and_then(|selected| selected.first().map(|record| (*record).clone()))
+    // A name more than one addon has is refused rather than guessed.
+    let record = crate::update::resolve_one_addon(&installed, selector)?
+        .cloned()
         .ok_or_else(|| {
             LemonupError::InvalidArgument(format!(
                 "No addon matches {selector}. Use the exact addon name or folder name; \
@@ -2867,6 +2867,49 @@ mod addon_dir_binding_tests {
 
         assert_eq!(error_text(refusal.as_ref()), "Nothing was linked.");
         assert_eq!(error_text(failure.as_ref()), "Error: invalid argument: bad");
+    }
+
+    #[test]
+    fn toc_command_prefers_a_folder_and_refuses_a_name_two_addons_have() {
+        use lemonup_core::TocField;
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = toc_fixture(temp.path());
+        // A plugin whose Wago.io name is the other addon's folder.
+        let mut plugin =
+            lemonup_core::AddonRecord::new("Foo Plugin", "FooPlugin", SourceKind::Wago);
+        plugin.source_name = Some("Foo".to_string());
+        database.upsert_addon(&plugin).expect("plugin");
+        let shown = toc_command(&mut database, &addon_dir, "foo", None, false).expect("show");
+        assert_eq!(shown[0], "toc field=Title value=Foo source=addon");
+
+        let mut one = lemonup_core::AddonRecord::new("Twin", "One", SourceKind::Manual);
+        one.source_name = None;
+        let mut two = lemonup_core::AddonRecord::new("Two Toc", "Two", SourceKind::Wago);
+        two.source_name = Some("Twin".to_string());
+        database.upsert_addon(&one).expect("one");
+        database.upsert_addon(&two).expect("two");
+        let error = toc_command(
+            &mut database,
+            &addon_dir,
+            "twin",
+            Some((TocField::Category, Some("Mine".to_string()))),
+            true,
+        )
+        .expect_err("ambiguous");
+        let message = error.to_string();
+        assert!(
+            message.contains("More than one addon is named twin"),
+            "{message}"
+        );
+        assert!(message.contains("One, Two"), "{message}");
+        assert!(message.contains("Use the folder name instead"), "{message}");
+        for folder in ["One", "Two"] {
+            let row = database
+                .get_addon_by_folder(folder)
+                .expect("get")
+                .expect("row");
+            assert!(row.toc_overrides.is_empty(), "{folder}");
+        }
     }
 
     #[test]

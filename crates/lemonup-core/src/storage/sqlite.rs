@@ -794,7 +794,13 @@ impl StateDatabase {
                 updated_at = excluded.updated_at,
                 last_checked_at = excluded.last_checked_at,
                 remote_version = excluded.remote_version,
-                source_name = COALESCE(excluded.source_name, source_name)",
+                source_name = CASE
+                    WHEN excluded.source = source
+                        AND (excluded.source_url IS NULL OR source_url IS NULL
+                             OR lower(excluded.source_url) = lower(source_url))
+                    THEN COALESCE(excluded.source_name, source_name)
+                    ELSE excluded.source_name
+                END",
             params![
                 addon.name,
                 addon.folder,
@@ -962,8 +968,11 @@ fn merge_scanned_addon(
         last_checked_at: existing.and_then(|addon| addon.last_checked_at),
         remote_version: existing.and_then(|addon| addon.remote_version.clone()),
         toc_overrides,
-        // A scan reads only the TOC files; the source's name stays as stored.
-        source_name: existing.and_then(|addon| addon.source_name.clone()),
+        // A scan reads only the TOC files; the source's name stays as stored, unless the row
+        // stops being linked to that source.
+        source_name: existing
+            .filter(|addon| addon.source == merged_source)
+            .and_then(|addon| addon.source_name.clone()),
         unrecognized: existing.and_then(|addon| addon.unrecognized.clone()),
     }
 }
@@ -1170,10 +1179,13 @@ fn merge_managed_addon(
             .clone()
             .or_else(|| existing.and_then(|addon| addon.remote_version.clone())),
         toc_overrides,
-        source_name: incoming
-            .source_name
-            .clone()
-            .or_else(|| existing.and_then(|addon| addon.source_name.clone())),
+        // A record without a name keeps the stored one only while the addon stays linked to the
+        // same project; linked anywhere else, the old project's name would be wrong.
+        source_name: incoming.source_name.clone().or_else(|| {
+            existing
+                .filter(|addon| same_link(addon, incoming))
+                .and_then(|addon| addon.source_name.clone())
+        }),
         unrecognized: incoming
             .unrecognized
             .clone()
@@ -1183,6 +1195,16 @@ fn merge_managed_addon(
     merged.ownership_source = OwnershipSource::Managed;
 
     merged
+}
+
+/// Whether `stored` and `incoming` are linked to the same project: the same source and, when
+/// both know it, the same source URL (case ignored). The upsert applies the same rule in SQL.
+fn same_link(stored: &AddonRecord, incoming: &AddonRecord) -> bool {
+    stored.source == incoming.source
+        && match (&stored.source_url, &incoming.source_url) {
+            (Some(stored_url), Some(incoming_url)) => stored_url.eq_ignore_ascii_case(incoming_url),
+            _ => true,
+        }
 }
 
 fn collect_owned_descendants(
@@ -3254,6 +3276,67 @@ mod tests {
             .expect("get")
             .expect("row");
         assert_eq!(stored.source_name.as_deref(), Some("Foo Ultimate"));
+    }
+
+    #[test]
+    fn a_change_of_source_drops_the_old_source_name() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let get = |database: &StateDatabase| {
+            database
+                .get_addon_by_folder("Foo")
+                .expect("get")
+                .expect("row")
+        };
+        let mut wago = AddonRecord::new("Foo Toc", "Foo", SourceKind::Wago);
+        wago.source_url = Some("https://addons.wago.io/addons/foo".to_string());
+        wago.source_name = Some("Old Project".to_string());
+        database.record_managed_addon(&wago).expect("wago");
+
+        // Reinstalled from GitHub, which gives no name.
+        let mut github = AddonRecord::new("Foo Toc", "Foo", SourceKind::GitHub);
+        github.source_url = Some("https://github.com/example/Foo".to_string());
+        database.record_managed_addon(&github).expect("github");
+        assert_eq!(get(&database).source_name, None);
+
+        // Linked again on Wago.io but to another project, without a name.
+        database.record_managed_addon(&wago).expect("wago again");
+        let mut other = wago.clone();
+        other.source_url = Some("https://addons.wago.io/addons/bar".to_string());
+        other.source_name = None;
+        database
+            .record_managed_addon(&other)
+            .expect("other project");
+        assert_eq!(get(&database).source_name, None);
+
+        // The same through a whole-row write.
+        database.record_managed_addon(&wago).expect("wago again");
+        let mut unlinked = get(&database);
+        unlinked.source = SourceKind::Manual;
+        unlinked.source_name = None;
+        database.upsert_addon(&unlinked).expect("upsert");
+        assert_eq!(get(&database).source_name, None);
+        assert_eq!(get(&database).display_name(), "Foo Toc");
+    }
+
+    #[test]
+    fn a_scan_that_unlinks_a_row_drops_its_source_name() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        // A GitHub row without a URL over a development clone: the scan makes it Not linked.
+        let mut tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        tracked.source_name = Some("Old Project".to_string());
+        database.upsert_addon(&tracked).expect("seed");
+
+        database
+            .reconcile_scanned_addons(&[scanned_with("Foo", None, Some("abc123"))])
+            .expect("reconcile");
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.source, SourceKind::Manual);
+        assert_eq!(stored.source_name, None);
     }
 
     #[test]
