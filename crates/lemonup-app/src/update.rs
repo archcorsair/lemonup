@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use lemonup_core::{
@@ -105,17 +105,23 @@ pub(crate) fn build_update_checks(
 /// stored now. Only the check's own fields are written, and only onto a row that still is
 /// `addon` (same folder, source and installed version): a row that was deleted, linked to
 /// another source or updated while the check waited for the network is left as it is, and
-/// has no result.
+/// has no result. `source_name` is the addon's name as the source gives it; without one the
+/// stored name stays.
 fn record_check(
     database: &StateDatabase,
     addon: &AddonRecord,
     remote_version: Option<String>,
     source_url: Option<String>,
+    source_name: Option<String>,
 ) -> Result<Option<CheckResult>, LemonupError> {
+    let source_name = source_name
+        .as_deref()
+        .and_then(lemonup_core::domain::source_name);
     let Some(stored) = database.record_check_result(
         addon,
         remote_version.as_deref(),
         source_url.as_deref(),
+        source_name.as_deref(),
         OffsetDateTime::now_utc(),
     )?
     else {
@@ -205,6 +211,7 @@ where
                             &addon,
                             remote.version,
                             remote.source_url,
+                            remote.name,
                         )?);
                     }
                     Err(error) => {
@@ -225,6 +232,7 @@ where
                         &addon,
                         remote.version,
                         remote.source_url,
+                        remote.name,
                     )?);
                 }
                 Err(error) => {
@@ -245,6 +253,7 @@ where
                             &addon,
                             remote.version,
                             remote.source_url,
+                            remote.name,
                         )?);
                     }
                     Err(error) => {
@@ -260,11 +269,13 @@ where
             }
             SourceKind::GitHub => match crate::github::fetch_github_remote_version(&addon).await {
                 Ok(remote) => {
+                    // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
                     results.extend(record_check(
                         database,
                         &addon,
                         remote.version,
                         remote.source_url,
+                        None,
                     )?);
                 }
                 Err(error) => {
@@ -599,8 +610,10 @@ pub(crate) fn compare_release_versions(installed: &str, remote: &str) -> Option<
 }
 
 /// Saves what an update that installed nothing (remote older or already current) learned from
-/// the provider, the same way a check does: the fresh remote version, the source URL and the
-/// check time. Without it the row keeps an older remote version and can show an update again.
+/// the provider, the same way a check does: the fresh remote version, the source URL, the
+/// addon's name at the source (`source_name`, as the source gives it; without one the stored
+/// name stays) and the check time. Without it the row keeps an older remote version and can
+/// show an update again.
 ///
 /// A dry run writes nothing, and a row removed in the meantime is not recreated.
 pub(crate) fn record_skipped_update_check(
@@ -608,6 +621,7 @@ pub(crate) fn record_skipped_update_check(
     tracked: &AddonRecord,
     remote_version: Option<&str>,
     source_url: Option<String>,
+    source_name: Option<&str>,
     dry_run: bool,
 ) -> Result<(), String> {
     if dry_run {
@@ -621,6 +635,9 @@ pub(crate) fn record_skipped_update_check(
     };
     refreshed.remote_version = remote_version.map(str::to_string);
     refreshed.source_url = source_url.or(refreshed.source_url);
+    refreshed.source_name = source_name
+        .and_then(lemonup_core::domain::source_name)
+        .or(refreshed.source_name);
     refreshed.last_checked_at = Some(OffsetDateTime::now_utc());
     database
         .upsert_addon(&refreshed)
@@ -814,7 +831,7 @@ pub(crate) fn refresh_managed_update_state_for_selectors(
     let scanned_by_folder = scanned
         .iter()
         .map(|addon| (addon.folder.as_str(), addon))
-        .collect::<HashMap<_, _>>();
+        .collect::<std::collections::HashMap<_, _>>();
 
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?;
@@ -886,6 +903,7 @@ pub(crate) fn build_managed_update_record(
         last_checked_at: existing.last_checked_at,
         remote_version: existing.remote_version.clone(),
         toc_overrides: existing.toc_overrides.clone(),
+        source_name: existing.source_name.clone(),
         unrecognized: existing.unrecognized.clone(),
     };
     refreshed.set_managed_owned_folders(existing.owned_folders.clone());
@@ -900,23 +918,12 @@ pub(crate) fn resolve_selected_addons<'a>(
         return Ok(installed.iter().collect());
     }
 
-    let by_name_or_folder = installed
-        .iter()
-        .flat_map(|addon| {
-            [
-                (normalize_selector(&addon.folder), addon),
-                (normalize_selector(&addon.name), addon),
-            ]
-        })
-        .collect::<HashMap<_, _>>();
-
     let mut selected = Vec::new();
     let mut seen_folders = HashSet::new();
     let mut missing = Vec::new();
 
     for selector in selectors {
-        let normalized = normalize_selector(selector);
-        let Some(addon) = by_name_or_folder.get(&normalized).copied() else {
+        let Some(addon) = resolve_one_addon(installed, selector)? else {
             missing.push(selector.clone());
             continue;
         };
@@ -941,6 +948,43 @@ pub(crate) fn resolve_selected_addons<'a>(
     Ok(selected)
 }
 
+/// The addon `selector` names, ignoring case: the one whose folder it is, else the one whose
+/// shown name (the source's name for a linked addon) or TOC Title it is. `None` when no addon
+/// matches; an error when it names more than one addon and no folder, so a command never acts
+/// on a guess.
+pub(crate) fn resolve_one_addon<'a>(
+    installed: &'a [AddonRecord],
+    selector: &str,
+) -> Result<Option<&'a AddonRecord>, LemonupError> {
+    let normalized = normalize_selector(selector);
+    if let Some(addon) = installed
+        .iter()
+        .find(|addon| normalize_selector(&addon.folder) == normalized)
+    {
+        return Ok(Some(addon));
+    }
+    let named = installed
+        .iter()
+        .filter(|addon| {
+            normalize_selector(addon.display_name()) == normalized
+                || normalize_selector(&addon.name) == normalized
+        })
+        .collect::<Vec<_>>();
+    match named.as_slice() {
+        [] => Ok(None),
+        [addon] => Ok(Some(addon)),
+        several => Err(LemonupError::InvalidArgument(format!(
+            "More than one addon is named {}: {}. Use the folder name instead.",
+            selector.trim(),
+            several
+                .iter()
+                .map(|addon| addon.folder.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 fn normalize_selector(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
@@ -961,11 +1005,100 @@ mod tests {
     use super::{
         LiveUpdateStatus, apply_live_updates, compare_release_versions, determine_update_status,
         record_skipped_update_check, refresh_live_update_checks_with, remote_is_older,
-        remote_older_result, serialize_live_update_status, serialize_update_status,
+        remote_older_result, resolve_selected_addons, serialize_live_update_status,
+        serialize_update_status,
     };
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
     use std::cmp::Ordering;
     use tempfile::tempdir;
+
+    /// `lemonup update`, `lemonup check` and `lemonup toc` select an addon by its shown name
+    /// (the source's name) or its TOC Title, whatever the case.
+    #[test]
+    fn selectors_match_the_source_name_and_the_toc_title() {
+        let mut dbm = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        dbm.source_name = Some("Deadly Boss Mods (DBM)".to_string());
+        let installed = vec![
+            dbm,
+            AddonRecord::new("Details", "Details", SourceKind::Manual),
+        ];
+
+        for selector in [
+            "<DBM Core> Main Core",
+            "deadly boss mods (dbm)",
+            "Deadly Boss Mods (DBM)",
+            "DBM-Core",
+        ] {
+            let selected =
+                resolve_selected_addons(&installed, &[selector.to_string()]).expect(selector);
+            assert_eq!(
+                selected
+                    .iter()
+                    .map(|addon| addon.folder.as_str())
+                    .collect::<Vec<_>>(),
+                ["DBM-Core"],
+                "{selector}"
+            );
+        }
+        assert!(resolve_selected_addons(&installed, &["Deadly Boss".to_string()]).is_err());
+    }
+
+    /// A Not linked `Details` folder and a plugin whose Wago.io name is "Details": the folder
+    /// wins, whatever the order of the rows.
+    #[test]
+    fn a_folder_selector_wins_over_another_addons_name() {
+        let mut plugin = AddonRecord::new("Details Streamer", "Details_Streamer", SourceKind::Wago);
+        plugin.source_name = Some("Details".to_string());
+        let details = AddonRecord::new("Details! Damage Meter", "Details", SourceKind::Manual);
+        for installed in [
+            vec![plugin.clone(), details.clone()],
+            vec![details.clone(), plugin.clone()],
+        ] {
+            let selected =
+                resolve_selected_addons(&installed, &["details".to_string()]).expect("select");
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].folder, "Details");
+        }
+    }
+
+    /// A name two addons have is refused for `lemonup check` and `lemonup update`, and the
+    /// message names both folders; `lemonup toc` is covered in `main.rs`.
+    #[tokio::test]
+    async fn a_name_two_addons_have_is_refused_for_check_and_update() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let one = AddonRecord::new("Twin", "One", SourceKind::Manual);
+        let mut two = AddonRecord::new("Two Toc", "Two", SourceKind::Wago);
+        two.source_name = Some("Twin".to_string());
+        database.upsert_addon(&one).expect("one");
+        database.upsert_addon(&two).expect("two");
+        let installed = database.list_addons().expect("list");
+        let selectors = ["twin".to_string()];
+
+        let check = super::build_update_checks(&installed, &selectors).expect_err("check");
+        let update = apply_live_updates(
+            &mut database,
+            temp.path(),
+            &selectors,
+            None,
+            false,
+            true,
+            |_, _, _| {},
+        )
+        .await
+        .expect_err("update");
+        for message in [check.to_string(), update.to_string()] {
+            assert!(
+                message.contains("More than one addon is named twin: One, Two."),
+                "{message}"
+            );
+            assert!(message.contains("Use the folder name instead"), "{message}");
+        }
+
+        // A name only one addon has still works.
+        let selected = resolve_selected_addons(&installed, &["two toc".to_string()]).expect("one");
+        assert_eq!(selected[0].folder, "Two");
+    }
 
     #[test]
     fn skipped_update_saves_the_fresh_remote_version_so_the_row_stops_offering_it() {
@@ -988,7 +1121,8 @@ mod tests {
         );
 
         // A dry run learns the same thing but saves nothing.
-        record_skipped_update_check(&database, &addon, Some("4.3.0"), None, true).expect("dry run");
+        record_skipped_update_check(&database, &addon, Some("4.3.0"), None, None, true)
+            .expect("dry run");
         let unchanged = database
             .get_addon_by_folder("Postal")
             .expect("get")
@@ -1000,6 +1134,7 @@ mod tests {
             &addon,
             Some("4.3.0"),
             Some("https://www.wowinterface.com/downloads/info2.html".to_string()),
+            None,
             false,
         )
         .expect("record");
@@ -1024,7 +1159,7 @@ mod tests {
         let mut current = stored.clone();
         current.remote_version = Some("4.4.0".to_string());
         database.upsert_addon(&current).expect("stale again");
-        record_skipped_update_check(&database, &current, Some("4.3.5"), None, false)
+        record_skipped_update_check(&database, &current, Some("4.3.5"), None, None, false)
             .expect("record");
         let stored = database
             .get_addon_by_folder("Postal")
@@ -1044,9 +1179,42 @@ mod tests {
         let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
         let addon = AddonRecord::new("Gone", "Gone", SourceKind::Tukui);
 
-        record_skipped_update_check(&database, &addon, Some("1.0"), None, false).expect("record");
+        record_skipped_update_check(&database, &addon, Some("1.0"), None, None, false)
+            .expect("record");
 
         assert!(database.get_addon_by_folder("Gone").expect("get").is_none());
+    }
+
+    #[test]
+    fn skipped_update_fills_the_source_name_and_keeps_it_when_the_source_gives_none() {
+        let temp = tempdir().expect("tempdir");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        addon.version = Some("1.0".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        record_skipped_update_check(
+            &database,
+            &addon,
+            Some("1.0"),
+            None,
+            Some(" |cff00ff00Deadly|r Boss Mods &amp; Co "),
+            false,
+        )
+        .expect("record");
+        let stored = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.source_name.as_deref(), Some("Deadly Boss Mods & Co"));
+
+        record_skipped_update_check(&database, &stored, Some("1.0"), None, None, false)
+            .expect("record without a name");
+        let kept = database
+            .get_addon_by_folder("DBM-Core")
+            .expect("get")
+            .expect("row");
+        assert_eq!(kept.source_name.as_deref(), Some("Deadly Boss Mods & Co"));
     }
 
     #[tokio::test]
@@ -1072,6 +1240,7 @@ mod tests {
                     Ok(crate::wago::WagoRemoteVersion {
                         source_url: tracked.source_url.clone(),
                         version: Some("5.21.1".to_string()),
+                        name: None,
                     })
                 }
             },
@@ -1089,6 +1258,48 @@ mod tests {
             .expect("addon exists");
         assert_eq!(refreshed.remote_version.as_deref(), Some("5.21.1"));
         assert!(refreshed.last_checked_at.is_some());
+    }
+
+    /// Addons linked before LemonUp stored source names get theirs on the next check, from
+    /// the check's own response; a check whose source gives no name keeps the stored one.
+    #[tokio::test]
+    async fn live_checks_fill_the_source_name_and_keep_it_when_the_source_gives_none() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        addon.version = Some("1.0".to_string());
+        addon.source_url = Some("https://addons.wago.io/addons/dbm".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+
+        for name in [Some("|cffff0000Deadly|r Boss Mods (DBM)"), None] {
+            refresh_live_update_checks_with(
+                &mut database,
+                &[],
+                Some("fake-key"),
+                None,
+                |tracked, _api_key| async move {
+                    Ok(crate::wago::WagoRemoteVersion {
+                        source_url: tracked.source_url.clone(),
+                        version: Some("1.1".to_string()),
+                        name: name.map(str::to_string),
+                    })
+                },
+            )
+            .await
+            .expect("refresh checks");
+
+            let stored = database
+                .get_addon_by_folder("DBM-Core")
+                .expect("get addon")
+                .expect("addon exists");
+            assert_eq!(
+                stored.source_name.as_deref(),
+                Some("Deadly Boss Mods (DBM)"),
+                "{name:?}"
+            );
+            assert_eq!(stored.display_name(), "Deadly Boss Mods (DBM)");
+            assert_eq!(stored.name, "<DBM Core> Main Core");
+        }
     }
 
     /// Checks `WeakAuras` while `during_the_check` changes the same database, like another
@@ -1115,6 +1326,7 @@ mod tests {
                     Ok(crate::wago::WagoRemoteVersion {
                         source_url: None,
                         version: Some("5.21.1".to_string()),
+                        name: None,
                     })
                 }
             },
@@ -1197,6 +1409,7 @@ mod tests {
             Ok(crate::wago::WagoRemoteVersion {
                 source_url: Some(url),
                 version: Some("5.21.1".to_string()),
+                name: None,
             })
         };
 
@@ -1262,6 +1475,7 @@ mod tests {
                 Ok(crate::wago::WagoRemoteVersion {
                     source_url: None,
                     version: None,
+                    name: None,
                 })
             },
         )
@@ -1297,6 +1511,7 @@ mod tests {
                 Ok(crate::wago::WagoRemoteVersion {
                     source_url: None,
                     version: None,
+                    name: None,
                 })
             },
         )

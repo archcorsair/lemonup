@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding, rebind_addon_dir};
+use lemonup_core::curseforge::CurseForgeManaged;
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
@@ -102,8 +103,16 @@ const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
 ];
+/// What the Install sheet says when a search returned addons but none has
+/// every word that was typed.
+pub(crate) const NO_ADDON_HAS_EVERY_WORD: &str =
+    "No addon has all of those words. Closest matches first.";
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
+/// How long a cut version holds at its start and its end before it moves
+/// on: about two seconds of animated ticks.
+const MARQUEE_HOLD_TICKS: usize =
+    (StdDuration::from_secs(2).as_millis() / ANIMATED_TICK_RATE.as_millis()) as usize;
 const BACKUP_SPAM_GUARD_WINDOW: Duration = Duration::seconds(10);
 /// How long a done or note message stays on the status line.
 const MESSAGE_FADE: StdDuration = StdDuration::from_secs(4);
@@ -192,6 +201,9 @@ struct ShellUiState {
     footer_pulse: Option<FooterKeyPulse>,
     status_flash: Option<StatusFlash>,
     help_context: HelpContext,
+    /// The motion tick when the Install sheet's selected row last changed:
+    /// a cut version on that row scrolls from here.
+    search_selection_tick: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1207,7 +1219,10 @@ struct DashboardRefreshabilitySummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardItem {
+    /// The name shown for the addon (`AddonRecord::display_name`).
     name: String,
+    /// The stored name: the TOC Title (or the user's Title). The `/` filter matches it too.
+    toc_name: String,
     folder: String,
     owned_folders: Vec<String>,
     source: SourceKind,
@@ -1382,7 +1397,8 @@ impl DashboardState {
                 let owned_folder_count = addon.owned_folders.len();
                 let has_authoritative_owned_folders = addon.has_authoritative_owned_folders();
                 DashboardItem {
-                    name: addon.name,
+                    name: addon.display_name().to_string(),
+                    toc_name: addon.name,
                     folder: addon.folder,
                     owned_folders: addon
                         .owned_folders
@@ -2152,8 +2168,8 @@ fn dashboard_filter_terms(query: &str) -> Vec<String> {
     query.split_whitespace().map(str::to_lowercase).collect()
 }
 
-/// Case-insensitive AND match: every term must be a substring of the title,
-/// folder, author, or any owned folder name.
+/// Case-insensitive AND match: every term must be a substring of the shown name, the TOC
+/// Title, folder, author, or any owned folder name.
 fn dashboard_item_filter_match(item: &DashboardItem, terms: &[String]) -> DashboardFilterMatch {
     if terms.is_empty() {
         return DashboardFilterMatch::Direct;
@@ -2161,6 +2177,7 @@ fn dashboard_item_filter_match(item: &DashboardItem, terms: &[String]) -> Dashbo
 
     let own_fields = [
         Some(item.name.as_str()),
+        Some(item.toc_name.as_str()),
         Some(item.folder.as_str()),
         item.author.as_deref(),
     ]
@@ -2292,11 +2309,13 @@ enum SearchInstallState {
     },
     /// A direct install found its folders already in AddOns (say a "Not
     /// linked" copy): the replace question is open. `name` is the addon
-    /// already there when known, `folders` what a yes replaces.
+    /// already there when known, `folders` what a yes replaces, and
+    /// `curseforge` whether CurseForge also manages one of them.
     ConfirmDirectReplace {
         request: DirectInstallRequest,
         name: String,
         folders: Vec<String>,
+        curseforge: bool,
     },
     /// `addon_name` is `None` when the search itself failed.
     Error {
@@ -2372,6 +2391,14 @@ impl SearchPaneState {
         self.focus == SearchFocus::Results && !self.results.is_empty()
     }
 
+    /// Which row a cut version scrolls on: the selected result while the
+    /// results have focus. A new key restarts the scroll.
+    fn marquee_key(&self) -> Option<&str> {
+        self.results_focused()
+            .then(|| self.selected_result().map(|result| result.id.as_str()))
+            .flatten()
+    }
+
     /// Editing the text leaves a finished install or a failure behind: the
     /// sheet shows what enter will do with the new text.
     fn edit_text(&self, change: impl FnOnce(&mut TextInput)) -> Self {
@@ -2438,8 +2465,8 @@ impl SearchPaneState {
     fn finish_search(&self, query: String, mut results: Vec<WagoSearchResult>) -> Self {
         let mut next = self.clone();
         next.in_progress = false;
+        rank_search_results(&query, &mut results);
         next.last_query = Some(query);
-        sort_search_results(&mut results);
         next.results = results;
         next.install_state = SearchInstallState::Idle;
         next.selected_result = if next.results.is_empty() {
@@ -2451,6 +2478,24 @@ impl SearchPaneState {
             next.focus = SearchFocus::Box;
         }
         next
+    }
+
+    /// Whether some result has every word of the search. Wago.io matches
+    /// any word, so a search for three words can return only partial matches.
+    fn some_result_has_every_word(&self) -> bool {
+        let Some(query) = self.last_query.as_deref() else {
+            return true;
+        };
+        let names: Vec<&str> = self
+            .results
+            .iter()
+            .map(|result| result.display_name.as_str())
+            .collect();
+        lemonup_core::search_rank::any_name_has_every_word(
+            query,
+            &lemonup_core::search_rank::GAME_WORDS,
+            &names,
+        )
     }
 
     fn fail_search(&self, error: &SourceError) -> Self {
@@ -2606,7 +2651,14 @@ impl SearchPaneState {
         next
     }
 
-    fn require_direct_replace(&self, request: DirectInstallRequest, clash: &FolderClash) -> Self {
+    /// Asks before replacing the clash's folders. `curseforge` is what
+    /// CurseForge manages now, read once for this question.
+    fn require_direct_replace(
+        &self,
+        request: DirectInstallRequest,
+        clash: &FolderClash,
+        curseforge: CurseForgeManaged,
+    ) -> Self {
         let mut next = self.clone();
         next.install_state = SearchInstallState::ConfirmDirectReplace {
             name: clash
@@ -2614,20 +2666,22 @@ impl SearchPaneState {
                 .clone()
                 .unwrap_or_else(|| request.name()),
             request,
+            curseforge: curseforge.manages_any(clash.replaceable.iter().map(String::as_str)),
             folders: clash.replaceable.clone(),
         };
         next
     }
 
-    /// The open replace question: the request, the addon's name and the
-    /// folders a yes replaces.
-    fn pending_direct_replace(&self) -> Option<(&DirectInstallRequest, &str, &[String])> {
+    /// The open replace question: the request, the addon's name, the
+    /// folders a yes replaces and whether CurseForge also manages one.
+    fn pending_direct_replace(&self) -> Option<(&DirectInstallRequest, &str, &[String], bool)> {
         match &self.install_state {
             SearchInstallState::ConfirmDirectReplace {
                 request,
                 name,
                 folders,
-            } => Some((request, name.as_str(), folders.as_slice())),
+                curseforge,
+            } => Some((request, name.as_str(), folders.as_slice(), *curseforge)),
             _ => None,
         }
     }
@@ -2739,6 +2793,8 @@ pub struct PendingWagoInstallRequest {
 pub struct WagoInstallConfirmation {
     request: PendingWagoInstallRequest,
     inspection: WagoInstallInspection,
+    /// CurseForge also manages a folder the question replaces.
+    curseforge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2783,6 +2839,11 @@ pub struct App {
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
+    /// Where CurseForge's record may be; read only, once per action.
+    curseforge_files: Vec<PathBuf>,
+    /// What CurseForge manages in the AddOns folder, as of the last scan or
+    /// the last time Details opened. Details reads it; nothing else does.
+    curseforge: CurseForgeManaged,
     wago_install_in_progress: bool,
     direct_install_in_progress: bool,
     auto_check_in_progress: bool,
@@ -2814,6 +2875,9 @@ pub struct App {
     last_frame_width: Option<u16>,
     /// The open sheet as last drawn, so keys can scroll it.
     sheet_scroll: std::cell::Cell<SheetScroll>,
+    /// Set while drawing: a cut version on the Install sheet's selected row
+    /// is scrolling, so the tick stays at the animated rate.
+    search_marquee_live: std::cell::Cell<bool>,
     /// Docked Details as last drawn, so PgUp, PgDn and the wheel scroll it.
     docked_scroll: std::cell::RefCell<render_inspect::DockedScroll>,
     onboarding: OnboardingState,
@@ -2983,6 +3047,8 @@ impl App {
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
+            curseforge_files: lemonup_core::curseforge::record_files(),
+            curseforge: CurseForgeManaged::default(),
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -3001,6 +3067,7 @@ impl App {
             go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            search_marquee_live: std::cell::Cell::new(false),
             docked_scroll: std::cell::RefCell::default(),
             onboarding,
             task_events_tx,
@@ -3101,7 +3168,7 @@ impl App {
             return true;
         }
 
-        false
+        self.search_marquee_live.get()
     }
 
     fn initial_status_line(&self) -> StatusMessage {
@@ -4874,7 +4941,8 @@ impl App {
                 self.search_pane.cancel_direct_install(),
             )],
             AppMessage::SearchConfirmReplace => {
-                if let Some((request, name, folders)) = self.search_pane.pending_direct_replace() {
+                if let Some((request, name, folders, _)) = self.search_pane.pending_direct_replace()
+                {
                     self.start_direct_install_actions(
                         request.clone(),
                         folders.to_vec(),
@@ -5702,21 +5770,28 @@ impl App {
                         )),
                     ]
                 }
-                AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
-                    AppAction::SetSearchPaneState(
-                        self.search_pane
-                            .finish_search(outcome.query.clone(), outcome.results.clone()),
-                    ),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Done,
-                        DetailMode::Search,
-                        &format!(
+                AppTaskEvent::WagoSearchFinished(Ok(outcome)) => {
+                    let pane = self
+                        .search_pane
+                        .finish_search(outcome.query.clone(), outcome.results.clone());
+                    let message = if pane.results.is_empty() || pane.some_result_has_every_word() {
+                        format!(
                             "Found {} addon{} on Wago.io",
                             outcome.results.len(),
                             plural_suffix(outcome.results.len())
-                        ),
-                    )),
-                ],
+                        )
+                    } else {
+                        NO_ADDON_HAS_EVERY_WORD.to_string()
+                    };
+                    vec![
+                        AppAction::SetSearchPaneState(pane),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
+                            DetailMode::Search,
+                            &message,
+                        )),
+                    ]
+                }
                 AppTaskEvent::WagoSearchFinished(Err(error)) => {
                     let mut pane = self.search_pane.fail_search(&error);
                     if error.kind == SourceErrorKind::KeyRejected {
@@ -5742,6 +5817,9 @@ impl App {
                         AppAction::SetWagoInstallInProgress(false),
                         AppAction::SetPendingWagoInstallConfirmation(Some(
                             WagoInstallConfirmation {
+                                curseforge: self.curseforge_now().manages_any(
+                                    inspection.existing_folders.iter().map(String::as_str),
+                                ),
                                 request,
                                 inspection,
                             },
@@ -5772,7 +5850,10 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
-                            &format!("{} is installed", outcome.summary.addon_name),
+                            &self.with_curseforge_note(
+                                format!("{} is installed", outcome.summary.addon_name),
+                                outcome.summary.installed_folders.iter().map(String::as_str),
+                            ),
                         )),
                     ]
                 }
@@ -5825,10 +5906,22 @@ impl App {
                     result: Ok(outcome),
                     ..
                 } => {
-                    let mut status = format!(
-                        "{} is installed from {}",
-                        outcome.addon_name,
-                        request.provider.label()
+                    let folders = outcome
+                        .sync
+                        .addons
+                        .iter()
+                        .find(|row| row.folder == outcome.parent_folder)
+                        .map(|row| row.owned_folders.iter().map(|owned| owned.name.as_str()))
+                        .into_iter()
+                        .flatten()
+                        .chain([outcome.parent_folder.as_str()]);
+                    let mut status = self.with_curseforge_note(
+                        format!(
+                            "{} is installed from {}",
+                            outcome.addon_name,
+                            request.provider.label()
+                        ),
+                        folders,
                     );
                     if let Some(warning) = &outcome.warning {
                         status.push_str(&format!(" | {warning}"));
@@ -5862,6 +5955,7 @@ impl App {
                         AppAction::SetSearchPaneState(self.search_pane.require_direct_replace(
                             request,
                             &error.clash.clone().unwrap_or_default(),
+                            self.curseforge_now(),
                         )),
                         AppAction::SetDirectInstallInProgress(false),
                     ]
@@ -5935,6 +6029,9 @@ impl App {
             AppAction::SetFooterKeyPulse(pulse) => self.shell_ui.footer_pulse = pulse,
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
+                if active {
+                    self.curseforge = self.curseforge_now();
+                }
             }
             AppAction::SetSheetOffset(offset) => {
                 let mut scroll = self.sheet_scroll.get();
@@ -6042,6 +6139,9 @@ impl App {
                 self.install_pane = state;
             }
             AppAction::SetSearchPaneState(state) => {
+                if self.search_pane.marquee_key() != state.marquee_key() {
+                    self.shell_ui.search_selection_tick = self.shell_ui.motion.tick_count;
+                }
                 self.search_pane = state;
             }
             AppAction::SetConfigPaneState(state) => {
@@ -6677,6 +6777,7 @@ impl App {
                     path: path.clone(),
                     summary: summary.clone(),
                 };
+                self.curseforge = self.curseforge_now();
                 // Looking through the folder ends with nothing to say.
                 self.status_line = self.dashboard_status_for(
                     StatusKind::Quiet,
@@ -6708,6 +6809,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
         self.note_question_shown(Instant::now());
+        self.search_marquee_live.set(false);
         if self.shell_mode == ShellMode::Dashboard {
             self.draw_dashboard_frame(frame);
         } else {
@@ -7129,6 +7231,29 @@ impl App {
 
     fn with_base_status(&self, kind: StatusKind, message: &str) -> StatusMessage {
         StatusMessage::new(kind, format!("{message} | {}", self.base_status_line()))
+    }
+
+    /// What CurseForge manages in the AddOns folder right now: reads its
+    /// record once. Nothing when LemonUp doesn't know the folder yet.
+    fn curseforge_now(&self) -> CurseForgeManaged {
+        self.effective_addon_dir
+            .as_deref()
+            .map(|addon_dir| CurseForgeManaged::read(addon_dir, &self.curseforge_files))
+            .unwrap_or_default()
+    }
+
+    /// `text` with ". CurseForge also manages it. Mark it Ignored there."
+    /// when it manages any of `folders`: the short form for the status line.
+    fn with_curseforge_note<'a>(
+        &self,
+        text: String,
+        folders: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        if self.curseforge_now().manages_any(folders) {
+            format!("{text}. CurseForge also manages it. Mark it Ignored there.")
+        } else {
+            text
+        }
     }
 
     fn dashboard_status_for(
@@ -8542,17 +8667,15 @@ fn is_placeholder_version(value: &str) -> bool {
     trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
-fn sort_search_results(results: &mut [WagoSearchResult]) {
+/// Orders search results: names with every search word first, then by how
+/// many words they have, then downloads. Equal ones go by name, then owner.
+fn rank_search_results(query: &str, results: &mut Vec<WagoSearchResult>) {
+    use lemonup_core::search_rank::{GAME_WORDS, SearchItem, rank_results};
+
     results.sort_by(|left, right| {
-        right
-            .download_count
-            .unwrap_or(0)
-            .cmp(&left.download_count.unwrap_or(0))
-            .then_with(|| {
-                left.display_name
-                    .to_ascii_lowercase()
-                    .cmp(&right.display_name.to_ascii_lowercase())
-            })
+        left.display_name
+            .to_ascii_lowercase()
+            .cmp(&right.display_name.to_ascii_lowercase())
             .then_with(|| {
                 left.owner
                     .as_deref()
@@ -8562,6 +8685,16 @@ fn sort_search_results(results: &mut [WagoSearchResult]) {
             })
             .then_with(|| left.id.cmp(&right.id))
     });
+    let items: Vec<SearchItem<'_>> = results
+        .iter()
+        .map(|result| SearchItem {
+            name: &result.display_name,
+            downloads: result.download_count.unwrap_or(0),
+        })
+        .collect();
+    let order = rank_results(query, &GAME_WORDS, &items).order;
+    let mut slots: Vec<Option<WagoSearchResult>> = results.drain(..).map(Some).collect();
+    results.extend(order.into_iter().filter_map(|index| slots[index].take()));
 }
 
 fn format_compact_count(count: u64, divisor: u64, suffix: &str) -> String {
@@ -8760,6 +8893,42 @@ mod tests {
 
     mod find_sheet;
 
+    /// A synthetic `_retail_` game folder with a `.curseclient`, and a
+    /// CurseForge record next to it whose instance has that GUID and
+    /// manages `managed` (not ignored). Returns the temp dir, the AddOns
+    /// folder and the record file.
+    fn curseforge_game(managed: &[&str]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        const GUID: &str = "00000000-0000-4000-8000-0000000000aa";
+        let temp = tempdir().expect("temp");
+        let flavor = temp.path().join("World of Warcraft").join("_retail_");
+        let addons = flavor.join("Interface").join("AddOns");
+        fs::create_dir_all(&addons).expect("addons");
+        fs::write(flavor.join(".curseclient"), GUID).expect("client");
+        let modules = managed
+            .iter()
+            .map(|folder| serde_json::json!({ "foldername": folder }))
+            .collect::<Vec<_>>();
+        let record = serde_json::json!([{
+            "guid": GUID,
+            "installPath": flavor,
+            "installedAddons": [{
+                "preferenceIsIgnored": false,
+                "installedFile": { "modules": modules },
+            }],
+        }]);
+        let file = temp.path().join("AddonGameInstance.json");
+        fs::write(&file, serde_json::to_vec(&record).expect("json")).expect("record");
+        (temp, addons, file)
+    }
+
+    /// Points `app` at a [`curseforge_game`]; keep the returned dir alive.
+    fn use_curseforge(app: &mut App, managed: &[&str]) -> tempfile::TempDir {
+        let (temp, addons, file) = curseforge_game(managed);
+        app.effective_addon_dir = Some(addons);
+        app.curseforge_files = vec![file];
+        temp
+    }
+
     fn app_for_tests(shell_mode: ShellMode) -> App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         let config = AppConfig::new_unconfigured();
@@ -8825,6 +8994,9 @@ mod tests {
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
             pending_wago_install_confirmation: None,
+            // Tests never read the real CurseForge record.
+            curseforge_files: Vec::new(),
+            curseforge: lemonup_core::curseforge::CurseForgeManaged::default(),
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -8843,6 +9015,7 @@ mod tests {
             go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            search_marquee_live: std::cell::Cell::new(false),
             docked_scroll: std::cell::RefCell::default(),
             onboarding: OnboardingState::new(),
             task_events_tx,
@@ -9400,6 +9573,7 @@ mod tests {
                 existing_folders: vec!["WeakAuras".to_string()],
                 tracked_parent: Some("WeakAuras".to_string()),
             },
+            curseforge: false,
         }
     }
 
@@ -9902,6 +10076,42 @@ mod tests {
     }
 
     #[test]
+    fn details_says_when_curseforge_also_manages_a_linked_addon() {
+        let select = |app: &mut App, folder: &str| {
+            let index = (0..app.dashboard.rows.len())
+                .find(|index| {
+                    app.dashboard.list_state.select(Some(*index));
+                    app.inspect_resolved_target()
+                        .is_some_and(|target| target.item.folder == folder)
+                })
+                .unwrap_or_else(|| panic!("no row for {folder}"));
+            app.dashboard.list_state.select(Some(index));
+        };
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        // Second's own folder is Second_Config; First is Not linked.
+        let _game = use_curseforge(&mut app, &["second_config", "First"]);
+        select(&mut app, "Second");
+        app.apply(AppAction::SetInspectOverlay(true));
+        for (width, height) in [(80, 24), (160, 40)] {
+            let rows = render_rows(&mut app, width, height).join("\n");
+            assert!(
+                rows.contains("CurseForge also"),
+                "{width}x{height}:\n{rows}"
+            );
+            assert!(rows.contains("Ignored there"), "{width}x{height}:\n{rows}");
+        }
+
+        // A Not linked addon, and a linked one CurseForge doesn't manage.
+        for folder in ["First", "Third"] {
+            select(&mut app, folder);
+            for (width, height) in [(80, 24), (160, 40)] {
+                let rows = render_rows(&mut app, width, height).join("\n");
+                assert!(!rows.contains("CurseForge"), "{folder}:\n{rows}");
+            }
+        }
+    }
+
+    #[test]
     fn details_arrows_and_jk_move_to_the_previous_or_next_addon() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.shell_ui.overlay.active = Some(OverlayKind::Inspect);
@@ -10374,6 +10584,7 @@ mod tests {
                 source: "TukUI",
                 direct: true,
                 folders: vec!["ElvUI".to_string(), "ElvUI_Options".to_string()],
+                curseforge: false,
             })
         );
         app.note_question_shown(Instant::now());
@@ -10392,6 +10603,7 @@ mod tests {
         app.search_pane = app.search_pane.require_direct_replace(
             elvui_request(),
             &folders_in_the_way(&["ElvUI"], None).clash.expect("clash"),
+            lemonup_core::curseforge::CurseForgeManaged::default(),
         );
         app.note_question_shown(Instant::now());
         assert_eq!(
@@ -10400,6 +10612,47 @@ mod tests {
         );
         apply_all(&mut app, AppMessage::SearchCancelReplace);
         assert_eq!(app.active_question(), None);
+    }
+
+    #[test]
+    fn a_direct_replace_question_says_when_curseforge_also_manages_a_folder() {
+        let mut app = installing_elvui();
+        let _game = use_curseforge(&mut app, &["elvui_options"]);
+        apply_all(
+            &mut app,
+            AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                request: elvui_request(),
+                result: Err(folders_in_the_way(
+                    &["ElvUI", "ElvUI_Options"],
+                    Some("ElvUI"),
+                )),
+            }),
+        );
+        assert!(matches!(
+            app.active_question(),
+            Some(crate::app::dialog::Question::ReplaceAddon {
+                curseforge: true,
+                ..
+            })
+        ));
+
+        // CurseForge manages something else: no note.
+        let mut app = installing_elvui();
+        let _game = use_curseforge(&mut app, &["Details"]);
+        apply_all(
+            &mut app,
+            AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                request: elvui_request(),
+                result: Err(folders_in_the_way(&["ElvUI"], Some("ElvUI"))),
+            }),
+        );
+        assert!(matches!(
+            app.active_question(),
+            Some(crate::app::dialog::Question::ReplaceAddon {
+                curseforge: false,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -11890,6 +12143,7 @@ mod tests {
                 existing_folders: vec!["WeakAuras".to_string()],
                 tracked_parent: Some("WeakAuras".to_string()),
             },
+            curseforge: false,
         });
         app.note_question_shown(Instant::now());
 
@@ -11938,14 +12192,14 @@ mod tests {
     }
 
     #[test]
-    fn wago_search_finished_sorts_results_by_downloads_descending() {
+    fn wago_search_finished_sorts_results_with_equal_words_by_downloads_descending() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
         app.search_pane.in_progress = true;
 
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
-                query: "details".to_string(),
+                query: "dl".to_string(),
                 results: vec![
                     WagoSearchResult {
                         id: "low".to_string(),
@@ -11993,6 +12247,125 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ordered, vec!["high", "low", "none"]);
         assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    fn named_result(id: &str, name: &str, downloads: u64) -> WagoSearchResult {
+        WagoSearchResult {
+            download_count: Some(downloads),
+            ..sample_result(id, name)
+        }
+    }
+
+    fn finish_search_with(app: &mut App, query: &str, results: Vec<WagoSearchResult>) {
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.in_progress = true;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: query.to_string(),
+                results,
+            })),
+        ));
+        assert_eq!(actions.len(), 2);
+        for action in actions {
+            app.apply(action);
+        }
+    }
+
+    fn result_ids(app: &App) -> Vec<&str> {
+        app.search_pane
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn finish_search_puts_names_with_every_word_before_more_downloaded_ones() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        finish_search_with(
+            &mut app,
+            "Forever Loot Sparkles",
+            vec![
+                named_result("tools", "Forever Tools", 900_000),
+                named_result("helper", "Loot Helper", 500_000),
+                named_result("both", "Loot Sparkles", 10),
+                named_result("named", "Forever Loot Sparkles Plus", 5),
+            ],
+        );
+
+        // Both full matches first (the one named "Forever ..." ahead of the
+        // other), then the partial matches by words, then downloads.
+        assert_eq!(result_ids(&app), ["named", "both", "helper", "tools"]);
+        assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    #[test]
+    fn finish_search_says_found_when_some_name_has_every_word() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "Loot Sparkles".to_string(),
+                results: vec![
+                    named_result("helper", "Loot Helper", 500_000),
+                    named_result("both", "Loot Sparkles", 10),
+                ],
+            })),
+        ));
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Found 2 addons on Wago.io"
+            ))
+        );
+    }
+
+    #[test]
+    fn finish_search_says_so_when_no_addon_has_every_word() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "Forever Loot Sparkles".to_string(),
+                results: vec![
+                    named_result("tools", "Forever Tools", 900_000),
+                    named_result("helper", "Loot Helper", 500_000),
+                ],
+            })),
+        ));
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "No addon has all of those words. Closest matches first."
+            ))
+        );
+        for action in actions {
+            app.apply(action);
+        }
+
+        // The sheet says it under the box, while the typed text is the one
+        // that was searched.
+        app.search_pane.query = "Forever Loot Sparkles".into();
+        let hint = line_text(&app.search_hint_line());
+        assert_eq!(
+            hint,
+            "No addon has all of those words. Closest matches first."
+        );
+        assert!(hint.chars().count() <= 78);
+        // Names with every word show the count instead.
+        finish_search_with(
+            &mut app,
+            "Forever Loot Sparkles",
+            vec![named_result("both", "Loot Sparkles", 10)],
+        );
+        assert_eq!(
+            line_text(&app.search_hint_line()),
+            "1 addon on Wago.io match \"Forever Loot Sparkles\""
+        );
     }
 
     #[test]
@@ -12063,6 +12436,59 @@ mod tests {
             app.tracked_wago_result_folder(&result).as_deref(),
             Some("WeakAuras")
         );
+    }
+
+    fn weakauras_installed() -> AppMessage {
+        AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+            WagoInstallTaskOutcome::Installed(WagoInstallOutcome {
+                summary: WagoInstallSummary {
+                    addon_id: "VBNBxKx5".to_string(),
+                    addon_name: "WeakAuras".to_string(),
+                    parent_folder: "WeakAuras".to_string(),
+                    installed_folders: vec![
+                        "WeakAuras".to_string(),
+                        "WeakAurasOptions".to_string(),
+                    ],
+                    stability: crate::wago::WagoStability::Stable,
+                    version: Some("5.21.1".to_string()),
+                    dry_run: false,
+                },
+                sync: AddonScanOutcome {
+                    path: PathBuf::from("/sandbox/AddOns"),
+                    summary: ScanSummary::default(),
+                    addons: Vec::new(),
+                    drift_report: DriftReport::empty(),
+                },
+            }),
+        )))
+    }
+
+    #[test]
+    fn the_install_result_line_says_when_curseforge_also_manages_the_addon() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let _game = use_curseforge(&mut app, &["WeakAurasOptions"]);
+        apply_all(&mut app, weakauras_installed());
+        let (text, kind) = app.status_line_message().expect("result line");
+        assert_eq!(kind, StatusKind::Done);
+        assert_eq!(
+            text,
+            "WeakAuras is installed. CurseForge also manages it. Mark it Ignored there."
+        );
+        let rows = render_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|row| row.contains(
+                "WeakAuras is installed. CurseForge also manages it. Mark it Ignored there."
+            )),
+            "{}",
+            rows.join("\n")
+        );
+
+        // Not managed: the line says only what happened.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let _game = use_curseforge(&mut app, &["Details"]);
+        apply_all(&mut app, weakauras_installed());
+        let (text, _) = app.status_line_message().expect("result line");
+        assert_eq!(text, "WeakAuras is installed");
     }
 
     #[test]
@@ -13137,8 +13563,8 @@ mod tests {
 
     #[test]
     fn list_columns_match_the_design_widths() {
-        use super::render_dashboard::ListColumns;
-        let wide = ListColumns::for_width(120);
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let wide = ListColumns::for_width(120, ColumnNeeds::default());
         assert_eq!(
             (
                 wide.name,
@@ -13149,7 +13575,7 @@ mod tests {
             ),
             (33, 21, 22, 26, 13)
         );
-        let narrow = ListColumns::for_width(80);
+        let narrow = ListColumns::for_width(80, ColumnNeeds::default());
         assert_eq!(
             (
                 narrow.name,
@@ -13160,22 +13586,88 @@ mod tests {
             ),
             (27, 21, 19, 0, 8)
         );
-        assert!(!ListColumns::for_width(109).wide);
-        assert!(ListColumns::for_width(110).wide);
+        assert!(!ListColumns::for_width(109, ColumnNeeds::default()).wide);
+        assert!(ListColumns::for_width(110, ColumnNeeds::default()).wide);
 
-        // Extra width: Addon to 40, then Author to 36, then Version to 26,
-        // then empty space. Nothing stretches to fill.
+        // Short content: the base widths hold at any window width, and the
+        // rest stays empty at the right edge.
         let widths = |width: u16| {
-            let c = ListColumns::for_width(width);
+            let c = ListColumns::for_width(width, ColumnNeeds::default());
             (c.name, c.status, c.version, c.author, c.source, c.total())
         };
-        assert_eq!(widths(127), (40, 21, 22, 26, 13, 127));
-        assert_eq!(widths(137), (40, 21, 22, 36, 13, 137));
-        assert_eq!(widths(138), (40, 21, 23, 36, 13, 138));
-        assert_eq!(widths(141), (40, 21, 26, 36, 13, 141));
-        assert_eq!(widths(200), (40, 21, 26, 36, 13, 141));
-        assert_eq!(widths(100), (40, 21, 26, 0, 8, 100));
-        assert_eq!(widths(160).5, 141);
+        assert_eq!(widths(110), (23, 21, 22, 26, 13, 110));
+        assert_eq!(widths(120), (33, 21, 22, 26, 13, 120));
+        assert_eq!(widths(250), (33, 21, 22, 26, 13, 120));
+        assert_eq!(widths(100), (27, 21, 19, 0, 8, 80));
+    }
+
+    #[test]
+    fn list_columns_grow_to_what_their_cells_need() {
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let needs = ColumnNeeds {
+            name: 60,
+            version: 40,
+            author: 50,
+            source: 13,
+        };
+        let c = ListColumns::for_width(250, needs);
+        // Every column shows its widest cell in full, with no fixed cap, and
+        // the rest of the window stays empty at the right.
+        assert_eq!(
+            (c.name, c.status, c.version, c.author, c.source),
+            (60, 21, 40, 50, 13)
+        );
+        assert_eq!(c.total(), 5 + 60 + 21 + 40 + 50 + 13);
+
+        // Little room: Version first, then Addon, then Author, then Source.
+        let widths = |width: u16| {
+            let c = ListColumns::for_width(width, needs);
+            (c.name, c.version, c.author, c.source)
+        };
+        let base = ListColumns::for_width(120, ColumnNeeds::default()).total();
+        assert_eq!(widths(base + 5), (33, 27, 26, 13));
+        assert_eq!(widths(base + 18), (33, 40, 26, 13));
+        assert_eq!(widths(base + 30), (45, 40, 26, 13));
+        assert_eq!(widths(base + 18 + 27 + 5), (60, 40, 31, 13));
+        // A column never shrinks below its base for short content.
+        let short = ColumnNeeds {
+            name: 5,
+            version: 5,
+            author: 5,
+            source: 5,
+        };
+        let c = ListColumns::for_width(250, short);
+        assert_eq!((c.name, c.version, c.author, c.source), (33, 22, 26, 13));
+        // Narrow windows grow the same way, without Author.
+        let c = ListColumns::for_width(109, needs);
+        assert_eq!((c.name, c.version, c.author, c.source), (35, 40, 0, 8));
+        // Too narrow for the design: Addon gives way first, as before.
+        assert_eq!(ListColumns::for_width(70, needs).name, 27 - 10);
+    }
+
+    #[test]
+    fn docked_list_columns_grow_to_what_their_cells_need() {
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let needs = ColumnNeeds {
+            name: 50,
+            version: 40,
+            author: 99,
+            source: 99,
+        };
+        let c = ListColumns::for_docked(150, needs);
+        assert_eq!(
+            (c.name, c.status, c.version, c.author, c.source),
+            (50, 21, 40, 0, 0)
+        );
+        // Version first, then Addon.
+        let c = ListColumns::for_docked(78 + 10, needs);
+        assert_eq!((c.name, c.version), (30, 32));
+        let c = ListColumns::for_docked(78 + 25, needs);
+        assert_eq!((c.name, c.version), (37, 40));
+        // Short content keeps the base widths.
+        let c = ListColumns::for_docked(150, ColumnNeeds::default());
+        assert_eq!((c.name, c.status, c.version), (30, 21, 22));
+        assert_eq!(c.total(), 78);
     }
 
     #[test]
@@ -13749,6 +14241,25 @@ mod tests {
                 assert!(at(last).contains("C check all"), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn wide_list_columns_measure_double_width_text_by_its_cells() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        // 16 and 18 CJK characters take 32 and 36 terminal cells.
+        let author = "\u{4f5c}\u{8005}".repeat(8);
+        let name = "\u{63d2}\u{4ef6}".repeat(9);
+        let mut addons = vec![versioned(SourceKind::Wago, "1.0.0", Some("1.0.1"))];
+        addons[0].name = name.clone();
+        addons[0].folder = "Wide".to_string();
+        addons[0].author = Some(author.clone());
+        app.dashboard = DashboardState::from_addons(addons);
+
+        let rows = render_rows(&mut app, 200, 30);
+        // Wide glyphs leave an empty buffer cell after them in the dump.
+        let text = rows.join("\n").replace(' ', "");
+        assert!(text.contains(&name), "name was cut\n{text}");
+        assert!(text.contains(&author), "author was cut\n{text}");
     }
 
     #[test]
@@ -15239,6 +15750,83 @@ mod tests {
         assert_eq!(visible_folders(&app), vec!["Second".to_string()]);
     }
 
+    /// Addons linked to Wago.io, WoWInterface or TukUI show the source's name; a Title the user
+    /// set wins, and GitHub and Not linked addons keep their TOC Title.
+    fn source_named_dashboard() -> DashboardState {
+        let mut dbm = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        dbm.source_name = Some("Deadly Boss Mods (DBM)".to_string());
+        let mut elvui = AddonRecord::new("ElvUI Toc", "ElvUI", SourceKind::Tukui);
+        elvui.source_name = Some("Alpha ElvUI".to_string());
+        let mut renamed = AddonRecord::new("Zed Mine", "Renamed", SourceKind::WowInterface);
+        renamed.toc_overrides =
+            std::collections::BTreeMap::from([("Title".to_string(), "Zed Mine".to_string())]);
+        renamed.source_name = Some("Alpha Renamed".to_string());
+        let mut repo = AddonRecord::new("Bravo Toc", "Repo", SourceKind::GitHub);
+        repo.source_name = Some("Alpha Repo".to_string());
+        let mut loose = AddonRecord::new("Charlie Toc", "Loose", SourceKind::Manual);
+        loose.source_name = Some("Alpha Loose".to_string());
+        DashboardState::from_addons(vec![dbm, elvui, renamed, repo, loose])
+    }
+
+    #[test]
+    fn linked_addons_show_their_sources_name_in_the_list_and_sort_by_it() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard = source_named_dashboard();
+        app.apply(AppAction::ToggleDashboardSort(DashboardSortColumn::Name));
+        assert_eq!(
+            app.dashboard.sort_config().column,
+            DashboardSortColumn::Name
+        );
+        let names = app
+            .dashboard
+            .rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect::<Vec<_>>();
+        let ascending = [
+            "Alpha ElvUI",
+            "Bravo Toc",
+            "Charlie Toc",
+            "Deadly Boss Mods (DBM)",
+            "Zed Mine",
+        ];
+        assert!(
+            names == ascending || names.iter().rev().eq(ascending.iter()),
+            "{names:?}"
+        );
+
+        for (width, height) in [(80u16, 24u16), (160, 40)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            for name in ["Alpha ElvUI", "Bravo Toc", "Charlie Toc", "Zed Mine"] {
+                assert!(text.contains(name), "{width}x{height}: {name}\n{text}");
+            }
+            assert!(text.contains("Deadly Boss"), "{width}x{height}\n{text}");
+            for hidden in ["<DBM Core>", "ElvUI Toc", "Alpha Renamed", "Alpha Repo"] {
+                assert!(!text.contains(hidden), "{width}x{height}: {hidden}\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_filter_matches_the_shown_name_and_the_toc_title() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard = source_named_dashboard();
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "deadly");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
+
+        app.dashboard.set_filter(TextInput::default(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "DBM Core");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
+
+        app.dashboard.set_filter(TextInput::default(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "main core");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
+    }
+
     #[test]
     fn dashboard_filter_child_folder_match_shows_parent_expanded() {
         let mut app = app_for_tests(ShellMode::Dashboard);
@@ -15832,6 +16420,264 @@ mod tests {
             app.search_pane.results = wago_results(30);
             app.search_pane.selected_result = Some(0);
             app.search_pane.last_query = Some("result".to_string());
+        }
+
+        const LONG_VERSION: &str = "v1.6.0-forever-extra-long";
+
+        /// Results whose first two versions are long.
+        fn app_with_long_versions() -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            app.search_pane.results[0].version = Some(LONG_VERSION.to_string());
+            app.search_pane.results[1].version = Some("v1.6.0-forever".to_string());
+            app
+        }
+
+        fn row_of<'a>(rows: &'a [String], name: &str) -> &'a str {
+            rows.iter()
+                .find(|row| row.contains(name))
+                .unwrap_or_else(|| panic!("no row with {name}:\n{}", rows.join("\n")))
+        }
+
+        fn tick(app: &mut App, count: usize) {
+            for _ in 0..count {
+                app.apply(AppAction::AdvanceMotionTick);
+            }
+        }
+
+        #[test]
+        fn the_version_column_grows_to_fit_the_longest_version_up_to_18() {
+            for (width, height) in [(138u16, 36u16), (100, 30)] {
+                let mut app = app_with_long_versions();
+                app.search_pane.results[0].version = Some("v1.6.0-forever".to_string());
+                let rows = render_rows(&mut app, width, height);
+                let text = rows.join("\n");
+                assert!(
+                    row_of(&rows, "Result Addon 0")
+                        .trim_end_matches(['\u{2502}', ' '])
+                        .ends_with("  v1.6.0-forever"),
+                    "{width}x{height}:\n{text}"
+                );
+                assert!(!text.contains("v1.6.0-forev\u{2026}"), "{text}");
+                assert!(!text.contains('\u{2026}'), "{text}");
+
+                // Longer than 18 is cut at 18, with an ellipsis.
+                app.search_pane.results[0].version = Some(LONG_VERSION.to_string());
+                let rows = render_rows(&mut app, width, height);
+                let cut: String = LONG_VERSION.chars().take(17).collect();
+                assert!(
+                    row_of(&rows, "Result Addon 0").contains(&format!("{cut}\u{2026}")),
+                    "{width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+
+        #[test]
+        fn the_version_column_keeps_its_width_while_the_list_scrolls() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            // Only the last result, off screen at first, has a long version.
+            app.search_pane.results[29].version = Some("v1.6.0-forever".to_string());
+            let header = |rows: &[String]| row_of(rows, "Downloads").to_string();
+            let top = render_rows(&mut app, 100, 30);
+            assert!(!top.join("\n").contains("Result Addon 29"));
+            app.search_pane.selected_result = Some(29);
+            let bottom = render_rows(&mut app, 100, 30);
+            assert!(bottom.join("\n").contains("v1.6.0-forever"));
+            assert_eq!(header(&top), header(&bottom));
+        }
+
+        #[test]
+        fn at_80_by_24_a_long_version_is_cut_and_the_addon_column_keeps_16() {
+            let mut app = app_with_long_versions();
+            // Not the selected row, so it does not scroll.
+            app.search_pane.selected_result = Some(1);
+            let rows = render_rows(&mut app, 80, 24);
+            let text = rows.join("\n");
+            assert!(
+                row_of(&rows, "Result Addon 0")
+                    .trim_end()
+                    .ends_with("v1.6.0-foreve\u{2026}"),
+                "{text}"
+            );
+            // The Addon column is at least 16 wide: the header's Author
+            // starts 16 and the 2 column gap after Addon starts.
+            let header = row_of(&rows, "Downloads");
+            let addon = header.chars().position(|c| c == 'A').expect("Addon");
+            let author = header.find("Author").expect("Author");
+            let author = header[..author].chars().count();
+            assert!(author - (addon - 2) - 2 >= 16, "{text}");
+            // Every row still fits the sheet.
+            assert!(rows.iter().all(|row| row.chars().count() == 80), "{text}");
+        }
+
+        #[test]
+        fn with_simple_symbols_the_cut_version_ends_in_three_dots() {
+            let mut app = app_with_long_versions();
+            app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
+            app.search_pane.selected_result = Some(1);
+            let rows = render_rows(&mut app, 80, 24);
+            assert!(
+                row_of(&rows, "Result Addon 0")
+                    .trim_end()
+                    .ends_with("v1.6.0-fore..."),
+                "{}",
+                rows.join("\n")
+            );
+        }
+
+        /// The version text of the "Result Addon `index`" row at 80x24.
+        fn version_shown(app: &mut App, index: usize) -> String {
+            let rows = render_rows(app, 80, 24);
+            let row = row_of(&rows, &format!("Result Addon {index} "));
+            row.split_whitespace().last().expect("version").to_string()
+        }
+
+        #[test]
+        fn the_selected_rows_cut_version_holds_scrolls_holds_and_starts_over() {
+            let mut app = app_with_long_versions();
+            let window =
+                |offset: usize| -> String { LONG_VERSION.chars().skip(offset).take(14).collect() };
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            assert!(
+                app.has_active_animation(),
+                "a scrolling version keeps the tick animated"
+            );
+            // Holds for 2 seconds of animated ticks.
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            // Then one character per tick.
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), window(1));
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), window(2));
+            // Until the end shows, then holds there.
+            let last = LONG_VERSION.chars().count() - 14;
+            tick(&mut app, last - 2);
+            assert_eq!(version_shown(&mut app, 0), window(last));
+            assert!(window(last).ends_with("extra-long"));
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 0), window(last));
+            // Then jumps back to the start and goes again.
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS);
+            assert_eq!(version_shown(&mut app, 0), window(1));
+        }
+
+        /// The version cell of the "Result Addon 0" row, as drawn: its text
+        /// and how many terminal cells that text takes.
+        fn wide_version_shown(app: &mut App) -> (String, usize) {
+            use ratatui::{Terminal, backend::TestBackend};
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let row = (0..24u16)
+                .find(|y| {
+                    let text: String = (0..80u16).map(|x| buffer[(x, *y)].symbol()).collect();
+                    text.contains("Result Addon 0 ")
+                })
+                .expect("row");
+            // The version starts 2 cells after the downloads count ("1K"),
+            // and runs to the empty status column. A double-width character
+            // is followed by a cell that holds only a space.
+            let count = (0..80u16)
+                .find(|x| buffer[(*x, row)].symbol() == "K")
+                .expect("downloads");
+            let mut version = String::new();
+            let mut x = count + 3;
+            while x < 80 {
+                let symbol = buffer[(x, row)].symbol();
+                version.push_str(symbol);
+                x += ratatui::text::Span::raw(symbol).width().max(1) as u16;
+            }
+            let version = version.trim_end().to_string();
+            let width = ratatui::text::Span::raw(version.as_str()).width();
+            (version, width)
+        }
+
+        #[test]
+        fn a_double_width_version_is_measured_in_cells() {
+            const WIDE: &str = "v1.0-\u{6b63}\u{5f0f}\u{53d1}\u{5e03}\u{7248}\u{672c}\u{7a33}\u{5b9a}\u{66f4}\u{65b0}";
+            let mut app = app_with_long_versions();
+            app.search_pane.results[0].version = Some(WIDE.to_string());
+            let (cut, cut_width) = wide_version_shown(&mut app);
+            assert!(cut.ends_with('\u{2026}'), "cut with an ellipsis: {cut:?}");
+            // The column is at most 18 cells wide.
+            assert!(cut_width <= 18, "{cut:?} takes {cut_width} cells");
+            assert!(app.has_active_animation(), "a cut version scrolls");
+
+            // It scrolls by characters, and no frame is wider than the column.
+            let mut frames = vec![cut];
+            for _ in 0..crate::app::MARQUEE_HOLD_TICKS + WIDE.chars().count() {
+                tick(&mut app, 1);
+                let (frame, width) = wide_version_shown(&mut app);
+                assert!(width <= cut_width, "{frame:?} takes {width} cells");
+                if frames.last() != Some(&frame) {
+                    frames.push(frame);
+                }
+            }
+            assert!(frames.len() > 3, "the version scrolls: {frames:?}");
+            assert!(
+                frames.iter().any(|frame| WIDE.ends_with(frame.as_str())),
+                "the end of the version shows: {frames:?}"
+            );
+        }
+
+        #[test]
+        fn only_the_selected_row_scrolls() {
+            let mut app = app_with_long_versions();
+            app.search_pane.results[1].version = Some(LONG_VERSION.to_string());
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 3);
+            assert_eq!(
+                version_shown(&mut app, 0),
+                LONG_VERSION.chars().skip(4).take(14).collect::<String>()
+            );
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+        }
+
+        #[test]
+        fn moving_the_selection_restarts_the_scroll() {
+            let mut app = app_with_long_versions();
+            app.search_pane.results[1].version = Some(LONG_VERSION.to_string());
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 5);
+            assert_ne!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+
+            app.apply(AppAction::SetSearchPaneState(app.search_pane.select_next()));
+            assert_eq!(app.search_pane.selected_result, Some(1));
+            // The new row starts at its beginning; the old one is cut again.
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, 1);
+            assert_ne!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+        }
+
+        #[test]
+        fn reduce_motion_keeps_the_version_cut() {
+            let mut app = app_with_long_versions();
+            app.ui_theme.reduce_motion = true;
+            for ticks in [0, crate::app::MARQUEE_HOLD_TICKS, 5, 40] {
+                tick(&mut app, ticks);
+                assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            }
+            assert!(!app.has_active_animation());
+        }
+
+        #[test]
+        fn a_version_that_fits_never_scrolls_or_asks_for_animation() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 3);
+            assert_eq!(version_shown(&mut app, 0), "1.0.0");
+            assert!(!app.has_active_animation());
+            // Wide enough to show all of it: nothing is cut, nothing scrolls.
+            let mut app = app_with_long_versions();
+            app.search_pane.results[0].version = Some("v1.6.0-forever".to_string());
+            let _ = render_rows(&mut app, 138, 36);
+            assert!(!app.has_active_animation());
         }
 
         /// The window sizes a sheet is checked at for holding still.
@@ -17239,7 +18085,10 @@ mod tests {
 
         #[test]
         fn docked_columns_are_78_1_41_at_120_and_the_panel_stops_near_52() {
-            let columns = crate::app::render_dashboard::ListColumns::for_docked(78);
+            let columns = crate::app::render_dashboard::ListColumns::for_docked(
+                78,
+                crate::app::render_dashboard::ColumnNeeds::default(),
+            );
             assert_eq!(
                 (
                     columns.name,
@@ -19339,6 +20188,55 @@ mod tests {
         }
 
         #[test]
+        fn the_replace_question_says_when_curseforge_also_manages_it_and_fits_at_80x24() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _game = use_curseforge(&mut app, &["weakauras_part07"]);
+            let confirmation = pending_wago_confirmation();
+            let mut inspection = confirmation.inspection;
+            inspection.existing_folders = (1..=14)
+                .map(|index| format!("WeakAuras_Part{index:02}"))
+                .collect();
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::NeedsConfirmation {
+                        request: confirmation.request,
+                        inspection: inspection.clone(),
+                    },
+                ))),
+            );
+            assert_dialog(
+                &mut app,
+                "Replace your copy of WeakAuras?",
+                &[
+                    "These folders are replaced:",
+                    "WeakAuras_Part01",
+                    "more",
+                    "CurseForge also manages this addon.",
+                    "(Install Settings).",
+                    "y  replace",
+                    "n  keep",
+                ],
+            );
+
+            // CurseForge manages none of these folders: no note.
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let _game = use_curseforge(&mut app, &["Details"]);
+            apply_all(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::WagoInstallFinished(Ok(
+                    WagoInstallTaskOutcome::NeedsConfirmation {
+                        request: pending_wago_confirmation().request,
+                        inspection,
+                    },
+                ))),
+            );
+            assert!(app.active_question().is_some());
+            let rows = render_rows(&mut app, 80, 24).join("\n");
+            assert!(!rows.contains("CurseForge"), "{rows}");
+        }
+
+        #[test]
         fn the_replace_question_lists_its_folders_and_fits_at_80x24() {
             let mut app = app_for_tests(ShellMode::Dashboard);
             let mut confirmation = pending_wago_confirmation();
@@ -19454,6 +20352,7 @@ mod tests {
                     source: "Wago.io",
                     direct: false,
                     folders: Vec::new(),
+                    curseforge: false,
                 }
                 .danger()
             );

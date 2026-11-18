@@ -329,7 +329,7 @@ impl TextView {
     }
 }
 
-fn char_width(character: char) -> usize {
+pub(super) fn char_width(character: char) -> usize {
     let mut buffer = [0u8; 4];
     Span::raw(&*character.encode_utf8(&mut buffer)).width()
 }

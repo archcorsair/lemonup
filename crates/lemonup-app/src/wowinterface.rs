@@ -45,6 +45,8 @@ pub(crate) struct WowinterfaceUpdateSummary {
 pub(crate) struct WowinterfaceRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
+    /// The addon's name on WoWInterface, as WoWInterface gives it.
+    pub(crate) name: Option<String>,
 }
 
 /// WoWInterface has no WoW Forever category, so its files are not tagged for that client.
@@ -155,6 +157,7 @@ pub(crate) async fn fetch_wowinterface_remote_version(
     Ok(WowinterfaceRemoteVersion {
         source_url: Some(canonical_source_url(&remote.uid)),
         version: Some(remote.ui_version.clone()),
+        name: Some(remote.ui_name.clone()),
     })
 }
 
@@ -187,6 +190,7 @@ pub(crate) async fn update_wowinterface_addon(
             tracked,
             remote_version.as_deref(),
             Some(canonical_source_url(&remote.uid)),
+            Some(&remote.ui_name),
             dry_run,
         )?;
         return Ok(WowinterfaceUpdateSummary {
@@ -498,6 +502,7 @@ fn build_managed_wowinterface_record(
     record.optional_deps = parent_metadata.optional_deps.clone();
     record.embedded_libs = parent_metadata.embedded_libs.clone();
     record.remote_version = Some(addon.ui_version.clone());
+    record.source_name = lemonup_core::domain::source_name(&addon.ui_name);
     record.last_checked_at = Some(OffsetDateTime::now_utc());
     record.set_managed_owned_folders(
         installed_folders
@@ -864,7 +869,7 @@ mod tests {
     fn build_managed_wowinterface_record_sets_owned_folders() {
         let addon = super::WowinterfaceAddon {
             uid: "25687".to_string(),
-            ui_name: "ElvUI_WindTools".to_string(),
+            ui_name: "|cff00ff00Wind|rTools &quot;for&quot; ElvUI &#38; more".to_string(),
             ui_version: "4.16".to_string(),
             ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=25687".to_string(),
             ui_author_name: "fang2hou".to_string(),
@@ -899,6 +904,11 @@ mod tests {
         );
         assert_eq!(record.source, SourceKind::WowInterface);
         assert_eq!(record.remote_version.as_deref(), Some("4.16"));
+        assert_eq!(record.name, "ElvUI WindTools");
+        assert_eq!(
+            record.source_name.as_deref(),
+            Some("WindTools \"for\" ElvUI & more")
+        );
         assert_eq!(record.owned_folders.len(), 1);
         assert_eq!(record.owned_folders[0].name, "ElvUI_WindTools_Options");
     }
