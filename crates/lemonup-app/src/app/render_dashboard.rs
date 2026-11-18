@@ -281,7 +281,7 @@ impl RowStatus {
             )],
             Self::UpToDate | Self::NewerThanSource => vec![
                 Span::styled(symbol, Style::default().fg(roles.green)),
-                Span::styled(format!(" {word}"), Style::default().fg(roles.muted)),
+                Span::styled(format!(" {word}"), roles.muted),
             ],
             Self::Updated => vec![Span::styled(
                 format!("{symbol} {word}"),
@@ -298,10 +298,9 @@ impl RowStatus {
                     Style::default().fg(roles.text).add_modifier(bold),
                 ),
             ],
-            Self::NotLinked | Self::NotChecked | Self::Waiting | Self::Done => vec![Span::styled(
-                format!("{symbol} {word}"),
-                Style::default().fg(roles.muted),
-            )],
+            Self::NotLinked | Self::NotChecked | Self::Waiting | Self::Done => {
+                vec![Span::styled(format!("{symbol} {word}"), roles.muted)]
+            }
         }
     }
 }
@@ -356,7 +355,7 @@ impl VersionCell {
     fn spans(&self, max: usize, theme: &UiTheme) -> Vec<Span<'static>> {
         let roles = theme.roles;
         let arrow = theme.symbols.arrow;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         match &self.new {
             None => vec![Span::styled(truncate_text(&self.installed, max), muted)],
             Some(new) => {
@@ -658,10 +657,7 @@ impl App {
         if !path.is_empty() {
             let room = usize::from(width).saturating_sub(used);
             first.push(Span::raw("  "));
-            first.push(Span::styled(
-                shorten_path_middle(&path, room),
-                Style::default().fg(roles.muted),
-            ));
+            first.push(Span::styled(shorten_path_middle(&path, room), roles.muted));
         }
         second.extend(self.dashboard_answer_spans(now));
         if let Some(warning) = self.profile_warning() {
@@ -727,10 +723,7 @@ impl App {
         }
         if items.iter().all(|item| item.source == SourceKind::Manual) {
             spans.push(dot());
-            spans.push(Span::styled(
-                "none linked yet",
-                Style::default().fg(roles.muted),
-            ));
+            spans.push(Span::styled("none linked yet", roles.muted));
             return spans;
         }
         // What the Status column says for each linked addon, before any
@@ -754,10 +747,7 @@ impl App {
         let checked_at = items.iter().filter_map(|item| item.last_checked_at).max();
         if checked_at.is_none() && failed == 0 {
             spans.push(dot());
-            spans.push(Span::styled(
-                "not checked yet",
-                Style::default().fg(roles.muted),
-            ));
+            spans.push(Span::styled("not checked yet", roles.muted));
             return spans;
         }
         let updates = self.dashboard.update_ready_folders().len();
@@ -779,7 +769,7 @@ impl App {
             spans.push(dot());
             spans.push(Span::styled(
                 format!("{unchecked} not checked yet"),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
         }
         // Only when every linked addon has an answer and none needs one.
@@ -794,7 +784,7 @@ impl App {
             spans.push(dot());
             spans.push(Span::styled(
                 checked_ago_label(now, checked_at),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
         }
         spans
@@ -820,7 +810,7 @@ impl App {
         }
         let editing = self.dashboard.filter_editing();
         let border = Style::default().fg(if editing { roles.lemon } else { roles.border });
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
         // Between the corners.
         let inner = width - 2;
@@ -1010,9 +1000,7 @@ impl App {
             } else {
                 vec![Span::styled(
                     label,
-                    Style::default()
-                        .fg(roles.muted)
-                        .add_modifier(Modifier::BOLD),
+                    roles.muted.add_modifier(Modifier::BOLD),
                 )]
             };
             let used = spans_width(&spans);
@@ -1120,7 +1108,7 @@ impl App {
     fn first_run_card_lines(&self, width: u16) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
         let text = Style::default().fg(roles.text);
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let key = |label: &'static str| {
             Span::styled(
                 label,
@@ -1228,7 +1216,7 @@ impl App {
             lines.push(Line::from(vec![
                 indent(),
                 key("esc", false),
-                Span::styled("  clear the filter", Style::default().fg(roles.muted)),
+                Span::styled("  clear the filter", roles.muted),
             ]));
             return lines;
         }
@@ -1256,7 +1244,7 @@ impl App {
                         indent(),
                         Span::styled(
                             shorten_path_middle(&path, usize::from(width).saturating_sub(6)),
-                            Style::default().fg(roles.muted),
+                            roles.muted,
                         ),
                     ]));
                 }
@@ -1278,10 +1266,7 @@ impl App {
             ScanState::Pending | ScanState::Running(_) => {
                 lines.push(Line::from(vec![
                     indent(),
-                    Span::styled(
-                        "Looking through your AddOns folder…",
-                        Style::default().fg(roles.muted),
-                    ),
+                    Span::styled("Looking through your AddOns folder…", roles.muted),
                 ]));
             }
             _ => {
@@ -1296,10 +1281,7 @@ impl App {
                 ];
                 let settings = vec![
                     key("s", false),
-                    Span::styled(
-                        "  check that this is the right game folder",
-                        Style::default().fg(roles.muted),
-                    ),
+                    Span::styled("  check that this is the right game folder", roles.muted),
                 ];
                 let one_row: usize = 5
                     + install.iter().map(Span::width).sum::<usize>()
@@ -1375,7 +1357,7 @@ impl App {
                 Span::styled(child_row_prefix(row), Style::default().fg(roles.dim)),
                 Span::styled(
                     truncate_text(&row.name, name_width.saturating_sub(4)),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 ),
             ]);
             return Row::new(vec![Cell::from(gutter), Cell::from(name)]);
@@ -1393,8 +1375,8 @@ impl App {
             Span::raw(" ")
         };
         let triangle = match (row.expandable, row.expanded) {
-            (true, true) => Span::styled("▾", Style::default().fg(roles.muted)),
-            (true, false) => Span::styled("▸", Style::default().fg(roles.muted)),
+            (true, true) => Span::styled("▾", roles.muted),
+            (true, false) => Span::styled("▸", roles.muted),
             (false, _) => Span::raw(" "),
         };
         let gutter = Line::from(vec![bar, dot, Span::raw(" "), triangle, Span::raw(" ")]);
@@ -1408,7 +1390,7 @@ impl App {
         let name_style = if is_cursor {
             Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
         } else if settled {
-            Style::default().fg(roles.muted)
+            roles.muted
         } else {
             Style::default().fg(roles.text)
         };
@@ -1435,13 +1417,13 @@ impl App {
                 let author = item.author.as_deref().map(str::trim).unwrap_or_default();
                 cells.push(Cell::from(Span::styled(
                     truncate_text(author, usize::from(columns.author.saturating_sub(1))),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )));
             }
             if columns.source > 0 {
                 cells.push(Cell::from(Span::styled(
                     dashboard_source_name(item.source, columns.wide),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )));
             }
         }
@@ -1493,10 +1475,7 @@ impl App {
             spans.push(Span::raw(
                 " ".repeat(width.saturating_sub(used + right_width + 1)),
             ));
-            spans.push(Span::styled(
-                right,
-                Style::default().fg(self.ui_theme.roles.muted),
-            ));
+            spans.push(Span::styled(right, self.ui_theme.roles.muted));
         }
         Line::from(spans)
     }
@@ -1540,10 +1519,7 @@ impl App {
         // "backed up your game settings first", once the backup ran.
         if let Some(note) = self.dashboard.job_note() {
             spans.push(Span::raw("   "));
-            spans.push(Span::styled(
-                note.to_string(),
-                Style::default().fg(roles.muted),
-            ));
+            spans.push(Span::styled(note.to_string(), roles.muted));
         }
         Some(spans)
     }
@@ -1577,10 +1553,7 @@ impl App {
                 Span::styled(text, Style::default().fg(roles.text)),
             ],
             StatusKind::Note | StatusKind::Quiet => {
-                vec![Span::styled(
-                    format!("· {text}"),
-                    Style::default().fg(roles.muted),
-                )]
+                vec![Span::styled(format!("· {text}"), roles.muted)]
             }
         };
         if let Some(offer) = flash.offer.filter(|offer| self.status_offer_works(*offer)) {
@@ -1592,7 +1565,7 @@ impl App {
                 StatusOffer::UndoDelete => spans.extend([
                     dot(),
                     key("z", roles.blue),
-                    Span::styled(" undo delete", Style::default().fg(roles.muted)),
+                    Span::styled(" undo delete", roles.muted),
                 ]),
                 StatusOffer::UpdateAll => {
                     let updates = self.dashboard.update_ready_folders().len();
@@ -1606,7 +1579,7 @@ impl App {
                         ),
                         dot(),
                         key("U", roles.lemon),
-                        Span::styled(" updates them all", Style::default().fg(roles.muted)),
+                        Span::styled(" updates them all", roles.muted),
                     ]);
                 }
             }
@@ -1625,10 +1598,7 @@ impl App {
                 spans.push(Span::raw(separator));
             }
             if hint.key.is_empty() {
-                spans.push(Span::styled(
-                    hint.label.clone(),
-                    Style::default().fg(roles.muted),
-                ));
+                spans.push(Span::styled(hint.label.clone(), roles.muted));
                 continue;
             }
             let pulsed = hint.id.is_some_and(|id| {
@@ -1654,7 +1624,7 @@ impl App {
             } else {
                 (
                     Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )
             };
             spans.push(Span::styled(hint.key, key_style));
