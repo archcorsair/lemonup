@@ -102,8 +102,16 @@ const LOGO_FULL: [&str; 2] = [
     "█   █▀▀ █▀▄▀█ █▀█ █▄ █ █ █ █▀█",
     "█▄▄ ██▄ █ ▀ █ █▄█ █ ▀█ █▄█ █▀▀",
 ];
+/// What the Install sheet says when a search returned addons but none has
+/// every word that was typed.
+pub(crate) const NO_ADDON_HAS_EVERY_WORD: &str =
+    "No addon has all of those words. Closest matches first.";
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
+/// How long a cut version holds at its start and its end before it moves
+/// on: about two seconds of animated ticks.
+const MARQUEE_HOLD_TICKS: usize =
+    (StdDuration::from_secs(2).as_millis() / ANIMATED_TICK_RATE.as_millis()) as usize;
 const BACKUP_SPAM_GUARD_WINDOW: Duration = Duration::seconds(10);
 /// How long a done or note message stays on the status line.
 const MESSAGE_FADE: StdDuration = StdDuration::from_secs(4);
@@ -192,6 +200,9 @@ struct ShellUiState {
     footer_pulse: Option<FooterKeyPulse>,
     status_flash: Option<StatusFlash>,
     help_context: HelpContext,
+    /// The motion tick when the Install sheet's selected row last changed:
+    /// a cut version on that row scrolls from here.
+    search_selection_tick: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2372,6 +2383,14 @@ impl SearchPaneState {
         self.focus == SearchFocus::Results && !self.results.is_empty()
     }
 
+    /// Which row a cut version scrolls on: the selected result while the
+    /// results have focus. A new key restarts the scroll.
+    fn marquee_key(&self) -> Option<&str> {
+        self.results_focused()
+            .then(|| self.selected_result().map(|result| result.id.as_str()))
+            .flatten()
+    }
+
     /// Editing the text leaves a finished install or a failure behind: the
     /// sheet shows what enter will do with the new text.
     fn edit_text(&self, change: impl FnOnce(&mut TextInput)) -> Self {
@@ -2438,8 +2457,8 @@ impl SearchPaneState {
     fn finish_search(&self, query: String, mut results: Vec<WagoSearchResult>) -> Self {
         let mut next = self.clone();
         next.in_progress = false;
+        rank_search_results(&query, &mut results);
         next.last_query = Some(query);
-        sort_search_results(&mut results);
         next.results = results;
         next.install_state = SearchInstallState::Idle;
         next.selected_result = if next.results.is_empty() {
@@ -2451,6 +2470,24 @@ impl SearchPaneState {
             next.focus = SearchFocus::Box;
         }
         next
+    }
+
+    /// Whether some result has every word of the search. Wago.io matches
+    /// any word, so a search for three words can return only partial matches.
+    fn some_result_has_every_word(&self) -> bool {
+        let Some(query) = self.last_query.as_deref() else {
+            return true;
+        };
+        let names: Vec<&str> = self
+            .results
+            .iter()
+            .map(|result| result.display_name.as_str())
+            .collect();
+        lemonup_core::search_rank::any_name_has_every_word(
+            query,
+            &lemonup_core::search_rank::GAME_WORDS,
+            &names,
+        )
     }
 
     fn fail_search(&self, error: &SourceError) -> Self {
@@ -2814,6 +2851,9 @@ pub struct App {
     last_frame_width: Option<u16>,
     /// The open sheet as last drawn, so keys can scroll it.
     sheet_scroll: std::cell::Cell<SheetScroll>,
+    /// Set while drawing: a cut version on the Install sheet's selected row
+    /// is scrolling, so the tick stays at the animated rate.
+    search_marquee_live: std::cell::Cell<bool>,
     /// Docked Details as last drawn, so PgUp, PgDn and the wheel scroll it.
     docked_scroll: std::cell::RefCell<render_inspect::DockedScroll>,
     onboarding: OnboardingState,
@@ -3001,6 +3041,7 @@ impl App {
             go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            search_marquee_live: std::cell::Cell::new(false),
             docked_scroll: std::cell::RefCell::default(),
             onboarding,
             task_events_tx,
@@ -3101,7 +3142,7 @@ impl App {
             return true;
         }
 
-        false
+        self.search_marquee_live.get()
     }
 
     fn initial_status_line(&self) -> StatusMessage {
@@ -5702,21 +5743,28 @@ impl App {
                         )),
                     ]
                 }
-                AppTaskEvent::WagoSearchFinished(Ok(outcome)) => vec![
-                    AppAction::SetSearchPaneState(
-                        self.search_pane
-                            .finish_search(outcome.query.clone(), outcome.results.clone()),
-                    ),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Done,
-                        DetailMode::Search,
-                        &format!(
+                AppTaskEvent::WagoSearchFinished(Ok(outcome)) => {
+                    let pane = self
+                        .search_pane
+                        .finish_search(outcome.query.clone(), outcome.results.clone());
+                    let message = if pane.results.is_empty() || pane.some_result_has_every_word() {
+                        format!(
                             "Found {} addon{} on Wago.io",
                             outcome.results.len(),
                             plural_suffix(outcome.results.len())
-                        ),
-                    )),
-                ],
+                        )
+                    } else {
+                        NO_ADDON_HAS_EVERY_WORD.to_string()
+                    };
+                    vec![
+                        AppAction::SetSearchPaneState(pane),
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Done,
+                            DetailMode::Search,
+                            &message,
+                        )),
+                    ]
+                }
                 AppTaskEvent::WagoSearchFinished(Err(error)) => {
                     let mut pane = self.search_pane.fail_search(&error);
                     if error.kind == SourceErrorKind::KeyRejected {
@@ -6042,6 +6090,9 @@ impl App {
                 self.install_pane = state;
             }
             AppAction::SetSearchPaneState(state) => {
+                if self.search_pane.marquee_key() != state.marquee_key() {
+                    self.shell_ui.search_selection_tick = self.shell_ui.motion.tick_count;
+                }
                 self.search_pane = state;
             }
             AppAction::SetConfigPaneState(state) => {
@@ -6708,6 +6759,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
         self.note_question_shown(Instant::now());
+        self.search_marquee_live.set(false);
         if self.shell_mode == ShellMode::Dashboard {
             self.draw_dashboard_frame(frame);
         } else {
@@ -8542,17 +8594,15 @@ fn is_placeholder_version(value: &str) -> bool {
     trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
-fn sort_search_results(results: &mut [WagoSearchResult]) {
+/// Orders search results: names with every search word first, then by how
+/// many words they have, then downloads. Equal ones go by name, then owner.
+fn rank_search_results(query: &str, results: &mut Vec<WagoSearchResult>) {
+    use lemonup_core::search_rank::{GAME_WORDS, SearchItem, rank_results};
+
     results.sort_by(|left, right| {
-        right
-            .download_count
-            .unwrap_or(0)
-            .cmp(&left.download_count.unwrap_or(0))
-            .then_with(|| {
-                left.display_name
-                    .to_ascii_lowercase()
-                    .cmp(&right.display_name.to_ascii_lowercase())
-            })
+        left.display_name
+            .to_ascii_lowercase()
+            .cmp(&right.display_name.to_ascii_lowercase())
             .then_with(|| {
                 left.owner
                     .as_deref()
@@ -8562,6 +8612,16 @@ fn sort_search_results(results: &mut [WagoSearchResult]) {
             })
             .then_with(|| left.id.cmp(&right.id))
     });
+    let items: Vec<SearchItem<'_>> = results
+        .iter()
+        .map(|result| SearchItem {
+            name: &result.display_name,
+            downloads: result.download_count.unwrap_or(0),
+        })
+        .collect();
+    let order = rank_results(query, &GAME_WORDS, &items).order;
+    let mut slots: Vec<Option<WagoSearchResult>> = results.drain(..).map(Some).collect();
+    results.extend(order.into_iter().filter_map(|index| slots[index].take()));
 }
 
 fn format_compact_count(count: u64, divisor: u64, suffix: &str) -> String {
@@ -8843,6 +8903,7 @@ mod tests {
             go_top_pending: std::cell::Cell::new(false),
             last_frame_width: None,
             sheet_scroll: std::cell::Cell::new(SheetScroll::default()),
+            search_marquee_live: std::cell::Cell::new(false),
             docked_scroll: std::cell::RefCell::default(),
             onboarding: OnboardingState::new(),
             task_events_tx,
@@ -11938,14 +11999,14 @@ mod tests {
     }
 
     #[test]
-    fn wago_search_finished_sorts_results_by_downloads_descending() {
+    fn wago_search_finished_sorts_results_with_equal_words_by_downloads_descending() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.detail_mode = DetailMode::Search;
         app.search_pane.in_progress = true;
 
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
-                query: "details".to_string(),
+                query: "dl".to_string(),
                 results: vec![
                     WagoSearchResult {
                         id: "low".to_string(),
@@ -11993,6 +12054,125 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ordered, vec!["high", "low", "none"]);
         assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    fn named_result(id: &str, name: &str, downloads: u64) -> WagoSearchResult {
+        WagoSearchResult {
+            download_count: Some(downloads),
+            ..sample_result(id, name)
+        }
+    }
+
+    fn finish_search_with(app: &mut App, query: &str, results: Vec<WagoSearchResult>) {
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.in_progress = true;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: query.to_string(),
+                results,
+            })),
+        ));
+        assert_eq!(actions.len(), 2);
+        for action in actions {
+            app.apply(action);
+        }
+    }
+
+    fn result_ids(app: &App) -> Vec<&str> {
+        app.search_pane
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn finish_search_puts_names_with_every_word_before_more_downloaded_ones() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        finish_search_with(
+            &mut app,
+            "Forever Loot Sparkles",
+            vec![
+                named_result("tools", "Forever Tools", 900_000),
+                named_result("helper", "Loot Helper", 500_000),
+                named_result("both", "Loot Sparkles", 10),
+                named_result("named", "Forever Loot Sparkles Plus", 5),
+            ],
+        );
+
+        // Both full matches first (the one named "Forever ..." ahead of the
+        // other), then the partial matches by words, then downloads.
+        assert_eq!(result_ids(&app), ["named", "both", "helper", "tools"]);
+        assert_eq!(app.search_pane.selected_result, Some(0));
+    }
+
+    #[test]
+    fn finish_search_says_found_when_some_name_has_every_word() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "Loot Sparkles".to_string(),
+                results: vec![
+                    named_result("helper", "Loot Helper", 500_000),
+                    named_result("both", "Loot Sparkles", 10),
+                ],
+            })),
+        ));
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Found 2 addons on Wago.io"
+            ))
+        );
+    }
+
+    #[test]
+    fn finish_search_says_so_when_no_addon_has_every_word() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard.detail_mode = DetailMode::Search;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                query: "Forever Loot Sparkles".to_string(),
+                results: vec![
+                    named_result("tools", "Forever Tools", 900_000),
+                    named_result("helper", "Loot Helper", 500_000),
+                ],
+            })),
+        ));
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "No addon has all of those words. Closest matches first."
+            ))
+        );
+        for action in actions {
+            app.apply(action);
+        }
+
+        // The sheet says it under the box, while the typed text is the one
+        // that was searched.
+        app.search_pane.query = "Forever Loot Sparkles".into();
+        let hint = line_text(&app.search_hint_line());
+        assert_eq!(
+            hint,
+            "No addon has all of those words. Closest matches first."
+        );
+        assert!(hint.chars().count() <= 78);
+        // Names with every word show the count instead.
+        finish_search_with(
+            &mut app,
+            "Forever Loot Sparkles",
+            vec![named_result("both", "Loot Sparkles", 10)],
+        );
+        assert_eq!(
+            line_text(&app.search_hint_line()),
+            "1 addon on Wago.io match \"Forever Loot Sparkles\""
+        );
     }
 
     #[test]
@@ -15832,6 +16012,190 @@ mod tests {
             app.search_pane.results = wago_results(30);
             app.search_pane.selected_result = Some(0);
             app.search_pane.last_query = Some("result".to_string());
+        }
+
+        const LONG_VERSION: &str = "v1.6.0-forever-extra-long";
+
+        /// Results whose first two versions are long.
+        fn app_with_long_versions() -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            app.search_pane.results[0].version = Some(LONG_VERSION.to_string());
+            app.search_pane.results[1].version = Some("v1.6.0-forever".to_string());
+            app
+        }
+
+        fn row_of<'a>(rows: &'a [String], name: &str) -> &'a str {
+            rows.iter()
+                .find(|row| row.contains(name))
+                .unwrap_or_else(|| panic!("no row with {name}:\n{}", rows.join("\n")))
+        }
+
+        fn tick(app: &mut App, count: usize) {
+            for _ in 0..count {
+                app.apply(AppAction::AdvanceMotionTick);
+            }
+        }
+
+        #[test]
+        fn the_version_column_grows_to_fit_the_longest_version_up_to_18() {
+            for (width, height) in [(138u16, 36u16), (100, 30)] {
+                let mut app = app_with_long_versions();
+                app.search_pane.results[0].version = Some("v1.6.0-forever".to_string());
+                let rows = render_rows(&mut app, width, height);
+                let text = rows.join("\n");
+                assert!(
+                    row_of(&rows, "Result Addon 0")
+                        .trim_end_matches(['\u{2502}', ' '])
+                        .ends_with("  v1.6.0-forever"),
+                    "{width}x{height}:\n{text}"
+                );
+                assert!(!text.contains("v1.6.0-forev\u{2026}"), "{text}");
+                assert!(!text.contains('\u{2026}'), "{text}");
+
+                // Longer than 18 is cut at 18, with an ellipsis.
+                app.search_pane.results[0].version = Some(LONG_VERSION.to_string());
+                let rows = render_rows(&mut app, width, height);
+                let cut: String = LONG_VERSION.chars().take(17).collect();
+                assert!(
+                    row_of(&rows, "Result Addon 0").contains(&format!("{cut}\u{2026}")),
+                    "{width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+
+        #[test]
+        fn at_80_by_24_a_long_version_is_cut_and_the_addon_column_keeps_16() {
+            let mut app = app_with_long_versions();
+            // Not the selected row, so it does not scroll.
+            app.search_pane.selected_result = Some(1);
+            let rows = render_rows(&mut app, 80, 24);
+            let text = rows.join("\n");
+            assert!(
+                row_of(&rows, "Result Addon 0")
+                    .trim_end()
+                    .ends_with("v1.6.0-foreve\u{2026}"),
+                "{text}"
+            );
+            // The Addon column is at least 16 wide: the header's Author
+            // starts 16 and the 2 column gap after Addon starts.
+            let header = row_of(&rows, "Downloads");
+            let addon = header.chars().position(|c| c == 'A').expect("Addon");
+            let author = header.find("Author").expect("Author");
+            let author = header[..author].chars().count();
+            assert!(author - (addon - 2) - 2 >= 16, "{text}");
+            // Every row still fits the sheet.
+            assert!(rows.iter().all(|row| row.chars().count() == 80), "{text}");
+        }
+
+        #[test]
+        fn with_simple_symbols_the_cut_version_ends_in_three_dots() {
+            let mut app = app_with_long_versions();
+            app.ui_theme.symbols = crate::theme::Symbols::SIMPLE;
+            app.search_pane.selected_result = Some(1);
+            let rows = render_rows(&mut app, 80, 24);
+            assert!(
+                row_of(&rows, "Result Addon 0")
+                    .trim_end()
+                    .ends_with("v1.6.0-fore..."),
+                "{}",
+                rows.join("\n")
+            );
+        }
+
+        /// The version text of the "Result Addon `index`" row at 80x24.
+        fn version_shown(app: &mut App, index: usize) -> String {
+            let rows = render_rows(app, 80, 24);
+            let row = row_of(&rows, &format!("Result Addon {index} "));
+            row.split_whitespace().last().expect("version").to_string()
+        }
+
+        #[test]
+        fn the_selected_rows_cut_version_holds_scrolls_holds_and_starts_over() {
+            let mut app = app_with_long_versions();
+            let window =
+                |offset: usize| -> String { LONG_VERSION.chars().skip(offset).take(14).collect() };
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            assert!(
+                app.has_active_animation(),
+                "a scrolling version keeps the tick animated"
+            );
+            // Holds for 2 seconds of animated ticks.
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            // Then one character per tick.
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), window(1));
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), window(2));
+            // Until the end shows, then holds there.
+            let last = LONG_VERSION.chars().count() - 14;
+            tick(&mut app, last - 2);
+            assert_eq!(version_shown(&mut app, 0), window(last));
+            assert!(window(last).ends_with("extra-long"));
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 0), window(last));
+            // Then jumps back to the start and goes again.
+            tick(&mut app, 1);
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS);
+            assert_eq!(version_shown(&mut app, 0), window(1));
+        }
+
+        #[test]
+        fn only_the_selected_row_scrolls() {
+            let mut app = app_with_long_versions();
+            app.search_pane.results[1].version = Some(LONG_VERSION.to_string());
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 3);
+            assert_eq!(
+                version_shown(&mut app, 0),
+                LONG_VERSION.chars().skip(4).take(14).collect::<String>()
+            );
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+        }
+
+        #[test]
+        fn moving_the_selection_restarts_the_scroll() {
+            let mut app = app_with_long_versions();
+            app.search_pane.results[1].version = Some(LONG_VERSION.to_string());
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 5);
+            assert_ne!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+
+            app.apply(AppAction::SetSearchPaneState(app.search_pane.select_next()));
+            assert_eq!(app.search_pane.selected_result, Some(1));
+            // The new row starts at its beginning; the old one is cut again.
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+            assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS - 1);
+            assert_eq!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+            tick(&mut app, 1);
+            assert_ne!(version_shown(&mut app, 1), "v1.6.0-foreve\u{2026}");
+        }
+
+        #[test]
+        fn reduce_motion_keeps_the_version_cut() {
+            let mut app = app_with_long_versions();
+            app.ui_theme.reduce_motion = true;
+            for ticks in [0, crate::app::MARQUEE_HOLD_TICKS, 5, 40] {
+                tick(&mut app, ticks);
+                assert_eq!(version_shown(&mut app, 0), "v1.6.0-foreve\u{2026}");
+            }
+            assert!(!app.has_active_animation());
+        }
+
+        #[test]
+        fn a_version_that_fits_never_scrolls_or_asks_for_animation() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_results(&mut app);
+            tick(&mut app, crate::app::MARQUEE_HOLD_TICKS + 3);
+            assert_eq!(version_shown(&mut app, 0), "1.0.0");
+            assert!(!app.has_active_animation());
+            // Wide enough to show all of it: nothing is cut, nothing scrolls.
+            let mut app = app_with_long_versions();
+            app.search_pane.results[0].version = Some("v1.6.0-forever".to_string());
+            let _ = render_rows(&mut app, 138, 36);
+            assert!(!app.has_active_animation());
         }
 
         /// The window sizes a sheet is checked at for holding still.
