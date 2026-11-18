@@ -5603,7 +5603,7 @@ impl App {
                 ],
                 AppTaskEvent::BackupFinished(Ok(outcome)) => {
                     let message = format!(
-                        "Backed up your game settings · keeping the newest {}",
+                        "Settings backed up · keeping the newest {}",
                         self.config_pane.draft.backup_retention
                     );
                     vec![
@@ -19181,11 +19181,11 @@ mod tests {
             );
             assert_eq!(
                 app.active_detail_status_message(DetailMode::Backup),
-                Some("Backed up your game settings · keeping the newest 5".to_string())
+                Some("Settings backed up · keeping the newest 5".to_string())
             );
             let text = render_rows(&mut app, 80, 24).join("\n");
             assert!(
-                text.contains("✓ Backed up your game settings · keeping the newest 5"),
+                text.contains("✓ Settings backed up · keeping the newest 5"),
                 "{text}"
             );
 
