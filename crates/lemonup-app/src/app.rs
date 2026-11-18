@@ -7185,15 +7185,15 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// `text` with ". CurseForge also manages it" when it manages any of
-    /// `folders`: the short form that fits the status line.
+    /// `text` with ". CurseForge also manages it. Mark it Ignored there."
+    /// when it manages any of `folders`: the short form for the status line.
     fn with_curseforge_note<'a>(
         &self,
         text: String,
         folders: impl IntoIterator<Item = &'a str>,
     ) -> String {
         if self.curseforge_now().manages_any(folders) {
-            format!("{text}. CurseForge also manages it")
+            format!("{text}. CurseForge also manages it. Mark it Ignored there.")
         } else {
             text
         }
@@ -12285,11 +12285,15 @@ mod tests {
         apply_all(&mut app, weakauras_installed());
         let (text, kind) = app.status_line_message().expect("result line");
         assert_eq!(kind, StatusKind::Done);
-        assert_eq!(text, "WeakAuras is installed. CurseForge also manages it");
+        assert_eq!(
+            text,
+            "WeakAuras is installed. CurseForge also manages it. Mark it Ignored there."
+        );
         let rows = render_rows(&mut app, 80, 24);
         assert!(
-            rows.iter()
-                .any(|row| row.contains("WeakAuras is installed. CurseForge also manages it")),
+            rows.iter().any(|row| row.contains(
+                "WeakAuras is installed. CurseForge also manages it. Mark it Ignored there."
+            )),
             "{}",
             rows.join("\n")
         );

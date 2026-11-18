@@ -1572,8 +1572,8 @@ pub(crate) fn linked_status(outcome: &FindLinkOutcome) -> (StatusKind, String) {
     }
     if !outcome.curseforge.is_empty() {
         text.push_str(&format!(
-            " CurseForge also manages {}.",
-            outcome.curseforge.join(", ")
+            " {}.",
+            lemonup_core::curseforge::short_hint_naming(&outcome.curseforge)
         ));
     }
     if !outcome.unconfirmed.is_empty() {

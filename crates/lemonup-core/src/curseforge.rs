@@ -77,24 +77,28 @@ impl CurseForgeManaged {
         Self::from_instances(&instances, &guid, &flavor_dir)
     }
 
+    /// The instance for this flavor folder: one whose GUID and install
+    /// path both match it, then one whose GUID does (a copied game folder
+    /// keeps its `.curseclient`), then one whose install path does.
     fn from_instances(instances: &[Instance], guid: &str, flavor_dir: &Path) -> Self {
+        let wanted = normalized_path(flavor_dir);
+        let guid_matches = |instance: &Instance| {
+            instance
+                .guid
+                .as_deref()
+                .is_some_and(|candidate| candidate.trim().eq_ignore_ascii_case(guid))
+        };
+        let path_matches = |instance: &Instance| {
+            instance
+                .install_path
+                .as_deref()
+                .is_some_and(|path| normalized_path(Path::new(path)) == wanted)
+        };
         let instance = instances
             .iter()
-            .find(|instance| {
-                instance
-                    .guid
-                    .as_deref()
-                    .is_some_and(|candidate| candidate.trim().eq_ignore_ascii_case(guid))
-            })
-            .or_else(|| {
-                let wanted = normalized_path(flavor_dir);
-                instances.iter().find(|instance| {
-                    instance
-                        .install_path
-                        .as_deref()
-                        .is_some_and(|path| normalized_path(Path::new(path)) == wanted)
-                })
-            });
+            .find(|instance| guid_matches(instance) && path_matches(instance))
+            .or_else(|| instances.iter().find(|instance| guid_matches(instance)))
+            .or_else(|| instances.iter().find(|instance| path_matches(instance)));
         let Some(instance) = instance else {
             return Self::default();
         };
@@ -132,15 +136,35 @@ impl CurseForgeManaged {
 pub const HINT: &str =
     "CurseForge also manages this addon. Mark it Ignored there (Install Settings).";
 
+/// The most addon names a hint lists before "and N more".
+const HINT_MAX_NAMES: usize = 3;
+
 /// The hint naming the addons CurseForge also manages: "CurseForge also
-/// manages Pawn. Mark it Ignored there (Install Settings)."
+/// manages Pawn. Mark it Ignored there (Install Settings)." Empty for none.
 pub fn hint_naming(names: &[String]) -> String {
-    let (list, them) = match names {
+    let short = short_hint_naming(names);
+    if short.is_empty() {
+        short
+    } else {
+        format!("{short} (Install Settings).")
+    }
+}
+
+/// The hint short enough for a result line: "CurseForge also manages Pawn.
+/// Mark it Ignored there". Empty for none.
+pub fn short_hint_naming(names: &[String]) -> String {
+    let them = if names.len() == 1 { "it" } else { "them" };
+    let list = match names {
         [] => return String::new(),
-        [one] => (one.clone(), "it"),
-        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "them"),
+        [one] => one.clone(),
+        _ if names.len() > HINT_MAX_NAMES => format!(
+            "{} and {} more",
+            names[..HINT_MAX_NAMES].join(", "),
+            names.len() - HINT_MAX_NAMES
+        ),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     };
-    format!("CurseForge also manages {list}. Mark {them} Ignored there (Install Settings).")
+    format!("CurseForge also manages {list}. Mark {them} Ignored there")
 }
 
 /// The flavor folder of `<flavor>/Interface/AddOns`; `None` for any other shape.
@@ -486,5 +510,61 @@ mod tests {
             "CurseForge also manages Pawn, Clique and Spy. Mark them Ignored there \
              (Install Settings)."
         );
+        assert_eq!(
+            short_hint_naming(&["Pawn".to_string()]),
+            "CurseForge also manages Pawn. Mark it Ignored there"
+        );
+        assert_eq!(short_hint_naming(&[]), "");
+    }
+
+    #[test]
+    fn a_long_list_of_names_gives_way_to_and_n_more() {
+        let names = (0..40)
+            .map(|index| format!("Addon{index:02}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hint_naming(&names),
+            "CurseForge also manages Addon00, Addon01, Addon02 and 37 more. Mark them \
+             Ignored there (Install Settings)."
+        );
+        assert_eq!(
+            short_hint_naming(&names[..4]),
+            "CurseForge also manages Addon00, Addon01, Addon02 and 1 more. Mark them \
+             Ignored there"
+        );
+    }
+
+    #[test]
+    fn the_instance_matching_both_guid_and_path_wins() {
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        let copy = game.root.join("_retail_copy_");
+        write(
+            &game.record,
+            &json!([
+                // The same GUID at another path: a copied game folder.
+                instance(GUID, &copy, vec![addon(&["FromTheCopy"], false)]),
+                // Another GUID at this path.
+                instance(OTHER_GUID, &game.flavor, vec![addon(&["PathOnly"], false)]),
+                instance(GUID, &game.flavor, vec![addon(&["Both"], false)]),
+            ]),
+        );
+        let managed = managed(&game);
+        assert!(managed.manages("Both"));
+        assert!(!managed.manages("FromTheCopy"));
+        assert!(!managed.manages("PathOnly"));
+
+        // Without that instance, the GUID wins over the path.
+        write(
+            &game.record,
+            &json!([
+                instance(OTHER_GUID, &game.flavor, vec![addon(&["PathOnly"], false)]),
+                instance(GUID, &copy, vec![addon(&["FromTheCopy"], false)]),
+            ]),
+        );
+        let managed =
+            super::CurseForgeManaged::read(&game.addons, std::slice::from_ref(&game.record));
+        assert!(managed.manages("FromTheCopy"));
+        assert!(!managed.manages("PathOnly"));
     }
 }

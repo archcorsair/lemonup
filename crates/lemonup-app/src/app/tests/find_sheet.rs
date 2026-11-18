@@ -600,8 +600,9 @@ fn the_link_result_line_says_which_linked_addons_curseforge_also_manages() {
     let db = addons.join("..").join("state.sqlite");
     let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
     let pawn = found(FindLabel::Exact, FindSource::Wago, "Pawn", &["Pawn"]);
+    let links = [clique, pawn];
 
-    let outcome = link_found(&db, &addons, &[clique, pawn], &[record]).expect("linked");
+    let outcome = link_found(&db, &addons, &links, &[record]).expect("linked");
     assert_eq!(outcome.curseforge, ["Pawn"]);
 
     let mut app = app_for_tests(ShellMode::Dashboard);
@@ -613,16 +614,53 @@ fn the_link_result_line_says_which_linked_addons_curseforge_also_manages() {
         ))))),
     );
     assert!(
-        app.status_line
-            .text
-            .contains("Linked 2 addons: 2 up to date. CurseForge also manages Pawn."),
+        app.status_line.text.contains(
+            "Linked 2 addons: 2 up to date. CurseForge also manages Pawn. \
+                 Mark it Ignored there."
+        ),
         "{}",
         app.status_line.text
     );
 
     // Without CurseForge's record nothing is said about it.
-    let outcome = link_found(&db, &addons, &[], &[]).expect("linked");
+    let db = addons.join("..").join("other.sqlite");
+    let outcome = link_found(&db, &addons, &links, &[]).expect("linked");
+    assert_eq!(outcome.rows.len(), 2);
     assert!(outcome.curseforge.is_empty());
+    let (_, text) = crate::app::find_sheet::linked_status(&outcome);
+    assert!(!text.contains("CurseForge"), "{text}");
+}
+
+#[test]
+fn a_link_question_naming_many_curseforge_addons_still_shows_its_answers_at_80x24() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let names = (0..40).map(|n| format!("Mod{n:02}")).collect::<Vec<_>>();
+    let mut many = report();
+    many.results = names
+        .iter()
+        .map(|name| {
+            result(
+                FindLabel::Exact,
+                name,
+                vec![found(FindLabel::Exact, FindSource::Wago, name, &[name])],
+            )
+        })
+        .collect();
+    open_find(&mut app);
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let _game = use_curseforge(&mut app, &refs);
+    set_results(&mut app, many);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let Some(Question::LinkFound { curseforge, .. }) = app.active_question() else {
+        panic!("no question");
+    };
+    assert_eq!(curseforge.len(), 40);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 40 addons?"), "{shown}");
+    assert!(shown.contains("and 37 more."), "{shown}");
+    assert!(shown.contains("y  link them"), "{shown}");
+    assert!(shown.contains("n  leave them alone"), "{shown}");
 }
 
 fn write_addon(addons: &std::path::Path, folder: &str, version: &str) {

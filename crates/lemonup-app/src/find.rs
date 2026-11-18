@@ -656,9 +656,10 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
             }
             if !curseforge.is_empty() {
                 lines.push(format!(
-                    "find link note: curseforge_manages={}, mark them Ignored in CurseForge \
+                    "find link note: curseforge_manages={}, mark {} Ignored in CurseForge \
                      (Install Settings)",
-                    join(&curseforge)
+                    join(&curseforge),
+                    if curseforge.len() == 1 { "it" } else { "them" }
                 ));
             }
             Ok(lines)

@@ -1249,6 +1249,19 @@ fn find_link_closing_names_the_linked_addons_curseforge_also_manages() {
     let plain = plain_link_lines(LinkOutcome::Linked {
         rows: Vec::new(),
         unconfirmed: Vec::new(),
+        curseforge: vec!["Pawn".to_string()],
+    })
+    .expect("plain");
+    assert_eq!(
+        plain.last().map(String::as_str),
+        Some(
+            "find link note: curseforge_manages=Pawn, mark it Ignored in CurseForge \
+             (Install Settings)"
+        )
+    );
+    let plain = plain_link_lines(LinkOutcome::Linked {
+        rows: Vec::new(),
+        unconfirmed: Vec::new(),
         curseforge: vec!["Pawn".to_string(), "Spy".to_string()],
     })
     .expect("plain");
