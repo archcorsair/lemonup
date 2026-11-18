@@ -1129,15 +1129,8 @@ impl App {
                 Line::from(vec![
                     Span::styled("Pick an addon and press ", text),
                     key("f"),
-                    Span::styled(
-                        " to find it online. Do that once per addon and LemonUp keeps it updated.",
-                        text,
-                    ),
+                    Span::styled(" to find it online.", text),
                 ]),
-                Line::from(Span::styled(
-                    "Your addon settings are never touched.",
-                    muted,
-                )),
             ]
             .into_iter()
             // `F` looks them all up at once.
@@ -1169,7 +1162,7 @@ impl App {
                 "d",
                 Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" hide this", muted),
+            Span::styled(" hide", muted),
         ];
         let keys_width: usize = keys.iter().map(Span::width).sum();
         let last = lines.last().map_or(0, Line::width);
@@ -1516,7 +1509,7 @@ impl App {
                 Style::default().fg(roles.dim),
             ));
         }
-        // "backed up your game settings first", once the backup ran.
+        // "settings backed up", once the backup ran.
         if let Some(note) = self.dashboard.job_note() {
             spans.push(Span::raw("   "));
             spans.push(Span::styled(note.to_string(), roles.muted));
@@ -1579,7 +1572,7 @@ impl App {
                         ),
                         dot(),
                         key("U", roles.lemon),
-                        Span::styled(" updates them all", roles.muted),
+                        Span::styled(" update all", roles.muted),
                     ]);
                 }
             }

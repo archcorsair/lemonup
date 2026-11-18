@@ -1,7 +1,7 @@
 //! The question dialog: one centered box for every yes or no question.
 //!
 //! The title is the question, the body names exactly what is affected, and
-//! the two answers are written as outcomes ("keep them"). `y` says yes; `n`,
+//! the two answers are written as outcomes ("keep"). `y` says yes; `n`,
 //! `esc` and `q` say no; `enter` does nothing, because it is what people hit
 //! by reflex. The border is red for delete and restore only.
 
@@ -129,19 +129,19 @@ impl Question {
     /// What `y` and `n` do, as outcomes.
     pub(super) fn answers(&self) -> (&'static str, &'static str) {
         match self {
-            Self::DeleteAddons(targets) if targets.len() == 1 => ("delete it", "keep it"),
-            Self::DeleteAddons(_) => ("delete them", "keep them"),
-            Self::RestoreBackup { .. } => ("restore", "keep what I have now"),
-            Self::DeleteBackup { .. } => ("delete it", "keep it"),
-            Self::ReplaceAddon { .. } => ("replace it", "leave it alone"),
-            Self::ChangeTocFiles { .. } => ("change them", "leave them alone"),
-            Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
-            Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
-            Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
-            Self::RemoveGame { .. } => ("remove it", "keep it"),
-            Self::LinkFound { replaces: 0, .. } => ("link them", "leave them alone"),
-            Self::LinkFound { links: 0, .. } => ("replace them", "leave them alone"),
-            Self::LinkFound { .. } => ("link and replace", "leave them alone"),
+            Self::DeleteAddons(targets) if targets.len() == 1 => ("delete", "keep"),
+            Self::DeleteAddons(_) => ("delete", "keep"),
+            Self::RestoreBackup { .. } => ("restore", "keep"),
+            Self::DeleteBackup { .. } => ("delete", "keep"),
+            Self::ReplaceAddon { .. } => ("replace", "keep"),
+            Self::ChangeTocFiles { .. } => ("change", "keep"),
+            Self::QuitWhileUpdating { .. } => ("quit", "continue"),
+            Self::QuitSetup { rerun: false } => ("quit", "continue"),
+            Self::QuitSetup { rerun: true } => ("back", "continue"),
+            Self::RemoveGame { .. } => ("remove", "keep"),
+            Self::LinkFound { replaces: 0, .. } => ("link", "skip"),
+            Self::LinkFound { links: 0, .. } => ("replace", "skip"),
+            Self::LinkFound { .. } => ("link and replace", "skip"),
         }
     }
 
@@ -283,8 +283,7 @@ impl Question {
             } => {
                 let mut lines = vec![Line::from(Span::styled(
                     format!(
-                        "{name} is already installed. Installing it from {source} replaces \
-                         the files in your AddOns folder, and LemonUp keeps it updated."
+                        "{name} is already installed. Installing it from {source} replaces it."
                     ),
                     text,
                 ))];
@@ -367,10 +366,7 @@ impl Question {
                     None => "LemonUp is still working out which addons to update.".to_string(),
                 };
                 vec![Line::from(Span::styled(
-                    format!(
-                        "{first} If you quit now, the update stops and the addons it has \
-                         not finished stay as they are."
-                    ),
+                    format!("{first} If you quit now, the update stops."),
                     text,
                 ))]
             }
@@ -385,7 +381,7 @@ impl Question {
             Self::RemoveGame { game, backups } => vec![
                 Line::from(Span::styled(
                     format!(
-                        "LemonUp forgets the addon list and settings it keeps for {game}. Its addons and game settings stay as they are."
+                        "LemonUp forgets the addon list and settings it keeps for {game}. It doesn't delete any addons or game settings."
                     ),
                     text,
                 )),
@@ -406,14 +402,12 @@ impl Question {
                 if *links > 0 {
                     lines.push(Line::from(Span::styled(
                         if *links == 1 {
-                            "LemonUp links 1 addon to its source and keeps it updated. Nothing \
-                             on disk changes now. From now on, updates replace these folders:"
+                            "Link 1 addon to its source? Its updates replace these folders:"
                                 .to_string()
                         } else {
                             format!(
-                                "LemonUp links {links} addons to their source and keeps them \
-                                 updated. Nothing on disk changes now. From now on, updates \
-                                 replace these folders:"
+                                "Link {links} addons to their source? Their updates replace \
+                                 these folders:"
                             )
                         },
                         text,
@@ -472,7 +466,7 @@ impl Question {
         )))
     }
 
-    /// The answers row: `    y  delete them          n  keep them`.
+    /// The answers row: `    y  delete          n  keep`.
     fn answer_line(&self, roles: ColorRoles) -> Line<'static> {
         let (yes, no) = self.answers();
         let yes_key = if self.danger() {

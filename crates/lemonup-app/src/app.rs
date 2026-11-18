@@ -5671,7 +5671,7 @@ impl App {
                 ],
                 AppTaskEvent::BackupFinished(Ok(outcome)) => {
                     let message = format!(
-                        "Backed up your game settings · keeping the newest {}",
+                        "Settings backed up · keeping the newest {}",
                         self.config_pane.draft.backup_retention
                     );
                     vec![
@@ -11510,7 +11510,7 @@ mod tests {
 
         press_text_key(&mut app, KeyEvent::from(KeyCode::Esc));
         let rows = render_rows(&mut app, 80, 24).join("\n");
-        assert!(rows.contains("back to my addons"), "{rows}");
+        assert!(rows.contains("y  back"), "{rows}");
         press_text_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
         assert_eq!(app.shell_mode, ShellMode::Dashboard);
         assert_eq!(app.effective_addon_dir, Some(forever));
@@ -13926,7 +13926,7 @@ mod tests {
         assert!(app.status_flash_is_live(&flash, late));
         let status = line_text(&app.dashboard_status_line(120));
         assert!(
-            status.contains("✓ Check complete · 1 update ready · U updates them all"),
+            status.contains("✓ Check complete · 1 update ready · U update all"),
             "{status}"
         );
         app.dashboard.set_update_in_progress(true);
@@ -14501,8 +14501,8 @@ mod tests {
         assert!(app.onboarding.quit_question);
         let rows = render_rows(&mut app, 80, 24).join("\n");
         assert!(rows.contains("Quit setup?"), "{rows}");
-        assert!(rows.contains("quit LemonUp"), "{rows}");
-        assert!(rows.contains("keep setting up"), "{rows}");
+        assert!(rows.contains("y  quit"), "{rows}");
+        assert!(rows.contains("n  continue"), "{rows}");
         assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Down)), vec![]);
         press(&mut app, KeyCode::Char('n'));
         assert!(!app.onboarding.quit_question);
@@ -17926,8 +17926,8 @@ mod tests {
                 assert!(text.contains("Delete this backup?"), "{text}");
                 assert!(text.contains("Backup from "), "{text}");
                 assert!(text.contains("(8 days ago)"), "{text}");
-                assert!(text.contains("y  delete it"), "{text}");
-                assert!(text.contains("n  keep it"), "{text}");
+                assert!(text.contains("y  delete"), "{text}");
+                assert!(text.contains("n  keep"), "{text}");
             }
         }
 
@@ -18398,6 +18398,21 @@ mod tests {
         }
 
         #[test]
+        fn details_for_a_not_linked_addon_says_only_how_to_find_it() {
+            for (width, height) in [(80, 24), (120, 30)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_inspect_not_linked(&mut app);
+                let text = render_rows(&mut app, width, height).join("\n");
+                assert!(text.contains("Press f to find it online."), "{text}");
+                assert!(!text.contains("keeps it updated"), "{text}");
+                assert!(
+                    !text.contains("Your addon settings stay as they are."),
+                    "{text}"
+                );
+            }
+        }
+
+        #[test]
         fn help_lists_the_details_keys_without_section_toggles() {
             let labels: Vec<&str> = help_page(HelpContext::Inspect)
                 .sections()
@@ -18653,7 +18668,8 @@ mod tests {
                 let text = rows.join("\n");
                 assert!(text.contains("Welcome. One thing before LemonUp"), "{text}");
                 assert!(text.contains("LemonUp found 2 addons"), "{text}");
-                assert!(text.contains("d hide this"), "{text}");
+                assert!(!text.contains("never touched"), "{text}");
+                assert!(text.contains("d hide"), "{text}");
                 assert!(text.contains("Alpha"), "{text}");
                 assert!(text.contains("f find online"), "{text}");
                 let keys = rows.last().expect("key line");
@@ -19934,8 +19950,8 @@ mod tests {
                     &name,
                     "Your settings for this addon are not touched.",
                     "You can undo the delete with z.",
-                    "y  delete it",
-                    "n  keep it",
+                    "y  delete",
+                    "n  keep",
                 ],
             );
 
@@ -19958,8 +19974,8 @@ mod tests {
                     "Addon00",
                     "more",
                     "You can undo the delete with z.",
-                    "y  delete them",
-                    "n  keep them",
+                    "y  delete",
+                    "n  keep",
                 ],
             );
             let rows = render_rows(&mut app, 80, 24).join("\n");
@@ -19986,7 +20002,7 @@ mod tests {
                     "(2 hours ago)",
                     "Close the game first",
                     "y  restore",
-                    "n  keep what I have now",
+                    "n  keep",
                 ],
             );
             press_key(&mut app, KeyCode::Esc);
@@ -20063,11 +20079,11 @@ mod tests {
             );
             assert_eq!(
                 app.active_detail_status_message(DetailMode::Backup),
-                Some("Backed up your game settings · keeping the newest 5".to_string())
+                Some("Settings backed up · keeping the newest 5".to_string())
             );
             let text = render_rows(&mut app, 80, 24).join("\n");
             assert!(
-                text.contains("✓ Backed up your game settings · keeping the newest 5"),
+                text.contains("✓ Settings backed up · keeping the newest 5"),
                 "{text}"
             );
 
@@ -20139,7 +20155,7 @@ mod tests {
             assert_dialog(
                 &mut app,
                 "Delete this backup?",
-                &["This can't be undone.", "y  delete it", "n  keep it"],
+                &["This can't be undone.", "y  delete", "n  keep"],
             );
             press_key(&mut app, KeyCode::Char('q'));
             assert!(app.backup_pane.pending_delete.is_none());
@@ -20165,8 +20181,8 @@ mod tests {
                     "WeakAuras is already installed.",
                     "This folder is replaced:",
                     "Your WeakAuras settings are kept.",
-                    "y  replace it",
-                    "n  leave it alone",
+                    "y  replace",
+                    "n  keep",
                 ],
             );
         }
@@ -20198,8 +20214,8 @@ mod tests {
                     "more",
                     "CurseForge also manages this addon.",
                     "(Install Settings).",
-                    "y  replace it",
-                    "n  leave it alone",
+                    "y  replace",
+                    "n  keep",
                 ],
             );
 
@@ -20235,8 +20251,8 @@ mod tests {
                     "These folders are replaced:",
                     "WeakAuras_Part01",
                     "more",
-                    "y  replace it",
-                    "n  leave it alone",
+                    "y  replace",
+                    "n  keep",
                 ],
             );
         }
@@ -20264,7 +20280,7 @@ mod tests {
             assert_dialog(
                 &mut app,
                 "Quit while LemonUp is still updating?",
-                &["2 of 4 addons are done.", "y  quit", "n  keep going"],
+                &["2 of 4 addons are done.", "y  quit", "n  continue"],
             );
 
             // n keeps going.
@@ -20695,9 +20711,7 @@ mod tests {
             std::fs::remove_file(&older).expect("prune");
             send(
                 &mut app,
-                step(DashboardJobStep::BackedUp(
-                    "backed up your game settings first".to_string(),
-                )),
+                step(DashboardJobStep::BackedUp("settings backed up".to_string())),
             );
             assert_eq!(names(&app), vec!["WTF-20260402T120000.000Z.zip"]);
 
@@ -20726,9 +20740,7 @@ mod tests {
             assert_eq!(status(&app, "Third"), RowStatus::Waiting);
             send(
                 &mut app,
-                step(DashboardJobStep::BackedUp(
-                    "backed up your game settings first".to_string(),
-                )),
+                step(DashboardJobStep::BackedUp("settings backed up".to_string())),
             );
             send(
                 &mut app,
@@ -20742,10 +20754,7 @@ mod tests {
             assert_eq!(status(&app, "Third"), RowStatus::Updating);
             let line = line_text(&app.dashboard_status_line(120));
             assert!(line.contains("Updating 2 of 2 · Third"), "{line}");
-            assert!(
-                line.contains("backed up your game settings first"),
-                "{line}"
-            );
+            assert!(line.contains("settings backed up"), "{line}");
             send(
                 &mut app,
                 step(DashboardJobStep::Updated {
@@ -21552,7 +21561,7 @@ mod tests {
             let question = app.active_question().expect("question");
             assert_eq!(question.title(), "Remove WoW Forever from LemonUp?");
             let shown = screen(&mut app, 120, 30);
-            assert!(shown.contains("addons and game settings stay"), "{shown}");
+            assert!(shown.contains("It doesn't delete any addons"), "{shown}");
             assert!(
                 shown.contains("backups of your game settings stay in"),
                 "{shown}"

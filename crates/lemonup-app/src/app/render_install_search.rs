@@ -846,8 +846,7 @@ impl App {
                 muted,
             ))),
             Some(InstalledCopy { linked: false }) => lines.push(Line::from(Span::styled(
-                "You have a copy that isn't linked. Enter replaces it with this one and \
-                 links it. Your addon settings stay as they are.",
+                "You have a copy that isn't linked. Enter replaces it with this one.",
                 muted,
             ))),
             None => {}

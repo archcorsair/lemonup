@@ -1096,9 +1096,7 @@ impl App {
                     )
                 };
                 body.text(vec![Line::from(Span::styled(line, text))]);
-                body.footer(
-                    self.find_hint_footer(vec![("esc", " cancel, nothing changes")], width),
-                );
+                body.footer(self.find_hint_footer(vec![("esc", " cancel")], width));
             }
             Some(FindStep::Failed(error)) => {
                 body.text(vec![Line::from(Span::styled(
@@ -1456,16 +1454,23 @@ impl App {
         ]);
         let hint: Vec<(&'static str, &'static str)> = match results.cursor {
             FindFocus::Action if self.find_offers_search() => {
-                vec![("enter", " search Wago.io for this addon's name")]
+                vec![("enter", " search Wago.io by name")]
             }
-            FindFocus::Action if active => vec![("enter", " asks before anything changes")],
-            FindFocus::Action => vec![("space", " on a match selects it")],
+            FindFocus::Action if active => vec![(
+                "enter",
+                match (links, replaces) {
+                    (_, 0) => " link",
+                    (0, _) => " replace",
+                    _ => " link and replace",
+                },
+            )],
+            FindFocus::Action => vec![("↑ ↓", " move to a match")],
             FindFocus::Result(index)
                 if results.report.results[index].label == FindLabel::ChooseOne =>
             {
-                vec![("enter", " picks the next one, or none")]
+                vec![("enter", " next match, or none")]
             }
-            FindFocus::Result(_) => vec![("space", " selects or unselects it")],
+            FindFocus::Result(_) => vec![("space", " select or unselect")],
         };
         let mut lines = vec![Line::from(""), action];
         lines.extend(self.find_hint_footer(hint, width).into_iter().skip(1));

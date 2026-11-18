@@ -437,6 +437,62 @@ fn enter_on_a_choose_one_row_picks_each_candidate_then_none() {
     assert_eq!(results(&app).picks[4], None);
 }
 
+/// The key line's enter hint, which sits after the action row.
+fn enter_hint(shown: &str) -> String {
+    shown
+        .lines()
+        .find(|line| line.trim_start().starts_with("enter "))
+        .unwrap_or_else(|| panic!("no enter hint:\n{shown}"))
+        .to_string()
+}
+
+#[test]
+fn the_enter_hint_says_replace_when_only_replacements_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // Unselect the link, then select Questie as a replacement.
+    key(&mut app, KeyCode::Char(' '));
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Replace 1 addon"), "{shown}");
+    let hint = enter_hint(&shown);
+    assert!(hint.contains("enter replace"), "{shown}");
+    assert!(!hint.contains("link"), "{shown}");
+}
+
+#[test]
+fn the_enter_hint_says_link_and_replace_for_a_mixed_selection() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // The link stays selected; add Questie as a replacement.
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon, replace 1"), "{shown}");
+    assert!(
+        enter_hint(&shown).contains("enter link and replace"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_enter_hint_says_link_when_only_links_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon"), "{shown}");
+    assert!(enter_hint(&shown).contains("enter link"), "{shown}");
+    assert!(!enter_hint(&shown).contains("replace"), "{shown}");
+}
+
 #[test]
 fn a_partial_match_asks_first_then_replaces_through_the_wago_install() {
     let mut app = app_for_tests(ShellMode::Dashboard);
@@ -570,7 +626,7 @@ fn the_link_question_names_the_picks_curseforge_also_manages_and_keeps_it_in_vie
         let shown = screen(&mut app, 80, 24);
         assert!(shown.contains("Link 1 addon?"), "{shown}");
         assert!(shown.contains("CurseForge also manages Pack."), "{shown}");
-        assert!(shown.contains("y  link them"), "{shown}");
+        assert!(shown.contains("y  link"), "{shown}");
         for _ in 0..12 {
             key(&mut app, KeyCode::Down);
         }
@@ -660,8 +716,8 @@ fn a_link_question_naming_many_curseforge_addons_still_shows_its_answers_at_80x2
     let shown = screen(&mut app, 80, 24);
     assert!(shown.contains("Link 40 addons?"), "{shown}");
     assert!(shown.contains("and 37 more."), "{shown}");
-    assert!(shown.contains("y  link them"), "{shown}");
-    assert!(shown.contains("n  leave them alone"), "{shown}");
+    assert!(shown.contains("y  link"), "{shown}");
+    assert!(shown.contains("n  skip"), "{shown}");
 }
 
 fn write_addon(addons: &std::path::Path, folder: &str, version: &str) {
@@ -912,7 +968,7 @@ fn the_welcome_card_offers_capital_f_next_to_p_at_80x24() {
             "{shown}"
         );
         assert!(shown.contains("Press p to add another game."), "{shown}");
-        assert!(shown.contains("d hide this"), "{shown}");
+        assert!(shown.contains("d hide"), "{shown}");
         assert!(shown.contains("Alpha"), "{shown}");
     }
     assert!(app.key_table(138).iter().any(|hint| hint.key == "F"));
