@@ -27,15 +27,47 @@ fn search_version_width(longest: usize, table_width: u16, show_author: bool) -> 
     wanted.min(room.max(SEARCH_VERSION_MIN_WIDTH))
 }
 
-/// `text` cut to `width` characters, ending in `ellipsis` when it was cut.
+/// How many terminal cells `text` takes.
+fn cells(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// The longest start of `characters` that fits in `width` cells.
+fn fit_cells(characters: impl Iterator<Item = char>, width: usize) -> String {
+    let mut used = 0;
+    let mut fitted = String::new();
+    for character in characters {
+        used += text_input::char_width(character);
+        if used > width {
+            break;
+        }
+        fitted.push(character);
+    }
+    fitted
+}
+
+/// `text` cut to `width` cells, ending in `ellipsis` when it was cut.
 fn cut_with_ellipsis(text: &str, width: usize, ellipsis: &str) -> String {
-    let length = text.chars().count();
-    if length <= width {
+    if cells(text) <= width {
         return text.to_string();
     }
-    let keep = width.saturating_sub(ellipsis.chars().count());
-    let head: String = text.chars().take(keep).collect();
-    format!("{head}{ellipsis}")
+    let keep = width.saturating_sub(cells(ellipsis));
+    format!("{}{ellipsis}", fit_cells(text.chars(), keep))
+}
+
+/// How many characters a marquee over `text` scrolls by until its end
+/// fits in `width` cells.
+fn marquee_steps(text: &str, width: usize) -> usize {
+    let mut used = 0;
+    let mut start = text.chars().count();
+    for character in text.chars().rev() {
+        used += text_input::char_width(character);
+        if used > width {
+            break;
+        }
+        start -= 1;
+    }
+    start
 }
 
 /// What the sheet says for each kind of source error: what happened and
@@ -664,7 +696,7 @@ impl App {
         let longest_version = pane
             .results
             .iter()
-            .map(|result| result.version.as_deref().map_or(0, |v| v.chars().count()))
+            .map(|result| result.version.as_deref().map_or(0, cells))
             .max()
             .unwrap_or(0);
         let version_width = search_version_width(longest_version, table_area.width, show_author);
@@ -763,9 +795,8 @@ impl App {
     /// is cut with an ellipsis. On the selected row it scrolls to show the
     /// whole of it, except under reduce motion, where it stays cut.
     fn search_version_text(&self, version: &str, width: usize, selected: bool) -> String {
-        let length = version.chars().count();
         let cut = cut_with_ellipsis(version, width, self.ui_theme.symbols.ellipsis);
-        if !selected || length <= width || self.ui_theme.reduce_motion {
+        if !selected || cells(version) <= width || self.ui_theme.reduce_motion {
             return cut;
         }
         self.search_marquee_live.set(true);
@@ -774,12 +805,15 @@ impl App {
             .motion
             .tick_count
             .wrapping_sub(self.shell_ui.search_selection_tick);
+        // The scroll moves by characters. Each frame is fitted by cells, so
+        // a double-width character is never cut in half.
+        let steps = marquee_steps(version, width);
         let offset =
-            lemonup_core::marquee::marquee_offset(length, width, ticks, MARQUEE_HOLD_TICKS);
+            lemonup_core::marquee::marquee_offset(steps + width, width, ticks, MARQUEE_HOLD_TICKS);
         if offset == 0 {
             cut
         } else {
-            version.chars().skip(offset).take(width).collect()
+            fit_cells(version.chars().skip(offset), width)
         }
     }
 

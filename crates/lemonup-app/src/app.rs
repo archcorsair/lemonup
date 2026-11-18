@@ -16158,6 +16158,65 @@ mod tests {
             assert_eq!(version_shown(&mut app, 0), window(1));
         }
 
+        /// The version cell of the "Result Addon 0" row, as drawn: its text
+        /// and how many terminal cells that text takes.
+        fn wide_version_shown(app: &mut App) -> (String, usize) {
+            use ratatui::{Terminal, backend::TestBackend};
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let row = (0..24u16)
+                .find(|y| {
+                    let text: String = (0..80u16).map(|x| buffer[(x, *y)].symbol()).collect();
+                    text.contains("Result Addon 0 ")
+                })
+                .expect("row");
+            // The version starts 2 cells after the downloads count ("1K"),
+            // and runs to the empty status column. A double-width character
+            // is followed by a cell that holds only a space.
+            let count = (0..80u16)
+                .find(|x| buffer[(*x, row)].symbol() == "K")
+                .expect("downloads");
+            let mut version = String::new();
+            let mut x = count + 3;
+            while x < 80 {
+                let symbol = buffer[(x, row)].symbol();
+                version.push_str(symbol);
+                x += ratatui::text::Span::raw(symbol).width().max(1) as u16;
+            }
+            let version = version.trim_end().to_string();
+            let width = ratatui::text::Span::raw(version.as_str()).width();
+            (version, width)
+        }
+
+        #[test]
+        fn a_double_width_version_is_measured_in_cells() {
+            const WIDE: &str = "v1.0-\u{6b63}\u{5f0f}\u{53d1}\u{5e03}\u{7248}\u{672c}\u{7a33}\u{5b9a}\u{66f4}\u{65b0}";
+            let mut app = app_with_long_versions();
+            app.search_pane.results[0].version = Some(WIDE.to_string());
+            let (cut, cut_width) = wide_version_shown(&mut app);
+            assert!(cut.ends_with('\u{2026}'), "cut with an ellipsis: {cut:?}");
+            // The column is at most 18 cells wide.
+            assert!(cut_width <= 18, "{cut:?} takes {cut_width} cells");
+            assert!(app.has_active_animation(), "a cut version scrolls");
+
+            // It scrolls by characters, and no frame is wider than the column.
+            let mut frames = vec![cut];
+            for _ in 0..crate::app::MARQUEE_HOLD_TICKS + WIDE.chars().count() {
+                tick(&mut app, 1);
+                let (frame, width) = wide_version_shown(&mut app);
+                assert!(width <= cut_width, "{frame:?} takes {width} cells");
+                if frames.last() != Some(&frame) {
+                    frames.push(frame);
+                }
+            }
+            assert!(frames.len() > 3, "the version scrolls: {frames:?}");
+            assert!(
+                frames.iter().any(|frame| WIDE.ends_with(frame.as_str())),
+                "the end of the version shows: {frames:?}"
+            );
+        }
+
         #[test]
         fn only_the_selected_row_scrolls() {
             let mut app = app_with_long_versions();
