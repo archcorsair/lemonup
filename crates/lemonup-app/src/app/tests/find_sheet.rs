@@ -1884,13 +1884,19 @@ fn rail_of(shown: &str) -> Vec<String> {
             (column >= 2 && border(row, column - 2)).then_some((at, column))
         })
         .unwrap_or_else(|| panic!("no rail:\n{shown}"));
+    // The rail's text ends where the sheet's right edge is, on the row of "Sources".
+    let end = rows[at]
+        .chars()
+        .skip(column)
+        .position(|ch| matches!(ch, '│' | '|'))
+        .unwrap_or(usize::MAX);
     rows[at..]
         .iter()
         .take_while(|row| border(row, column - 2))
         .map(|row| {
             row.chars()
                 .skip(column)
-                .take(22)
+                .take(end)
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -2124,26 +2130,50 @@ fn f_opens_straight_into_looking_and_asks_only_the_sources_that_are_on() {
     assert_eq!(asked(&app).len(), 2);
 }
 
+/// The text width of the narrow rail and of the wide one.
+const NARROW_RAIL: usize = 22;
+const WIDE_RAIL: usize = 32;
+
+/// A source's line in a rail `text` columns wide: `lead` (the number, the box and the name),
+/// then `status` right-aligned at the rail's edge.
+fn rail_row(lead: &str, status: &str, text: usize) -> String {
+    format!("{lead:<18}{status:>width$}", width = text - 18)
+        .trim_end()
+        .to_string()
+}
+
 #[test]
 fn the_rail_shows_each_source_with_its_state() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find_results(&mut app);
     app.shell_ui.motion.tick_count = 0;
+    // TukUI's request failed in this report.
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(
+        rail_of(&shown),
+        [
+            "Sources",
+            "1 [x] Wago.io        3",
+            "2 [x] WoWInterface   3",
+            "3 [x] TukUI",
+            "      Check failed",
+        ],
+        "{shown}"
+    );
+    let shown = screen(&mut app, 138, 36);
+    assert_eq!(
+        rail_of(&shown),
+        [
+            "Sources".to_string(),
+            rail_row("1 [x] Wago.io", "3", WIDE_RAIL),
+            rail_row("2 [x] WoWInterface", "3", WIDE_RAIL),
+            rail_row("3 [x] TukUI", "Check failed", WIDE_RAIL),
+        ],
+        "{shown}"
+    );
     for (width, height) in [(80, 24), (138, 36)] {
-        // TukUI's request failed in this report.
-        let shown = screen(&mut app, width, height);
-        assert_eq!(
-            rail_of(&shown),
-            [
-                "Sources",
-                "1 [x] Wago.io        3",
-                "2 [x] WoWInterface   3",
-                "3 [x] TukUI",
-                "      Check failed",
-            ],
-            "{shown}"
-        );
         // "Sources" is on the row of the first group heading.
+        let shown = screen(&mut app, width, height);
         let row = shown
             .lines()
             .find(|row| row.contains("Sources"))
@@ -2153,20 +2183,146 @@ fn the_rail_shows_each_source_with_its_state() {
     app.find.sources.toggle(FindSource::WowInterface);
     app.find.asking = vec![FindSource::Tukui];
     app.wago_api_key = None;
-    for (width, height) in [(80, 24), (138, 36)] {
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(
+        rail_of(&shown),
+        [
+            "Sources",
+            "1 [-] Wago.io",
+            "      Needs a key",
+            "2 [ ] WoWInterface off",
+            "3 [x] TukUI          ⠋",
+        ],
+        "{shown}"
+    );
+    let shown = screen(&mut app, 138, 36);
+    assert_eq!(
+        rail_of(&shown),
+        [
+            "Sources".to_string(),
+            rail_row("1 [-] Wago.io", "Needs a key", WIDE_RAIL),
+            rail_row("2 [ ] WoWInterface", "off", WIDE_RAIL),
+            rail_row("3 [x] TukUI", "⠋", WIDE_RAIL),
+        ],
+        "{shown}"
+    );
+}
+
+/// Wago.io needs a key and WoWInterface failed.
+fn open_key_and_failure(app: &mut App) {
+    open_find(app);
+    let mut outcome = outcome(report());
+    outcome.problems[0].source = FindSource::WowInterface;
+    app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
+        FindResults::new(outcome),
+    ))));
+    app.wago_api_key = None;
+}
+
+#[test]
+fn a_wide_rail_puts_needs_a_key_and_check_failed_on_the_sources_line() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_key_and_failure(&mut app);
+    let tukui = rail_row("3 [x] TukUI", "0", NARROW_RAIL);
+    let narrow = [
+        "Sources".to_string(),
+        "1 [-] Wago.io".to_string(),
+        "      Needs a key".to_string(),
+        "2 [x] WoWInterface".to_string(),
+        "      Check failed".to_string(),
+        tukui,
+    ];
+    let wide = [
+        "Sources".to_string(),
+        rail_row("1 [-] Wago.io", "Needs a key", WIDE_RAIL),
+        rail_row("2 [x] WoWInterface", "Check failed", WIDE_RAIL),
+        rail_row("3 [x] TukUI", "0", WIDE_RAIL),
+    ];
+    assert_eq!(wide[2], "2 [x] WoWInterface  Check failed");
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(rail_of(&shown), narrow, "{shown}");
+    for (width, height) in [(138, 36), (111, 30)] {
         let shown = screen(&mut app, width, height);
+        assert_eq!(rail_of(&shown), wide, "{width}x{height}:\n{shown}");
+        // The results keep the version column beside it.
+        let clique = shown
+            .lines()
+            .find(|row| row.contains("Clique"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(clique.contains("WoWInterface  1.0"), "{shown}");
+    }
+    // The words keep their colors.
+    let roles = app.ui_theme.roles;
+    assert_eq!(cell_at(&mut app, 138, 36, "Needs a key", 0).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, 138, 36, "Check failed", 0).fg, roles.red);
+}
+
+#[test]
+fn the_rail_is_narrow_just_below_the_width_the_wide_one_needs() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_key_and_failure(&mut app);
+    // A floating sheet is wide enough from 111 columns; a full screen one, in a short window,
+    // from 107.
+    for (width, height, wide) in [
+        (110, 30, false),
+        (111, 30, true),
+        (106, 24, false),
+        (107, 24, true),
+    ] {
+        let shown = screen(&mut app, width, height);
+        let rail = rail_of(&shown);
         assert_eq!(
-            rail_of(&shown),
-            [
-                "Sources",
-                "1 [-] Wago.io",
-                "      Needs a key",
-                "2 [ ] WoWInterface off",
-                "3 [x] TukUI          ⠋",
-            ],
-            "{shown}"
+            rail[1] == rail_row("1 [-] Wago.io", "Needs a key", WIDE_RAIL),
+            wide,
+            "{width}x{height}:\n{shown}"
+        );
+        assert_eq!(
+            rail.contains(&"      Needs a key".to_string()),
+            !wide,
+            "{width}x{height}:\n{shown}"
         );
     }
+}
+
+#[test]
+fn the_rail_keeps_its_width_when_a_source_fails_partway() {
+    let (_config, _path, mut app) = app_with_config();
+    let (_addons, inputs) = spy_inputs();
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    app.shell_ui.motion.tick_count = 0;
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    let shown = screen(&mut app, 138, 36);
+    assert_eq!(
+        rail_sources(&shown)[1],
+        rail_row("2 [x] WoWInterface", "⠋", WIDE_RAIL),
+        "{shown}"
+    );
+    let mut failed = SourceLookups::not_asked();
+    let mut answer = nothing_found();
+    answer.wowinterface = SourceAnswer::Failed;
+    failed.take_answer(FindSource::WowInterface, answer);
+    let generation = app.find.generation;
+    deliver(
+        &mut app,
+        FindTaskEvent::Answered {
+            generation,
+            source: FindSource::WowInterface,
+            lookups: Box::new(crate::find::Lookups {
+                lookups: failed,
+                problems: vec![SourceProblem {
+                    source: FindSource::WowInterface,
+                    error: SourceError::new(SourceErrorKind::NoConnection, "offline"),
+                }],
+            }),
+        },
+    );
+    let shown = screen(&mut app, 138, 36);
+    assert_eq!(
+        rail_sources(&shown)[1],
+        "2 [x] WoWInterface  Check failed",
+        "{shown}"
+    );
 }
 
 #[test]
@@ -2174,14 +2330,14 @@ fn the_rail_shows_while_looking() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find(&mut app);
     app.shell_ui.motion.tick_count = 0;
-    for (width, height) in [(80, 24), (138, 36)] {
+    for (width, height, text) in [(80, 24, NARROW_RAIL), (138, 36, WIDE_RAIL)] {
         let shown = screen(&mut app, width, height);
         assert_eq!(
             rail_sources(&shown),
             [
-                "1 [x] Wago.io        ⠋",
-                "2 [x] WoWInterface   ⠋",
-                "3 [x] TukUI          ⠋",
+                rail_row("1 [x] Wago.io", "⠋", text),
+                rail_row("2 [x] WoWInterface", "⠋", text),
+                rail_row("3 [x] TukUI", "⠋", text),
             ],
             "{shown}"
         );
@@ -2200,48 +2356,52 @@ fn the_rail_colors_come_from_the_theme_roles() {
     open_find_results(&mut app);
     app.find.sources.toggle(FindSource::WowInterface);
     let roles = app.ui_theme.roles;
-    let sources = cell_at(&mut app, 120, 30, "Sources", 0);
+    // A narrow rail, in a floating sheet.
+    let (width, height) = (100, 30);
+    let sources = cell_at(&mut app, width, height, "Sources", 0);
     assert_eq!(sources.fg, roles.muted);
     assert!(sources.modifier.contains(Modifier::BOLD));
     // On: a blue number, a lemon box, the name in text, the count muted.
     let on = "1 [x] Wago.io        3";
-    assert_eq!(cell_at(&mut app, 120, 30, on, 0).fg, roles.blue);
-    assert_eq!(cell_at(&mut app, 120, 30, on, 2).fg, roles.lemon);
-    assert_eq!(cell_at(&mut app, 120, 30, on, 6).fg, roles.text);
-    assert_eq!(cell_at(&mut app, 120, 30, on, 21).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, width, height, on, 0).fg, roles.blue);
+    assert_eq!(cell_at(&mut app, width, height, on, 2).fg, roles.lemon);
+    assert_eq!(cell_at(&mut app, width, height, on, 6).fg, roles.text);
+    assert_eq!(cell_at(&mut app, width, height, on, 21).fg, roles.muted);
     // Off: the box, the name and "off" muted.
     let off = "2 [ ] WoWInterface off";
-    assert_eq!(cell_at(&mut app, 120, 30, off, 0).fg, roles.blue);
+    assert_eq!(cell_at(&mut app, width, height, off, 0).fg, roles.blue);
     for offset in [2, 6, 19] {
-        assert_eq!(cell_at(&mut app, 120, 30, off, offset).fg, roles.muted);
+        assert_eq!(
+            cell_at(&mut app, width, height, off, offset).fg,
+            roles.muted
+        );
     }
     // Failed: "Check failed" in red.
-    assert_eq!(cell_at(&mut app, 120, 30, "Check failed", 0).fg, roles.red);
+    assert_eq!(
+        cell_at(&mut app, width, height, "Check failed", 0).fg,
+        roles.red
+    );
     // Asking: the spinner in lemon.
     app.find.asking = vec![FindSource::Tukui];
     app.shell_ui.motion.tick_count = 0;
     assert_eq!(
-        cell_at(&mut app, 120, 30, "3 [x] TukUI          ⠋", 21).fg,
+        cell_at(&mut app, width, height, "3 [x] TukUI          ⠋", 21).fg,
         roles.lemon
     );
     // Needs a key: a muted number, a dim box, the name and the words muted.
     app.wago_api_key = None;
     let key = "1 [-] Wago.io";
-    assert_eq!(cell_at(&mut app, 120, 30, key, 0).fg, roles.muted);
-    assert_eq!(cell_at(&mut app, 120, 30, key, 2).fg, roles.dim);
-    assert_eq!(cell_at(&mut app, 120, 30, key, 6).fg, roles.muted);
-    assert_eq!(cell_at(&mut app, 120, 30, "Needs a key", 0).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, width, height, key, 0).fg, roles.muted);
+    assert_eq!(cell_at(&mut app, width, height, key, 2).fg, roles.dim);
+    assert_eq!(cell_at(&mut app, width, height, key, 6).fg, roles.muted);
+    assert_eq!(
+        cell_at(&mut app, width, height, "Needs a key", 0).fg,
+        roles.muted
+    );
 }
 
 #[test]
 fn the_rail_reads_the_same_without_color_and_is_plain_with_simple_symbols() {
-    let expected = [
-        "Sources",
-        "1 [-] Wago.io",
-        "      Needs a key",
-        "2 [ ] WoWInterface off",
-        "3 [x] TukUI          /",
-    ];
     for no_color in [false, true] {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.ui_theme = UiTheme::from_mode(ThemeMode::Terminal);
@@ -2252,7 +2412,20 @@ fn the_rail_reads_the_same_without_color_and_is_plain_with_simple_symbols() {
         app.find.sources.toggle(FindSource::WowInterface);
         app.find.asking = vec![FindSource::Tukui];
         app.wago_api_key = None;
-        for (width, height) in [(80, 24), (138, 36)] {
+        let narrow = [
+            "Sources".to_string(),
+            "1 [-] Wago.io".to_string(),
+            "      Needs a key".to_string(),
+            rail_row("2 [ ] WoWInterface", "off", NARROW_RAIL),
+            rail_row("3 [x] TukUI", "/", NARROW_RAIL),
+        ];
+        let wide = [
+            "Sources".to_string(),
+            rail_row("1 [-] Wago.io", "Needs a key", WIDE_RAIL),
+            rail_row("2 [ ] WoWInterface", "off", WIDE_RAIL),
+            rail_row("3 [x] TukUI", "/", WIDE_RAIL),
+        ];
+        for (width, height, expected) in [(80, 24, &narrow[..]), (138, 36, &wide[..])] {
             let shown = screen(&mut app, width, height);
             let rail = rail_of(&shown);
             assert_eq!(rail, expected, "{no_color}:\n{shown}");
@@ -2278,17 +2451,19 @@ fn the_wago_notice_is_in_the_rail_wrapped_to_its_width() {
     let mut app = app_for_tests(ShellMode::Dashboard);
     open_find_results(&mut app);
     app.find.hash_notice = true;
-    for (width, height) in [(80, 24), (138, 36)] {
-        let shown = screen(&mut app, width, height);
-        let rail = rail_of(&shown);
-        assert_eq!(
-            rail[5..],
-            ["", "Sends folder names and", "file hashes to", "Wago.io."],
-            "{shown}"
-        );
-        // Nowhere else.
-        assert!(!shown.contains(WAGO_HASH_NOTICE), "{shown}");
-    }
+    let shown = screen(&mut app, 80, 24);
+    assert_eq!(
+        rail_of(&shown)[5..],
+        ["", "Sends folder names and", "file hashes to", "Wago.io."],
+        "{shown}"
+    );
+    assert!(!shown.contains(WAGO_HASH_NOTICE), "{shown}");
+    let shown = screen(&mut app, 138, 36);
+    assert_eq!(
+        rail_of(&shown)[4..],
+        ["", "Sends folder names and file", "hashes to Wago.io."],
+        "{shown}"
+    );
     // Not while Wago.io is off.
     app.find.sources.toggle(FindSource::Wago);
     assert!(!has_notice(&screen(&mut app, 80, 24)));
@@ -2435,7 +2610,7 @@ fn turning_a_source_off_works_the_report_out_again_and_on_brings_it_back() {
     assert_eq!(label_of(&app, "Spy"), FindLabel::Exact);
     assert_eq!(pick_of(&app, "Spy"), None);
     assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
-    let shown = screen(&mut app, 120, 30);
+    let shown = screen(&mut app, 100, 30);
     assert_eq!(
         rail_sources(&shown),
         [

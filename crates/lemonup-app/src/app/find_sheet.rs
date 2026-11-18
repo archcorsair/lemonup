@@ -33,11 +33,56 @@ const SOURCE_WIDTH: usize = 14;
 /// The results show the version column from this width on. Narrower, a row is the name, the
 /// source and the note, so every source and note fits beside the rail.
 const VERSION_COLUMN_FROM: usize = 70;
-/// The columns the source rail takes on the right of the sheet: a gap, its left border, a
-/// space, then [`RAIL_TEXT`] columns of text.
-const RAIL_WIDTH: u16 = 25;
-/// The text width of the source rail.
-const RAIL_TEXT: u16 = 22;
+/// The columns the source rail takes on the right of the sheet besides its text: a gap, its
+/// left border and a space.
+const RAIL_EDGE: usize = 3;
+/// In a rail line, the number, the box and the name, each with the space after it.
+const RAIL_LEAD: usize = 6 + 12;
+/// The words that say a source can't answer. A wide rail puts them where the count goes; the
+/// narrow one under the source.
+const RAIL_WORDS: [&str; 2] = ["Needs a key", "Check failed"];
+
+/// How wide the source rail is: narrow, with the status in 4 columns, or wide enough for the
+/// longest of [`RAIL_WORDS`] in its place. A sheet picks it from its width alone, so the rail
+/// keeps its width while sources fail or answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RailLayout {
+    wide: bool,
+}
+
+impl RailLayout {
+    /// The wide rail when the results keep the version column beside it.
+    fn for_width(width: u16) -> Self {
+        let wide = Self { wide: true };
+        Self {
+            wide: usize::from(width) >= usize::from(wide.width()) + VERSION_COLUMN_FROM,
+        }
+    }
+
+    /// The columns of the status at the end of a source's line.
+    fn status(self) -> usize {
+        if self.wide {
+            2 + RAIL_WORDS
+                .iter()
+                .map(|word| word.chars().count())
+                .max()
+                .unwrap_or(0)
+        } else {
+            4
+        }
+    }
+
+    /// The text width.
+    fn text(self) -> u16 {
+        u16::try_from(RAIL_LEAD + self.status()).unwrap_or(u16::MAX)
+    }
+
+    /// The columns the rail takes, its edge included.
+    fn width(self) -> u16 {
+        self.text()
+            .saturating_add(u16::try_from(RAIL_EDGE).unwrap_or(0))
+    }
+}
 /// The index of "Not checked" in [`GROUPS`].
 const NOT_CHECKED_GROUP: usize = 5;
 /// In the rail, the first time Wago.io is asked on this machine.
@@ -1375,10 +1420,11 @@ impl App {
         let mut body = SheetBody::new();
         body.reserve(room.height);
         let ellipsis = self.ui_theme.symbols.ellipsis;
+        let rail = RailLayout::for_width(width);
         match self.find.step.as_ref() {
             None => {}
             Some(FindStep::Looking { folders }) => {
-                body.rail(RAIL_WIDTH, self.find_rail());
+                body.rail(rail.width(), self.find_rail(rail));
                 if self.find.read.is_none() {
                     body.text(vec![Line::from(Span::styled(
                         format!("Reading {folders} folders{ellipsis}"),
@@ -1398,8 +1444,8 @@ impl App {
                 ))]);
             }
             Some(FindStep::Results(results)) => {
-                body.rail(RAIL_WIDTH, self.find_rail());
-                let width = width.saturating_sub(RAIL_WIDTH).max(1);
+                body.rail(rail.width(), self.find_rail(rail));
+                let width = width.saturating_sub(rail.width()).max(1);
                 self.find_results_body(&mut body, results, width);
             }
         }
@@ -1408,9 +1454,10 @@ impl App {
 
     /// The rail of sources: under "Sources", one line per source with its number, a box that
     /// says whether it is on, its name, then how many addons it found, a spinner while it is
-    /// asked, or `off`. "Needs a key" or "Check failed" goes on the line under a source, and
-    /// the Wago.io notice under them all while it shows and Wago.io is on.
-    fn find_rail(&self) -> Vec<Line<'static>> {
+    /// asked, or `off`. "Needs a key" or "Check failed" takes the count's place in a wide rail
+    /// and goes on the line under the source in a narrow one. The Wago.io notice goes under
+    /// them all while it shows and Wago.io is on.
+    fn find_rail(&self, rail: RailLayout) -> Vec<Line<'static>> {
         enum Shown {
             NeedsKey,
             Off,
@@ -1467,20 +1514,26 @@ impl App {
                     Style::default().fg(roles.lemon),
                 ),
                 Shown::Off => ("off".to_string(), muted),
+                Shown::NeedsKey if rail.wide => (RAIL_WORDS[0].to_string(), muted),
+                Shown::Failed if rail.wide => {
+                    (RAIL_WORDS[1].to_string(), Style::default().fg(roles.red))
+                }
                 Shown::NeedsKey | Shown::Failed => (String::new(), muted),
             };
+            let status_width = rail.status();
             lines.push(Line::from(vec![
                 Span::styled((index + 1).to_string(), digit),
                 Span::raw(" "),
                 Span::styled(mark, mark_style),
                 Span::raw(" "),
                 Span::styled(format!("{:<12}", source.name()), name),
-                Span::styled(format!("{status:>4}"), status_style),
+                Span::styled(format!("{status:>status_width$}"), status_style),
             ]));
-            // Under the name.
+            // Under the name, in a narrow rail.
             let under = match shown {
-                Shown::NeedsKey => Some(("Needs a key", muted)),
-                Shown::Failed => Some(("Check failed", Style::default().fg(roles.red))),
+                _ if rail.wide => None,
+                Shown::NeedsKey => Some((RAIL_WORDS[0], muted)),
+                Shown::Failed => Some((RAIL_WORDS[1], Style::default().fg(roles.red))),
                 _ => None,
             };
             if let Some((text, style)) = under {
@@ -1494,7 +1547,7 @@ impl App {
             lines.push(Line::from(""));
             lines.extend(super::sheet::wrap_lines(
                 &[Line::from(Span::styled(WAGO_HASH_NOTICE, muted))],
-                RAIL_TEXT,
+                rail.text(),
             ));
         }
         lines

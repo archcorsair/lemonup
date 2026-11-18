@@ -33,7 +33,9 @@ const DIM_AMOUNT: f32 = 0.34;
 pub(super) fn sheet_width(kind: OverlayKind) -> u16 {
     match kind {
         OverlayKind::Inspect => 76,
-        OverlayKind::Install | OverlayKind::Search | OverlayKind::Find => 104,
+        OverlayKind::Install | OverlayKind::Search => 104,
+        // Room for the wide source rail beside results that keep the version column.
+        OverlayKind::Find => 114,
         OverlayKind::Config => 100,
         OverlayKind::Backup | OverlayKind::TocEdit => 84,
         OverlayKind::Help => 108,
