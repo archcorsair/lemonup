@@ -13818,6 +13818,25 @@ mod tests {
     }
 
     #[test]
+    fn wide_list_columns_measure_double_width_text_by_its_cells() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        // 16 and 18 CJK characters take 32 and 36 terminal cells.
+        let author = "\u{4f5c}\u{8005}".repeat(8);
+        let name = "\u{63d2}\u{4ef6}".repeat(9);
+        let mut addons = vec![versioned(SourceKind::Wago, "1.0.0", Some("1.0.1"))];
+        addons[0].name = name.clone();
+        addons[0].folder = "Wide".to_string();
+        addons[0].author = Some(author.clone());
+        app.dashboard = DashboardState::from_addons(addons);
+
+        let rows = render_rows(&mut app, 200, 30);
+        // Wide glyphs leave an empty buffer cell after them in the dump.
+        let text = rows.join("\n").replace(' ', "");
+        assert!(text.contains(&name), "name was cut\n{text}");
+        assert!(text.contains(&author), "author was cut\n{text}");
+    }
+
+    #[test]
     fn overlay_keeps_the_frame_and_shows_its_own_keys() {
         let mut app = app_for_tests(ShellMode::Dashboard);
         press_key(&mut app, KeyCode::Char('?'));

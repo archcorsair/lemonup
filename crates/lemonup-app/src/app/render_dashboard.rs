@@ -967,27 +967,28 @@ impl App {
         let arrow = self.ui_theme.symbols.arrow;
         // Cells are cut one column short of their width, so each needs one
         // more than its text. A sorted header adds a space and an indicator.
-        let cells = |chars: usize| u16::try_from(chars + 1).unwrap_or(u16::MAX);
+        // Text is measured in terminal cells: CJK characters take two each.
+        let cells = |text: &str| u16::try_from(Span::raw(text).width() + 1).unwrap_or(u16::MAX);
         let mut needs = ColumnNeeds {
-            name: cells("Addon".len() + 2),
-            version: cells("Version".len()),
-            author: cells("Author".len() + 2),
-            source: cells("Source".len() + 2),
+            name: cells("Addon  "),
+            version: cells("Version"),
+            author: cells("Author  "),
+            source: cells("Source  "),
         };
         for item in &self.dashboard.items {
-            needs.name = needs.name.max(cells(item.name.chars().count()));
+            needs.name = needs.name.max(cells(&item.name));
             let version = VersionCell::for_item(item, wide).text(arrow);
-            needs.version = needs.version.max(cells(version.chars().count()));
+            needs.version = needs.version.max(cells(&version));
             let author = item.author.as_deref().map(str::trim).unwrap_or_default();
-            needs.author = needs.author.max(cells(author.chars().count()));
+            needs.author = needs.author.max(cells(author));
             let source = dashboard_source_name(item.source, wide);
-            needs.source = needs.source.max(cells(source.chars().count()));
+            needs.source = needs.source.max(cells(source));
         }
         for row in &self.dashboard.rows {
             if matches!(row.kind, DashboardRowKind::OwnedChild { .. }) {
                 // Two spaces and the connector come before the folder name.
-                let width = 2 + child_row_prefix(row).chars().count() + row.name.chars().count();
-                needs.name = needs.name.max(cells(width));
+                let child = format!("  {}{}", child_row_prefix(row), row.name);
+                needs.name = needs.name.max(cells(&child));
             }
         }
         needs
