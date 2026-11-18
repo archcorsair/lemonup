@@ -191,7 +191,7 @@ impl Question {
     fn body_lines(&self, roles: ColorRoles, names: usize) -> Vec<Line<'static>> {
         let text = Style::default().fg(roles.text);
         let strong = text.add_modifier(Modifier::BOLD);
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
         match self {
             Self::DeleteAddons(targets) => {
@@ -536,10 +536,7 @@ impl Question {
                 (true, false) => "↑/↓ scroll".to_string(),
                 (false, false) => String::new(),
             };
-            lines.push(Line::from(Span::styled(
-                where_,
-                Style::default().fg(roles.muted),
-            )));
+            lines.push(Line::from(Span::styled(where_, roles.muted)));
             u16::try_from(max).unwrap_or(u16::MAX)
         };
         lines.push(Line::from(""));

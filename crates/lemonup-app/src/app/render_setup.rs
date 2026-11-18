@@ -90,7 +90,7 @@ impl App {
                 ),
                 Span::styled(
                     " Pick the install LemonUp should look after too.",
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 ),
             ]
         } else {
@@ -99,10 +99,7 @@ impl App {
                     "Welcome.",
                     Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    " Let's get your addons set up.",
-                    Style::default().fg(roles.muted),
-                ),
+                Span::styled(" Let's get your addons set up.", roles.muted),
             ]
         };
         let mut step = Vec::new();
@@ -113,14 +110,11 @@ impl App {
                     self.onboarding.step.index() + 1,
                     OnboardingStep::ALL.len()
                 ),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
         }
         if !self.runtime.is_default_profile() && !self.games.adding {
-            step.push(Span::styled(
-                "   Profile: ",
-                Style::default().fg(roles.muted),
-            ));
+            step.push(Span::styled("   Profile: ", roles.muted));
             step.push(Span::styled(
                 self.runtime.profile_name.clone(),
                 Style::default()
@@ -164,7 +158,7 @@ impl App {
                     format!("{} ", self.ui_theme.symbols.done),
                     Style::default().fg(roles.green),
                 ));
-                spans.push(Span::styled(step.label(), Style::default().fg(roles.muted)));
+                spans.push(Span::styled(step.label(), roles.muted));
             } else if step.index() == current {
                 spans.push(Span::styled(
                     format!("● {}", step.label()),
@@ -173,10 +167,7 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                spans.push(Span::styled(
-                    format!("○ {}", step.label()),
-                    Style::default().fg(roles.muted),
-                ));
+                spans.push(Span::styled(format!("○ {}", step.label()), roles.muted));
             }
         }
         Line::from(spans)
@@ -205,12 +196,9 @@ impl App {
         width.saturating_sub(u16::try_from(INDENT.len()).unwrap_or(3) + 1)
     }
 
-    fn setup_prose(&self, text: &str, color: Color, width: u16) -> Vec<Line<'static>> {
+    fn setup_prose(&self, text: &str, style: Style, width: u16) -> Vec<Line<'static>> {
         wrap_lines(
-            &[Line::from(Span::styled(
-                text.to_string(),
-                Style::default().fg(color),
-            ))],
+            &[Line::from(Span::styled(text.to_string(), style))],
             Self::setup_text_width(width),
         )
     }
@@ -220,7 +208,11 @@ impl App {
         let mut lines = Vec::new();
         if let Some((notice, is_error)) = self.startup_notice.as_ref() {
             let color = if *is_error { roles.amber } else { roles.green };
-            lines.extend(self.setup_prose(&notice.replace(" | ", " · "), color, width));
+            lines.extend(self.setup_prose(
+                &notice.replace(" | ", " · "),
+                Style::default().fg(color),
+                width,
+            ));
             lines.push(Line::from(""));
         }
         let title = match &self.onboarding.phase {
@@ -232,7 +224,7 @@ impl App {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "This usually takes a few seconds.",
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )));
                 "Looking for World of Warcraft…".to_string()
             }
@@ -255,7 +247,7 @@ impl App {
                             room
                         )
                     ),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
@@ -264,7 +256,7 @@ impl App {
                     } else {
                         "This can take a few minutes."
                     },
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 )));
                 "Looking for World of Warcraft…".to_string()
             }
@@ -338,16 +330,16 @@ impl App {
             ));
             spans.push(Span::styled(
                 format!("{count:>count_width$}"),
-                Style::default().fg(if install.addons == 0 || guarded {
+                if install.addons == 0 || guarded {
                     roles.muted
                 } else {
-                    roles.text
-                }),
+                    Style::default().fg(roles.text)
+                },
             ));
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(
                 shorten_path_middle(&friendly_path(game_dir), path_room),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
             lines.push(Line::from(spans));
         }
@@ -363,7 +355,7 @@ impl App {
         ));
         spans.push(Span::styled(
             "type or paste a different folder",
-            Style::default().fg(roles.muted),
+            roles.muted,
         ));
         lines.push(Line::from(spans));
         lines.push(Line::from(""));
@@ -373,13 +365,13 @@ impl App {
         {
             lines.extend(self.setup_prose(
                 "This profile can't use your main AddOns folder. Choose a test copy instead.",
-                roles.amber,
+                Style::default().fg(roles.amber),
                 width,
             ));
             lines.push(Line::from(""));
         }
         if found.installs.len() > 1 {
-            let muted = Style::default().fg(roles.muted);
+            let muted = roles.muted;
             lines.push(Line::from(Span::styled(
                 "LemonUp looks after one game version at a time.",
                 muted,
@@ -420,7 +412,7 @@ impl App {
             ));
             spans.push(Span::styled(
                 truncate_text(&detail, detail_room),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
             lines.push(Line::from(spans));
         }
@@ -452,7 +444,7 @@ impl App {
                         Style::default().fg(roles.red).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(problem, Style::default().fg(roles.red)),
-                    Span::styled(help, Style::default().fg(roles.muted)),
+                    Span::styled(help, roles.muted),
                 ])],
                 Self::setup_text_width(width),
             ));
@@ -472,7 +464,7 @@ impl App {
             "Wago.io is one of the sites LemonUp gets addons from. Searching it, and updating \
              addons that came from it, needs your own Wago.io key. Wago gives one to its \
              Patreon supporters:",
-            roles.text,
+            Style::default().fg(roles.text),
             width,
         );
         lines.push(Line::from(Span::styled(
@@ -496,7 +488,7 @@ impl App {
         ));
         lines.push(Line::from(Span::styled(
             "You can add or change it later in Settings.",
-            Style::default().fg(roles.muted),
+            roles.muted,
         )));
         ("Wago.io key (you can skip this)".to_string(), lines)
     }
@@ -636,7 +628,7 @@ impl App {
         {
             spans.push(Span::styled(
                 truncate_text(hint, inner.saturating_sub(1)),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ));
         }
         let used: usize = spans.iter().map(|span| span.width()).sum();
