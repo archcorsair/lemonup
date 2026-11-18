@@ -16527,6 +16527,55 @@ mod tests {
                 assert!(rows.join("\n").contains("NO_COLOR is set now."));
             }
 
+            /// Cells that hold a letter or digit and are dim, as muted text is.
+            fn dim_text_cells(buffer: &Buffer) -> Vec<&ratatui::buffer::Cell> {
+                buffer
+                    .content()
+                    .iter()
+                    .filter(|cell| {
+                        cell.modifier.contains(Modifier::DIM)
+                            && cell.symbol().chars().any(char::is_alphanumeric)
+                    })
+                    .collect()
+            }
+
+            #[test]
+            fn terminal_theme_draws_muted_text_dim_in_the_normal_text_color() {
+                let mut app = app_in(DisplayEnv::FULL, false, |config| {
+                    config.theme = ThemeMode::Terminal;
+                });
+                assert_eq!(app.ui_theme.mode, ThemeMode::Terminal);
+                let buffer = draw_buffer(&mut app, 120, 30);
+                let muted = dim_text_cells(&buffer);
+                assert!(!muted.is_empty(), "no muted text on the list screen");
+                for cell in &muted {
+                    assert_eq!(cell.fg, Color::Reset, "{:?}", cell.symbol());
+                }
+                for cell in buffer.content() {
+                    assert!(
+                        !(cell.fg == Color::DarkGray
+                            && cell.symbol().chars().any(char::is_alphanumeric)),
+                        "text {:?} is bright black",
+                        cell.symbol()
+                    );
+                }
+            }
+
+            #[test]
+            fn no_color_keeps_muted_text_dim() {
+                let no_color = DisplayEnv {
+                    no_color: true,
+                    ..DisplayEnv::FULL
+                };
+                let mut app = app_in(no_color, false, |_| {});
+                let buffer = draw_buffer(&mut app, 120, 30);
+                let muted = dim_text_cells(&buffer);
+                assert!(!muted.is_empty(), "NO_COLOR dropped the dim on muted text");
+                for cell in &muted {
+                    assert_eq!(cell.fg, Color::Reset);
+                }
+            }
+
             #[test]
             fn without_truecolor_terminal_shows_until_a_theme_is_chosen() {
                 let ansi = DisplayEnv {

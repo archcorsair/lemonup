@@ -61,7 +61,7 @@ impl App {
     /// folder)." and what LemonUp does with them, from Settings.
     fn backup_intro_lines(&self) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let client = self
             .effective_addon_dir
             .as_deref()
@@ -93,7 +93,7 @@ impl App {
 
     fn backup_empty_line(&self) -> Line<'static> {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let mut spans = vec![Span::styled(
             "No backups of your game settings yet.",
             Style::default().fg(roles.text),
@@ -118,9 +118,7 @@ impl App {
         let made = if utc { "Made (UTC)" } else { "Made" };
         Line::from(Span::styled(
             format!("  {made:<width$}Size", width = MADE_WIDTH + AGO_WIDTH),
-            Style::default()
-                .fg(self.ui_theme.roles.muted)
-                .add_modifier(Modifier::BOLD),
+            self.ui_theme.roles.muted.add_modifier(Modifier::BOLD),
         ))
     }
 
@@ -146,7 +144,7 @@ impl App {
             Span::styled(format!("{made:<MADE_WIDTH$}"), made_style),
             Span::styled(
                 format!("{:<AGO_WIDTH$}", time_ago(now, entry.made_at)),
-                Style::default().fg(roles.muted),
+                roles.muted,
             ),
             Span::styled(
                 format_backup_size(entry.size_bytes),
@@ -163,7 +161,7 @@ impl App {
         let folder = shorten_path_middle(&friendly_path(&self.backup_dir), room);
         Line::from(Span::styled(
             truncate_text(&format!("{lead}{folder}"), usize::from(width)),
-            Style::default().fg(self.ui_theme.roles.muted),
+            self.ui_theme.roles.muted,
         ))
     }
 

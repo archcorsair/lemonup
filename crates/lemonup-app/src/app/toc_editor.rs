@@ -517,7 +517,7 @@ impl App {
         let Some(item) = self.toc_edit_item() else {
             body.text(vec![Line::from(Span::styled(
                 "This addon is not in the list any more.",
-                Style::default().fg(roles.muted),
+                roles.muted,
             ))]);
             return body;
         };
@@ -545,7 +545,7 @@ impl App {
                 item.name.clone(),
                 Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(linked, Style::default().fg(roles.muted)),
+            Span::styled(linked, roles.muted),
         ])]);
         if spaced {
             body.gap(1);
@@ -658,7 +658,7 @@ impl App {
             if edit.input.is_empty() {
                 spans.push(Span::styled(
                     " empty gives back the addon's own",
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 ));
             }
             return Line::from(spans);
@@ -673,14 +673,14 @@ impl App {
                 bold(Style::default().fg(roles.text)),
             ),
             None if self.toc_scanned(&item.folder).is_none() => {
-                ("not read yet".to_string(), Style::default().fg(roles.muted))
+                ("not read yet".to_string(), roles.muted)
             }
-            None => ("none".to_string(), Style::default().fg(roles.muted)),
+            None => ("none".to_string(), roles.muted),
         };
-        let source_color = match source {
+        let source_style = match source {
             TocValueSource::Addon => roles.muted,
-            TocValueSource::Override => roles.green,
-            TocValueSource::OverrideNotApplied => roles.amber,
+            TocValueSource::Override => Style::default().fg(roles.green),
+            TocValueSource::OverrideNotApplied => Style::default().fg(roles.amber),
         };
         spans.push(Span::styled(
             format!(
@@ -691,7 +691,7 @@ impl App {
         ));
         spans.push(Span::styled(
             truncate_text(source_label(source), source_width),
-            Style::default().fg(source_color),
+            source_style,
         ));
         Line::from(spans)
     }
@@ -715,7 +715,7 @@ impl App {
                         .fg(roles.lemon)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(roles.muted)
+                    roles.muted
                 };
                 Line::from(vec![
                     Span::raw(indent.clone()),
@@ -753,7 +753,7 @@ impl App {
         yours: &str,
     ) -> Line<'static> {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         if let Some(tab_hint) = editing {
             let mut text = "enter saves it and writes it to the addon's files, esc keeps what \
                             you had. An empty box gives back the addon's own."

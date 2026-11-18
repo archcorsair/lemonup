@@ -88,7 +88,7 @@ impl App {
             lines.extend(self.help_column(page.right, width, keys));
         }
         lines.push(Line::default());
-        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let muted = self.ui_theme.roles.muted;
         // LemonUp takes the mouse, so the terminal's own selection needs Shift.
         lines.push(Line::from(Span::styled(
             "Hold Shift while dragging to copy text",
@@ -181,7 +181,7 @@ impl App {
                 key_width
             };
             let text_style = if status {
-                Style::default().fg(roles.muted)
+                roles.muted
             } else {
                 Style::default().fg(roles.text)
             };
