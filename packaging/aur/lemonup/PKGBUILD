@@ -1,5 +1,5 @@
 pkgname=lemonup
-pkgver=2.4.0
+pkgver=2.5.0
 pkgrel=1
 pkgdesc='Terminal addon manager for World of Warcraft (Retail and WoW Forever)'
 arch=('x86_64' 'aarch64')
@@ -11,7 +11,7 @@ conflicts=('lemonup-bin')
 # makepkg's LTO flags make the bundled SQLite C objects unlinkable by Rust's linker.
 options=('!lto')
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/archcorsair/lemonup/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('58a8ce53dff5bd2fe509277d402cb91b365a92e3a955545e0709bae8f764bc3f')
+sha256sums=('8ea92c1c92b514c84796b157976497b07fdeeb80ea5f5aec64dc5d9880bb5d4c')
 
 prepare() {
   cd "${pkgname}-${pkgver}"
