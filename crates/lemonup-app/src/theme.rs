@@ -121,7 +121,7 @@ pub(crate) struct ColorRoles {
     /// Keys you can press, and links.
     pub(crate) blue: Color,
     /// Everything that does not need you.
-    pub(crate) muted: Color,
+    pub(crate) muted: Style,
     /// Rules and separators.
     pub(crate) dim: Color,
     pub(crate) text: Color,
@@ -145,7 +145,7 @@ impl ColorRoles {
             green: Color::Rgb(158, 206, 106),
             red: Color::Rgb(247, 118, 142),
             blue: Color::Rgb(122, 162, 247),
-            muted: Color::Rgb(140, 150, 192),
+            muted: Style::new().fg(Color::Rgb(140, 150, 192)),
             dim: Color::Rgb(0x45, 0x4b, 0x6c),
             text: Color::Rgb(0xc5, 0xcd, 0xf2),
             background: Color::Rgb(0x24, 0x28, 0x3b),
@@ -166,7 +166,7 @@ impl ColorRoles {
             // the nearest red that reaches 4.5:1.
             red: Color::Rgb(180, 48, 48),
             blue: Color::Rgb(28, 92, 190),
-            muted: Color::Rgb(86, 94, 134),
+            muted: Style::new().fg(Color::Rgb(86, 94, 134)),
             dim: Color::Rgb(0xa9, 0xaf, 0xc8),
             text: Color::Rgb(0x2b, 0x31, 0x50),
             background: Color::Rgb(0xe4, 0xe5, 0xeb),
@@ -188,7 +188,7 @@ impl ColorRoles {
             green: Color::Green,
             red: Color::Red,
             blue: Color::Cyan,
-            muted: Color::DarkGray,
+            muted: Style::new().fg(Color::Reset).add_modifier(Modifier::DIM),
             dim: Color::DarkGray,
             text: Color::Reset,
             background: Color::Reset,
@@ -422,7 +422,7 @@ mod tests {
                 ("green", roles.green),
                 ("red", roles.red),
                 ("blue", roles.blue),
-                ("muted", roles.muted),
+                ("muted", roles.muted.fg.expect("muted has a color")),
                 ("text", roles.text),
             ] {
                 for (surface, background) in
@@ -447,7 +447,7 @@ mod tests {
             roles.green,
             roles.red,
             roles.blue,
-            roles.muted,
+            roles.muted.fg.expect("muted has a color"),
             roles.dim,
             roles.text,
             roles.border,
@@ -456,12 +456,37 @@ mod tests {
         }
         assert_eq!(roles.background, Color::Reset);
         assert_eq!(roles.sheet, Color::Reset);
+        assert_eq!(roles.muted.bg, None);
         assert!(
             roles
                 .cursor_row_style()
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn terminal_muted_is_the_normal_text_color_dimmed() {
+        let muted = ColorRoles::terminal().muted;
+        assert_eq!(muted.fg, Some(Color::Reset));
+        assert!(muted.add_modifier.contains(Modifier::DIM));
+        for roles in [ColorRoles::dark(), ColorRoles::light()] {
+            assert!(matches!(roles.muted.fg, Some(Color::Rgb(..))));
+            assert!(roles.muted.add_modifier.is_empty());
+        }
+    }
+
+    #[test]
+    fn no_color_keeps_dim_text_dim() {
+        let mut theme = UiTheme::from_mode(ThemeMode::Terminal);
+        theme.no_color = true;
+        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 4, 1));
+        buffer.set_string(0, 0, "mute", theme.roles.muted);
+        theme.finish_frame(&mut buffer);
+        for cell in buffer.content() {
+            assert_eq!(cell.fg, Color::Reset);
+            assert!(cell.modifier.contains(Modifier::DIM));
+        }
     }
 
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
