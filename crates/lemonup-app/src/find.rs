@@ -11,6 +11,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lemonup_core::curseforge::CurseForgeManaged;
 use lemonup_core::find::{
     self, FindLabel, FindReport, FindResult, FindSource, FoundAddon, SourceAnswer, SourceLookups,
     WagoLookup, WagoMatch, WowiFile, wire,
@@ -501,24 +502,28 @@ pub(crate) enum LinkOutcome {
     /// Some exact matches move folders between addons and `--yes` was not given. Nothing was
     /// linked; these are the matches that move folders.
     NeedsYes(Vec<FoundAddon>),
-    /// The rows the database holds after linking, and the names of linked addons it doesn't
-    /// hold after all (a read of the AddOns folder after linking can drop one).
+    /// The rows the database holds after linking, the names of linked addons it doesn't
+    /// hold after all (a read of the AddOns folder after linking can drop one), and the names
+    /// of linked addons the CurseForge app also manages.
     Linked {
         rows: Vec<AddonRecord>,
         unconfirmed: Vec<String>,
+        curseforge: Vec<String>,
     },
 }
 
 /// `lemonup find --link`: links the exact matches, then reads the AddOns folder again so
 /// folders that left a group are listed as their own Not linked addons. The CLI never asks, so
 /// when an exact match takes over folders beyond its own (folders joining from other addons or
-/// leaving this one) it refuses without `--yes` and links nothing.
+/// leaving this one) it refuses without `--yes` and links nothing. CurseForge's record is read
+/// from the first readable of `curseforge_files`, once, after linking.
 pub(crate) fn link_exact_matches(
     database: &mut StateDatabase,
     addon_dir: &Path,
     flavor: GameFlavor,
     report: &FindReport,
     yes: bool,
+    curseforge_files: &[PathBuf],
 ) -> Result<LinkOutcome, LemonupError> {
     let picks = exact_picks(report);
     if picks.is_empty() {
@@ -555,9 +560,12 @@ pub(crate) fn link_exact_matches(
             None => unconfirmed.push(linked.name.clone()),
         }
     }
+    let managed = CurseForgeManaged::read(addon_dir, curseforge_files);
+    let curseforge = managed.managed_row_names(&stored);
     Ok(LinkOutcome::Linked {
         rows: stored,
         unconfirmed,
+        curseforge,
     })
 }
 
@@ -607,7 +615,11 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
                 regrouping.join("; ")
             )))
         }
-        LinkOutcome::Linked { rows, unconfirmed } => {
+        LinkOutcome::Linked {
+            rows,
+            unconfirmed,
+            curseforge,
+        } => {
             let mut lines = rows
                 .iter()
                 .map(|stored| {
@@ -631,6 +643,14 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
                 lines.push(format!(
                     "find link warning: not_confirmed={}",
                     join(&unconfirmed)
+                ));
+            }
+            if !curseforge.is_empty() {
+                lines.push(format!(
+                    "find link note: curseforge_manages={}, mark {} Ignored in CurseForge \
+                     (Install Settings)",
+                    join(&curseforge),
+                    if curseforge.len() == 1 { "it" } else { "them" }
                 ));
             }
             Ok(lines)

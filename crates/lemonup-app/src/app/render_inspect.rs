@@ -268,6 +268,16 @@ impl App {
                     roles.muted,
                 )],
             ]
+        } else if linked
+            && self.curseforge.manages_any(
+                std::iter::once(item.folder.as_str())
+                    .chain(item.owned_folders.iter().map(String::as_str)),
+            )
+        {
+            vec![vec![Span::styled(
+                lemonup_core::curseforge::HINT,
+                Style::default().fg(roles.amber),
+            )]]
         } else {
             Vec::new()
         };

@@ -41,11 +41,13 @@ pub(super) enum Question {
     },
     /// `direct` is a GitHub, WoWInterface or TukUI install, `source` its
     /// label; otherwise Wago.io. `folders` are exactly what a yes replaces.
+    /// `curseforge`: CurseForge also manages one of `folders`.
     ReplaceAddon {
         name: String,
         source: &'static str,
         direct: bool,
         folders: Vec<String>,
+        curseforge: bool,
     },
     /// Saving a .toc field of a "Not linked" addon. `folders` are exactly
     /// the folders whose .toc files change; `restore` when the field goes
@@ -74,13 +76,15 @@ pub(super) enum Question {
     /// Enter on "Link" in the Find sheet. `taken` are every folder the
     /// linked addons take over, `replaced` every folder on disk replaced now
     /// with the source's copy, and `added` the source's folders that aren't
-    /// on disk yet. The list scrolls from `offset`.
+    /// on disk yet. `curseforge` names the picked addons CurseForge also
+    /// manages. The list scrolls from `offset`.
     LinkFound {
         links: usize,
         replaces: usize,
         taken: Vec<String>,
         replaced: Vec<String>,
         added: Vec<String>,
+        curseforge: Vec<String>,
         offset: u16,
     },
 }
@@ -450,6 +454,24 @@ impl Question {
         }
     }
 
+    /// The note under the body that the folders are also CurseForge's, so
+    /// its updates would fight LemonUp's copy.
+    fn curseforge_note(&self, roles: ColorRoles) -> Option<Line<'static>> {
+        let text = match self {
+            Self::ReplaceAddon {
+                curseforge: true, ..
+            } => lemonup_core::curseforge::HINT.to_string(),
+            Self::LinkFound { curseforge, .. } if !curseforge.is_empty() => {
+                lemonup_core::curseforge::hint_naming(curseforge)
+            }
+            _ => return None,
+        };
+        Some(Line::from(Span::styled(
+            text,
+            Style::default().fg(roles.amber),
+        )))
+    }
+
     /// The answers row: `    y  delete them          n  keep them`.
     fn answer_line(&self, roles: ColorRoles) -> Line<'static> {
         let (yes, no) = self.answers();
@@ -480,9 +502,14 @@ impl Question {
         if let Self::LinkFound { offset, .. } = self {
             return self.scrolled_lines(roles, width, max_rows, *offset).0;
         }
+        let note = self.curseforge_note(roles);
         let build = |names: usize| {
             let mut lines = vec![Line::from("")];
             lines.extend(wrap_lines(&self.body_lines(roles, names), width));
+            if let Some(note) = &note {
+                lines.push(Line::from(""));
+                lines.extend(wrap_lines(std::slice::from_ref(note), width));
+            }
             lines.push(Line::from(""));
             lines.extend(wrap_lines(&[self.answer_line(roles)], width));
             lines.push(Line::from(""));
@@ -517,9 +544,15 @@ impl Question {
     ) -> (Vec<Line<'static>>, u16) {
         let body = wrap_lines(&self.body_lines(roles, usize::MAX), width);
         let answers = wrap_lines(&[self.answer_line(roles)], width);
+        // The note stays in view under the list, a blank row above it.
+        let note = self
+            .curseforge_note(roles)
+            .map(|note| wrap_lines(&[note], width))
+            .unwrap_or_default();
+        let note_rows = if note.is_empty() { 0 } else { note.len() + 1 };
         // A blank row above the body, and above and below the answers.
         let room = usize::from(max_rows)
-            .saturating_sub(answers.len() + 3)
+            .saturating_sub(answers.len() + 3 + note_rows)
             .max(1);
         let mut lines = vec![Line::from("")];
         let max = if body.len() <= room {
@@ -539,6 +572,10 @@ impl Question {
             lines.push(Line::from(Span::styled(where_, roles.muted)));
             u16::try_from(max).unwrap_or(u16::MAX)
         };
+        if !note.is_empty() {
+            lines.push(Line::from(""));
+            lines.extend(note);
+        }
         lines.push(Line::from(""));
         lines.extend(answers);
         lines.push(Line::from(""));
@@ -612,16 +649,19 @@ impl App {
                 source: "Wago.io",
                 direct: false,
                 folders: confirmation.inspection.existing_folders.clone(),
+                curseforge: confirmation.curseforge,
             });
         }
         if self.dashboard.detail_mode == DetailMode::Search
-            && let Some((request, name, folders)) = self.search_pane.pending_direct_replace()
+            && let Some((request, name, folders, curseforge)) =
+                self.search_pane.pending_direct_replace()
         {
             return Some(Question::ReplaceAddon {
                 name: name.to_string(),
                 source: request.provider.label(),
                 direct: true,
                 folders: folders.to_vec(),
+                curseforge,
             });
         }
         if let Some(question) = self.toc_apply_question() {

@@ -403,8 +403,17 @@ async fn run_find(
         crate::find::lookup_sources(&wago_lookups, flavor, api_key.as_deref(), &paths.cache_dir)
             .await;
     let report = lemonup_core::find::match_addons(&inputs, &rows, None, &lookups.lookups);
-    let mut link_now =
-        || crate::find::link_exact_matches(&mut database, &addon_dir, flavor, &report, yes);
+    let curseforge_files = lemonup_core::curseforge::record_files();
+    let mut link_now = || {
+        crate::find::link_exact_matches(
+            &mut database,
+            &addon_dir,
+            flavor,
+            &report,
+            yes,
+            &curseforge_files,
+        )
+    };
     if plain {
         for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
             println!("{line}");

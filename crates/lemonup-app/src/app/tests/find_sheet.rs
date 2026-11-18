@@ -544,6 +544,126 @@ fn the_link_question_names_every_folder_scrolls_and_only_y_confirms() {
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
 }
 
+#[test]
+fn the_link_question_names_the_picks_curseforge_also_manages_and_keeps_it_in_view() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let folders = (0..30).map(|n| format!("Pack_{n:02}")).collect::<Vec<_>>();
+    let refs = folders.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut long = report();
+    long.results[2] = result(
+        FindLabel::Exact,
+        "Pack_00",
+        vec![found(FindLabel::Exact, FindSource::Wago, "Pack", &refs)],
+    );
+    open_find(&mut app);
+    let _game = use_curseforge(&mut app, &["pack_29"]);
+    set_results(&mut app, long);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let Some(Question::LinkFound { curseforge, .. }) = app.active_question() else {
+        panic!("no question");
+    };
+    assert_eq!(curseforge, ["Pack"]);
+    app.note_question_shown(Instant::now());
+    // The note shows while the long folder list scrolls under it.
+    for _ in 0..3 {
+        let shown = screen(&mut app, 80, 24);
+        assert!(shown.contains("Link 1 addon?"), "{shown}");
+        assert!(shown.contains("CurseForge also manages Pack."), "{shown}");
+        assert!(shown.contains("y  link them"), "{shown}");
+        for _ in 0..12 {
+            key(&mut app, KeyCode::Down);
+        }
+    }
+    key(&mut app, KeyCode::Char('n'));
+    assert!(app.find.question_curseforge.is_empty());
+
+    // CurseForge manages none of the picks: no note.
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    let _game = use_curseforge(&mut app, &["Lonely"]);
+    set_results(&mut app, report());
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        app.active_question(),
+        Some(Question::LinkFound { ref curseforge, .. }) if curseforge.is_empty()
+    ));
+    let shown = screen(&mut app, 80, 24);
+    assert!(!shown.contains("CurseForge"), "{shown}");
+}
+
+#[test]
+fn the_link_result_line_says_which_linked_addons_curseforge_also_manages() {
+    let (_game, addons, record) = curseforge_game(&["Pawn"]);
+    write_addon(&addons, "Clique", "1.0");
+    write_addon(&addons, "Pawn", "2.0");
+    let db = addons.join("..").join("state.sqlite");
+    let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
+    let pawn = found(FindLabel::Exact, FindSource::Wago, "Pawn", &["Pawn"]);
+    let links = [clique, pawn];
+
+    let outcome = link_found(&db, &addons, &links, &[record]).expect("linked");
+    assert_eq!(outcome.curseforge, ["Pawn"]);
+
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.find.linking = true;
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Linked(Ok(Box::new(
+            outcome,
+        ))))),
+    );
+    assert!(
+        app.status_line.text.contains(
+            "Linked 2 addons: 2 up to date. CurseForge also manages Pawn. \
+                 Mark it Ignored there."
+        ),
+        "{}",
+        app.status_line.text
+    );
+
+    // Without CurseForge's record nothing is said about it.
+    let db = addons.join("..").join("other.sqlite");
+    let outcome = link_found(&db, &addons, &links, &[]).expect("linked");
+    assert_eq!(outcome.rows.len(), 2);
+    assert!(outcome.curseforge.is_empty());
+    let (_, text) = crate::app::find_sheet::linked_status(&outcome);
+    assert!(!text.contains("CurseForge"), "{text}");
+}
+
+#[test]
+fn a_link_question_naming_many_curseforge_addons_still_shows_its_answers_at_80x24() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let names = (0..40).map(|n| format!("Mod{n:02}")).collect::<Vec<_>>();
+    let mut many = report();
+    many.results = names
+        .iter()
+        .map(|name| {
+            result(
+                FindLabel::Exact,
+                name,
+                vec![found(FindLabel::Exact, FindSource::Wago, name, &[name])],
+            )
+        })
+        .collect();
+    open_find(&mut app);
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let _game = use_curseforge(&mut app, &refs);
+    set_results(&mut app, many);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let Some(Question::LinkFound { curseforge, .. }) = app.active_question() else {
+        panic!("no question");
+    };
+    assert_eq!(curseforge.len(), 40);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 40 addons?"), "{shown}");
+    assert!(shown.contains("and 37 more."), "{shown}");
+    assert!(shown.contains("y  link them"), "{shown}");
+    assert!(shown.contains("n  leave them alone"), "{shown}");
+}
+
 fn write_addon(addons: &std::path::Path, folder: &str, version: &str) {
     let dir = addons.join(folder);
     std::fs::create_dir_all(&dir).expect("addon dir");
@@ -575,7 +695,7 @@ fn linking_writes_rows_and_the_result_line_reads_them_from_the_database() {
     pawn.latest_version = Some("2.1".to_string());
     let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
 
-    let outcome = link_found(&db, &addons, &[clique, pawn]).expect("linked");
+    let outcome = link_found(&db, &addons, &[clique, pawn], &[]).expect("linked");
     let stored = StateDatabase::read_addons(&db).expect("rows");
     let row = |folder: &str| {
         stored
@@ -634,6 +754,7 @@ fn linking_writes_rows_and_the_result_line_reads_them_from_the_database() {
             FindLinkOutcome {
                 rows: Vec::new(),
                 unconfirmed: vec!["Pawn".to_string()],
+                curseforge: Vec::new(),
                 sync: None,
             },
         ))))),
@@ -983,7 +1104,7 @@ fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
         .join("AddOns");
     let db = temp.path().join("state.sqlite");
     let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
-    let error = link_found(&db, &addons, &[clique]).expect_err("no AddOns folder");
+    let error = link_found(&db, &addons, &[clique], &[]).expect_err("no AddOns folder");
     assert!(
         error.starts_with("LemonUp couldn't read your AddOns folder"),
         "{error}"
