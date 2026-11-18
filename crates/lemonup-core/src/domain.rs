@@ -115,6 +115,10 @@ pub struct AddonRecord {
     /// and update. Keys this version does not know are kept as they are and never acted on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub toc_overrides: BTreeMap<String, String>,
+    /// The addon's name at its source (Wago.io, WoWInterface, TukUI), cleaned with
+    /// [`source_name`]. Shown instead of the TOC Title; see [`AddonRecord::display_name`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
     /// Set only for a row written by a newer LemonUp with values this version does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unrecognized: Option<UnrecognizedValues>,
@@ -146,7 +150,25 @@ impl AddonRecord {
             last_checked_at: None,
             remote_version: None,
             toc_overrides: BTreeMap::new(),
+            source_name: None,
             unrecognized: None,
+        }
+    }
+
+    /// The name LemonUp shows for this addon: a Title the user set in the TOC editor, else the
+    /// source's name for an addon linked to Wago.io, WoWInterface or TukUI, else the TOC Title.
+    /// GitHub only gives a repository name, so GitHub addons keep their TOC Title.
+    pub fn display_name(&self) -> &str {
+        let has_title_override =
+            crate::toc_edit::title_override_name(&self.toc_overrides).is_some();
+        let named_by_source = matches!(
+            self.source,
+            SourceKind::Wago | SourceKind::WowInterface | SourceKind::Tukui
+        );
+        match self.source_name.as_deref() {
+            Some(source_name) if named_by_source && !has_title_override => source_name,
+            // `name` is the Title override when there is one, else the TOC Title.
+            _ => &self.name,
         }
     }
 
@@ -210,11 +232,107 @@ impl AddonRecord {
     }
 }
 
+/// `raw`, a name an addon source gives, as LemonUp stores it: HTML entities decoded, WoW color
+/// codes removed and spaces trimmed, the same as a TOC Title. `None` when nothing is left.
+pub fn source_name(raw: &str) -> Option<String> {
+    let name = crate::scan::strip_wow_color_codes(decode_html_entities(raw));
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Decodes the HTML entities addon sites put in names (`&amp;`, `&lt;`, `&gt;`, `&quot;`,
+/// `&#39;`, `&apos;` and numeric `&#NN;` or `&#xNN;`). Anything else is kept as it is.
+fn decode_html_entities(raw: &str) -> String {
+    let mut decoded = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let entity = rest[1..]
+            .find(';')
+            .filter(|end| *end <= 10)
+            .map(|end| &rest[1..=end]);
+        let character = entity.and_then(|entity| match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => {
+                let number = entity.strip_prefix('#')?;
+                let code = match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => number.parse::<u32>().ok()?,
+                };
+                char::from_u32(code)
+            }
+        });
+        match (entity, character) {
+            (Some(entity), Some(character)) => {
+                decoded.push(character);
+                rest = &rest[entity.len() + 2..];
+            }
+            _ => {
+                decoded.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
-    use super::{AddonRecord, GameFlavor, OwnershipSource, SourceKind};
+    use super::{AddonRecord, GameFlavor, OwnershipSource, SourceKind, source_name};
+
+    #[test]
+    fn source_names_lose_color_codes_and_html_entities() {
+        assert_eq!(
+            source_name(" |cff1784d1Deadly|r Boss Mods &amp; Friends ").as_deref(),
+            Some("Deadly Boss Mods & Friends")
+        );
+        assert_eq!(
+            source_name("&lt;DBM&gt; &quot;Core&quot; &#39;x&#39; &#65;&#x42; &apos;").as_deref(),
+            Some("<DBM> \"Core\" 'x' AB '")
+        );
+        // Not entities: kept as they are.
+        assert_eq!(
+            source_name("Tom & Jerry &bogus; &#xZZ; &").as_deref(),
+            Some("Tom & Jerry &bogus; &#xZZ; &")
+        );
+        assert_eq!(source_name("|cffff0000|r  "), None);
+        assert_eq!(source_name(""), None);
+    }
+
+    #[test]
+    fn display_name_prefers_a_title_override_then_the_source_name_then_the_toc_title() {
+        let mut addon = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        addon.source_name = Some("Deadly Boss Mods (DBM)".to_string());
+        assert_eq!(addon.display_name(), "Deadly Boss Mods (DBM)");
+
+        for source in [SourceKind::WowInterface, SourceKind::Tukui] {
+            addon.source = source;
+            assert_eq!(addon.display_name(), "Deadly Boss Mods (DBM)", "{source:?}");
+        }
+        for source in [SourceKind::GitHub, SourceKind::Manual] {
+            addon.source = source;
+            assert_eq!(addon.display_name(), "<DBM Core> Main Core", "{source:?}");
+        }
+
+        addon.source = SourceKind::Wago;
+        addon.source_name = None;
+        assert_eq!(addon.display_name(), "<DBM Core> Main Core");
+
+        // With a Title override, `name` is that override (storage keeps it so).
+        addon.source_name = Some("Deadly Boss Mods (DBM)".to_string());
+        addon.toc_overrides = BTreeMap::from([("Title".to_string(), "My DBM".to_string())]);
+        addon.name = "My DBM".to_string();
+        assert_eq!(addon.display_name(), "My DBM");
+    }
 
     #[test]
     fn detects_flavor_from_client_folder() {

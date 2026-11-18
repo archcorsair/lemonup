@@ -22,6 +22,7 @@ fn found(label: FindLabel, source: FindSource, name: &str, folders: &[&str]) -> 
         source_id: format!("{name}-id"),
         source_url: format!("https://example.invalid/{name}"),
         name: name.to_string(),
+        source_name: Some(name.to_string()),
         author: None,
         parent_folder: folders[0].to_string(),
         folders: folders.iter().map(|folder| folder.to_string()).collect(),
