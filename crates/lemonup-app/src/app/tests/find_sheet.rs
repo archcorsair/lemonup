@@ -436,6 +436,62 @@ fn enter_on_a_choose_one_row_picks_each_candidate_then_none() {
     assert_eq!(results(&app).picks[4], None);
 }
 
+/// The key line's enter hint, which sits after the action row.
+fn enter_hint(shown: &str) -> String {
+    shown
+        .lines()
+        .find(|line| line.trim_start().starts_with("enter "))
+        .unwrap_or_else(|| panic!("no enter hint:\n{shown}"))
+        .to_string()
+}
+
+#[test]
+fn the_enter_hint_says_replace_when_only_replacements_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // Unselect the link, then select Questie as a replacement.
+    key(&mut app, KeyCode::Char(' '));
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Replace 1 addon"), "{shown}");
+    let hint = enter_hint(&shown);
+    assert!(hint.contains("enter replace"), "{shown}");
+    assert!(!hint.contains("link"), "{shown}");
+}
+
+#[test]
+fn the_enter_hint_says_link_and_replace_for_a_mixed_selection() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // The link stays selected; add Questie as a replacement.
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon, replace 1"), "{shown}");
+    assert!(
+        enter_hint(&shown).contains("enter link and replace"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_enter_hint_says_link_when_only_links_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon"), "{shown}");
+    assert!(enter_hint(&shown).contains("enter link"), "{shown}");
+    assert!(!enter_hint(&shown).contains("replace"), "{shown}");
+}
+
 #[test]
 fn a_partial_match_asks_first_then_replaces_through_the_wago_install() {
     let mut app = app_for_tests(ShellMode::Dashboard);

@@ -1426,7 +1426,14 @@ impl App {
             FindFocus::Action if self.find_offers_search() => {
                 vec![("enter", " search Wago.io by name")]
             }
-            FindFocus::Action if active => vec![("enter", " link")],
+            FindFocus::Action if active => vec![(
+                "enter",
+                match (links, replaces) {
+                    (_, 0) => " link",
+                    (0, _) => " replace",
+                    _ => " link and replace",
+                },
+            )],
             FindFocus::Action => vec![("↑ ↓", " move to a match")],
             FindFocus::Result(index)
                 if results.report.results[index].label == FindLabel::ChooseOne =>
