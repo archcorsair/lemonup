@@ -146,7 +146,7 @@ fn open_find(app: &mut App) {
 
 fn set_results(app: &mut App, report: FindReport) {
     app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
-        FindResults::new(outcome(report)),
+        Box::new(FindResults::new(outcome(report))),
     ))));
 }
 
@@ -1185,7 +1185,7 @@ fn check_failed_comes_right_after_not_checked() {
         error: SourceError::new(SourceErrorKind::SlowDown, "429"),
     });
     app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
-        FindResults::new(outcome),
+        Box::new(FindResults::new(outcome)),
     ))));
     let shown = screen(&mut app, 138, 80);
     let at = |heading: &str| {
@@ -1377,11 +1377,11 @@ fn long_result_rows_continue_under_their_text() {
         open_find(&mut app);
         let (report, problems) = long_report();
         app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
-            FindResults::new(FindOutcome {
+            Box::new(FindResults::new(FindOutcome {
                 report,
                 problems,
                 names: LocalNames::default(),
-            }),
+            })),
         ))));
         let rows = render_rows(&mut app, width, height)
             .into_iter()
@@ -1652,14 +1652,14 @@ fn tall_report(selectable: bool) -> FindReport {
 fn open_tall_report(app: &mut App, selectable: bool) {
     open_find(app);
     app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
-        FindResults::new(FindOutcome {
+        Box::new(FindResults::new(FindOutcome {
             report: tall_report(selectable),
             problems: vec![SourceProblem {
                 source: FindSource::Wago,
                 error: SourceError::new(SourceErrorKind::Other, "wago exploded"),
             }],
             names: LocalNames::default(),
-        }),
+        })),
     ))));
     let shown = screen(app, 80, 24);
     assert!(app.sheet_scroll.get().max_offset > 0, "{shown}");
@@ -2061,7 +2061,7 @@ fn pick_of(app: &App, folder: &str) -> Option<FindSource> {
     results.picks[index].map(|pick| results.report.results[index].candidates[pick].source)
 }
 
-/// Picks the candidate of `folder` from `source`.
+/// Picks the candidate of `folder` from `source`, as the person would.
 fn pick(app: &mut App, folder: &str, source: FindSource) {
     let index = index_of(app, folder);
     let Some(FindStep::Results(results)) = app.find.step.as_mut() else {
@@ -2071,6 +2071,7 @@ fn pick(app: &mut App, folder: &str, source: FindSource) {
         .candidates
         .iter()
         .position(|candidate| candidate.source == source);
+    results.chosen[index] = true;
 }
 
 #[test]
@@ -2214,7 +2215,7 @@ fn open_key_and_failure(app: &mut App) {
     let mut outcome = outcome(report());
     outcome.problems[0].source = FindSource::WowInterface;
     app.apply(AppAction::Find(FindAction::SetStep(FindStep::Results(
-        FindResults::new(outcome),
+        Box::new(FindResults::new(outcome)),
     ))));
     app.wago_api_key = None;
 }
@@ -3225,4 +3226,147 @@ fn not_found_names_the_sources_it_asked_when_it_did_not_ask_them_all() {
             }
         }
     }
+}
+
+#[test]
+fn the_key_line_shows_only_the_source_numbers_that_do_something() {
+    let sources_hint = |app: &App| {
+        app.key_table(200)
+            .into_iter()
+            .find(|hint| hint.label == "turn on or off")
+            .map(|hint| hint.key)
+    };
+    // No Wago.io key and TukUI off: WoWInterface is the last source on, so 2 does nothing.
+    let (_config, _path, mut app) = app_with_config();
+    app.wago_api_key = None;
+    app.config_pane.persisted.wago_api_key = None;
+    app.config_pane.draft.wago_api_key = None;
+    app.config_pane.persisted.find_sources = Some(names(&["wowinterface"]));
+    open_find(&mut app);
+    assert_eq!(sources_hint(&app), Some("3"));
+    assert!(
+        app.footer_hint_for_key(KeyEvent::from(KeyCode::Char('2')))
+            .is_none()
+    );
+    assert_eq!(
+        app.messages_for_key(KeyEvent::from(KeyCode::Char('2'))),
+        vec![]
+    );
+    // TukUI on: both numbers work.
+    key(&mut app, KeyCode::Char('3'));
+    assert_eq!(sources_hint(&app), Some("2 3"));
+
+    // With a key and only Wago.io on, 1 does nothing.
+    let (_config, _path, mut app) = app_with_config();
+    app.config_pane.persisted.find_sources = Some(names(&["wago"]));
+    open_find(&mut app);
+    assert_eq!(sources_hint(&app), Some("2 3"));
+    // Help keeps a row for every number.
+    let help = crate::app::keymap::help_page(HelpContext::Find);
+    for digit in ['1', '2', '3'] {
+        assert!(
+            help.sections()
+                .flat_map(|section| section.rows.iter())
+                .any(|row| row.keys == [KeyEvent::from(KeyCode::Char(digit))]),
+            "{digit}"
+        );
+    }
+}
+
+/// The links `y` starts, by the name of the match.
+fn confirmed_links(app: &App) -> Vec<(FindSource, String)> {
+    app.find_actions(FindMessage::ConfirmLink)
+        .into_iter()
+        .find_map(|action| match action {
+            AppAction::Find(FindAction::StartLink { links, .. }) => Some(
+                links
+                    .into_iter()
+                    .map(|found| (found.source, found.name))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("a link")
+}
+
+#[test]
+fn an_answer_while_the_link_question_is_open_waits_until_it_closes() {
+    let (_config, _path, mut app) = app_with_config();
+    let (_addons, inputs) = spy_inputs();
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    // WoWInterface answers first: its Spy is picked. Wago.io is still asked.
+    deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
+    apply_all(&mut app, AppMessage::Find(FindMessage::Last));
+    apply_all(&mut app, AppMessage::Find(FindMessage::Enter));
+    assert!(app.find.question);
+    let before = app.find_question();
+    assert_eq!(
+        confirmed_links(&app),
+        [(FindSource::WowInterface, "Spy fork".to_string())]
+    );
+
+    // Wago.io answers with Clique, which a new report would pick: the question, the results
+    // and y stay as they were.
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    assert_eq!(app.find_question(), before);
+    assert!(app.find.asking.contains(&FindSource::Wago));
+    assert_eq!(
+        confirmed_links(&app),
+        [(FindSource::WowInterface, "Spy fork".to_string())]
+    );
+
+    // n: the answer counts now.
+    apply_all(&mut app, AppMessage::Find(FindMessage::CancelLink));
+    assert!(!app.find.question);
+    assert!(app.find.held.is_empty());
+    assert!(!app.find.asking.contains(&FindSource::Wago));
+    assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
+    assert_eq!(pick_of(&app, "Clique"), Some(FindSource::Wago));
+}
+
+#[test]
+fn the_order_the_sources_answer_in_never_decides_a_choose_one() {
+    let (_addons, inputs) = spy_inputs();
+    let answers = [
+        (FindSource::Wago, wago_answer(&inputs)),
+        (FindSource::WowInterface, wowinterface_answer()),
+    ];
+    for reversed in [false, true] {
+        let (_config, _path, mut app) = app_with_config();
+        app.config_pane.persisted.find_sources = Some(names(&["wago", "wowinterface"]));
+        open_find(&mut app);
+        deliver_read(&mut app, inputs.clone());
+        let mut order = answers.clone();
+        if reversed {
+            order.reverse();
+        }
+        let (first, first_answer) = order[0].clone();
+        deliver_answer(&mut app, first, first_answer);
+        // A single exact match is picked for the person.
+        assert_eq!(pick_of(&app, "Spy"), Some(first), "{reversed}");
+        let (second, second_answer) = order[1].clone();
+        deliver_answer(&mut app, second, second_answer);
+        assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne, "{reversed}");
+        assert_eq!(pick_of(&app, "Spy"), None, "{reversed}");
+    }
+
+    // A pick the person made stays while its match is still there.
+    let (_config, _path, mut app) = app_with_config();
+    app.config_pane.persisted.find_sources = Some(names(&["wago", "wowinterface"]));
+    open_find(&mut app);
+    deliver_read(&mut app, inputs.clone());
+    deliver_answer(&mut app, FindSource::Wago, wago_answer(&inputs));
+    let spy = index_of(&app, "Spy");
+    let Some(FindStep::Results(results)) = app.find.step.as_mut() else {
+        panic!("results");
+    };
+    results.cursor = FindFocus::Result(spy);
+    // Space twice: unselected, then selected again by the person.
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Char(' '));
+    assert_eq!(pick_of(&app, "Spy"), Some(FindSource::Wago));
+    deliver_answer(&mut app, FindSource::WowInterface, wowinterface_answer());
+    assert_eq!(label_of(&app, "Spy"), FindLabel::ChooseOne);
+    assert_eq!(pick_of(&app, "Spy"), Some(FindSource::Wago));
 }

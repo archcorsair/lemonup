@@ -1232,11 +1232,12 @@ impl App {
         use super::find_sheet::{FindFocus, FindStep};
         use FooterHintId as Id;
         match self.find.step.as_ref() {
-            Some(FindStep::Looking { .. }) => vec![
-                self.find_sources_hint(),
-                KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE),
-                self.help_hint(),
-            ],
+            Some(FindStep::Looking { .. }) => {
+                let mut hints = Vec::from_iter(self.find_sources_hint());
+                hints.push(KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE));
+                hints.push(self.help_hint());
+                hints
+            }
             Some(FindStep::Results(results)) => {
                 let mut hints = Vec::new();
                 if results.focusables(self.find_offers_search()).len() > 1 {
@@ -1274,7 +1275,7 @@ impl App {
                     };
                     hints.push(KeyHint::key(Id::Confirm, "enter", label, ENTER).main());
                 }
-                hints.push(self.find_sources_hint());
+                hints.extend(self.find_sources_hint());
                 hints.push(self.close_hint());
                 hints.push(self.help_hint());
                 hints
@@ -1283,10 +1284,15 @@ impl App {
         }
     }
 
-    /// The numbers of the sources: Wago.io's only while it can be on.
-    fn find_sources_hint(&self) -> KeyHint {
-        let (keys, codes) = self.find_source_keys();
-        KeyHint::key(FooterHintId::Sources, keys, "turn on or off", codes)
+    /// The numbers of the sources that turn one on or off right now, if any does.
+    fn find_sources_hint(&self) -> Option<KeyHint> {
+        let (keys, codes) = self.find_source_keys()?;
+        Some(KeyHint::key(
+            FooterHintId::Sources,
+            keys,
+            "turn on or off",
+            codes,
+        ))
     }
 
     /// `F`, while some addon is Not linked.

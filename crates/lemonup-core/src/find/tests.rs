@@ -1877,3 +1877,32 @@ fn turning_a_source_off_works_the_matches_out_again_without_it() {
         vec![FindSource::WowInterface, FindSource::Tukui]
     );
 }
+
+#[test]
+fn a_wago_id_in_the_toc_is_no_match_when_wago_is_left_out() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Hekili",
+        &["## Version: 1.0", "## X-Wago-ID: HK"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let wago_candidates = |report: &FindReport| {
+        report
+            .results
+            .iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|candidate| candidate.source == FindSource::Wago)
+            .count()
+    };
+
+    // Left out: nothing from Wago.io, and the addon is not found.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::NotAsked));
+    assert_eq!(wago_candidates(&report), 0, "{:#?}", report.results);
+    assert_eq!(result(&report, "Hekili").label, FindLabel::NotFound);
+
+    // No key: Wago.io is skipped, and the .toc still names a likely match.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::Skipped));
+    assert_eq!(wago_candidates(&report), 1);
+    assert_eq!(result(&report, "Hekili").label, FindLabel::Likely);
+}

@@ -1198,7 +1198,10 @@ pub fn match_addons(
                 .filter(|unit| key(&unit.folder) == key(folder))
                 .map_or_else(|| vec![local.folder.clone()], |unit| unit.folders.clone());
             let name = local.title.clone().unwrap_or_else(|| local.folder.clone());
+            // A Wago.io ID in the .toc is a likely match on Wago.io, unless Wago.io was left out.
+            // Without a key Wago.io is skipped, not left out: the .toc is all there is to go on.
             if let Some(id) = &local.ids.wago
+                && !matches!(lookups.wago, SourceAnswer::NotAsked)
                 && !claims_folder(&claims, FindSource::Wago, id, folder)
             {
                 let mut found = empty_found(FindSource::Wago, id, wago_url(id), &name);

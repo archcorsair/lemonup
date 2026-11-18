@@ -104,7 +104,7 @@ pub(crate) enum FindStep {
     },
     /// The lookup couldn't run; nothing changed.
     Failed(String),
-    Results(FindResults),
+    Results(Box<FindResults>),
 }
 
 /// A line of the results the cursor can be on.
@@ -133,6 +133,9 @@ pub(crate) struct FindResults {
     pub(crate) names: LocalNames,
     /// The picked candidate of each result, by report index.
     pub(crate) picks: Vec<Option<usize>>,
+    /// Whether the person set that pick (or cleared it) themselves, rather than the report
+    /// picking it. Only their own picks outlive a report worked out again.
+    pub(crate) chosen: Vec<bool>,
     pub(crate) cursor: FindFocus,
 }
 
@@ -205,6 +208,9 @@ pub(crate) struct FindState {
     pub(crate) problems: Vec<SourceProblem>,
     /// The sources asked that haven't answered yet.
     pub(crate) asking: Vec<FindSource>,
+    /// Answers that came while the link question was open. They wait until it closes, so the
+    /// question and the results behind it stay as they were when it opened.
+    pub(crate) held: Vec<(FindSource, Box<Lookups>)>,
     /// The Wago.io notice shows in this sheet.
     pub(crate) hash_notice: bool,
     /// The Wago.io notice was shown on this machine, so it never shows again.
@@ -284,6 +290,8 @@ pub(crate) enum FindAction {
     Asking(Vec<FindSource>),
     /// A source answered.
     StoreAnswer(FindSource, Box<Lookups>),
+    /// A source answered while the link question is open: kept for when it closes.
+    HoldAnswer(FindSource, Box<Lookups>),
     /// Works the report out again from the answers of the sources that are on.
     Refresh,
     /// Shows the Wago.io notice in this sheet, and remembers it was shown.
@@ -352,8 +360,9 @@ impl FindResults {
             .results
             .iter()
             .map(|result| result.preselected().then_some(0))
-            .collect();
+            .collect::<Vec<_>>();
         let mut results = Self {
+            chosen: vec![false; picks.len()],
             report: outcome.report,
             problems: outcome.problems,
             names: outcome.names,
@@ -368,9 +377,10 @@ impl FindResults {
         results
     }
 
-    /// The results of a report worked out again: a pick stays while its match is still there
-    /// and is dropped when it is not; a result the old report didn't have, or whose matches
-    /// changed while nothing was picked, starts as a new one would. The cursor stays on its
+    /// The results of a report worked out again: a pick the person made stays while its match
+    /// is still there and is dropped when it is not, and one they cleared stays clear while the
+    /// matches are the same. Every other result starts as a new one would, so a pick the report
+    /// made never depends on which source answered first. The cursor stays on its
     /// row while it can be picked. `search` is whether the sheet looked up one addon.
     pub(crate) fn carried(outcome: FindOutcome, old: &FindResults, search: bool) -> Self {
         let mut next = Self::new(outcome);
@@ -390,13 +400,19 @@ impl FindResults {
                 continue;
             };
             let was = &old.report.results[before];
-            next.picks[index] = match old.picks[before] {
-                Some(pick) => was.candidates.get(pick).and_then(|picked| {
-                    result
-                        .candidates
-                        .iter()
-                        .position(|candidate| same(candidate, picked))
-                }),
+            if !old.chosen[before] {
+                continue;
+            }
+            let (pick, chosen) = match old.picks[before] {
+                Some(pick) => {
+                    let kept = was.candidates.get(pick).and_then(|picked| {
+                        result
+                            .candidates
+                            .iter()
+                            .position(|candidate| same(candidate, picked))
+                    });
+                    (kept, kept.is_some())
+                }
                 None if was.candidates.len() == result.candidates.len()
                     && was
                         .candidates
@@ -404,10 +420,12 @@ impl FindResults {
                         .zip(&result.candidates)
                         .all(|(a, b)| same(a, b)) =>
                 {
-                    None
+                    (None, true)
                 }
-                None => next.picks[index],
+                None => (next.picks[index], false),
             };
+            next.picks[index] = pick;
+            next.chosen[index] = chosen;
         }
         let search = search && !next.any_selectable();
         let focus = next.focusables(search);
@@ -671,17 +689,23 @@ impl App {
             && !(self.find_on(source) && self.find_on_sources().len() == 1)
     }
 
-    /// The keys that turn a source on or off, as the key line shows them: Wago.io's only
-    /// while it can be on.
-    pub(super) fn find_source_keys(&self) -> (&'static str, super::keymap::KeyCodes) {
-        if self.wago_api_key.is_some() {
-            (
-                "1 2 3",
-                &[KeyCode::Char('1'), KeyCode::Char('2'), KeyCode::Char('3')],
-            )
-        } else {
-            ("2 3", &[KeyCode::Char('2'), KeyCode::Char('3')])
-        }
+    /// The keys that turn a source on or off, as the key line shows them: only the numbers
+    /// that do something now, and `None` when none does.
+    pub(super) fn find_source_keys(&self) -> Option<(&'static str, super::keymap::KeyCodes)> {
+        const ONE: KeyCode = KeyCode::Char('1');
+        const TWO: KeyCode = KeyCode::Char('2');
+        const THREE: KeyCode = KeyCode::Char('3');
+        let works = FindSource::ALL.map(|source| self.find_toggle_works(source));
+        Some(match works {
+            [true, true, true] => ("1 2 3", &[ONE, TWO, THREE]),
+            [true, true, false] => ("1 2", &[ONE, TWO]),
+            [true, false, true] => ("1 3", &[ONE, THREE]),
+            [false, true, true] => ("2 3", &[TWO, THREE]),
+            [true, false, false] => ("1", &[ONE]),
+            [false, true, false] => ("2", &[TWO]),
+            [false, false, true] => ("3", &[THREE]),
+            [false, false, false] => return None,
+        })
     }
 
     /// Space selects the row under the cursor: a match, not a choice.
@@ -744,7 +768,8 @@ impl App {
                     Some(_) => None,
                     None => Some(0),
                 };
-                vec![self.set_find_step(FindStep::Results(next))]
+                next.chosen[index] = true;
+                vec![self.set_find_step(FindStep::Results(Box::new(next)))]
             }
             FindMessage::Enter => self.find_enter_actions(),
             FindMessage::ConfirmLink => self.find_confirm_actions(),
@@ -887,7 +912,7 @@ impl App {
             .unwrap_or(0);
         let mut next = results.clone();
         next.cursor = focus[to(position, focus.len() - 1)];
-        vec![self.set_find_step(FindStep::Results(next))]
+        vec![self.set_find_step(FindStep::Results(Box::new(next)))]
     }
 
     fn find_enter_actions(&self) -> Vec<AppAction> {
@@ -903,7 +928,8 @@ impl App {
                     .find(|candidate| pick_kind(&result.candidates[*candidate]).is_some());
                 let mut next = results.clone();
                 next.picks[index] = next_pick;
-                vec![self.set_find_step(FindStep::Results(next))]
+                next.chosen[index] = true;
+                vec![self.set_find_step(FindStep::Results(Box::new(next)))]
             }
             FindFocus::Action if self.find_offers_search() => self.find_search_by_name_actions(),
             FindFocus::Action if results.picked().is_empty() => vec![],
@@ -986,10 +1012,16 @@ impl App {
                 generation,
                 source,
                 lookups,
-            } if generation == self.find.generation && self.find.step.is_some() => vec![
-                AppAction::Find(FindAction::StoreAnswer(source, lookups)),
-                AppAction::Find(FindAction::Refresh),
-            ],
+            } if generation == self.find.generation && self.find.step.is_some() => {
+                if self.find.question {
+                    vec![AppAction::Find(FindAction::HoldAnswer(source, lookups))]
+                } else {
+                    vec![
+                        AppAction::Find(FindAction::StoreAnswer(source, lookups)),
+                        AppAction::Find(FindAction::Refresh),
+                    ]
+                }
+            }
             // A lookup that was cancelled: its answer changes nothing.
             FindTaskEvent::Read { .. } | FindTaskEvent::Answered { .. } => vec![],
             FindTaskEvent::Linked(result) => {
@@ -1153,6 +1185,7 @@ impl App {
                 self.find.scope = scope;
                 self.find.single = single;
                 self.find.question = false;
+                self.find.held.clear();
                 self.find.read = None;
                 self.find.answers = SourceLookups::not_asked();
                 self.find.answered.clear();
@@ -1178,6 +1211,7 @@ impl App {
                 self.find.generation += 1;
                 self.find.step = None;
                 self.find.question = false;
+                self.find.held.clear();
                 self.find.asking.clear();
                 if self.dashboard.detail_mode == DetailMode::Find {
                     self.apply(AppAction::SetDetailMode(DetailMode::Overview));
@@ -1203,6 +1237,7 @@ impl App {
                 );
                 self.find.answers.take_answer(source, lookups);
             }
+            FindAction::HoldAnswer(source, lookups) => self.find.held.push((source, lookups)),
             FindAction::Refresh => self.refresh_find(),
             FindAction::ShowHashNotice => {
                 self.find.hash_notice = true;
@@ -1219,7 +1254,16 @@ impl App {
                     self.find.step = Some(step);
                 }
             }
-            FindAction::SetQuestion(open) => self.find.question = open,
+            FindAction::SetQuestion(open) => {
+                self.find.question = open;
+                // Answers held while the question was open count now.
+                if !open && !self.find.held.is_empty() {
+                    for (source, lookups) in std::mem::take(&mut self.find.held) {
+                        self.apply_find(FindAction::StoreAnswer(source, lookups));
+                    }
+                    self.refresh_find();
+                }
+            }
             FindAction::SetQuestionOffset(offset) => self.find.question_offset = offset,
             FindAction::StartLink {
                 links,
@@ -1310,7 +1354,7 @@ impl App {
             Some(old) => FindResults::carried(outcome, old, self.find.single.is_some()),
             None => FindResults::new(outcome),
         };
-        self.find.step = Some(FindStep::Results(next));
+        self.find.step = Some(FindStep::Results(Box::new(next)));
     }
 
     /// Records the job instead of starting it, so a test never reads a folder or asks a source.

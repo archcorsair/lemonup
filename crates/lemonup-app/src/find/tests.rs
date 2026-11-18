@@ -2084,3 +2084,35 @@ fn the_plain_report_keeps_its_field_names_whatever_sources_were_asked() {
         "{lines:?}"
     );
 }
+
+#[tokio::test]
+async fn find_without_wago_reports_no_wago_match_for_a_wago_id_in_the_toc() {
+    let (_, lookups) = count_requests(
+        cli_choice(&[FindSource::WowInterface, FindSource::Tukui]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(lookups.lookups.wago, SourceAnswer::NotAsked);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addons = dir.path().join("AddOns");
+    fs::create_dir_all(addons.join("Hekili")).expect("folder");
+    fs::write(
+        addons.join("Hekili/Hekili.toc"),
+        "## Title: Hekili\n## X-Wago-ID: HK\n",
+    )
+    .expect("toc");
+    let inputs = FindInputs::read(&addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(&inputs, &[], None, &lookups.lookups);
+    let lines = report_lines(&report, &lookups.problems, 1);
+    assert!(
+        !lines.iter().any(|line| line.contains("source=wago")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("likely=0") && line.contains("not_found=1")),
+        "{lines:?}"
+    );
+}
