@@ -790,7 +790,7 @@ fn the_welcome_card_offers_capital_f_next_to_p_at_80x24() {
             "{shown}"
         );
         assert!(shown.contains("Press p to add another game."), "{shown}");
-        assert!(shown.contains("d hide this"), "{shown}");
+        assert!(shown.contains("d hide"), "{shown}");
         assert!(shown.contains("Alpha"), "{shown}");
     }
     assert!(app.key_table(138).iter().any(|hint| hint.key == "F"));

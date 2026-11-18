@@ -1124,7 +1124,7 @@ impl App {
                 "d",
                 Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" hide this", muted),
+            Span::styled(" hide", muted),
         ];
         let keys_width: usize = keys.iter().map(Span::width).sum();
         let last = lines.last().map_or(0, Line::width);
@@ -1549,7 +1549,7 @@ impl App {
                         ),
                         dot(),
                         key("U", roles.lemon),
-                        Span::styled(" updates them all", Style::default().fg(roles.muted)),
+                        Span::styled(" update all", Style::default().fg(roles.muted)),
                     ]);
                 }
             }

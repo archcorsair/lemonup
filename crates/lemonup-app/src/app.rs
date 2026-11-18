@@ -13434,7 +13434,7 @@ mod tests {
         assert!(app.status_flash_is_live(&flash, late));
         let status = line_text(&app.dashboard_status_line(120));
         assert!(
-            status.contains("✓ Check complete · 1 update ready · U updates them all"),
+            status.contains("✓ Check complete · 1 update ready · U update all"),
             "{status}"
         );
         app.dashboard.set_update_in_progress(true);
@@ -17771,7 +17771,7 @@ mod tests {
                 assert!(text.contains("Welcome. One thing before LemonUp"), "{text}");
                 assert!(text.contains("LemonUp found 2 addons"), "{text}");
                 assert!(!text.contains("never touched"), "{text}");
-                assert!(text.contains("d hide this"), "{text}");
+                assert!(text.contains("d hide"), "{text}");
                 assert!(text.contains("Alpha"), "{text}");
                 assert!(text.contains("f find online"), "{text}");
                 let keys = rows.last().expect("key line");

@@ -421,10 +421,10 @@ static DETAILS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "This addon",
             rows: &[
-                HelpRow::key("u", "update it", &[ch('u')]).when(HelpWhen::NoJob),
-                HelpRow::key("c", "check it for updates", &[ch('c')]).when(HelpWhen::NoJob),
-                HelpRow::key("x", "delete it", &[ch('x')]),
-                HelpRow::key("space", "select or unselect it", &[ch(' ')]),
+                HelpRow::key("u", "update", &[ch('u')]).when(HelpWhen::NoJob),
+                HelpRow::key("c", "check for updates", &[ch('c')]).when(HelpWhen::NoJob),
+                HelpRow::key("x", "delete", &[ch('x')]),
+                HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find it online", K_FIND).when(HelpWhen::NotLinked),
             ],
@@ -462,11 +462,9 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
             title: "Details",
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "move; Details follows", K_MOVE),
-                HelpRow::key("u", "update it, or the selected ones", &[ch('u')])
-                    .when(HelpWhen::NoJob),
-                HelpRow::key("c", "check it, or the selected ones", &[ch('c')])
-                    .when(HelpWhen::NoJob),
-                HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
+                HelpRow::key("u", "update, or the selected ones", &[ch('u')]).when(HelpWhen::NoJob),
+                HelpRow::key("c", "check, or the selected ones", &[ch('c')]).when(HelpWhen::NoJob),
+                HelpRow::key("x", "delete, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find this one online", K_FIND).when(HelpWhen::NotLinked),
@@ -565,7 +563,7 @@ static INSTALL_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Install from a link?",
             rows: &[
-                HelpRow::key("enter", "install it", K_ENTER),
+                HelpRow::key("enter", "install", K_ENTER),
                 HelpRow::key("esc", "not now", K_ESC),
             ],
         },
@@ -620,7 +618,7 @@ static SETTINGS_HELP: HelpPage = HelpPage {
                 HelpRow::key("↑ ↓  or  j k", "choose a setting", K_MOVE),
                 HelpRow::key(
                     "← →  or  h l",
-                    "change it",
+                    "change",
                     &[
                         press(KeyCode::Left),
                         press(KeyCode::Right),
@@ -630,7 +628,7 @@ static SETTINGS_HELP: HelpPage = HelpPage {
                 ),
                 HelpRow::key(
                     "enter",
-                    "switch it on or off, type your Wago.io key, or run a row such as \
+                    "switch on or off, type your Wago.io key, or run a row such as \
                      \"Change game folder…\"",
                     K_ENTER,
                 ),
@@ -641,8 +639,8 @@ static SETTINGS_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "While you type your key",
             rows: &[
-                HelpRow::key("enter", "save it", K_ENTER),
-                HelpRow::key("esc", "keep the one you had", K_ESC),
+                HelpRow::key("enter", "save", K_ENTER),
+                HelpRow::key("esc", "cancel", K_ESC),
                 TEXT_DELETE,
                 TEXT_MOVE_ROW,
                 TEXT_CLEAR,
@@ -696,7 +694,7 @@ static TOC_EDIT_HELP: HelpPage = HelpPage {
             title: "Edit .toc fields",
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "choose Title, Notes or Category", K_MOVE),
-                HelpRow::key("enter", "edit it", K_ENTER),
+                HelpRow::key("enter", "edit", K_ENTER),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
                 HelpRow::key("Home End  or  gg G", "top, bottom", K_ENDS_VIM),
             ],
@@ -704,12 +702,8 @@ static TOC_EDIT_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "While you edit a field",
             rows: &[
-                HelpRow::key(
-                    "enter",
-                    "save it and write it to the addon's files",
-                    K_ENTER,
-                ),
-                HelpRow::key("esc", "keep what you had", K_ESC),
+                HelpRow::key("enter", "save and write to the addon's files", K_ENTER),
+                HelpRow::key("esc", "cancel", K_ESC),
                 HelpRow::key(
                     "tab",
                     "fill in the next suggestion (Category)",
