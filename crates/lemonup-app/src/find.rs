@@ -561,16 +561,7 @@ pub(crate) fn link_exact_matches(
         }
     }
     let managed = CurseForgeManaged::read(addon_dir, curseforge_files);
-    let curseforge = stored
-        .iter()
-        .filter(|row| {
-            managed.manages_any(
-                std::iter::once(row.folder.as_str())
-                    .chain(row.owned_folders.iter().map(|owned| owned.name.as_str())),
-            )
-        })
-        .map(|row| row.name.clone())
-        .collect();
+    let curseforge = managed.managed_row_names(&stored);
     Ok(LinkOutcome::Linked {
         rows: stored,
         unconfirmed,

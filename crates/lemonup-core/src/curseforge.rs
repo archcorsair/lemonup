@@ -22,6 +22,8 @@ use directories::BaseDirs;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
+use crate::domain::AddonRecord;
+
 /// The file CurseForge keeps its game instances in, under its own folder.
 const RECORD_PATH: [&str; 4] = [
     "CurseForge",
@@ -125,6 +127,34 @@ impl CurseForgeManaged {
     /// Whether CurseForge manages any of `folders`.
     pub fn manages_any<'a>(&self, folders: impl IntoIterator<Item = &'a str>) -> bool {
         folders.into_iter().any(|folder| self.manages(folder))
+    }
+
+    /// The names of the addons CurseForge manages, in order. Each addon is
+    /// a name and every folder it owns; one managed folder is enough.
+    pub fn managed_names<N, F>(&self, addons: impl IntoIterator<Item = (N, F)>) -> Vec<N>
+    where
+        F: IntoIterator,
+        F::Item: AsRef<str>,
+    {
+        addons
+            .into_iter()
+            .filter_map(|(name, folders)| {
+                folders
+                    .into_iter()
+                    .any(|folder| self.manages(folder.as_ref()))
+                    .then_some(name)
+            })
+            .collect()
+    }
+
+    /// The names of the linked `rows` CurseForge manages, counting each
+    /// row's own folder and the folders it owns.
+    pub fn managed_row_names(&self, rows: &[AddonRecord]) -> Vec<String> {
+        self.managed_names(rows.iter().map(|row| {
+            let folders = std::iter::once(row.folder.as_str())
+                .chain(row.owned_folders.iter().map(|owned| owned.name.as_str()));
+            (row.name.clone(), folders)
+        }))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -566,5 +596,62 @@ mod tests {
             super::CurseForgeManaged::read(&game.addons, std::slice::from_ref(&game.record));
         assert!(managed.manages("FromTheCopy"));
         assert!(!managed.manages("PathOnly"));
+    }
+
+    /// A game whose record lists these addons for the flavor folder.
+    fn managed_with(addons: Vec<serde_json::Value>) -> CurseForgeManaged {
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        write(&game.record, &json!([instance(GUID, &game.flavor, addons)]));
+        managed(&game)
+    }
+
+    #[test]
+    fn managed_names_match_folders_without_case() {
+        let managed = managed_with(vec![addon(&["DBM-Core"], false)]);
+        let names = managed.managed_names([
+            ("Deadly Boss Mods", vec!["dbm-core"]),
+            ("Clique", vec!["Clique"]),
+        ]);
+        assert_eq!(names, ["Deadly Boss Mods"]);
+    }
+
+    #[test]
+    fn managed_names_skip_addons_ignored_in_curseforge() {
+        let managed = managed_with(vec![addon(&["Pawn"], true), addon(&["Spy"], false)]);
+        let names = managed.managed_names([("Pawn", ["Pawn"]), ("Spy", ["Spy"])]);
+        assert_eq!(names, ["Spy"]);
+    }
+
+    #[test]
+    fn managed_names_count_an_addon_once_when_any_folder_is_managed() {
+        let managed = managed_with(vec![addon(&["Pawn_Extra"], false)]);
+        let names = managed.managed_names([
+            ("Pawn", vec!["Pawn", "Pawn_Extra", "Pawn_Other"]),
+            ("Clique", vec!["Clique", "Clique_Extra"]),
+        ]);
+        assert_eq!(names, ["Pawn"]);
+        assert!(
+            managed
+                .managed_names([("Nothing", Vec::<&str>::new())])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn managed_row_names_check_the_own_folder_and_the_owned_ones() {
+        use crate::domain::{OwnedFolder, SourceKind};
+
+        let managed = managed_with(vec![addon(&["Pawn_Extra", "SPY"], false)]);
+        let mut pawn = AddonRecord::new("Pawn", "Pawn", SourceKind::GitHub);
+        pawn.owned_folders = vec![OwnedFolder {
+            name: "pawn_extra".to_string(),
+        }];
+        let spy = AddonRecord::new("Spy", "spy", SourceKind::GitHub);
+        let clique = AddonRecord::new("Clique", "Clique", SourceKind::GitHub);
+        assert_eq!(
+            managed.managed_row_names(&[pawn, clique, spy]),
+            ["Pawn", "Spy"]
+        );
     }
 }

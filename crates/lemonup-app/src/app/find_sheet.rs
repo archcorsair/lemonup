@@ -991,14 +991,12 @@ impl App {
             return Vec::new();
         };
         let managed = self.curseforge_now();
-        results
-            .picked()
-            .into_iter()
-            .filter(|(candidate, _)| {
-                managed.manages_any(candidate.folders.iter().map(String::as_str))
-            })
-            .map(|(candidate, _)| candidate.name.clone())
-            .collect()
+        managed.managed_names(
+            results
+                .picked()
+                .into_iter()
+                .map(|(candidate, _)| (candidate.name.clone(), candidate.folders.iter())),
+        )
     }
 
     /// The question enter on "Link" asks, while it is open.
@@ -1541,16 +1539,7 @@ pub(crate) fn link_found(
         }
     }
     let managed = CurseForgeManaged::read(addon_dir, curseforge_files);
-    let curseforge = stored
-        .iter()
-        .filter(|row| {
-            managed.manages_any(
-                std::iter::once(row.folder.as_str())
-                    .chain(row.owned_folders.iter().map(|owned| owned.name.as_str())),
-            )
-        })
-        .map(|row| row.name.clone())
-        .collect();
+    let curseforge = managed.managed_row_names(&stored);
     Ok(FindLinkOutcome {
         rows: stored,
         unconfirmed,
