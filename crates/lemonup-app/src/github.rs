@@ -178,6 +178,8 @@ pub(crate) async fn update_github_addon(
             tracked,
             remote_version.as_deref(),
             Some(resolved.metadata.html_url.clone()),
+            // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
+            None,
             dry_run,
         )?;
         return Ok(GithubUpdateSummary {

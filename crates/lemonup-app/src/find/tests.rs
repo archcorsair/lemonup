@@ -233,6 +233,7 @@ fn link_plain(
         GameFlavor::Forever,
         report,
         yes,
+        &[],
     )?)
 }
 
@@ -476,6 +477,7 @@ fn found(source: FindSource, name: &str, folder: &str, version: &str, latest: &s
         source_id: "1".to_string(),
         source_url: String::new(),
         name: name.to_string(),
+        source_name: Some(name.to_string()),
         author: None,
         parent_folder: folder.to_string(),
         folders: vec![folder.to_string()],
@@ -1123,6 +1125,7 @@ fn find_link_without_yes_prints_a_refusal_that_says_what_moves() {
         GameFlavor::Forever,
         &report,
         false,
+        &[],
     )
     .expect("a refusal is an outcome");
 
@@ -1187,6 +1190,7 @@ fn find_link_with_yes_ends_with_what_was_linked_and_what_is_ready_to_update() {
         GameFlavor::Forever,
         &report,
         true,
+        &[],
     )
     .expect("linked");
 
@@ -1200,11 +1204,92 @@ fn find_link_with_yes_ends_with_what_was_linked_and_what_is_ready_to_update() {
 }
 
 #[test]
+fn find_link_closing_names_the_linked_addons_curseforge_also_manages() {
+    const GUID: &str = "00000000-0000-4000-8000-0000000000bb";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let flavor = dir.path().join("_forever_");
+    let addons = flavor.join("Interface").join("AddOns");
+    fs::create_dir_all(&addons).expect("addons");
+    let database = StateDatabase::open(dir.path().join("state.sqlite")).expect("database");
+    let record = dir.path().join("AddonGameInstance.json");
+    let mut sandbox = Sandbox {
+        _dir: dir,
+        addons,
+        database,
+    };
+    let report = report_for(&sandbox);
+    fs::write(flavor.join(".curseclient"), GUID).expect("client");
+    let json = serde_json::json!([{
+        "guid": GUID,
+        "installPath": flavor,
+        "installedAddons": [
+            { "preferenceIsIgnored": false, "installedFile": { "modules": [{ "foldername": "pawn" }] } },
+            { "preferenceIsIgnored": true, "installedFile": { "modules": [{ "foldername": "GatherMate2" }] } },
+        ],
+    }]);
+    fs::write(&record, serde_json::to_vec(&json).expect("json")).expect("record");
+
+    let outcome = link_exact_matches(
+        &mut sandbox.database,
+        &sandbox.addons,
+        GameFlavor::Forever,
+        &report,
+        true,
+        &[record],
+    )
+    .expect("linked");
+    let LinkOutcome::Linked { curseforge, .. } = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(curseforge, &["Pawn"]);
+    let lines = human_closing(
+        &report,
+        &full_names(),
+        Some(outcome),
+        Paint::PLAIN,
+        Paint::PLAIN,
+    )
+    .expect("closing");
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("CurseForge also manages Pawn. Mark it Ignored there (Install Settings).")
+    );
+
+    let plain = plain_link_lines(LinkOutcome::Linked {
+        rows: Vec::new(),
+        unconfirmed: Vec::new(),
+        curseforge: vec!["Pawn".to_string()],
+    })
+    .expect("plain");
+    assert_eq!(
+        plain.last().map(String::as_str),
+        Some(
+            "find link note: curseforge_manages=Pawn, mark it Ignored in CurseForge \
+             (Install Settings)"
+        )
+    );
+    let plain = plain_link_lines(LinkOutcome::Linked {
+        rows: Vec::new(),
+        unconfirmed: Vec::new(),
+        curseforge: vec!["Pawn".to_string(), "Spy".to_string()],
+    })
+    .expect("plain");
+    assert_eq!(
+        plain.last().map(String::as_str),
+        Some(
+            "find link note: curseforge_manages=Pawn|Spy, mark them Ignored in CurseForge \
+             (Install Settings)"
+        )
+    );
+}
+
+#[test]
 fn a_link_the_database_does_not_hold_is_said_not_claimed() {
     let linked = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
     let outcome = LinkOutcome::Linked {
         rows: vec![linked],
         unconfirmed: vec!["Spy".to_string()],
+        curseforge: Vec::new(),
     };
 
     let lines = human_closing(
@@ -1422,6 +1507,7 @@ fn the_closing_line_and_the_refusal_are_bold() {
     let linked = LinkOutcome::Linked {
         rows: vec![AddonRecord::new("Pawn", "Pawn", SourceKind::Wago)],
         unconfirmed: Vec::new(),
+        curseforge: Vec::new(),
     };
     let lines = human_closing(
         &full_report(),

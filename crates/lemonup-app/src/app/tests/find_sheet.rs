@@ -23,6 +23,7 @@ fn found(label: FindLabel, source: FindSource, name: &str, folders: &[&str]) -> 
         source_id: format!("{name}-id"),
         source_url: format!("https://example.invalid/{name}"),
         name: name.to_string(),
+        source_name: Some(name.to_string()),
         author: None,
         parent_folder: folders[0].to_string(),
         folders: folders.iter().map(|folder| folder.to_string()).collect(),
@@ -452,6 +453,65 @@ fn enter_on_a_choose_one_row_picks_each_candidate_then_none() {
     assert_eq!(results(&app).picks[4], None);
 }
 
+/// The key line at the bottom of the screen, which holds the enter hint.
+fn enter_hint(shown: &str) -> String {
+    let line = shown
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| panic!("no key line:\n{shown}"))
+        .to_string();
+    assert!(line.contains("enter "), "no enter hint:\n{shown}");
+    line
+}
+
+#[test]
+fn the_enter_hint_says_replace_when_only_replacements_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // Unselect the link, then select Questie as a replacement.
+    key(&mut app, KeyCode::Char(' '));
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Replace 1 addon"), "{shown}");
+    let hint = enter_hint(&shown);
+    assert!(hint.contains("enter replace"), "{shown}");
+    assert!(!hint.contains("link"), "{shown}");
+}
+
+#[test]
+fn the_enter_hint_says_link_and_replace_for_a_mixed_selection() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    // The link stays selected; add Questie as a replacement.
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon, replace 1"), "{shown}");
+    assert!(
+        enter_hint(&shown).contains("enter link and replace"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_enter_hint_says_link_when_only_links_are_selected() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find_results(&mut app);
+    key(&mut app, KeyCode::End);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 1 addon"), "{shown}");
+    assert!(enter_hint(&shown).contains("enter link"), "{shown}");
+    assert!(!enter_hint(&shown).contains("replace"), "{shown}");
+}
+
 #[test]
 fn a_partial_match_asks_first_then_replaces_through_the_wago_install() {
     let mut app = app_for_tests(ShellMode::Dashboard);
@@ -559,6 +619,126 @@ fn the_link_question_names_every_folder_scrolls_and_only_y_confirms() {
     assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Find));
 }
 
+#[test]
+fn the_link_question_names_the_picks_curseforge_also_manages_and_keeps_it_in_view() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let folders = (0..30).map(|n| format!("Pack_{n:02}")).collect::<Vec<_>>();
+    let refs = folders.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut long = report();
+    long.results[2] = result(
+        FindLabel::Exact,
+        "Pack_00",
+        vec![found(FindLabel::Exact, FindSource::Wago, "Pack", &refs)],
+    );
+    open_find(&mut app);
+    let _game = use_curseforge(&mut app, &["pack_29"]);
+    set_results(&mut app, long);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let Some(Question::LinkFound { curseforge, .. }) = app.active_question() else {
+        panic!("no question");
+    };
+    assert_eq!(curseforge, ["Pack"]);
+    app.note_question_shown(Instant::now());
+    // The note shows while the long folder list scrolls under it.
+    for _ in 0..3 {
+        let shown = screen(&mut app, 80, 24);
+        assert!(shown.contains("Link 1 addon?"), "{shown}");
+        assert!(shown.contains("CurseForge also manages Pack."), "{shown}");
+        assert!(shown.contains("y  link"), "{shown}");
+        for _ in 0..12 {
+            key(&mut app, KeyCode::Down);
+        }
+    }
+    key(&mut app, KeyCode::Char('n'));
+    assert!(app.find.question_curseforge.is_empty());
+
+    // CurseForge manages none of the picks: no note.
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    open_find(&mut app);
+    let _game = use_curseforge(&mut app, &["Lonely"]);
+    set_results(&mut app, report());
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        app.active_question(),
+        Some(Question::LinkFound { ref curseforge, .. }) if curseforge.is_empty()
+    ));
+    let shown = screen(&mut app, 80, 24);
+    assert!(!shown.contains("CurseForge"), "{shown}");
+}
+
+#[test]
+fn the_link_result_line_says_which_linked_addons_curseforge_also_manages() {
+    let (_game, addons, record) = curseforge_game(&["Pawn"]);
+    write_addon(&addons, "Clique", "1.0");
+    write_addon(&addons, "Pawn", "2.0");
+    let db = addons.join("..").join("state.sqlite");
+    let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
+    let pawn = found(FindLabel::Exact, FindSource::Wago, "Pawn", &["Pawn"]);
+    let links = [clique, pawn];
+
+    let outcome = link_found(&db, &addons, &links, &[record]).expect("linked");
+    assert_eq!(outcome.curseforge, ["Pawn"]);
+
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    app.find.linking = true;
+    apply_all(
+        &mut app,
+        AppMessage::BackgroundTask(AppTaskEvent::Find(FindTaskEvent::Linked(Ok(Box::new(
+            outcome,
+        ))))),
+    );
+    assert!(
+        app.status_line.text.contains(
+            "Linked 2 addons: 2 up to date. CurseForge also manages Pawn. \
+                 Mark it Ignored there."
+        ),
+        "{}",
+        app.status_line.text
+    );
+
+    // Without CurseForge's record nothing is said about it.
+    let db = addons.join("..").join("other.sqlite");
+    let outcome = link_found(&db, &addons, &links, &[]).expect("linked");
+    assert_eq!(outcome.rows.len(), 2);
+    assert!(outcome.curseforge.is_empty());
+    let (_, text) = crate::app::find_sheet::linked_status(&outcome);
+    assert!(!text.contains("CurseForge"), "{text}");
+}
+
+#[test]
+fn a_link_question_naming_many_curseforge_addons_still_shows_its_answers_at_80x24() {
+    let mut app = app_for_tests(ShellMode::Dashboard);
+    let names = (0..40).map(|n| format!("Mod{n:02}")).collect::<Vec<_>>();
+    let mut many = report();
+    many.results = names
+        .iter()
+        .map(|name| {
+            result(
+                FindLabel::Exact,
+                name,
+                vec![found(FindLabel::Exact, FindSource::Wago, name, &[name])],
+            )
+        })
+        .collect();
+    open_find(&mut app);
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let _game = use_curseforge(&mut app, &refs);
+    set_results(&mut app, many);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Enter);
+    let Some(Question::LinkFound { curseforge, .. }) = app.active_question() else {
+        panic!("no question");
+    };
+    assert_eq!(curseforge.len(), 40);
+    let shown = screen(&mut app, 80, 24);
+    assert!(shown.contains("Link 40 addons?"), "{shown}");
+    assert!(shown.contains("and 37 more."), "{shown}");
+    assert!(shown.contains("y  link"), "{shown}");
+    assert!(shown.contains("n  skip"), "{shown}");
+}
+
 fn write_addon(addons: &std::path::Path, folder: &str, version: &str) {
     let dir = addons.join(folder);
     std::fs::create_dir_all(&dir).expect("addon dir");
@@ -590,7 +770,7 @@ fn linking_writes_rows_and_the_result_line_reads_them_from_the_database() {
     pawn.latest_version = Some("2.1".to_string());
     let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
 
-    let outcome = link_found(&db, &addons, &[clique, pawn]).expect("linked");
+    let outcome = link_found(&db, &addons, &[clique, pawn], &[]).expect("linked");
     let stored = StateDatabase::read_addons(&db).expect("rows");
     let row = |folder: &str| {
         stored
@@ -649,6 +829,7 @@ fn linking_writes_rows_and_the_result_line_reads_them_from_the_database() {
             FindLinkOutcome {
                 rows: Vec::new(),
                 unconfirmed: vec!["Pawn".to_string()],
+                curseforge: Vec::new(),
                 sync: None,
             },
         ))))),
@@ -805,7 +986,7 @@ fn the_welcome_card_offers_capital_f_next_to_p_at_80x24() {
             "{shown}"
         );
         assert!(shown.contains("Press p to add another game."), "{shown}");
-        assert!(shown.contains("d hide this"), "{shown}");
+        assert!(shown.contains("d hide"), "{shown}");
         assert!(shown.contains("Alpha"), "{shown}");
     }
     assert!(app.key_table(138).iter().any(|hint| hint.key == "F"));
@@ -992,7 +1173,7 @@ fn a_link_that_cant_read_the_folder_says_nothing_was_linked_once() {
         .join("AddOns");
     let db = temp.path().join("state.sqlite");
     let clique = found(FindLabel::Exact, FindSource::Wago, "Clique", &["Clique"]);
-    let error = link_found(&db, &addons, &[clique]).expect_err("no AddOns folder");
+    let error = link_found(&db, &addons, &[clique], &[]).expect_err("no AddOns folder");
     assert!(
         error.starts_with("LemonUp couldn't read your AddOns folder"),
         "{error}"

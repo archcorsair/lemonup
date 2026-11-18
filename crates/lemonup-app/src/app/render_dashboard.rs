@@ -98,6 +98,17 @@ pub(super) struct ListColumns {
     pub(super) wide: bool,
 }
 
+/// What each addon list column needs to show every cell in full, trailing
+/// space included. Measured over all addons, so columns stay put while the
+/// list scrolls. Zero means "no need beyond the base width".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ColumnNeeds {
+    pub(super) name: u16,
+    pub(super) version: u16,
+    pub(super) author: u16,
+    pub(super) source: u16,
+}
+
 impl ListColumns {
     /// The widths from the design for a list `width` columns wide (the whole
     /// window today; a docked Details panel would take its share first and
@@ -105,9 +116,11 @@ impl ListColumns {
     /// Version 22, Author 26, Source 13. Below: Addon 27, Status 21,
     /// Version 19, Source 8 and no Author.
     ///
-    /// Extra width grows Addon to 40, then Author to 36, then Version to 26.
-    /// Anything left stays empty at the right edge: columns never stretch.
-    pub(super) fn for_width(width: u16) -> Self {
+    /// Extra width goes to the columns whose cells are cut, each up to its
+    /// `needs` and no further: Version, then Addon, then Author, then
+    /// Source. Anything left stays empty at the right edge: columns never
+    /// stretch past what they show.
+    pub(super) fn for_width(width: u16, needs: ColumnNeeds) -> Self {
         let wide = width >= WIDE_FRAME_MIN_WIDTH;
         let mut columns = if wide {
             Self {
@@ -135,23 +148,24 @@ impl ListColumns {
             return columns;
         }
         let mut extra = width - base;
-        let mut grow = |column: &mut u16, cap: u16| {
-            let step = cap.saturating_sub(*column).min(extra);
+        let mut grow = |column: &mut u16, need: u16| {
+            let step = need.saturating_sub(*column).min(extra);
             *column += step;
             extra -= step;
         };
-        grow(&mut columns.name, 40);
+        grow(&mut columns.version, needs.version);
+        grow(&mut columns.name, needs.name);
         if columns.author > 0 {
-            grow(&mut columns.author, 36);
+            grow(&mut columns.author, needs.author);
         }
-        grow(&mut columns.version, 26);
+        grow(&mut columns.source, needs.source);
         columns
     }
 
     /// The list beside docked Details: Addon, Status and Version only. At
     /// 78 columns (a 120 column window): Addon 30, Status 21, Version 22.
-    /// Extra width grows Addon to 40, then Version to 26.
-    pub(super) fn for_docked(width: u16) -> Self {
+    /// Extra width goes to Version, then Addon, each up to its `needs`.
+    pub(super) fn for_docked(width: u16, needs: ColumnNeeds) -> Self {
         let mut columns = Self {
             name: 30,
             status: 21,
@@ -166,13 +180,13 @@ impl ListColumns {
             return columns;
         }
         let mut extra = width - base;
-        let mut grow = |column: &mut u16, cap: u16| {
-            let step = cap.saturating_sub(*column).min(extra);
+        let mut grow = |column: &mut u16, need: u16| {
+            let step = need.saturating_sub(*column).min(extra);
             *column += step;
             extra -= step;
         };
-        grow(&mut columns.name, 40);
-        grow(&mut columns.version, 26);
+        grow(&mut columns.version, needs.version);
+        grow(&mut columns.name, needs.name);
         columns
     }
 
@@ -526,9 +540,12 @@ impl App {
             (area.width, 0)
         };
         let columns = if docked {
-            ListColumns::for_docked(list_width)
+            ListColumns::for_docked(list_width, self.dashboard_column_needs(true))
         } else {
-            ListColumns::for_width(area.width)
+            ListColumns::for_width(
+                area.width,
+                self.dashboard_column_needs(area.width >= WIDE_FRAME_MIN_WIDTH),
+            )
         };
         let narrow = |row: Rect| Rect {
             width: list_width,
@@ -934,6 +951,39 @@ impl App {
         vec![Line::from(top), Line::from(row), Line::from(bottom)]
     }
 
+    /// The widest cell of every column over all addons (and the folder rows
+    /// that are showing), plus the header, so wide windows show it in full.
+    pub(super) fn dashboard_column_needs(&self, wide: bool) -> ColumnNeeds {
+        let arrow = self.ui_theme.symbols.arrow;
+        // Cells are cut one column short of their width, so each needs one
+        // more than its text. A sorted header adds a space and an indicator.
+        // Text is measured in terminal cells: CJK characters take two each.
+        let cells = |text: &str| u16::try_from(Span::raw(text).width() + 1).unwrap_or(u16::MAX);
+        let mut needs = ColumnNeeds {
+            name: cells("Addon  "),
+            version: cells("Version"),
+            author: cells("Author  "),
+            source: cells("Source  "),
+        };
+        for item in &self.dashboard.items {
+            needs.name = needs.name.max(cells(&item.name));
+            let version = VersionCell::for_item(item, wide).text(arrow);
+            needs.version = needs.version.max(cells(&version));
+            let author = item.author.as_deref().map(str::trim).unwrap_or_default();
+            needs.author = needs.author.max(cells(author));
+            let source = dashboard_source_name(item.source, wide);
+            needs.source = needs.source.max(cells(source));
+        }
+        for row in &self.dashboard.rows {
+            if matches!(row.kind, DashboardRowKind::OwnedChild { .. }) {
+                // Two spaces and the connector come before the folder name.
+                let child = format!("  {}{}", child_row_prefix(row), row.name);
+                needs.name = needs.name.max(cells(&child));
+            }
+        }
+        needs
+    }
+
     pub(super) fn dashboard_column_header_line(&self, columns: ListColumns) -> Line<'static> {
         let roles = self.ui_theme.roles;
         let sort = self.dashboard.sort_config();
@@ -1079,15 +1129,8 @@ impl App {
                 Line::from(vec![
                     Span::styled("Pick an addon and press ", text),
                     key("f"),
-                    Span::styled(
-                        " to find it online. Do that once per addon and LemonUp keeps it updated.",
-                        text,
-                    ),
+                    Span::styled(" to find it online.", text),
                 ]),
-                Line::from(Span::styled(
-                    "Your addon settings are never touched.",
-                    muted,
-                )),
             ]
             .into_iter()
             // `F` looks them all up at once.
@@ -1119,7 +1162,7 @@ impl App {
                 "d",
                 Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" hide this", muted),
+            Span::styled(" hide", muted),
         ];
         let keys_width: usize = keys.iter().map(Span::width).sum();
         let last = lines.last().map_or(0, Line::width);
@@ -1466,7 +1509,7 @@ impl App {
                 Style::default().fg(roles.dim),
             ));
         }
-        // "backed up your game settings first", once the backup ran.
+        // "settings backed up", once the backup ran.
         if let Some(note) = self.dashboard.job_note() {
             spans.push(Span::raw("   "));
             spans.push(Span::styled(note.to_string(), roles.muted));
@@ -1529,7 +1572,7 @@ impl App {
                         ),
                         dot(),
                         key("U", roles.lemon),
-                        Span::styled(" updates them all", roles.muted),
+                        Span::styled(" update all", roles.muted),
                     ]);
                 }
             }

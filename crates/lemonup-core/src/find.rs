@@ -668,6 +668,9 @@ pub struct FoundAddon {
     pub source_id: String,
     pub source_url: String,
     pub name: String,
+    /// The addon's name as the source gives it, which a link stores. `None` when `name` comes
+    /// from the addon's own TOC (a Wago.io ID its TOC names that Wago.io did not answer for).
+    pub source_name: Option<String>,
     pub author: Option<String>,
     /// The folder the linked row is listed under.
     pub parent_folder: String,
@@ -963,6 +966,7 @@ fn empty_found(source: FindSource, source_id: &str, source_url: String, name: &s
         source_id: source_id.to_string(),
         source_url,
         name: name.to_string(),
+        source_name: Some(name.to_string()),
         author: None,
         parent_folder: String::new(),
         folders: Vec::new(),
@@ -1205,6 +1209,8 @@ pub fn match_addons(
                 && !claims_folder(&claims, FindSource::Wago, id, folder)
             {
                 let mut found = empty_found(FindSource::Wago, id, wago_url(id), &name);
+                // The name is the local TOC Title, not Wago.io's.
+                found.source_name = None;
                 found.folders = current.clone();
                 // Wago.io answered and its hashes of this folder matched nothing: say so, rather
                 // than claim the files weren't checked.
@@ -1696,6 +1702,10 @@ pub fn link_record(found: &FoundAddon, parent: &ScannedAddon, now: OffsetDateTim
     record.author = found.author.clone().or_else(|| parent.author.clone());
     record.interface = parent.interface.clone();
     record.source_url = Some(found.source_url.clone());
+    record.source_name = found
+        .source_name
+        .as_deref()
+        .and_then(crate::domain::source_name);
     record.required_deps = parent.required_deps.clone();
     record.optional_deps = parent.optional_deps.clone();
     record.embedded_libs = parent.embedded_libs.clone();

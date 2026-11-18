@@ -1,13 +1,16 @@
 pub mod binding;
 pub mod config;
+pub mod curseforge;
 pub mod domain;
 pub mod error;
 pub mod events;
 pub mod find;
 pub mod fingerprint;
+pub mod marquee;
 pub mod paths;
 pub mod profiles;
 pub mod scan;
+pub mod search_rank;
 pub mod shared;
 pub mod storage;
 pub mod toc_conditions;

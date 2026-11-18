@@ -300,9 +300,7 @@ impl App {
         };
         if !long {
             let text = match field {
-                ConfigField::WagoApiKey if editing => {
-                    "enter saves it, esc keeps the one you had".to_string()
-                }
+                ConfigField::WagoApiKey if editing => "enter save, esc cancel".to_string(),
                 ConfigField::WagoApiKey
                     if self.wago_key_from_environment(&self.config_pane.draft) =>
                 {
@@ -363,11 +361,11 @@ impl App {
         let plain = |text: &str| vec![Span::styled(text.to_string(), muted)];
         let text: Vec<Span<'static>> = match field {
             ConfigField::WagoApiKey if editing => vec![
-                Span::styled("Type or paste your key, then press ", muted),
+                Span::styled("Paste your key, then press ", muted),
                 Span::styled("enter", key),
-                Span::styled(" to save it. Leave the box empty to remove it. ", muted),
+                Span::styled(" to save. An empty box removes the key. ", muted),
                 Span::styled("esc", key),
-                Span::styled(" keeps the one you had.", muted),
+                Span::styled(" cancel.", muted),
             ],
             ConfigField::WagoApiKey if self.wago_key_from_environment(&self.config_pane.draft) => {
                 vec![

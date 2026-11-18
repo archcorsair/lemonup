@@ -1,7 +1,7 @@
 //! The question dialog: one centered box for every yes or no question.
 //!
 //! The title is the question, the body names exactly what is affected, and
-//! the two answers are written as outcomes ("keep them"). `y` says yes; `n`,
+//! the two answers are written as outcomes ("keep"). `y` says yes; `n`,
 //! `esc` and `q` say no; `enter` does nothing, because it is what people hit
 //! by reflex. The border is red for delete and restore only.
 
@@ -41,11 +41,13 @@ pub(super) enum Question {
     },
     /// `direct` is a GitHub, WoWInterface or TukUI install, `source` its
     /// label; otherwise Wago.io. `folders` are exactly what a yes replaces.
+    /// `curseforge`: CurseForge also manages one of `folders`.
     ReplaceAddon {
         name: String,
         source: &'static str,
         direct: bool,
         folders: Vec<String>,
+        curseforge: bool,
     },
     /// Saving a .toc field of a "Not linked" addon. `folders` are exactly
     /// the folders whose .toc files change; `restore` when the field goes
@@ -74,13 +76,15 @@ pub(super) enum Question {
     /// Enter on "Link" in the Find sheet. `taken` are every folder the
     /// linked addons take over, `replaced` every folder on disk replaced now
     /// with the source's copy, and `added` the source's folders that aren't
-    /// on disk yet. The list scrolls from `offset`.
+    /// on disk yet. `curseforge` names the picked addons CurseForge also
+    /// manages. The list scrolls from `offset`.
     LinkFound {
         links: usize,
         replaces: usize,
         taken: Vec<String>,
         replaced: Vec<String>,
         added: Vec<String>,
+        curseforge: Vec<String>,
         offset: u16,
     },
 }
@@ -125,19 +129,19 @@ impl Question {
     /// What `y` and `n` do, as outcomes.
     pub(super) fn answers(&self) -> (&'static str, &'static str) {
         match self {
-            Self::DeleteAddons(targets) if targets.len() == 1 => ("delete it", "keep it"),
-            Self::DeleteAddons(_) => ("delete them", "keep them"),
-            Self::RestoreBackup { .. } => ("restore", "keep what I have now"),
-            Self::DeleteBackup { .. } => ("delete it", "keep it"),
-            Self::ReplaceAddon { .. } => ("replace it", "leave it alone"),
-            Self::ChangeTocFiles { .. } => ("change them", "leave them alone"),
-            Self::QuitWhileUpdating { .. } => ("quit", "keep going"),
-            Self::QuitSetup { rerun: false } => ("quit LemonUp", "keep setting up"),
-            Self::QuitSetup { rerun: true } => ("back to my addons", "keep setting up"),
-            Self::RemoveGame { .. } => ("remove it", "keep it"),
-            Self::LinkFound { replaces: 0, .. } => ("link them", "leave them alone"),
-            Self::LinkFound { links: 0, .. } => ("replace them", "leave them alone"),
-            Self::LinkFound { .. } => ("link and replace", "leave them alone"),
+            Self::DeleteAddons(targets) if targets.len() == 1 => ("delete", "keep"),
+            Self::DeleteAddons(_) => ("delete", "keep"),
+            Self::RestoreBackup { .. } => ("restore", "keep"),
+            Self::DeleteBackup { .. } => ("delete", "keep"),
+            Self::ReplaceAddon { .. } => ("replace", "keep"),
+            Self::ChangeTocFiles { .. } => ("change", "keep"),
+            Self::QuitWhileUpdating { .. } => ("quit", "continue"),
+            Self::QuitSetup { rerun: false } => ("quit", "continue"),
+            Self::QuitSetup { rerun: true } => ("back", "continue"),
+            Self::RemoveGame { .. } => ("remove", "keep"),
+            Self::LinkFound { replaces: 0, .. } => ("link", "skip"),
+            Self::LinkFound { links: 0, .. } => ("replace", "skip"),
+            Self::LinkFound { .. } => ("link and replace", "skip"),
         }
     }
 
@@ -279,8 +283,7 @@ impl Question {
             } => {
                 let mut lines = vec![Line::from(Span::styled(
                     format!(
-                        "{name} is already installed. Installing it from {source} replaces \
-                         the files in your AddOns folder, and LemonUp keeps it updated."
+                        "{name} is already installed. Installing it from {source} replaces it."
                     ),
                     text,
                 ))];
@@ -363,10 +366,7 @@ impl Question {
                     None => "LemonUp is still working out which addons to update.".to_string(),
                 };
                 vec![Line::from(Span::styled(
-                    format!(
-                        "{first} If you quit now, the update stops and the addons it has \
-                         not finished stay as they are."
-                    ),
+                    format!("{first} If you quit now, the update stops."),
                     text,
                 ))]
             }
@@ -381,7 +381,7 @@ impl Question {
             Self::RemoveGame { game, backups } => vec![
                 Line::from(Span::styled(
                     format!(
-                        "LemonUp forgets the addon list and settings it keeps for {game}. Its addons and game settings stay as they are."
+                        "LemonUp forgets the addon list and settings it keeps for {game}. It doesn't delete any addons or game settings."
                     ),
                     text,
                 )),
@@ -402,14 +402,12 @@ impl Question {
                 if *links > 0 {
                     lines.push(Line::from(Span::styled(
                         if *links == 1 {
-                            "LemonUp links 1 addon to its source and keeps it updated. Nothing \
-                             on disk changes now. From now on, updates replace these folders:"
+                            "Link 1 addon to its source? Its updates replace these folders:"
                                 .to_string()
                         } else {
                             format!(
-                                "LemonUp links {links} addons to their source and keeps them \
-                                 updated. Nothing on disk changes now. From now on, updates \
-                                 replace these folders:"
+                                "Link {links} addons to their source? Their updates replace \
+                                 these folders:"
                             )
                         },
                         text,
@@ -450,7 +448,25 @@ impl Question {
         }
     }
 
-    /// The answers row: `    y  delete them          n  keep them`.
+    /// The note under the body that the folders are also CurseForge's, so
+    /// its updates would fight LemonUp's copy.
+    fn curseforge_note(&self, roles: ColorRoles) -> Option<Line<'static>> {
+        let text = match self {
+            Self::ReplaceAddon {
+                curseforge: true, ..
+            } => lemonup_core::curseforge::HINT.to_string(),
+            Self::LinkFound { curseforge, .. } if !curseforge.is_empty() => {
+                lemonup_core::curseforge::hint_naming(curseforge)
+            }
+            _ => return None,
+        };
+        Some(Line::from(Span::styled(
+            text,
+            Style::default().fg(roles.amber),
+        )))
+    }
+
+    /// The answers row: `    y  delete          n  keep`.
     fn answer_line(&self, roles: ColorRoles) -> Line<'static> {
         let (yes, no) = self.answers();
         let yes_key = if self.danger() {
@@ -480,9 +496,14 @@ impl Question {
         if let Self::LinkFound { offset, .. } = self {
             return self.scrolled_lines(roles, width, max_rows, *offset).0;
         }
+        let note = self.curseforge_note(roles);
         let build = |names: usize| {
             let mut lines = vec![Line::from("")];
             lines.extend(wrap_lines(&self.body_lines(roles, names), width));
+            if let Some(note) = &note {
+                lines.push(Line::from(""));
+                lines.extend(wrap_lines(std::slice::from_ref(note), width));
+            }
             lines.push(Line::from(""));
             lines.extend(wrap_lines(&[self.answer_line(roles)], width));
             lines.push(Line::from(""));
@@ -517,9 +538,15 @@ impl Question {
     ) -> (Vec<Line<'static>>, u16) {
         let body = wrap_lines(&self.body_lines(roles, usize::MAX), width);
         let answers = wrap_lines(&[self.answer_line(roles)], width);
+        // The note stays in view under the list, a blank row above it.
+        let note = self
+            .curseforge_note(roles)
+            .map(|note| wrap_lines(&[note], width))
+            .unwrap_or_default();
+        let note_rows = if note.is_empty() { 0 } else { note.len() + 1 };
         // A blank row above the body, and above and below the answers.
         let room = usize::from(max_rows)
-            .saturating_sub(answers.len() + 3)
+            .saturating_sub(answers.len() + 3 + note_rows)
             .max(1);
         let mut lines = vec![Line::from("")];
         let max = if body.len() <= room {
@@ -539,6 +566,10 @@ impl Question {
             lines.push(Line::from(Span::styled(where_, roles.muted)));
             u16::try_from(max).unwrap_or(u16::MAX)
         };
+        if !note.is_empty() {
+            lines.push(Line::from(""));
+            lines.extend(note);
+        }
         lines.push(Line::from(""));
         lines.extend(answers);
         lines.push(Line::from(""));
@@ -612,16 +643,19 @@ impl App {
                 source: "Wago.io",
                 direct: false,
                 folders: confirmation.inspection.existing_folders.clone(),
+                curseforge: confirmation.curseforge,
             });
         }
         if self.dashboard.detail_mode == DetailMode::Search
-            && let Some((request, name, folders)) = self.search_pane.pending_direct_replace()
+            && let Some((request, name, folders, curseforge)) =
+                self.search_pane.pending_direct_replace()
         {
             return Some(Question::ReplaceAddon {
                 name: name.to_string(),
                 source: request.provider.label(),
                 direct: true,
                 folders: folders.to_vec(),
+                curseforge,
             });
         }
         if let Some(question) = self.toc_apply_question() {

@@ -46,6 +46,8 @@ pub(crate) struct TukuiUpdateSummary {
 pub(crate) struct TukuiRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
+    /// The addon's name on TukUI, as TukUI gives it.
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -217,6 +219,7 @@ pub(crate) async fn fetch_tukui_remote_version(
     Ok(TukuiRemoteVersion {
         source_url: Some(entry.web_url.clone()),
         version: Some(entry.version.clone()),
+        name: Some(entry.name.clone()),
     })
 }
 
@@ -247,6 +250,7 @@ pub(crate) async fn update_tukui_addon(
             tracked,
             summary.remote_version.as_deref(),
             Some(addon.web_url.clone()),
+            Some(&addon.name),
             dry_run,
         )?;
         return Ok(summary);
@@ -668,6 +672,7 @@ fn build_managed_tukui_record(
     record.optional_deps = parent_metadata.optional_deps.clone();
     record.embedded_libs = parent_metadata.embedded_libs.clone();
     record.remote_version = Some(addon.version.clone());
+    record.source_name = lemonup_core::domain::source_name(&addon.name);
     record.last_checked_at = Some(OffsetDateTime::now_utc());
     record.set_managed_owned_folders(
         installed_folders
@@ -1062,7 +1067,7 @@ mod tests {
         let addon = super::TukuiAddon {
             slug: "elvui".to_string(),
             author: "Elv".to_string(),
-            name: "ElvUI".to_string(),
+            name: "|cff1784d1ElvUI|r &amp; Friends".to_string(),
             url: "https://api.tukui.org/v1/download/elvui/token".to_string(),
             version: "15.09".to_string(),
             web_url: "https://tukui.org/elvui".to_string(),
@@ -1074,6 +1079,8 @@ mod tests {
             build_managed_tukui_record(&addon, &scanned, &canonical_install_folders("elvui"));
         assert_eq!(record.source, SourceKind::Tukui);
         assert_eq!(record.remote_version.as_deref(), Some("15.09"));
+        assert_eq!(record.name, "ElvUI");
+        assert_eq!(record.source_name.as_deref(), Some("ElvUI & Friends"));
         assert_eq!(
             record
                 .owned_folders

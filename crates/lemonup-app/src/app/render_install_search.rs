@@ -6,6 +6,70 @@ use super::sheet::{SheetBody, SheetRoom, render_stateful, text_height, wrap_line
 use super::*;
 use crate::source_error::FolderClash;
 
+/// The Addon column never gets narrower than this to make room for the
+/// version.
+const SEARCH_ADDON_MIN_WIDTH: u16 = 16;
+/// The Version column grows from the first to the second to fit the longest
+/// version shown.
+const SEARCH_VERSION_MIN_WIDTH: u16 = 12;
+const SEARCH_VERSION_MAX_WIDTH: u16 = 18;
+
+/// The width of the Version column for versions up to `longest` characters,
+/// in a table `table_width` wide. The Addon column keeps its minimum; when
+/// there is no room the column stays at its minimum and versions are cut.
+fn search_version_width(longest: usize, table_width: u16, show_author: bool) -> u16 {
+    let columns: u16 = if show_author { 5 } else { 4 };
+    let others = 9 + 11 + if show_author { 20 } else { 0 } + 2 * (columns - 1);
+    let room = table_width.saturating_sub(others + SEARCH_ADDON_MIN_WIDTH);
+    let wanted = u16::try_from(longest)
+        .unwrap_or(u16::MAX)
+        .clamp(SEARCH_VERSION_MIN_WIDTH, SEARCH_VERSION_MAX_WIDTH);
+    wanted.min(room.max(SEARCH_VERSION_MIN_WIDTH))
+}
+
+/// How many terminal cells `text` takes.
+fn cells(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// The longest start of `characters` that fits in `width` cells.
+fn fit_cells(characters: impl Iterator<Item = char>, width: usize) -> String {
+    let mut used = 0;
+    let mut fitted = String::new();
+    for character in characters {
+        used += text_input::char_width(character);
+        if used > width {
+            break;
+        }
+        fitted.push(character);
+    }
+    fitted
+}
+
+/// `text` cut to `width` cells, ending in `ellipsis` when it was cut.
+fn cut_with_ellipsis(text: &str, width: usize, ellipsis: &str) -> String {
+    if cells(text) <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(cells(ellipsis));
+    format!("{}{ellipsis}", fit_cells(text.chars(), keep))
+}
+
+/// How many characters a marquee over `text` scrolls by until its end
+/// fits in `width` cells.
+fn marquee_steps(text: &str, width: usize) -> usize {
+    let mut used = 0;
+    let mut start = text.chars().count();
+    for character in text.chars().rev() {
+        used += text_input::char_width(character);
+        if used > width {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
 /// What the sheet says for each kind of source error: what happened and
 /// what to do. The raw error is shown under it as a technical detail.
 pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> String {
@@ -261,7 +325,10 @@ impl App {
             }
             SearchInputIntent::WagoSearch(query) => {
                 let count = pane.results.len();
-                let text = if count > 0 && pane.last_query.as_deref() == Some(query.as_str()) {
+                let shown = count > 0 && pane.last_query.as_deref() == Some(query.as_str());
+                let text = if shown && !pane.some_result_has_every_word() {
+                    NO_ADDON_HAS_EVERY_WORD.to_string()
+                } else if shown {
                     format!(
                         "{count} addon{} on Wago.io match \"{query}\"",
                         plural_suffix(count)
@@ -621,6 +688,15 @@ impl App {
         header.push(Cell::from(Span::styled("Downloads", heading)));
         header.push(Cell::from(Span::styled("Version", heading)));
         header.push(Cell::from(""));
+        // Every result, not just the visible window, so the column keeps
+        // its width while the list scrolls.
+        let longest_version = pane
+            .results
+            .iter()
+            .map(|result| result.version.as_deref().map_or(0, cells))
+            .max()
+            .unwrap_or(0);
+        let version_width = search_version_width(longest_version, table_area.width, show_author);
         let mut rows = Vec::new();
         for (index, result) in pane.results[window_start..window_end].iter().enumerate() {
             let selected = focused && pane.selected_result == Some(window_start + index);
@@ -659,7 +735,11 @@ impl App {
                 muted,
             )));
             cells.push(Cell::from(Span::styled(
-                result.version.clone().unwrap_or_default(),
+                self.search_version_text(
+                    result.version.as_deref().unwrap_or_default(),
+                    usize::from(version_width),
+                    selected,
+                ),
                 muted,
             )));
             cells.push(Cell::from(if self.installed_copy(result).is_some() {
@@ -682,7 +762,7 @@ impl App {
         }
         widths.extend([
             Constraint::Length(9),
-            Constraint::Length(12),
+            Constraint::Length(version_width),
             Constraint::Length(11),
         ]);
         let table = Table::new(rows, widths)
@@ -705,6 +785,32 @@ impl App {
                 areas[area_index],
                 buffer,
             );
+        }
+    }
+
+    /// A version as it shows in the Version column. One that does not fit
+    /// is cut with an ellipsis. On the selected row it scrolls to show the
+    /// whole of it, except under reduce motion, where it stays cut.
+    fn search_version_text(&self, version: &str, width: usize, selected: bool) -> String {
+        let cut = cut_with_ellipsis(version, width, self.ui_theme.symbols.ellipsis);
+        if !selected || cells(version) <= width || self.ui_theme.reduce_motion {
+            return cut;
+        }
+        self.search_marquee_live.set(true);
+        let ticks = self
+            .shell_ui
+            .motion
+            .tick_count
+            .wrapping_sub(self.shell_ui.search_selection_tick);
+        // The scroll moves by characters. Each frame is fitted by cells, so
+        // a double-width character is never cut in half.
+        let steps = marquee_steps(version, width);
+        let offset =
+            lemonup_core::marquee::marquee_offset(steps + width, width, ticks, MARQUEE_HOLD_TICKS);
+        if offset == 0 {
+            cut
+        } else {
+            fit_cells(version.chars().skip(offset), width)
         }
     }
 
@@ -740,8 +846,7 @@ impl App {
                 muted,
             ))),
             Some(InstalledCopy { linked: false }) => lines.push(Line::from(Span::styled(
-                "You have a copy that isn't linked. Enter replaces it with this one and \
-                 links it. Your addon settings stay as they are.",
+                "You have a copy that isn't linked. Enter replaces it with this one.",
                 muted,
             ))),
             None => {}

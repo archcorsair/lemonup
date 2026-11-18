@@ -96,6 +96,8 @@ pub(crate) struct WagoUpdateSummary {
 pub(crate) struct WagoRemoteVersion {
     pub(crate) source_url: Option<String>,
     pub(crate) version: Option<String>,
+    /// The addon's name on Wago.io, as Wago gives it.
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -386,6 +388,7 @@ pub(crate) async fn fetch_wago_remote_version(
                 .unwrap_or_else(|| format!("https://addons.wago.io/addons/{}", resolved.addon.id)),
         ),
         version: resolved.version,
+        name: Some(resolved.addon.display_name),
     })
 }
 
@@ -429,6 +432,7 @@ pub(crate) async fn update_wago_addon(
                     format!("https://addons.wago.io/addons/{}", resolved.addon.id)
                 }),
             ),
+            Some(&resolved.addon.display_name),
             dry_run,
         )?;
         return Ok(WagoUpdateSummary {
@@ -726,6 +730,7 @@ fn build_managed_wago_record(
     record.optional_deps = parent_metadata.optional_deps.clone();
     record.embedded_libs = parent_metadata.embedded_libs.clone();
     record.remote_version = release_version(addon, stability);
+    record.source_name = lemonup_core::domain::source_name(&addon.display_name);
     record.last_checked_at = Some(OffsetDateTime::now_utc());
     record.set_managed_owned_folders(
         installed_folders
@@ -844,11 +849,16 @@ pub(crate) fn addon_details_url(addon_id: &str, flavor: GameFlavor) -> String {
     )
 }
 
+/// The search request. Game words like "forever" are left out of the query
+/// when other words remain: Wago.io matches any word, and the request
+/// already names the game.
 fn addon_search_url(query: &str, flavor: GameFlavor) -> Result<Url, String> {
+    let query =
+        lemonup_core::search_rank::source_query(query, &lemonup_core::search_rank::GAME_WORDS);
     Url::parse_with_params(
         &format!("{API_BASE}{EXTERNAL_PATH}/addons/_search"),
         [
-            ("query", query),
+            ("query", query.as_str()),
             ("game_version", wago_game_version(flavor)),
             ("stability", "stable"),
         ],
@@ -1261,6 +1271,29 @@ mod tests {
     }
 
     #[test]
+    fn the_search_request_leaves_out_game_words_when_other_words_remain() {
+        let query_of = |typed: &str, flavor| {
+            addon_search_url(typed, flavor)
+                .expect("search url")
+                .query_pairs()
+                .find(|(key, _)| key == "query")
+                .map(|(_, value)| value.into_owned())
+        };
+        assert_eq!(
+            query_of("Forever Loot Sparkles", GameFlavor::Forever).as_deref(),
+            Some("Loot Sparkles")
+        );
+        assert_eq!(
+            query_of("forever", GameFlavor::Forever).as_deref(),
+            Some("forever")
+        );
+        assert_eq!(
+            query_of("WeakAuras", GameFlavor::Retail).as_deref(),
+            Some("WeakAuras")
+        );
+    }
+
+    #[test]
     fn parse_wago_target_accepts_slug_or_wago_url() {
         assert_eq!(parse_wago_target("details").expect("slug"), "details");
         assert_eq!(
@@ -1439,6 +1472,46 @@ mod tests {
             }]
         );
         assert!(installed[0].has_authoritative_owned_folders());
+    }
+
+    #[test]
+    fn install_downloaded_wago_addon_stores_the_wago_name_cleaned() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let bytes = build_zip(&[(
+            "Details/Details.toc",
+            "## Title: Details Core\n## Version: 11.2.0\n## Interface: 110205\n",
+        )]);
+        let mut addon = sample_addon();
+        addon.display_name = " |cffffd100Details!|r Damage Meter &amp; More ".to_string();
+
+        install_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            false,
+            &[],
+        )
+        .expect("install addon");
+
+        let installed = database
+            .get_addon_by_folder("Details")
+            .expect("get")
+            .expect("row");
+        assert_eq!(installed.name, "Details Core");
+        assert_eq!(
+            installed.source_name.as_deref(),
+            Some("Details! Damage Meter & More")
+        );
+        assert_eq!(installed.display_name(), "Details! Damage Meter & More");
     }
 
     #[test]
