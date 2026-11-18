@@ -271,6 +271,7 @@ fn without_a_wago_key_find_says_a_key_finds_more() {
         results: Vec::new(),
         failed: Vec::new(),
         skipped: vec![FindSource::Wago],
+        not_asked: vec![FindSource::Wago],
     };
 
     let lines = report_lines(&report, &[], 0);
@@ -648,6 +649,7 @@ fn full_report() -> FindReport {
         results,
         failed: vec![FindSource::WowInterface],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     }
 }
 
@@ -867,6 +869,7 @@ fn likely_line(source: FindSource, folder: &str, reason: Option<LikelyReason>) -
         results: vec![result_of(FindLabel::Likely, folder, folder, vec![likely])],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
     section_lines(&lines, "Likely matches (1)")
@@ -960,6 +963,7 @@ fn names_never_show_doubled_spaces() {
         ],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let lines = human_report(&report, &[], &names, 0, Paint::PLAIN);
@@ -1031,6 +1035,7 @@ fn a_failed_source_that_left_nothing_unchecked_is_still_reported() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: vec![FindSource::Tukui],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let problems = vec![SourceProblem {
         source: FindSource::Tukui,
@@ -1064,6 +1069,7 @@ fn the_report_opens_with_what_was_sent_to_wago_or_that_a_key_finds_more() {
         results: Vec::new(),
         failed: Vec::new(),
         skipped: vec![FindSource::Wago],
+        not_asked: vec![FindSource::Wago],
     };
     let lines = human_report(&without_key, &[], &names, 0, Paint::PLAIN);
     assert_eq!(
@@ -1086,6 +1092,7 @@ fn the_last_line_always_says_what_happened() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     assert_eq!(
         human_closing(&nothing_ready, &names, None, Paint::PLAIN, Paint::PLAIN).expect("closing"),
@@ -1149,6 +1156,7 @@ fn a_refusal_names_folders_that_become_their_own_addon() {
         results: vec![exact(gather.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let error = human_closing(
@@ -1251,6 +1259,7 @@ fn plain_output_keeps_its_fields_and_fixes_the_three_lines() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     assert_eq!(
         plain_closing(&nothing_ready, None).expect("closing"),
@@ -1333,6 +1342,7 @@ fn colored_headings_are_bold_in_the_color_of_what_they_mean() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: vec![FindSource::Tukui],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let problems = vec![SourceProblem {
         source: FindSource::Tukui,
@@ -1433,6 +1443,7 @@ fn the_closing_line_and_the_refusal_are_bold() {
         results: vec![exact(gather.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let refused = |error_paint| {
         human_closing(
@@ -1550,6 +1561,7 @@ fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
         results: vec![exact(data.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let error = human_closing(
@@ -1671,6 +1683,7 @@ fn choose_one_lists_folders_with_a_short_reason_and_wraps() {
         )],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
     let joined = section_lines(&lines, "Choose one in LemonUp (1)")
@@ -2047,5 +2060,48 @@ fn a_left_out_wago_leaves_no_key_note_in_the_report() {
         report_lines(&report, &[], 1)
             .iter()
             .any(|line| line.contains("A Wago.io key finds more"))
+    );
+}
+
+#[test]
+fn the_readable_report_says_where_not_found_looked() {
+    for (not_asked, heading) in [
+        (Vec::new(), "Not found (2)"),
+        (
+            vec![FindSource::WowInterface],
+            "Not found on Wago.io and TukUI (2)",
+        ),
+        (
+            vec![FindSource::Wago],
+            "Not found on WoWInterface and TukUI (2)",
+        ),
+    ] {
+        let mut report = full_report();
+        report.not_asked = not_asked.clone();
+        let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
+        assert!(
+            lines.iter().any(|line| line == heading),
+            "{heading}: {lines:?}"
+        );
+        if not_asked.is_empty() {
+            assert!(!lines.iter().any(|line| line.starts_with("Not found on")));
+        }
+    }
+}
+
+#[test]
+fn the_plain_report_keeps_its_field_names_whatever_sources_were_asked() {
+    let mut report = full_report();
+    report.not_asked = vec![FindSource::WowInterface];
+    let lines = report_lines(&report, &[], 44);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("find summary:") && line.contains("not_found=2")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Not found")),
+        "{lines:?}"
     );
 }

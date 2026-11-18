@@ -400,6 +400,11 @@ impl<T> SourceAnswer<T> {
     fn failed(&self) -> bool {
         matches!(self, Self::Failed | Self::Incomplete(_))
     }
+
+    /// Whether the source was asked, whatever came back.
+    fn asked(&self) -> bool {
+        !matches!(self, Self::Skipped | Self::NotAsked)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -707,6 +712,29 @@ pub struct FindReport {
     pub failed: Vec<FindSource>,
     /// Sources that were not asked (Wago.io without a key).
     pub skipped: Vec<FindSource>,
+    /// Sources that were not asked for any reason: no key, or left out by the person.
+    pub not_asked: Vec<FindSource>,
+}
+
+impl FindReport {
+    /// The sources the lookup asked, in their usual order.
+    pub fn asked(&self) -> Vec<FindSource> {
+        FindSource::ALL
+            .into_iter()
+            .filter(|source| !self.not_asked.contains(source))
+            .collect()
+    }
+
+    /// The title of the "Not found" group. When some source was not asked it says where the
+    /// lookup did look ("Not found on WoWInterface and TukUI"), so the group never claims more.
+    pub fn not_found_title(&self) -> String {
+        let asked = self.asked();
+        if asked.is_empty() || asked.len() == FindSource::ALL.len() {
+            return "Not found".to_string();
+        }
+        let names = asked.iter().map(|source| source.name()).collect::<Vec<_>>();
+        format!("Not found on {}", names.join(" and "))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1305,6 +1333,15 @@ pub fn match_addons(
         } else {
             Vec::new()
         },
+        not_asked: [
+            (FindSource::Wago, lookups.wago.asked()),
+            (FindSource::WowInterface, lookups.wowinterface.asked()),
+            (FindSource::Tukui, lookups.tukui.asked()),
+        ]
+        .into_iter()
+        .filter(|(_, asked)| !asked)
+        .map(|(source, _)| source)
+        .collect(),
     }
 }
 

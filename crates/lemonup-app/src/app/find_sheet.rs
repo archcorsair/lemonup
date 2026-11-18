@@ -1310,9 +1310,15 @@ impl App {
                 6..=8 => roles.muted,
                 _ => roles.amber,
             };
+            // "Not found" says where the lookup looked when it didn't ask every source.
+            let title = if *label == FindLabel::NotFound {
+                report.not_found_title()
+            } else {
+                title.to_string()
+            };
             body.text(vec![Line::from(vec![
                 Span::styled(
-                    title.to_string(),
+                    title,
                     Style::default().fg(tone).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!(" ({})", members.len()), muted),

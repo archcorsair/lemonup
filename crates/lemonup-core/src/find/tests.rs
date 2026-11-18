@@ -1771,3 +1771,65 @@ fn a_source_that_was_not_asked_finds_nothing_and_does_not_fail() {
             .all(|result| result.not_checked_by.is_empty())
     );
 }
+
+#[test]
+fn the_not_found_title_names_the_sources_asked_unless_all_were() {
+    let report = |not_asked: &[FindSource]| FindReport {
+        results: Vec::new(),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        not_asked: not_asked.to_vec(),
+    };
+    assert_eq!(report(&[]).not_found_title(), "Not found");
+    assert_eq!(
+        report(&[FindSource::WowInterface]).not_found_title(),
+        "Not found on Wago.io and TukUI"
+    );
+    assert_eq!(
+        report(&[FindSource::Wago]).not_found_title(),
+        "Not found on WoWInterface and TukUI"
+    );
+    assert_eq!(
+        report(&[FindSource::Wago, FindSource::WowInterface]).not_found_title(),
+        "Not found on TukUI"
+    );
+    // Nothing asked: there is nothing to name.
+    assert_eq!(report(&FindSource::ALL).not_found_title(), "Not found");
+}
+
+#[test]
+fn the_report_records_every_source_that_was_not_asked() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Alpha", &["## Title: Alpha"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let report = |wago, wowinterface, tukui| {
+        match_addons(
+            &inputs,
+            &[],
+            None,
+            &SourceLookups {
+                wago,
+                wowinterface,
+                tukui,
+            },
+        )
+    };
+    let asked = report(
+        SourceAnswer::Found(Vec::new()),
+        SourceAnswer::Failed,
+        SourceAnswer::Found(Vec::new()),
+    );
+    // A source that failed was still asked.
+    assert!(asked.not_asked.is_empty());
+    assert_eq!(asked.not_found_title(), "Not found");
+    let left_out = report(
+        SourceAnswer::Skipped,
+        SourceAnswer::NotAsked,
+        SourceAnswer::Found(Vec::new()),
+    );
+    assert_eq!(
+        left_out.not_asked,
+        vec![FindSource::Wago, FindSource::WowInterface]
+    );
+    assert_eq!(left_out.not_found_title(), "Not found on TukUI");
+}

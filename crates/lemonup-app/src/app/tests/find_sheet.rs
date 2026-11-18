@@ -113,6 +113,7 @@ fn report() -> FindReport {
         ],
         failed: vec![FindSource::Tukui],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     }
 }
 
@@ -739,6 +740,7 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
         )],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     set_results(&mut app, found_report);
     assert!(!app.find_offers_search());
@@ -753,6 +755,7 @@ fn f_checks_one_addon_first_and_offers_a_name_search_when_nothing_is_found() {
             results: vec![result(FindLabel::NotFound, "DBM-Core", Vec::new())],
             failed: Vec::new(),
             skipped: Vec::new(),
+            not_asked: Vec::new(),
         },
     );
     assert!(app.find_offers_search());
@@ -1354,6 +1357,7 @@ fn long_report() -> (FindReport, Vec<SourceProblem>) {
             results,
             failed: vec![FindSource::Tukui],
             skipped: Vec::new(),
+            not_asked: Vec::new(),
         },
         problems,
     )
@@ -1657,6 +1661,7 @@ fn tall_report(selectable: bool) -> FindReport {
         results,
         failed: vec![FindSource::Wago],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     }
 }
 
@@ -2422,4 +2427,51 @@ fn start_and_looking_keep_the_same_size_and_place() {
         }),
     ];
     super::sheets::assert_sheet_holds_still(&[(138, 36), (120, 30), (80, 24)], &open, &steps);
+}
+
+fn only_not_found(not_asked: Vec<FindSource>) -> FindReport {
+    FindReport {
+        results: vec![
+            result(FindLabel::NotFound, "Lonely", Vec::new()),
+            result(FindLabel::NotFound, "Alone", Vec::new()),
+        ],
+        failed: Vec::new(),
+        skipped: not_asked
+            .contains(&FindSource::Wago)
+            .then_some(FindSource::Wago)
+            .into_iter()
+            .collect(),
+        not_asked,
+    }
+}
+
+#[test]
+fn not_found_names_the_sources_it_asked_when_it_did_not_ask_them_all() {
+    for (not_asked, heading) in [
+        (Vec::new(), "Not found (2)"),
+        (
+            vec![FindSource::WowInterface],
+            "Not found on Wago.io and TukUI (2)",
+        ),
+        // Wago.io without a key was not asked either.
+        (
+            vec![FindSource::Wago],
+            "Not found on WoWInterface and TukUI (2)",
+        ),
+        (
+            vec![FindSource::Wago, FindSource::Tukui],
+            "Not found on WoWInterface (2)",
+        ),
+    ] {
+        for (width, height) in [(80, 24), (138, 36)] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_find(&mut app);
+            set_results(&mut app, only_not_found(not_asked.clone()));
+            let shown = screen(&mut app, width, height);
+            assert!(shown.contains(heading), "{heading} at {width}:\n{shown}");
+            if not_asked.is_empty() {
+                assert!(!shown.contains("Not found on"), "{shown}");
+            }
+        }
+    }
 }
