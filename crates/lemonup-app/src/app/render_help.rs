@@ -37,6 +37,7 @@ impl App {
         match when {
             HelpWhen::Always => true,
             HelpWhen::NoWagoKey => self.wago_api_key.is_none(),
+            HelpWhen::HasWagoKey => self.wago_api_key.is_some(),
             HelpWhen::NotLinked => self.not_linked_current_item().is_some(),
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
             HelpWhen::NoJob => self.dashboard_job_running().is_none(),

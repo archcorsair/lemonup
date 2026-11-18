@@ -1875,3 +1875,177 @@ fn the_target_falls_back_to_the_version_of_the_folder() {
         "WoW Forever"
     );
 }
+
+/// How many requests each source got.
+#[derive(Default)]
+struct Requests {
+    wago: std::cell::Cell<usize>,
+    wowinterface: std::cell::Cell<usize>,
+    tukui: std::cell::Cell<usize>,
+}
+
+/// Runs a lookup whose three requests only count themselves; none reaches the network.
+async fn count_requests(
+    choice: FindChoice,
+    key: Option<&str>,
+    nothing_for_wago: bool,
+) -> (Requests, Lookups) {
+    let requests = Requests::default();
+    let lookups = lookup_with(
+        choice,
+        key,
+        nothing_for_wago,
+        |_key| async {
+            requests.wago.set(requests.wago.get() + 1);
+            Ok(wire::WagoAnswer::default())
+        },
+        || async {
+            requests.wowinterface.set(requests.wowinterface.get() + 1);
+            Ok(Vec::new())
+        },
+        || async {
+            requests.tukui.set(requests.tukui.get() + 1);
+            Ok(Vec::new())
+        },
+    )
+    .await;
+    (requests, lookups)
+}
+
+#[tokio::test]
+async fn a_source_left_out_gets_no_request_at_all() {
+    let (requests, lookups) = count_requests(
+        FindChoice::only(&[FindSource::Wago, FindSource::Tukui]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(lookups.lookups.wowinterface, SourceAnswer::NotAsked);
+    assert!(matches!(lookups.lookups.wago, SourceAnswer::Found(_)));
+    assert!(lookups.problems.is_empty());
+
+    let (requests, lookups) = count_requests(
+        FindChoice::only(&[FindSource::WowInterface]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(lookups.lookups.wago, SourceAnswer::NotAsked);
+    assert_eq!(lookups.lookups.tukui, SourceAnswer::NotAsked);
+}
+
+#[tokio::test]
+async fn every_source_is_asked_when_all_are_checked_and_wago_needs_its_key() {
+    let (requests, _) = count_requests(FindChoice::all(), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 1, 1)
+    );
+    // No key: Wago.io is skipped (the report says a key finds more), not asked.
+    let (requests, lookups) = count_requests(FindChoice::all(), None, false).await;
+    assert_eq!(requests.wago.get(), 0);
+    assert_eq!(lookups.lookups.wago, SourceAnswer::Skipped);
+    // A key with no folders to send asks nothing of Wago.io either.
+    let (requests, _) = count_requests(FindChoice::all(), Some("key"), true).await;
+    assert_eq!(requests.wago.get(), 0);
+}
+
+#[tokio::test]
+async fn find_without_source_asks_all_and_ignores_what_the_tui_remembers() {
+    assert_eq!(cli_choice(&[]), FindChoice::all());
+    let (requests, _) = count_requests(cli_choice(&[]), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 1, 1)
+    );
+    // `--source wowinterface` asks only WoWInterface.
+    assert_eq!(
+        cli_choice(&[FindSource::WowInterface]),
+        FindChoice::only(&[FindSource::WowInterface])
+    );
+    let (requests, _) =
+        count_requests(cli_choice(&[FindSource::WowInterface]), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (0, 1, 0)
+    );
+}
+
+#[test]
+fn the_sources_asked_are_the_checked_ones_and_wago_needs_a_key_and_folders() {
+    let without_wowinterface = FindChoice::only(&[FindSource::Wago, FindSource::Tukui]);
+    assert_eq!(
+        asking(without_wowinterface, true, true),
+        vec![FindSource::Wago, FindSource::Tukui]
+    );
+    assert_eq!(
+        asking(without_wowinterface, false, true),
+        vec![FindSource::Tukui]
+    );
+    assert_eq!(
+        asking(without_wowinterface, true, false),
+        vec![FindSource::Tukui]
+    );
+    assert_eq!(
+        asking(FindChoice::all(), true, true),
+        FindSource::ALL.to_vec()
+    );
+}
+
+#[test]
+fn a_left_out_wago_leaves_no_key_note_in_the_report() {
+    let lookups = SourceLookups {
+        wago: SourceAnswer::NotAsked,
+        wowinterface: SourceAnswer::Found(Vec::new()),
+        tukui: SourceAnswer::Found(Vec::new()),
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addons = dir.path().join("AddOns");
+    fs::create_dir_all(addons.join("Alpha")).expect("folder");
+    fs::write(addons.join("Alpha/Alpha.toc"), "## Title: Alpha\n").expect("toc");
+    let inputs = FindInputs::read(&addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(&inputs, &[], None, &lookups);
+    let lines = report_lines(&report, &[], 1);
+    assert!(
+        !lines.iter().any(|line| line.contains("Wago.io key")),
+        "{lines:?}"
+    );
+    let skipped = SourceLookups {
+        wago: SourceAnswer::Skipped,
+        ..lookups
+    };
+    let report = match_addons(&inputs, &[], None, &skipped);
+    assert!(
+        report_lines(&report, &[], 1)
+            .iter()
+            .any(|line| line.contains("A Wago.io key finds more"))
+    );
+}

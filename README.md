@@ -67,7 +67,8 @@ Coming from LemonUp 1? Your settings and linked addons carry over on the first r
 - **Find your addons online:** press `F` to look up every "Not linked" addon (or the selected
   ones) on Wago.io, WoWInterface and TukUI by its files, see what matched, and link the ones you
   pick after one question. Partial matches can be replaced with the source's copy. `f` does the
-  same for one addon, and offers a Wago.io name search when nothing matches
+  same for one addon, and offers a Wago.io name search when nothing matches. Keys `1`, `2` and `3`
+  choose which sources to look at, and LemonUp remembers the choice for each game
 - **Edit .toc fields:** press `e` in Details to change the Title, Notes or Category the game shows
   for an addon. Updates keep your values, and clearing one puts the original back
 - **Safe updates:** new folders are staged and rolled back if anything fails, folders that belong
@@ -111,6 +112,13 @@ lemonup find --link
 `lemonup find` prints a readable report: what is ready to link, what is only a likely match, and
 what was not found, ending with what was changed (nothing, unless you pass `--link`). Add
 `--plain` for one `key=value` line per result, for scripts.
+
+`--source` limits which sources are asked, as a comma separated list of `wago`, `wowinterface` and
+`tukui` (default: all of them; the choice the TUI remembers is not used):
+
+```sh
+lemonup find --source wowinterface,tukui
+```
 
 Searching Wago.io by name needs a Wago.io API key (Wago gives them to Patreon supporters).
 GitHub, WoWInterface and TukUI links work without one.

@@ -1701,3 +1701,73 @@ fn a_folder_the_source_lists_no_version_for_says_so() {
         })
     );
 }
+
+#[test]
+fn the_choice_of_sources_reads_names_without_case_and_ignores_unknown_ones() {
+    let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    // Missing means every source.
+    assert_eq!(FindChoice::from_config(None), FindChoice::all());
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["Wago", "WOWI", "bogus"]))),
+        FindChoice::only(&[FindSource::Wago, FindSource::WowInterface])
+    );
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["tukui", "curseforge"]))).to_config(),
+        names(&["tukui"])
+    );
+    // Nothing known, or nothing at all, is every source: nothing is saved with none checked.
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["curseforge"]))),
+        FindChoice::all()
+    );
+    assert_eq!(FindChoice::from_config(Some(&[])), FindChoice::all());
+    assert_eq!(
+        FindChoice::all().to_config(),
+        names(&["wago", "wowinterface", "tukui"])
+    );
+}
+
+#[test]
+fn wago_stays_wanted_without_a_key_but_is_never_asked() {
+    let mut choice = FindChoice::all();
+    assert_eq!(choice.asked(true), FindSource::ALL.to_vec());
+    assert_eq!(
+        choice.asked(false),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+    // No key does not change what is saved.
+    assert!(choice.wants(FindSource::Wago));
+    assert_eq!(choice.to_config().len(), 3);
+    choice.toggle(FindSource::Wago);
+    assert!(!choice.wants(FindSource::Wago));
+    assert_eq!(
+        choice.asked(true),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+}
+
+#[test]
+fn a_source_that_was_not_asked_finds_nothing_and_does_not_fail() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Alpha", &["## Title: Alpha"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &SourceLookups {
+            wago: SourceAnswer::NotAsked,
+            wowinterface: SourceAnswer::Found(Vec::new()),
+            tukui: SourceAnswer::NotAsked,
+        },
+    );
+    assert!(report.failed.is_empty());
+    // Left out by choice is not "a key finds more".
+    assert!(report.skipped.is_empty());
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|result| result.not_checked_by.is_empty())
+    );
+}

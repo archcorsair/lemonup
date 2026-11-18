@@ -206,7 +206,12 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             clear,
             yes,
         } => run_toc(paths, runtime, &addon, field, value, clear, yes)?,
-        Commands::Find { link, yes, plain } => run_find(paths, runtime, link, yes, plain).await?,
+        Commands::Find {
+            link,
+            yes,
+            plain,
+            source,
+        } => run_find(paths, runtime, link, yes, plain, &source).await?,
     };
 
     Ok(outcome)
@@ -330,13 +335,15 @@ fn run_toc(
 /// `lemonup find`: lists where the Not linked addons come from, grouped by label, and changes
 /// nothing. `--link` links the exact matches (no download); the CLI never asks, so matches that
 /// take over folders beyond their own need `--yes`. `--plain` prints one key=value line per
-/// result instead of the readable report. Exits 1 when a source failed.
+/// result instead of the readable report. `--source` limits the sources asked (all without it;
+/// the choice the TUI remembers is not used). Exits 1 when a source failed.
 async fn run_find(
     paths: AppPaths,
     runtime: AppRuntime,
     link: bool,
     yes: bool,
     plain: bool,
+    sources: &[lemonup_core::find::FindSource],
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
@@ -386,9 +393,12 @@ async fn run_find(
     }
     let rows = database.list_addons()?;
     let inputs = lemonup_core::find::FindInputs::read(&addon_dir, flavor)?;
+    let choice = crate::find::cli_choice(sources);
     let wago_lookups = inputs.wago_lookups(&rows, None);
     let api_key = resolve_wago_api_key(&config_store, &config_state)?;
-    let sends_to_wago = api_key.is_some() && !wago_lookups.is_empty();
+    let sends_to_wago = choice.wants(lemonup_core::find::FindSource::Wago)
+        && api_key.is_some()
+        && !wago_lookups.is_empty();
     if plain {
         println!("{}", crate::find::target_plain_line(&target));
     }
@@ -399,9 +409,14 @@ async fn run_find(
         );
     }
     let names = crate::find::LocalNames::new(&rows, &inputs);
-    let lookups =
-        crate::find::lookup_sources(&wago_lookups, flavor, api_key.as_deref(), &paths.cache_dir)
-            .await;
+    let lookups = crate::find::lookup_sources(
+        &wago_lookups,
+        flavor,
+        api_key.as_deref(),
+        &paths.cache_dir,
+        choice,
+    )
+    .await;
     let report = lemonup_core::find::match_addons(&inputs, &rows, None, &lookups.lookups);
     let mut link_now =
         || crate::find::link_exact_matches(&mut database, &addon_dir, flavor, &report, yes);

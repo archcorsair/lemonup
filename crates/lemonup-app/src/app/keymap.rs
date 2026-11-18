@@ -165,6 +165,8 @@ pub(super) enum HelpWhen {
     Always,
     /// No Wago.io key is saved: a name search asks for one in place.
     NoWagoKey,
+    /// A Wago.io key is saved: only then does a key that uses it do anything.
+    HasWagoKey,
     /// The current addon is "Not linked": `f` finds it online.
     NotLinked,
     /// The welcome card is on the list.
@@ -793,10 +795,19 @@ static FIND_HELP: HelpPage = HelpPage {
             ],
         },
         HelpSection {
+            title: "Before the lookup",
+            rows: &[
+                HelpRow::key("1", "Wago.io on or off", &[ch('1')]).when(HelpWhen::HasWagoKey),
+                HelpRow::key("2", "WoWInterface on or off", &[ch('2')]),
+                HelpRow::key("3", "TukUI on or off", &[ch('3')]),
+                HelpRow::key("enter", "look up the sources", K_ENTER),
+            ],
+        },
+        HelpSection {
             title: "Picking and linking",
             rows: &[HelpRow::key(
                 "enter",
-                "start; pick in a \"Choose one\" row; on Link, ask first",
+                "pick in a \"Choose one\" row; on Link, ask first",
                 K_ENTER,
             )],
         },
@@ -1217,11 +1228,17 @@ impl App {
         use super::find_sheet::{FindFocus, FindStep};
         use FooterHintId as Id;
         match self.find.step.as_ref() {
-            Some(FindStep::Start) => vec![
-                KeyHint::key(Id::Run, "enter", "look up", ENTER).main(),
-                self.close_hint(),
-                self.help_hint(),
-            ],
+            Some(FindStep::Start) => {
+                let (keys, codes) = self.find_check_keys();
+                let mut hints = vec![KeyHint::key(Id::Toggle, keys, "check", codes)];
+                // With nothing checked, enter does nothing.
+                if self.find_start_works() {
+                    hints.push(KeyHint::key(Id::Run, "enter", "look", ENTER).main());
+                }
+                hints.push(self.close_hint());
+                hints.push(self.help_hint());
+                hints
+            }
             Some(FindStep::Looking { .. }) => vec![
                 KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE),
                 self.help_hint(),

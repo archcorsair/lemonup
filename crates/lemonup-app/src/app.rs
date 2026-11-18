@@ -17605,6 +17605,7 @@ mod tests {
                 (HelpContext::TocEdit, _) => toc_edit,
                 (HelpContext::Games, "Questions") => |app| questions_in(open_games, app),
                 (HelpContext::Games, _) => open_games,
+                (HelpContext::Find, "Before the lookup") => super::find_sheet::open_find_start,
                 (HelpContext::Find, "Picking and linking") => super::find_sheet::open_find_action,
                 (HelpContext::Find, "Questions") => {
                     |app| questions_in(super::find_sheet::open_find_results, app)
@@ -17640,7 +17641,10 @@ mod tests {
             match when {
                 HelpWhen::Always => {}
                 HelpWhen::NoWagoKey => app.wago_api_key = None,
-                HelpWhen::NotLinked | HelpWhen::NoJob | HelpWhen::DetailsOverflow => {}
+                HelpWhen::HasWagoKey
+                | HelpWhen::NotLinked
+                | HelpWhen::NoJob
+                | HelpWhen::DetailsOverflow => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),

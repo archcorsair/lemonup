@@ -242,6 +242,9 @@ pub(crate) struct Symbols {
     /// Work in progress, and the spinner under reduce motion.
     pub(crate) ellipsis: &'static str,
     pub(crate) spinner: &'static [&'static str],
+    /// A source that is checked, and one that is not (the Find sheet's Start step).
+    pub(crate) checked: &'static str,
+    pub(crate) unchecked: &'static str,
 }
 
 impl Symbols {
@@ -251,6 +254,8 @@ impl Symbols {
         arrow: "→",
         ellipsis: "…",
         spinner: &["⠋", "⠙", "⠸", "⠴"],
+        checked: "●",
+        unchecked: "○",
     };
 
     pub(crate) const SIMPLE: Self = Self {
@@ -259,6 +264,8 @@ impl Symbols {
         arrow: "->",
         ellipsis: "...",
         spinner: &["|", "/", "-", "\\"],
+        checked: "[x]",
+        unchecked: "[ ]",
     };
 }
 

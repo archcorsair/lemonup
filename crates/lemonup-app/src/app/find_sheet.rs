@@ -1,7 +1,7 @@
 //! "Find your addons online": the `F` sheet (and `f` on one addon).
 //!
-//! Three steps in one sheet that keeps its size: Start says what is sent
-//! where, Looking reads the folders and asks the sources in the background,
+//! Three steps in one sheet that keeps its size: Start chooses the sources
+//! to look at, Looking reads the folders and asks them in the background,
 //! and Results lists what was found the way `lemonup find` does. Linking
 //! asks one question first; partial matches are replaced through the normal
 //! Wago.io install, one at a time. Matching and linking live in
@@ -9,7 +9,9 @@
 
 use std::collections::VecDeque;
 
-use lemonup_core::find::{FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon};
+use lemonup_core::find::{
+    FindChoice, FindInputs, FindLabel, FindReport, FindResult, FindSource, FoundAddon,
+};
 
 use super::render_dashboard::fit_spans;
 use super::sheet::{SheetBody, SheetMove, SheetRoom};
@@ -35,7 +37,7 @@ fn hanging(lines: Vec<Line<'static>>, width: u16, indent: usize) -> Vec<Line<'st
 /// What the sheet shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FindStep {
-    /// What happens, and what is sent; enter starts.
+    /// The sources to look at, checked with `1`, `2` and `3`; enter looks.
     Start,
     /// Reading the folders (`asking` empty), then asking the sources.
     Looking {
@@ -115,6 +117,8 @@ pub(crate) enum FindTaskEvent {
 pub(crate) struct FindState {
     /// `None` while the sheet is closed.
     pub(crate) step: Option<FindStep>,
+    /// The sources checked on the Start step: this game's saved choice when the sheet opened.
+    pub(crate) sources: FindChoice,
     /// The parent folders looked up; `None` for every Not linked addon.
     pub(crate) scope: Option<Vec<String>>,
     /// `f` on one addon: the name to search Wago.io for when nothing is found.
@@ -155,6 +159,8 @@ pub(crate) enum FindMessage {
     OpenOne,
     /// Enter on Start.
     Start,
+    /// `1`, `2` or `3` on Start: checks or unchecks a source.
+    ToggleSource(FindSource),
     /// Esc or q: closes, and cancels a lookup.
     Close,
     Move(isize),
@@ -178,6 +184,8 @@ pub(crate) enum FindAction {
     },
     Close,
     StartLookup,
+    /// Checks or unchecks a source on the Start step.
+    ToggleSource(FindSource),
     SetStep(FindStep),
     SetQuestion(bool),
     SetQuestionOffset(u16),
@@ -417,7 +425,18 @@ impl App {
         match (step, key.code) {
             (_, KeyCode::Char('?')) => Some(vec![AppMessage::DashboardOpenHelp]),
             (_, KeyCode::Esc | KeyCode::Char('q')) => message(FindMessage::Close),
-            (FindStep::Start, KeyCode::Enter) => message(FindMessage::Start),
+            (FindStep::Start, KeyCode::Enter) if self.find_start_works() => {
+                message(FindMessage::Start)
+            }
+            // The sources have a number each; there is no cursor on this step.
+            (FindStep::Start, KeyCode::Char(number @ '1'..='3')) => {
+                let source = FindSource::ALL[usize::from(number as u8 - b'1')];
+                if self.find_source_available(source) {
+                    message(FindMessage::ToggleSource(source))
+                } else {
+                    Some(vec![])
+                }
+            }
             (FindStep::Results(results), code) => {
                 let focus = results.focusables(self.find_offers_search());
                 let position = focus
@@ -460,6 +479,40 @@ impl App {
                 }
             }
             _ => Some(vec![]),
+        }
+    }
+
+    /// Whether a source can be checked: Wago.io needs a key.
+    pub(super) fn find_source_available(&self, source: FindSource) -> bool {
+        source != FindSource::Wago || self.wago_api_key.is_some()
+    }
+
+    /// Whether a source is checked as the Start step shows it. Wago.io without a key never is,
+    /// though the saved choice keeps it for when there is one.
+    pub(super) fn find_checked(&self, source: FindSource) -> bool {
+        self.find.sources.wants(source) && self.find_source_available(source)
+    }
+
+    /// The sources enter on Start asks.
+    pub(super) fn find_asked(&self) -> Vec<FindSource> {
+        self.find.sources.asked(self.wago_api_key.is_some())
+    }
+
+    /// Enter on Start looks up only with a source checked.
+    pub(super) fn find_start_works(&self) -> bool {
+        !self.find_asked().is_empty()
+    }
+
+    /// The keys that check a source, as the key line and the sheet show them: Wago.io's key
+    /// only while it can be checked.
+    pub(super) fn find_check_keys(&self) -> (&'static str, super::keymap::KeyCodes) {
+        if self.wago_api_key.is_some() {
+            (
+                "1 2 3",
+                &[KeyCode::Char('1'), KeyCode::Char('2'), KeyCode::Char('3')],
+            )
+        } else {
+            ("2 3", &[KeyCode::Char('2'), KeyCode::Char('3')])
         }
     }
 
@@ -518,8 +571,17 @@ impl App {
                 if let Some(note) = self.switch_busy_note() {
                     return vec![self.find_note(StatusKind::Note, note)];
                 }
-                vec![AppAction::Find(FindAction::StartLookup)]
+                if !self.find_start_works() {
+                    return vec![];
+                }
+                let mut actions = self.find_remember_actions();
+                actions.push(AppAction::Find(FindAction::StartLookup));
+                actions
             }
+            FindMessage::ToggleSource(source) if self.find_source_available(source) => {
+                vec![AppAction::Find(FindAction::ToggleSource(source))]
+            }
+            FindMessage::ToggleSource(_) => vec![],
             FindMessage::Close => vec![AppAction::Find(FindAction::Close)],
             FindMessage::Move(delta) => {
                 self.find_move(|position, last| position.saturating_add_signed(delta).min(last))
@@ -569,6 +631,30 @@ impl App {
                 vec![AppAction::Find(FindAction::SetQuestionOffset(offset))]
             }
             FindMessage::Task(event) => self.find_task_actions(event),
+        }
+    }
+
+    /// Saves the sources checked in this game's config, when they differ from what it holds.
+    /// A save that fails says so; the lookup still runs.
+    fn find_remember_actions(&self) -> Vec<AppAction> {
+        let persisted = &self.config_pane.persisted;
+        if FindChoice::from_config(persisted.find_sources.as_deref()) == self.find.sources {
+            return vec![];
+        }
+        let mut saved = persisted.clone();
+        saved.find_sources = Some(self.find.sources.to_config());
+        match self.config_store.write_config(&saved) {
+            Ok(saved) => {
+                let pane = self.config_pane.mark_saved(saved.clone());
+                vec![
+                    AppAction::SetPersistedConfig(saved),
+                    AppAction::SetConfigPaneState(pane),
+                ]
+            }
+            Err(error) => vec![self.find_note(
+                StatusKind::Problem,
+                &format!("Couldn't remember which sources to look at: {error}"),
+            )],
         }
     }
 
@@ -833,6 +919,8 @@ impl App {
         match action {
             FindAction::Open { scope, single } => {
                 self.find.step = Some(FindStep::Start);
+                self.find.sources =
+                    FindChoice::from_config(self.config_pane.persisted.find_sources.as_deref());
                 self.find.scope = scope;
                 self.find.single = single;
                 self.find.question = false;
@@ -850,6 +938,7 @@ impl App {
                 }
             }
             FindAction::StartLookup => self.start_find_lookup(),
+            FindAction::ToggleSource(source) => self.find.sources.toggle(source),
             FindAction::SetStep(step) => {
                 if self.find.step.is_some() {
                     self.find.step = Some(step);
@@ -920,6 +1009,7 @@ impl App {
         let state_db_file = self.state_db_file.clone();
         let scope = self.find.scope.clone();
         let api_key = self.wago_api_key.clone();
+        let choice = self.find.sources;
         let cache_dir = self
             .roots
             .paths(&self.runtime.profile_name)
@@ -946,11 +1036,7 @@ impl App {
                 }
             };
             let wago_lookups = inputs.wago_lookups(&rows, read_scope.as_deref());
-            let mut asking = Vec::new();
-            if api_key.is_some() && !wago_lookups.is_empty() {
-                asking.push(FindSource::Wago);
-            }
-            asking.extend([FindSource::WowInterface, FindSource::Tukui]);
+            let asking = crate::find::asking(choice, api_key.is_some(), !wago_lookups.is_empty());
             let _ = read_sender.send(AppTaskEvent::Find(FindTaskEvent::Read {
                 generation,
                 folders: inputs.folders.len(),
@@ -961,6 +1047,7 @@ impl App {
                 inputs.flavor,
                 api_key.as_deref(),
                 &cache_dir,
+                choice,
             )
             .await;
             let outcome = find_outcome(&inputs, &rows, scope.as_deref(), lookups);
@@ -1020,38 +1107,36 @@ impl App {
             None => {}
             Some(FindStep::Start) => {
                 let what = match &self.find.single {
-                    Some(name) => format!("LemonUp looks up {name}"),
+                    Some(name) => name.clone(),
                     None => {
                         let count = self.find_scope_items().len();
                         format!(
-                            "LemonUp looks up {count} Not linked {}",
+                            "{count} Not linked {}",
                             if count == 1 { "addon" } else { "addons" }
                         )
                     }
                 };
-                // Wago.io is asked only with a key.
-                let sources = if self.wago_api_key.is_some() {
-                    "Wago.io, WoWInterface and TukUI"
-                } else {
-                    "WoWInterface and TukUI"
-                };
                 body.text(vec![Line::from(Span::styled(
-                    format!(
-                        "{what} on {sources}, and shows what it finds. \
-                         Nothing changes until you say yes."
-                    ),
+                    format!("Look for {what} on"),
                     text,
                 ))]);
                 body.gap(1);
-                let note = if self.wago_api_key.is_some() {
-                    "Sends folder names and file hashes to Wago.io."
+                body.text(self.find_source_chips(width));
+                // One line under the chips, only when it applies.
+                let note = if !self.find_start_works() {
+                    Some(("Check at least one source.", text))
+                } else if self.wago_api_key.is_none() {
+                    Some(("Add a Wago.io key in Settings to look there too.", muted))
+                } else if self.find_checked(FindSource::Wago) {
+                    Some(("Sends folder names and file hashes to Wago.io.", muted))
                 } else {
-                    "A Wago.io key finds more of your addons. Add one in Settings."
+                    None
                 };
-                body.text(vec![Line::from(Span::styled(note, muted))]);
-                body.footer(
-                    self.find_hint_footer(vec![("enter", " look up, "), ("esc", " close")], width),
-                );
+                if let Some((note, style)) = note {
+                    body.gap(1);
+                    body.text(vec![Line::from(Span::styled(note, style))]);
+                }
+                body.footer(self.find_hint_footer(self.find_start_hints(), width));
             }
             Some(FindStep::Looking { folders, asking }) => {
                 let line = if asking.is_empty() {
@@ -1086,6 +1171,73 @@ impl App {
             Some(FindStep::Results(results)) => self.find_results_body(&mut body, results, width),
         }
         body
+    }
+
+    /// The three sources on one line, each with its number: a checked one is filled and in
+    /// bold, one that is not is hollow and muted. Wago.io without a key is all muted, its
+    /// number too: the key does nothing. A line that is too narrow wraps between chips.
+    pub(super) fn find_source_chips(&self, width: u16) -> Vec<Line<'static>> {
+        let roles = self.ui_theme.roles;
+        let symbols = self.ui_theme.symbols;
+        let muted = Style::default().fg(roles.muted);
+        let indent = "  ";
+        let gap = "    ";
+        let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+        let mut used = 0;
+        for (index, source) in FindSource::ALL.into_iter().enumerate() {
+            let checked = self.find_checked(source);
+            let number_style = if self.find_source_available(source) {
+                Style::default().fg(roles.blue).add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            };
+            let (mark, mark_style) = if checked {
+                (symbols.checked, Style::default().fg(roles.lemon))
+            } else {
+                (symbols.unchecked, muted)
+            };
+            let name_style = if checked {
+                Style::default().fg(roles.text).add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            };
+            let chip = vec![
+                Span::styled((index + 1).to_string(), number_style),
+                Span::raw(" "),
+                Span::styled(mark, mark_style),
+                Span::raw(" "),
+                Span::styled(source.name(), name_style),
+            ];
+            let chip_width = chip
+                .iter()
+                .map(|span| span.content.chars().count())
+                .sum::<usize>();
+            match lines.last_mut() {
+                Some(line) if used + gap.len() + chip_width <= usize::from(width) => {
+                    line.push(Span::raw(gap));
+                    line.extend(chip);
+                    used += gap.len() + chip_width;
+                }
+                _ => {
+                    let mut line = vec![Span::raw(indent)];
+                    line.extend(chip);
+                    lines.push(line);
+                    used = indent.len() + chip_width;
+                }
+            }
+        }
+        lines.into_iter().map(Line::from).collect()
+    }
+
+    /// The keys of the Start step, as the sheet's footer shows them: the key line's entries
+    /// with the same conditions.
+    fn find_start_hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut hints = vec![(self.find_check_keys().0, " check   ")];
+        if self.find_start_works() {
+            hints.push(("enter", " look   "));
+        }
+        hints.push(("esc", " close"));
+        hints
     }
 
     fn find_hint_footer(

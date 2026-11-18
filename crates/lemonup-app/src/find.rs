@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lemonup_core::find::{
-    self, FindLabel, FindReport, FindResult, FindSource, FoundAddon, SourceAnswer, SourceLookups,
-    WagoLookup, WagoMatch, WowiFile, wire,
+    self, FindChoice, FindLabel, FindReport, FindResult, FindSource, FoundAddon, SourceAnswer,
+    SourceLookups, TukuiPackage, WagoLookup, WagoMatch, WowiFile, wire,
 };
 use lemonup_core::{AddonRecord, GameFlavor, LemonupError, StateDatabase, scan_addons_dir_report};
 
@@ -36,6 +36,29 @@ pub(crate) struct SourceProblem {
     pub(crate) error: SourceError,
 }
 
+/// The sources `lemonup find` asks: the ones named with `--source`, else all of them. The
+/// choice the TUI remembers is not used.
+pub(crate) fn cli_choice(sources: &[FindSource]) -> FindChoice {
+    if sources.is_empty() {
+        FindChoice::all()
+    } else {
+        FindChoice::only(sources)
+    }
+}
+
+/// The sources a lookup asks: the checked ones, Wago.io only with a key and folders to send.
+pub(crate) fn asking(
+    choice: FindChoice,
+    has_wago_key: bool,
+    wago_has_folders: bool,
+) -> Vec<FindSource> {
+    let mut asking = choice.asked(has_wago_key);
+    if !wago_has_folders {
+        asking.retain(|source| *source != FindSource::Wago);
+    }
+    asking
+}
+
 /// What the sources answered, ready for `lemonup_core::find::match_addons`.
 #[derive(Debug, Clone)]
 pub(crate) struct Lookups {
@@ -43,7 +66,8 @@ pub(crate) struct Lookups {
     pub(crate) problems: Vec<SourceProblem>,
 }
 
-/// Asks the three sources at once. Without a key Wago.io is skipped (not a failure); a source
+/// Asks the sources in `choice` at once. A source left out is never asked: no request goes out
+/// and its answer is `NotAsked`. Without a key Wago.io is skipped (not a failure); a source
 /// that fails is reported in `problems` and its answer is `Failed`, so the addons only it could
 /// find stay "Not checked".
 pub(crate) async fn lookup_sources(
@@ -51,25 +75,71 @@ pub(crate) async fn lookup_sources(
     flavor: GameFlavor,
     wago_api_key: Option<&str>,
     cache_dir: &Path,
+    choice: FindChoice,
 ) -> Lookups {
+    lookup_with(
+        choice,
+        wago_api_key,
+        wago_lookups.is_empty(),
+        |key| async move { fetch_wago_matches(&key, flavor, wago_lookups).await },
+        || fetch_wowi_files(cache_dir, flavor),
+        || crate::tukui::fetch_tukui_packages(flavor),
+    )
+    .await
+}
+
+/// [`lookup_sources`] with the three requests given, so a test can count which ones are made.
+/// Each runs only for a source in `choice`.
+pub(crate) async fn lookup_with<WagoFn, WagoFut, WowiFn, WowiFut, TukuiFn, TukuiFut>(
+    choice: FindChoice,
+    wago_api_key: Option<&str>,
+    nothing_for_wago: bool,
+    wago: WagoFn,
+    wowinterface: WowiFn,
+    tukui: TukuiFn,
+) -> Lookups
+where
+    WagoFn: FnOnce(String) -> WagoFut,
+    WagoFut: Future<Output = Result<wire::WagoAnswer, SourceError>>,
+    WowiFn: FnOnce() -> WowiFut,
+    WowiFut: Future<Output = Result<Vec<WowiFile>, SourceError>>,
+    TukuiFn: FnOnce() -> TukuiFut,
+    TukuiFut: Future<Output = Result<Vec<TukuiPackage>, SourceError>>,
+{
     let wago = async {
+        if !choice.wants(FindSource::Wago) {
+            return Reply::NotAsked;
+        }
         match wago_api_key {
-            None => None,
-            Some(_) if wago_lookups.is_empty() => Some(Ok(wire::WagoAnswer::default())),
-            Some(key) => Some(fetch_wago_matches(key, flavor, wago_lookups).await),
+            None => Reply::Skipped,
+            Some(_) if nothing_for_wago => Reply::Answer(Ok(wire::WagoAnswer::default())),
+            Some(key) => Reply::Answer(wago(key.to_string()).await),
         }
     };
-    let wowinterface = fetch_wowi_files(cache_dir, flavor);
-    let tukui = crate::tukui::fetch_tukui_packages(flavor);
+    let wowinterface = async {
+        if choice.wants(FindSource::WowInterface) {
+            Reply::Answer(wowinterface().await)
+        } else {
+            Reply::NotAsked
+        }
+    };
+    let tukui = async {
+        if choice.wants(FindSource::Tukui) {
+            Reply::Answer(tukui().await)
+        } else {
+            Reply::NotAsked
+        }
+    };
     let (wago, wowinterface, tukui) = tokio::join!(wago, wowinterface, tukui);
 
     let mut problems = Vec::new();
     let wago = match wago {
-        None => SourceAnswer::Skipped,
-        Some(result) => wago_answer(&mut problems, result),
+        Reply::NotAsked => SourceAnswer::NotAsked,
+        Reply::Skipped => SourceAnswer::Skipped,
+        Reply::Answer(result) => wago_answer(&mut problems, result),
     };
-    let wowinterface = answer(&mut problems, FindSource::WowInterface, wowinterface);
-    let tukui = answer(&mut problems, FindSource::Tukui, tukui);
+    let wowinterface = answer_of(&mut problems, FindSource::WowInterface, wowinterface);
+    let tukui = answer_of(&mut problems, FindSource::Tukui, tukui);
     Lookups {
         lookups: SourceLookups {
             wago,
@@ -77,6 +147,25 @@ pub(crate) async fn lookup_sources(
             tukui,
         },
         problems,
+    }
+}
+
+/// What asking one source came to.
+enum Reply<T> {
+    NotAsked,
+    Skipped,
+    Answer(Result<T, SourceError>),
+}
+
+fn answer_of<T>(
+    problems: &mut Vec<SourceProblem>,
+    source: FindSource,
+    asked: Reply<Vec<T>>,
+) -> SourceAnswer<T> {
+    match asked {
+        Reply::NotAsked => SourceAnswer::NotAsked,
+        Reply::Skipped => SourceAnswer::Skipped,
+        Reply::Answer(result) => answer(problems, source, result),
     }
 }
 
