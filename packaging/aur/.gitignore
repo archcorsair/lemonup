@@ -1,0 +1,5 @@
+# makepkg leaves its downloads, build folders and packages next to each
+# PKGBUILD. Only the PKGBUILD and .SRCINFO belong in git.
+/*/*
+!/*/PKGBUILD
+!/*/.SRCINFO
