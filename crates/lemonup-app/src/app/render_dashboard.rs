@@ -98,6 +98,17 @@ pub(super) struct ListColumns {
     pub(super) wide: bool,
 }
 
+/// What each addon list column needs to show every cell in full, trailing
+/// space included. Measured over all addons, so columns stay put while the
+/// list scrolls. Zero means "no need beyond the base width".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ColumnNeeds {
+    pub(super) name: u16,
+    pub(super) version: u16,
+    pub(super) author: u16,
+    pub(super) source: u16,
+}
+
 impl ListColumns {
     /// The widths from the design for a list `width` columns wide (the whole
     /// window today; a docked Details panel would take its share first and
@@ -105,9 +116,11 @@ impl ListColumns {
     /// Version 22, Author 26, Source 13. Below: Addon 27, Status 21,
     /// Version 19, Source 8 and no Author.
     ///
-    /// Extra width grows Addon to 40, then Author to 36, then Version to 26.
-    /// Anything left stays empty at the right edge: columns never stretch.
-    pub(super) fn for_width(width: u16) -> Self {
+    /// Extra width goes to the columns whose cells are cut, each up to its
+    /// `needs` and no further: Version, then Addon, then Author, then
+    /// Source. Anything left stays empty at the right edge: columns never
+    /// stretch past what they show.
+    pub(super) fn for_width(width: u16, needs: ColumnNeeds) -> Self {
         let wide = width >= WIDE_FRAME_MIN_WIDTH;
         let mut columns = if wide {
             Self {
@@ -135,23 +148,24 @@ impl ListColumns {
             return columns;
         }
         let mut extra = width - base;
-        let mut grow = |column: &mut u16, cap: u16| {
-            let step = cap.saturating_sub(*column).min(extra);
+        let mut grow = |column: &mut u16, need: u16| {
+            let step = need.saturating_sub(*column).min(extra);
             *column += step;
             extra -= step;
         };
-        grow(&mut columns.name, 40);
+        grow(&mut columns.version, needs.version);
+        grow(&mut columns.name, needs.name);
         if columns.author > 0 {
-            grow(&mut columns.author, 36);
+            grow(&mut columns.author, needs.author);
         }
-        grow(&mut columns.version, 26);
+        grow(&mut columns.source, needs.source);
         columns
     }
 
     /// The list beside docked Details: Addon, Status and Version only. At
     /// 78 columns (a 120 column window): Addon 30, Status 21, Version 22.
-    /// Extra width grows Addon to 40, then Version to 26.
-    pub(super) fn for_docked(width: u16) -> Self {
+    /// Extra width goes to Version, then Addon, each up to its `needs`.
+    pub(super) fn for_docked(width: u16, needs: ColumnNeeds) -> Self {
         let mut columns = Self {
             name: 30,
             status: 21,
@@ -166,13 +180,13 @@ impl ListColumns {
             return columns;
         }
         let mut extra = width - base;
-        let mut grow = |column: &mut u16, cap: u16| {
-            let step = cap.saturating_sub(*column).min(extra);
+        let mut grow = |column: &mut u16, need: u16| {
+            let step = need.saturating_sub(*column).min(extra);
             *column += step;
             extra -= step;
         };
-        grow(&mut columns.name, 40);
-        grow(&mut columns.version, 26);
+        grow(&mut columns.version, needs.version);
+        grow(&mut columns.name, needs.name);
         columns
     }
 
@@ -527,9 +541,12 @@ impl App {
             (area.width, 0)
         };
         let columns = if docked {
-            ListColumns::for_docked(list_width)
+            ListColumns::for_docked(list_width, self.dashboard_column_needs(true))
         } else {
-            ListColumns::for_width(area.width)
+            ListColumns::for_width(
+                area.width,
+                self.dashboard_column_needs(area.width >= WIDE_FRAME_MIN_WIDTH),
+            )
         };
         let narrow = |row: Rect| Rect {
             width: list_width,
@@ -942,6 +959,38 @@ impl App {
 
         let bottom = vec![Span::styled(format!("╰{}╯", "─".repeat(inner)), border)];
         vec![Line::from(top), Line::from(row), Line::from(bottom)]
+    }
+
+    /// The widest cell of every column over all addons (and the folder rows
+    /// that are showing), plus the header, so wide windows show it in full.
+    pub(super) fn dashboard_column_needs(&self, wide: bool) -> ColumnNeeds {
+        let arrow = self.ui_theme.symbols.arrow;
+        // Cells are cut one column short of their width, so each needs one
+        // more than its text. A sorted header adds a space and an indicator.
+        let cells = |chars: usize| u16::try_from(chars + 1).unwrap_or(u16::MAX);
+        let mut needs = ColumnNeeds {
+            name: cells("Addon".len() + 2),
+            version: cells("Version".len()),
+            author: cells("Author".len() + 2),
+            source: cells("Source".len() + 2),
+        };
+        for item in &self.dashboard.items {
+            needs.name = needs.name.max(cells(item.name.chars().count()));
+            let version = VersionCell::for_item(item, wide).text(arrow);
+            needs.version = needs.version.max(cells(version.chars().count()));
+            let author = item.author.as_deref().map(str::trim).unwrap_or_default();
+            needs.author = needs.author.max(cells(author.chars().count()));
+            let source = dashboard_source_name(item.source, wide);
+            needs.source = needs.source.max(cells(source.chars().count()));
+        }
+        for row in &self.dashboard.rows {
+            if matches!(row.kind, DashboardRowKind::OwnedChild { .. }) {
+                // Two spaces and the connector come before the folder name.
+                let width = 2 + child_row_prefix(row).chars().count() + row.name.chars().count();
+                needs.name = needs.name.max(cells(width));
+            }
+        }
+        needs
     }
 
     pub(super) fn dashboard_column_header_line(&self, columns: ListColumns) -> Line<'static> {
