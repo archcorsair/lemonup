@@ -1824,3 +1824,208 @@ fn a_folder_the_source_lists_no_version_for_says_so() {
         })
     );
 }
+
+#[test]
+fn the_choice_of_sources_reads_names_without_case_and_ignores_unknown_ones() {
+    let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    // Missing means every source.
+    assert_eq!(FindChoice::from_config(None), FindChoice::all());
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["Wago", "WOWI", "bogus"]))),
+        FindChoice::only(&[FindSource::Wago, FindSource::WowInterface])
+    );
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["tukui", "curseforge"]))).to_config(),
+        names(&["tukui"])
+    );
+    // Nothing known, or nothing at all, is every source: nothing is saved with none checked.
+    assert_eq!(
+        FindChoice::from_config(Some(&names(&["curseforge"]))),
+        FindChoice::all()
+    );
+    assert_eq!(FindChoice::from_config(Some(&[])), FindChoice::all());
+    assert_eq!(
+        FindChoice::all().to_config(),
+        names(&["wago", "wowinterface", "tukui"])
+    );
+}
+
+#[test]
+fn wago_stays_wanted_without_a_key_but_is_never_asked() {
+    let mut choice = FindChoice::all();
+    assert_eq!(choice.asked(true), FindSource::ALL.to_vec());
+    assert_eq!(
+        choice.asked(false),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+    // No key does not change what is saved.
+    assert!(choice.wants(FindSource::Wago));
+    assert_eq!(choice.to_config().len(), 3);
+    choice.toggle(FindSource::Wago);
+    assert!(!choice.wants(FindSource::Wago));
+    assert_eq!(
+        choice.asked(true),
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+}
+
+#[test]
+fn a_source_that_was_not_asked_finds_nothing_and_does_not_fail() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Alpha", &["## Title: Alpha"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(
+        &inputs,
+        &[],
+        None,
+        &SourceLookups {
+            wago: SourceAnswer::NotAsked,
+            wowinterface: SourceAnswer::Found(Vec::new()),
+            tukui: SourceAnswer::NotAsked,
+        },
+    );
+    assert!(report.failed.is_empty());
+    // Left out by choice is not "a key finds more".
+    assert!(report.skipped.is_empty());
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|result| result.not_checked_by.is_empty())
+    );
+}
+
+#[test]
+fn the_not_found_title_names_the_sources_asked_unless_all_were() {
+    let report = |not_asked: &[FindSource]| FindReport {
+        results: Vec::new(),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        not_asked: not_asked.to_vec(),
+    };
+    assert_eq!(report(&[]).not_found_title(), "Not found");
+    assert_eq!(
+        report(&[FindSource::WowInterface]).not_found_title(),
+        "Not found on Wago.io and TukUI"
+    );
+    assert_eq!(
+        report(&[FindSource::Wago]).not_found_title(),
+        "Not found on WoWInterface and TukUI"
+    );
+    assert_eq!(
+        report(&[FindSource::Wago, FindSource::WowInterface]).not_found_title(),
+        "Not found on TukUI"
+    );
+    // Nothing asked: there is nothing to name.
+    assert_eq!(report(&FindSource::ALL).not_found_title(), "Not found");
+}
+
+#[test]
+fn the_report_records_every_source_that_was_not_asked() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Alpha", &["## Title: Alpha"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let report = |wago, wowinterface, tukui| {
+        match_addons(
+            &inputs,
+            &[],
+            None,
+            &SourceLookups {
+                wago,
+                wowinterface,
+                tukui,
+            },
+        )
+    };
+    let asked = report(
+        SourceAnswer::Found(Vec::new()),
+        SourceAnswer::Failed,
+        SourceAnswer::Found(Vec::new()),
+    );
+    // A source that failed was still asked.
+    assert!(asked.not_asked.is_empty());
+    assert_eq!(asked.not_found_title(), "Not found");
+    let left_out = report(
+        SourceAnswer::Skipped,
+        SourceAnswer::NotAsked,
+        SourceAnswer::Found(Vec::new()),
+    );
+    assert_eq!(
+        left_out.not_asked,
+        vec![FindSource::Wago, FindSource::WowInterface]
+    );
+    assert_eq!(left_out.not_found_title(), "Not found on TukUI");
+}
+
+#[test]
+fn turning_a_source_off_works_the_matches_out_again_without_it() {
+    let fixture = fixture();
+    addon(&fixture.addons, "Spy", &["## Version: 1.0"]);
+    addon(&fixture.addons, "Spy_Extra", &["## Version: 1.0"]);
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Forever).expect("inputs");
+    let mut answers = SourceLookups::not_asked();
+    answers.take_answer(
+        FindSource::Wago,
+        lookups(SourceAnswer::Found(vec![wago(
+            "SPY",
+            "Spy",
+            vec![("Spy".to_string(), hash_of(&inputs, "Spy"))],
+        )])),
+    );
+    let mut wowinterface = SourceLookups::not_asked();
+    wowinterface.wowinterface = SourceAnswer::Found(vec![wowi_file(
+        "99",
+        "Spy fork",
+        "1.0",
+        &[("Spy", "1.0"), ("Spy_Extra", "1.0")],
+    )]);
+    answers.take_answer(FindSource::WowInterface, wowinterface);
+    // Taking one source's answer leaves the others as they were.
+    assert_eq!(answers.tukui, SourceAnswer::NotAsked);
+    assert!(matches!(answers.wago, SourceAnswer::Found(_)));
+
+    let both = match_addons(&inputs, &[], None, &answers.only(&FindSource::ALL));
+    assert_eq!(result(&both, "Spy").label, FindLabel::ChooseOne);
+    assert_eq!(both.found_on(FindSource::Wago), 1);
+    assert_eq!(both.found_on(FindSource::WowInterface), 1);
+    assert_eq!(both.found_on(FindSource::Tukui), 0);
+
+    let wago_only = match_addons(&inputs, &[], None, &answers.only(&[FindSource::Wago]));
+    let spy = result(&wago_only, "Spy");
+    assert_eq!(spy.label, FindLabel::Exact);
+    assert_eq!(spy.found().expect("match").source, FindSource::Wago);
+    assert_eq!(wago_only.found_on(FindSource::WowInterface), 0);
+    assert_eq!(
+        wago_only.not_asked,
+        vec![FindSource::WowInterface, FindSource::Tukui]
+    );
+}
+
+#[test]
+fn a_wago_id_in_the_toc_is_no_match_when_wago_is_left_out() {
+    let fixture = fixture();
+    addon(
+        &fixture.addons,
+        "Hekili",
+        &["## Version: 1.0", "## X-Wago-ID: HK"],
+    );
+    let inputs = FindInputs::read(&fixture.addons, GameFlavor::Retail).expect("inputs");
+    let wago_candidates = |report: &FindReport| {
+        report
+            .results
+            .iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|candidate| candidate.source == FindSource::Wago)
+            .count()
+    };
+
+    // Left out: nothing from Wago.io, and the addon is not found.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::NotAsked));
+    assert_eq!(wago_candidates(&report), 0, "{:#?}", report.results);
+    assert_eq!(result(&report, "Hekili").label, FindLabel::NotFound);
+
+    // No key: Wago.io is skipped, and the .toc still names a likely match.
+    let report = match_addons(&inputs, &[], None, &lookups(SourceAnswer::Skipped));
+    assert_eq!(wago_candidates(&report), 1);
+    assert_eq!(result(&report, "Hekili").label, FindLabel::Likely);
+}

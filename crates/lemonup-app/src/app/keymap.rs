@@ -165,6 +165,8 @@ pub(super) enum HelpWhen {
     Always,
     /// No Wago.io key is saved: a name search asks for one in place.
     NoWagoKey,
+    /// A Wago.io key is saved: only then does a key that uses it do anything.
+    HasWagoKey,
     /// The current addon is "Not linked": `f` finds it online.
     NotLinked,
     /// The welcome card is on the list.
@@ -781,10 +783,23 @@ static FIND_HELP: HelpPage = HelpPage {
             ],
         },
         HelpSection {
+            title: "Sources",
+            rows: &[
+                HelpRow::key(
+                    "1",
+                    "Wago.io on or off; sends folder names and file hashes",
+                    &[ch('1')],
+                )
+                .when(HelpWhen::HasWagoKey),
+                HelpRow::key("2", "WoWInterface on or off", &[ch('2')]),
+                HelpRow::key("3", "TukUI on or off", &[ch('3')]),
+            ],
+        },
+        HelpSection {
             title: "Picking and linking",
             rows: &[HelpRow::key(
                 "enter",
-                "start; pick in a \"Choose one\" row; on Link, ask first",
+                "pick in a \"Choose one\" row; on Link, ask first",
                 K_ENTER,
             )],
         },
@@ -1205,15 +1220,12 @@ impl App {
         use super::find_sheet::{FindFocus, FindStep};
         use FooterHintId as Id;
         match self.find.step.as_ref() {
-            Some(FindStep::Start) => vec![
-                KeyHint::key(Id::Run, "enter", "look up", ENTER).main(),
-                self.close_hint(),
-                self.help_hint(),
-            ],
-            Some(FindStep::Looking { .. }) => vec![
-                KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE),
-                self.help_hint(),
-            ],
+            Some(FindStep::Looking { .. }) => {
+                let mut hints = Vec::from_iter(self.find_sources_hint());
+                hints.push(KeyHint::key(Id::Cancel, "esc", "cancel", CLOSE));
+                hints.push(self.help_hint());
+                hints
+            }
             Some(FindStep::Results(results)) => {
                 let mut hints = Vec::new();
                 if results.focusables(self.find_offers_search()).len() > 1 {
@@ -1251,12 +1263,24 @@ impl App {
                     };
                     hints.push(KeyHint::key(Id::Confirm, "enter", label, ENTER).main());
                 }
+                hints.extend(self.find_sources_hint());
                 hints.push(self.close_hint());
                 hints.push(self.help_hint());
                 hints
             }
             Some(FindStep::Failed(_)) | None => vec![self.close_hint(), self.help_hint()],
         }
+    }
+
+    /// The numbers of the sources that turn one on or off right now, if any does.
+    fn find_sources_hint(&self) -> Option<KeyHint> {
+        let (keys, codes) = self.find_source_keys()?;
+        Some(KeyHint::key(
+            FooterHintId::Sources,
+            keys,
+            "turn on or off",
+            codes,
+        ))
     }
 
     /// `F`, while some addon is Not linked.

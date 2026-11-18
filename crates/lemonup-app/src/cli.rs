@@ -6,6 +6,7 @@ use crate::wago::WagoStability;
 use crate::wowinterface::parse_wowinterface_target;
 use clap::{Parser, Subcommand};
 use lemonup_core::TocField;
+use lemonup_core::find::FindSource;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -115,6 +116,14 @@ pub enum Commands {
         /// Print one key=value line per result, for scripts
         #[arg(long)]
         plain: bool,
+        /// Look only at these sources: wago, wowinterface, tukui (comma separated; default all)
+        #[arg(
+            long,
+            value_name = "LIST",
+            value_delimiter = ',',
+            value_parser = parse_find_source
+        )]
+        source: Vec<FindSource>,
     },
     /// Show an addon's Title, Notes and Category, or change one in its .toc files
     Toc {
@@ -175,6 +184,13 @@ fn parse_toc_field(value: &str) -> Result<TocField, String> {
         .ok_or_else(|| format!("unknown field '{value}'; use title, notes or category"))
 }
 
+/// `wago`, `wowinterface` (or `wowi`) or `tukui`, in any case.
+fn parse_find_source(value: &str) -> Result<FindSource, String> {
+    FindSource::from_config_name(value).ok_or_else(|| {
+        format!("unknown source '{value}'; use wago, wowinterface or tukui (comma separated)")
+    })
+}
+
 fn parse_wago_install_target(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -209,6 +225,7 @@ mod tests {
     use clap::Parser;
 
     use lemonup_core::TocField;
+    use lemonup_core::find::FindSource;
 
     use super::{
         Cli, Commands, parse_addon_selector, parse_github_install_target,
@@ -413,7 +430,8 @@ mod tests {
             Some(Commands::Find {
                 link: false,
                 yes: false,
-                plain: false
+                plain: false,
+                ..
             })
         ));
         let cli = Cli::try_parse_from(["lemonup", "find", "--link", "--yes"]).expect("link parses");
@@ -422,7 +440,8 @@ mod tests {
             Some(Commands::Find {
                 link: true,
                 yes: true,
-                plain: false
+                plain: false,
+                ..
             })
         ));
         let cli = Cli::try_parse_from(["lemonup", "find", "--plain"]).expect("plain parses");
@@ -431,10 +450,48 @@ mod tests {
             Some(Commands::Find {
                 link: false,
                 yes: false,
-                plain: true
+                plain: true,
+                ..
             })
         ));
         assert!(Cli::try_parse_from(["lemonup", "find", "--yes"]).is_err());
+    }
+
+    fn find_sources(args: &[&str]) -> Result<Vec<FindSource>, clap::Error> {
+        let mut argv = vec!["lemonup", "find"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).map(|cli| match cli.command {
+            Some(Commands::Find { source, .. }) => source,
+            other => panic!("expected find, got {other:?}"),
+        })
+    }
+
+    #[test]
+    fn find_source_takes_a_comma_separated_list_in_any_case() {
+        assert_eq!(find_sources(&[]).expect("none"), vec![]);
+        assert_eq!(
+            find_sources(&["--source", "wowinterface"]).expect("one"),
+            vec![FindSource::WowInterface]
+        );
+        assert_eq!(
+            find_sources(&["--source", "Wago,WOWI,tukui"]).expect("three"),
+            vec![
+                FindSource::Wago,
+                FindSource::WowInterface,
+                FindSource::Tukui
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_find_source_is_an_error_that_lists_the_valid_names() {
+        for bad in ["bogus", "wago,bogus", ""] {
+            let error = find_sources(&["--source", bad]).expect_err(bad).to_string();
+            assert!(
+                error.contains("wago, wowinterface or tukui"),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]

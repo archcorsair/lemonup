@@ -33,7 +33,9 @@ const DIM_AMOUNT: f32 = 0.34;
 pub(super) fn sheet_width(kind: OverlayKind) -> u16 {
     match kind {
         OverlayKind::Inspect => 76,
-        OverlayKind::Install | OverlayKind::Search | OverlayKind::Find => 104,
+        OverlayKind::Install | OverlayKind::Search => 104,
+        // Room for the wide source rail beside results that keep the version column.
+        OverlayKind::Find => 114,
         OverlayKind::Config => 100,
         OverlayKind::Backup | OverlayKind::TocEdit => 84,
         OverlayKind::Help => 108,
@@ -64,6 +66,11 @@ pub(super) struct SheetBody<'a> {
     focus: Option<usize>,
     /// Rows pinned under the body: they stay in place while it scrolls.
     footer: Vec<Line<'static>>,
+    /// The footer sits on the body's last rows rather than right under the content.
+    footer_at_bottom: bool,
+    /// Lines in a column on the right of the body, and the columns it takes with its gap and
+    /// left border: it holds still at the top while the body scrolls beside it.
+    rail: Option<(u16, Vec<Line<'static>>)>,
     /// The tallest the body gets while the sheet is open, footer included.
     reserve: Option<u16>,
 }
@@ -74,6 +81,8 @@ impl<'a> SheetBody<'a> {
             parts: Vec::new(),
             focus: None,
             footer: Vec::new(),
+            footer_at_bottom: false,
+            rail: None,
             reserve: None,
         }
     }
@@ -94,6 +103,20 @@ impl<'a> SheetBody<'a> {
         self
     }
 
+    /// Puts the footer on the body's last rows, however short the content is.
+    pub(super) fn footer_at_bottom(&mut self) -> &mut Self {
+        self.footer_at_bottom = true;
+        self
+    }
+
+    /// A column `width` columns wide on the right of the body: a gap, a left border line, a
+    /// space, then `lines`, which are not wrapped. It is only as tall as its lines and holds
+    /// still while the rest of the body, drawn to its left, scrolls.
+    pub(super) fn rail(&mut self, width: u16, lines: Vec<Line<'static>>) -> &mut Self {
+        self.rail = Some((width, lines));
+        self
+    }
+
     pub(super) fn text(&mut self, lines: Vec<Line<'static>>) -> &mut Self {
         self.parts.push(SheetPart::Text {
             lines,
@@ -104,6 +127,14 @@ impl<'a> SheetBody<'a> {
 
     pub(super) fn gap(&mut self, rows: u16) -> &mut Self {
         self.parts.push(SheetPart::Gap(rows));
+        self
+    }
+
+    /// Drops a gap the body ends with, so the footer alone sets the space above it.
+    pub(super) fn trim_trailing_gap(&mut self) -> &mut Self {
+        if matches!(self.parts.last(), Some(SheetPart::Gap(_))) {
+            self.parts.pop();
+        }
         self
     }
 
@@ -566,7 +597,16 @@ impl App {
             layout: kept.and_then(|kept| kept.layout).or(room.picked.get()),
             reserve,
         };
-        let heights = body.part_heights(sheet_frame.body_width);
+        // The rail takes its columns on the right; the parts get the rest.
+        let rail_width = body
+            .rail
+            .as_ref()
+            .map_or(0, |(width, _)| (*width).min(sheet_frame.body_width));
+        let parts_width = sheet_frame.body_width - rail_width;
+        let rail_rows = body.rail.as_ref().map_or(0, |(_, lines)| {
+            u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        });
+        let heights = body.part_heights(parts_width);
         let total = heights.iter().copied().fold(0u16, u16::saturating_add);
         let footer = wrap_lines(&body.footer, sheet_frame.body_width);
         let footer_rows = u16::try_from(footer.len()).unwrap_or(u16::MAX);
@@ -577,7 +617,7 @@ impl App {
                 .fold(0u16, u16::saturating_add);
             (start, start.saturating_add(heights[index].max(1)))
         });
-        let content = total.saturating_add(footer_rows);
+        let content = total.max(rail_rows).saturating_add(footer_rows);
         let geometry = match reserve {
             Some(reserve) => sheet_frame.place_reserved(content, reserve),
             None => sheet_frame.place(content),
@@ -622,19 +662,19 @@ impl App {
         });
 
         // Draw the whole body off screen, then copy the rows on screen.
-        let canvas_area = Rect::new(0, 0, geometry.body.width, total.max(1));
+        let canvas_area = Rect::new(0, 0, parts_width, total.max(1));
         let mut canvas = Buffer::empty(canvas_area);
         canvas.set_style(canvas_area, Style::default().bg(roles.sheet).fg(roles.text));
         let mut y = 0u16;
         for (part, height) in body.parts.into_iter().zip(heights) {
-            let area = Rect::new(0, y, geometry.body.width, height);
+            let area = Rect::new(0, y, parts_width, height);
             y = y.saturating_add(height);
             if height == 0 {
                 continue;
             }
             match part {
                 SheetPart::Text { lines, alignment } => {
-                    Paragraph::new(wrap_lines(&lines, geometry.body.width))
+                    Paragraph::new(wrap_lines(&lines, parts_width))
                         .alignment(alignment)
                         .render(area, &mut canvas)
                 }
@@ -654,7 +694,7 @@ impl App {
                 break;
             }
             let target_y = geometry.body.y + row;
-            for column in 0..geometry.body.width {
+            for column in 0..parts_width {
                 let target = (geometry.body.x + column, target_y);
                 if buffer.area.contains(target.into()) {
                     buffer[target] = canvas[(column, source_y)].clone();
@@ -662,9 +702,14 @@ impl App {
             }
         }
         if footer_rows > 0 {
+            let top = if body.footer_at_bottom {
+                geometry.body.height - footer_rows
+            } else {
+                viewport
+            };
             let area = Rect::new(
                 geometry.body.x,
-                geometry.body.y + viewport,
+                geometry.body.y + top,
                 geometry.body.width,
                 footer_rows,
             );
@@ -672,13 +717,32 @@ impl App {
             buffer.set_style(area, Style::default().bg(roles.sheet).fg(roles.text));
             Paragraph::new(footer[..usize::from(footer_rows)].to_vec()).render(area, buffer);
         }
+        if let Some((_, lines)) = body.rail
+            && rail_width > 1
+        {
+            let rows = rail_rows.min(geometry.body.height.saturating_sub(footer_rows));
+            let area = Rect::new(
+                geometry.body.x + parts_width + 1,
+                geometry.body.y,
+                rail_width - 1,
+                rows,
+            );
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(Style::default().fg(roles.border))
+                        .padding(ratatui::widgets::Padding::left(1)),
+                )
+                .render(area, buffer);
+        }
         let arrow_style = roles.muted.bg(roles.sheet);
         if show_up {
             let line = Line::from(Span::styled(
                 format!("↑ {} more", hidden_above + 1),
                 arrow_style,
             ));
-            let area = Rect::new(geometry.body.x, geometry.body.y, geometry.body.width, 1);
+            let area = Rect::new(geometry.body.x, geometry.body.y, parts_width, 1);
             Clear.render(area, buffer);
             buffer.set_style(area, arrow_style);
             line.render(area, buffer);
@@ -691,7 +755,7 @@ impl App {
             let area = Rect::new(
                 geometry.body.x,
                 geometry.body.y + viewport - 1,
-                geometry.body.width,
+                parts_width,
                 1,
             );
             Clear.render(area, buffer);

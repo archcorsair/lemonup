@@ -374,7 +374,7 @@ fn wrapped_text(text: &str, width: usize) -> Vec<String> {
     wrap_words(INDENT, text, width)
 }
 
-fn capitalize(text: &str) -> String {
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -826,10 +826,13 @@ pub(crate) fn human_report(
     for (label, title) in [
         (
             FindLabel::CurseForgeOnly,
-            "On CurseForge only, LemonUp can't update these yet",
+            "On CurseForge only, LemonUp can't update these yet".to_string(),
         ),
-        (FindLabel::NotFound, "Not found"),
-        (FindLabel::DeveloperCopy, "Skipped, developer copy"),
+        (FindLabel::NotFound, report.not_found_title()),
+        (
+            FindLabel::DeveloperCopy,
+            "Skipped, developer copy".to_string(),
+        ),
     ] {
         let results = with(label);
         if !results.is_empty() {
@@ -837,7 +840,7 @@ pub(crate) fn human_report(
                 &mut lines,
                 paint,
                 Tone::Quiet,
-                title,
+                &title,
                 results.len(),
                 wrapped_list(name_list(&results, names), paint.1),
             );

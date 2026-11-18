@@ -266,6 +266,8 @@ enum FooterHintId {
     SwitchGame,
     /// `F`, find your addons online.
     FindAll,
+    /// `1`, `2` and `3` in the Find sheet: a source on or off.
+    Sources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18553,7 +18555,10 @@ mod tests {
             match when {
                 HelpWhen::Always => {}
                 HelpWhen::NoWagoKey => app.wago_api_key = None,
-                HelpWhen::NotLinked | HelpWhen::NoJob | HelpWhen::DetailsOverflow => {}
+                HelpWhen::HasWagoKey
+                | HelpWhen::NotLinked
+                | HelpWhen::NoJob
+                | HelpWhen::DetailsOverflow => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),

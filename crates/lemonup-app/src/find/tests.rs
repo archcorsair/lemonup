@@ -272,6 +272,7 @@ fn without_a_wago_key_find_says_a_key_finds_more() {
         results: Vec::new(),
         failed: Vec::new(),
         skipped: vec![FindSource::Wago],
+        not_asked: vec![FindSource::Wago],
     };
 
     let lines = report_lines(&report, &[], 0);
@@ -650,6 +651,7 @@ fn full_report() -> FindReport {
         results,
         failed: vec![FindSource::WowInterface],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     }
 }
 
@@ -869,6 +871,7 @@ fn likely_line(source: FindSource, folder: &str, reason: Option<LikelyReason>) -
         results: vec![result_of(FindLabel::Likely, folder, folder, vec![likely])],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
     section_lines(&lines, "Likely matches (1)")
@@ -962,6 +965,7 @@ fn names_never_show_doubled_spaces() {
         ],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let lines = human_report(&report, &[], &names, 0, Paint::PLAIN);
@@ -1033,6 +1037,7 @@ fn a_failed_source_that_left_nothing_unchecked_is_still_reported() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: vec![FindSource::Tukui],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let problems = vec![SourceProblem {
         source: FindSource::Tukui,
@@ -1066,6 +1071,7 @@ fn the_report_opens_with_what_was_sent_to_wago_or_that_a_key_finds_more() {
         results: Vec::new(),
         failed: Vec::new(),
         skipped: vec![FindSource::Wago],
+        not_asked: vec![FindSource::Wago],
     };
     let lines = human_report(&without_key, &[], &names, 0, Paint::PLAIN);
     assert_eq!(
@@ -1088,6 +1094,7 @@ fn the_last_line_always_says_what_happened() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     assert_eq!(
         human_closing(&nothing_ready, &names, None, Paint::PLAIN, Paint::PLAIN).expect("closing"),
@@ -1152,6 +1159,7 @@ fn a_refusal_names_folders_that_become_their_own_addon() {
         results: vec![exact(gather.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let error = human_closing(
@@ -1336,6 +1344,7 @@ fn plain_output_keeps_its_fields_and_fixes_the_three_lines() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     assert_eq!(
         plain_closing(&nothing_ready, None).expect("closing"),
@@ -1418,6 +1427,7 @@ fn colored_headings_are_bold_in_the_color_of_what_they_mean() {
         results: vec![only(FindLabel::NotFound, "Spy")],
         failed: vec![FindSource::Tukui],
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let problems = vec![SourceProblem {
         source: FindSource::Tukui,
@@ -1519,6 +1529,7 @@ fn the_closing_line_and_the_refusal_are_bold() {
         results: vec![exact(gather.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let refused = |error_paint| {
         human_closing(
@@ -1636,6 +1647,7 @@ fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
         results: vec![exact(data.clone())],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
 
     let error = human_closing(
@@ -1757,6 +1769,7 @@ fn choose_one_lists_folders_with_a_short_reason_and_wraps() {
         )],
         failed: Vec::new(),
         skipped: Vec::new(),
+        not_asked: Vec::new(),
     };
     let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
     let joined = section_lines(&lines, "Choose one in LemonUp (1)")
@@ -1979,5 +1992,233 @@ fn the_target_falls_back_to_the_version_of_the_folder() {
     assert_eq!(
         FindTarget::new("default", dir, GameFlavor::Forever, &profiles).game,
         "WoW Forever"
+    );
+}
+
+/// How many requests each source got.
+#[derive(Default)]
+struct Requests {
+    wago: std::cell::Cell<usize>,
+    wowinterface: std::cell::Cell<usize>,
+    tukui: std::cell::Cell<usize>,
+}
+
+/// Runs a lookup whose three requests only count themselves; none reaches the network.
+async fn count_requests(
+    choice: FindChoice,
+    key: Option<&str>,
+    nothing_for_wago: bool,
+) -> (Requests, Lookups) {
+    let requests = Requests::default();
+    let lookups = lookup_with(
+        choice,
+        key,
+        nothing_for_wago,
+        |_key| async {
+            requests.wago.set(requests.wago.get() + 1);
+            Ok(wire::WagoAnswer::default())
+        },
+        || async {
+            requests.wowinterface.set(requests.wowinterface.get() + 1);
+            Ok(Vec::new())
+        },
+        || async {
+            requests.tukui.set(requests.tukui.get() + 1);
+            Ok(Vec::new())
+        },
+    )
+    .await;
+    (requests, lookups)
+}
+
+#[tokio::test]
+async fn a_source_left_out_gets_no_request_at_all() {
+    let (requests, lookups) = count_requests(
+        FindChoice::only(&[FindSource::Wago, FindSource::Tukui]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(lookups.lookups.wowinterface, SourceAnswer::NotAsked);
+    assert!(matches!(lookups.lookups.wago, SourceAnswer::Found(_)));
+    assert!(lookups.problems.is_empty());
+
+    let (requests, lookups) = count_requests(
+        FindChoice::only(&[FindSource::WowInterface]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(lookups.lookups.wago, SourceAnswer::NotAsked);
+    assert_eq!(lookups.lookups.tukui, SourceAnswer::NotAsked);
+}
+
+#[tokio::test]
+async fn every_source_is_asked_when_all_are_checked_and_wago_needs_its_key() {
+    let (requests, _) = count_requests(FindChoice::all(), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 1, 1)
+    );
+    // No key: Wago.io is skipped (the report says a key finds more), not asked.
+    let (requests, lookups) = count_requests(FindChoice::all(), None, false).await;
+    assert_eq!(requests.wago.get(), 0);
+    assert_eq!(lookups.lookups.wago, SourceAnswer::Skipped);
+    // A key with no folders to send asks nothing of Wago.io either.
+    let (requests, _) = count_requests(FindChoice::all(), Some("key"), true).await;
+    assert_eq!(requests.wago.get(), 0);
+}
+
+#[tokio::test]
+async fn find_without_source_asks_all_and_ignores_what_the_tui_remembers() {
+    assert_eq!(cli_choice(&[]), FindChoice::all());
+    let (requests, _) = count_requests(cli_choice(&[]), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (1, 1, 1)
+    );
+    // `--source wowinterface` asks only WoWInterface.
+    assert_eq!(
+        cli_choice(&[FindSource::WowInterface]),
+        FindChoice::only(&[FindSource::WowInterface])
+    );
+    let (requests, _) =
+        count_requests(cli_choice(&[FindSource::WowInterface]), Some("key"), false).await;
+    assert_eq!(
+        (
+            requests.wago.get(),
+            requests.wowinterface.get(),
+            requests.tukui.get()
+        ),
+        (0, 1, 0)
+    );
+}
+
+#[test]
+fn a_left_out_wago_leaves_no_key_note_in_the_report() {
+    let lookups = SourceLookups {
+        wago: SourceAnswer::NotAsked,
+        wowinterface: SourceAnswer::Found(Vec::new()),
+        tukui: SourceAnswer::Found(Vec::new()),
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addons = dir.path().join("AddOns");
+    fs::create_dir_all(addons.join("Alpha")).expect("folder");
+    fs::write(addons.join("Alpha/Alpha.toc"), "## Title: Alpha\n").expect("toc");
+    let inputs = FindInputs::read(&addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(&inputs, &[], None, &lookups);
+    let lines = report_lines(&report, &[], 1);
+    assert!(
+        !lines.iter().any(|line| line.contains("Wago.io key")),
+        "{lines:?}"
+    );
+    let skipped = SourceLookups {
+        wago: SourceAnswer::Skipped,
+        ..lookups
+    };
+    let report = match_addons(&inputs, &[], None, &skipped);
+    assert!(
+        report_lines(&report, &[], 1)
+            .iter()
+            .any(|line| line.contains("A Wago.io key finds more"))
+    );
+}
+
+#[test]
+fn the_readable_report_says_where_not_found_looked() {
+    for (not_asked, heading) in [
+        (Vec::new(), "Not found (2)"),
+        (
+            vec![FindSource::WowInterface],
+            "Not found on Wago.io and TukUI (2)",
+        ),
+        (
+            vec![FindSource::Wago],
+            "Not found on WoWInterface and TukUI (2)",
+        ),
+    ] {
+        let mut report = full_report();
+        report.not_asked = not_asked.clone();
+        let lines = human_report(&report, &[], &full_names(), 0, Paint::PLAIN);
+        assert!(
+            lines.iter().any(|line| line == heading),
+            "{heading}: {lines:?}"
+        );
+        if not_asked.is_empty() {
+            assert!(!lines.iter().any(|line| line.starts_with("Not found on")));
+        }
+    }
+}
+
+#[test]
+fn the_plain_report_keeps_its_field_names_whatever_sources_were_asked() {
+    let mut report = full_report();
+    report.not_asked = vec![FindSource::WowInterface];
+    let lines = report_lines(&report, &[], 44);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("find summary:") && line.contains("not_found=2")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Not found")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn find_without_wago_reports_no_wago_match_for_a_wago_id_in_the_toc() {
+    let (_, lookups) = count_requests(
+        cli_choice(&[FindSource::WowInterface, FindSource::Tukui]),
+        Some("key"),
+        false,
+    )
+    .await;
+    assert_eq!(lookups.lookups.wago, SourceAnswer::NotAsked);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addons = dir.path().join("AddOns");
+    fs::create_dir_all(addons.join("Hekili")).expect("folder");
+    fs::write(
+        addons.join("Hekili/Hekili.toc"),
+        "## Title: Hekili\n## X-Wago-ID: HK\n",
+    )
+    .expect("toc");
+    let inputs = FindInputs::read(&addons, GameFlavor::Retail).expect("inputs");
+    let report = match_addons(&inputs, &[], None, &lookups.lookups);
+    let lines = report_lines(&report, &lookups.problems, 1);
+    assert!(
+        !lines.iter().any(|line| line.contains("source=wago")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("likely=0") && line.contains("not_found=1")),
+        "{lines:?}"
     );
 }

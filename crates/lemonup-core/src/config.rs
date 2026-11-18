@@ -45,6 +45,47 @@ pub struct AppConfig {
     pub reduce_motion: bool,
     /// How often the games that aren't open are checked. Shared by all games.
     pub check_other_games: OtherGamesCheck,
+    /// The sources the Find sheet looks at in this game: `wago`, `wowinterface`, `tukui`.
+    /// Missing means all of them. Only this game's `config.toml` holds it. A value that isn't
+    /// a list of names reads as missing, and names LemonUp doesn't know are ignored, so a
+    /// newer LemonUp's choice never stops this one from loading.
+    #[serde(
+        deserialize_with = "lenient_names",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub find_sources: Option<Vec<String>>,
+}
+
+/// The names in a list, whatever else the value holds. Anything that is not a list of strings
+/// reads as missing instead of failing the whole config.
+fn lenient_names<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Name(String),
+        Other(serde::de::IgnoredAny),
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        List(Vec<Entry>),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Value::deserialize(deserializer)? {
+        Value::List(entries) => Some(
+            entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Entry::Name(name) => Some(name),
+                    Entry::Other(_) => None,
+                })
+                .collect(),
+        ),
+        Value::Other(_) => None,
+    })
 }
 
 /// Debug output never shows the Wago.io key, so a log line or a failed
@@ -71,6 +112,7 @@ impl fmt::Debug for AppConfig {
             .field("simple_symbols", &self.simple_symbols)
             .field("reduce_motion", &self.reduce_motion)
             .field("check_other_games", &self.check_other_games)
+            .field("find_sources", &self.find_sources)
             .finish()
     }
 }
@@ -95,6 +137,7 @@ impl AppConfig {
             simple_symbols: false,
             reduce_motion: false,
             check_other_games: OtherGamesCheck::default(),
+            find_sources: None,
         }
     }
 }
@@ -524,6 +567,72 @@ mod tests {
                 assert_eq!(config.schema_version, 1);
             }
             ConfigLoad::Missing(_) => panic!("legacy config should load"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod find_sources_tests {
+    use tempfile::tempdir;
+
+    use super::{AppConfig, ConfigLoad, ConfigStore};
+
+    fn loaded(store: &ConfigStore) -> AppConfig {
+        match store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => config,
+            ConfigLoad::Missing(_) => panic!("config should load"),
+        }
+    }
+
+    #[test]
+    fn find_sources_round_trip_as_a_list_and_missing_means_none_saved() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::new(path.clone());
+
+        let mut config = AppConfig::new_unconfigured();
+        assert_eq!(config.find_sources, None);
+        store.write_config(&config).expect("write config");
+        let raw = std::fs::read_to_string(&path).expect("read config");
+        assert!(!raw.contains("find_sources"), "{raw}");
+
+        config.find_sources = Some(vec!["wowinterface".to_string(), "tukui".to_string()]);
+        store.write_config(&config).expect("write config");
+        let raw = std::fs::read_to_string(&path).expect("read config");
+        assert!(
+            raw.contains("find_sources = [\n    \"wowinterface\",\n    \"tukui\",\n]"),
+            "{raw}"
+        );
+        assert_eq!(loaded(&store), config);
+
+        // A config written before the field existed.
+        std::fs::write(&path, "schema_version = 1\ntheme = \"dark\"\n").expect("write old");
+        assert_eq!(loaded(&store).find_sources, None);
+    }
+
+    #[test]
+    fn an_unreadable_find_sources_value_never_breaks_loading_the_config() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::new(path.clone());
+        for (value, expected) in [
+            ("5", None),
+            ("\"wago\"", None),
+            ("{ a = 1 }", None),
+            ("[1, \"tukui\", true]", Some(vec!["tukui".to_string()])),
+            (
+                "[\"curseforge\", \"wago\"]",
+                Some(vec!["curseforge".to_string(), "wago".to_string()]),
+            ),
+        ] {
+            std::fs::write(
+                &path,
+                format!("schema_version = 1\nshow_libs = true\nfind_sources = {value}\n"),
+            )
+            .expect("write config");
+            let config = loaded(&store);
+            assert_eq!(config.find_sources, expected, "{value}");
+            assert!(config.show_libs, "{value}");
         }
     }
 }

@@ -56,6 +56,111 @@ impl FindSource {
             Self::Tukui => SourceKind::Tukui,
         }
     }
+
+    /// The name `config.toml` and `lemonup find --source` use.
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Self::Wago => "wago",
+            Self::WowInterface => "wowinterface",
+            Self::Tukui => "tukui",
+        }
+    }
+
+    /// The source called `name` (`wago`, `wowinterface` or `wowi`, `tukui`; case does not
+    /// matter), or `None` for a name this version doesn't know.
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "wago" => Some(Self::Wago),
+            "wowinterface" | "wowi" => Some(Self::WowInterface),
+            "tukui" => Some(Self::Tukui),
+            _ => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Wago => 0,
+            Self::WowInterface => 1,
+            Self::Tukui => 2,
+        }
+    }
+}
+
+/// The sources a person wants "find" to look at, as they chose them. Wago.io stays wanted
+/// while there is no key to ask it with: the choice is theirs, and a key added later brings
+/// Wago.io back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FindChoice {
+    wanted: [bool; 3],
+}
+
+impl Default for FindChoice {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl FindChoice {
+    /// Every source.
+    pub fn all() -> Self {
+        Self { wanted: [true; 3] }
+    }
+
+    /// The choice `config.toml` holds (`find_sources`). Missing means every source. Names this
+    /// version doesn't know are ignored (a newer LemonUp may add sources), and a list with no
+    /// known name means every source too: nothing is ever saved with no source checked.
+    pub fn from_config(names: Option<&[String]>) -> Self {
+        let Some(names) = names else {
+            return Self::all();
+        };
+        let mut wanted = [false; 3];
+        for source in names
+            .iter()
+            .filter_map(|name| FindSource::from_config_name(name))
+        {
+            wanted[source.index()] = true;
+        }
+        if wanted == [false; 3] {
+            Self::all()
+        } else {
+            Self { wanted }
+        }
+    }
+
+    /// The names to save in `config.toml`, in the order the sources are listed.
+    pub fn to_config(self) -> Vec<String> {
+        FindSource::ALL
+            .into_iter()
+            .filter(|source| self.wants(*source))
+            .map(|source| source.config_name().to_string())
+            .collect()
+    }
+
+    /// Exactly `sources`, for `lemonup find --source`.
+    pub fn only(sources: &[FindSource]) -> Self {
+        let mut wanted = [false; 3];
+        for source in sources {
+            wanted[source.index()] = true;
+        }
+        Self { wanted }
+    }
+
+    pub fn wants(self, source: FindSource) -> bool {
+        self.wanted[source.index()]
+    }
+
+    pub fn toggle(&mut self, source: FindSource) {
+        let wanted = &mut self.wanted[source.index()];
+        *wanted = !*wanted;
+    }
+
+    /// The wanted sources that can be asked: Wago.io only with a key.
+    pub fn asked(self, has_wago_key: bool) -> Vec<FindSource> {
+        FindSource::ALL
+            .into_iter()
+            .filter(|source| self.wants(*source) && (*source != FindSource::Wago || has_wago_key))
+            .collect()
+    }
 }
 
 /// Why a folder counts as a developer copy.
@@ -273,8 +378,10 @@ pub struct TukuiPackage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceAnswer<T> {
     Found(Vec<T>),
-    /// Not asked (Wago.io without a key).
+    /// Not asked: Wago.io without a key. The report says a key finds more.
     Skipped,
+    /// Not asked: the person left this source out. Nothing is said about it.
+    NotAsked,
     /// Asked, but the answer never came or made no sense.
     Failed,
     /// Answered, but part of the answer made no sense: what could be read is used, and what
@@ -286,12 +393,17 @@ impl<T> SourceAnswer<T> {
     fn items(&self) -> &[T] {
         match self {
             Self::Found(items) | Self::Incomplete(items) => items,
-            Self::Skipped | Self::Failed => &[],
+            Self::Skipped | Self::NotAsked | Self::Failed => &[],
         }
     }
 
     fn failed(&self) -> bool {
         matches!(self, Self::Failed | Self::Incomplete(_))
+    }
+
+    /// Whether the source was asked, whatever came back.
+    fn asked(&self) -> bool {
+        !matches!(self, Self::Skipped | Self::NotAsked)
     }
 }
 
@@ -302,7 +414,55 @@ pub struct SourceLookups {
     pub tukui: SourceAnswer<TukuiPackage>,
 }
 
+impl Default for SourceLookups {
+    fn default() -> Self {
+        Self::not_asked()
+    }
+}
+
 impl SourceLookups {
+    /// No source asked yet.
+    pub fn not_asked() -> Self {
+        Self {
+            wago: SourceAnswer::NotAsked,
+            wowinterface: SourceAnswer::NotAsked,
+            tukui: SourceAnswer::NotAsked,
+        }
+    }
+
+    /// Takes `source`'s answer from `other`; the other sources keep theirs.
+    pub fn take_answer(&mut self, source: FindSource, other: SourceLookups) {
+        match source {
+            FindSource::Wago => self.wago = other.wago,
+            FindSource::WowInterface => self.wowinterface = other.wowinterface,
+            FindSource::Tukui => self.tukui = other.tukui,
+        }
+    }
+
+    /// These answers with every source not in `keep` read as not asked, so a report made from
+    /// them shows only what the kept sources found, and matches across sources (a "Choose
+    /// one", a match that outweighs another) are worked out again for those alone.
+    pub fn only(&self, keep: &[FindSource]) -> Self {
+        let kept = |source| keep.contains(&source);
+        Self {
+            wago: if kept(FindSource::Wago) {
+                self.wago.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+            wowinterface: if kept(FindSource::WowInterface) {
+                self.wowinterface.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+            tukui: if kept(FindSource::Tukui) {
+                self.tukui.clone()
+            } else {
+                SourceAnswer::NotAsked
+            },
+        }
+    }
+
     fn failed(&self) -> Vec<FindSource> {
         let mut failed = Vec::new();
         if self.wago.failed() {
@@ -603,6 +763,42 @@ pub struct FindReport {
     pub failed: Vec<FindSource>,
     /// Sources that were not asked (Wago.io without a key).
     pub skipped: Vec<FindSource>,
+    /// Sources that were not asked for any reason: no key, or left out by the person.
+    pub not_asked: Vec<FindSource>,
+}
+
+impl FindReport {
+    /// How many results have a match from `source`, one to pick or one of a "Choose one".
+    pub fn found_on(&self, source: FindSource) -> usize {
+        self.results
+            .iter()
+            .filter(|result| {
+                result
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.source == source)
+            })
+            .count()
+    }
+
+    /// The sources the lookup asked, in their usual order.
+    pub fn asked(&self) -> Vec<FindSource> {
+        FindSource::ALL
+            .into_iter()
+            .filter(|source| !self.not_asked.contains(source))
+            .collect()
+    }
+
+    /// The title of the "Not found" group. When some source was not asked it says where the
+    /// lookup did look ("Not found on WoWInterface and TukUI"), so the group never claims more.
+    pub fn not_found_title(&self) -> String {
+        let asked = self.asked();
+        if asked.is_empty() || asked.len() == FindSource::ALL.len() {
+            return "Not found".to_string();
+        }
+        let names = asked.iter().map(|source| source.name()).collect::<Vec<_>>();
+        format!("Not found on {}", names.join(" and "))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1006,7 +1202,10 @@ pub fn match_addons(
                 .filter(|unit| key(&unit.folder) == key(folder))
                 .map_or_else(|| vec![local.folder.clone()], |unit| unit.folders.clone());
             let name = local.title.clone().unwrap_or_else(|| local.folder.clone());
+            // A Wago.io ID in the .toc is a likely match on Wago.io, unless Wago.io was left out.
+            // Without a key Wago.io is skipped, not left out: the .toc is all there is to go on.
             if let Some(id) = &local.ids.wago
+                && !matches!(lookups.wago, SourceAnswer::NotAsked)
                 && !claims_folder(&claims, FindSource::Wago, id, folder)
             {
                 let mut found = empty_found(FindSource::Wago, id, wago_url(id), &name);
@@ -1204,6 +1403,15 @@ pub fn match_addons(
         } else {
             Vec::new()
         },
+        not_asked: [
+            (FindSource::Wago, lookups.wago.asked()),
+            (FindSource::WowInterface, lookups.wowinterface.asked()),
+            (FindSource::Tukui, lookups.tukui.asked()),
+        ]
+        .into_iter()
+        .filter(|(_, asked)| !asked)
+        .map(|(source, _)| source)
+        .collect(),
     }
 }
 
