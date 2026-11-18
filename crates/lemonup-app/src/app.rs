@@ -1207,7 +1207,10 @@ struct DashboardRefreshabilitySummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DashboardItem {
+    /// The name shown for the addon (`AddonRecord::display_name`).
     name: String,
+    /// The stored name: the TOC Title (or the user's Title). The `/` filter matches it too.
+    toc_name: String,
     folder: String,
     owned_folders: Vec<String>,
     source: SourceKind,
@@ -1382,7 +1385,8 @@ impl DashboardState {
                 let owned_folder_count = addon.owned_folders.len();
                 let has_authoritative_owned_folders = addon.has_authoritative_owned_folders();
                 DashboardItem {
-                    name: addon.name,
+                    name: addon.display_name().to_string(),
+                    toc_name: addon.name,
                     folder: addon.folder,
                     owned_folders: addon
                         .owned_folders
@@ -2152,8 +2156,8 @@ fn dashboard_filter_terms(query: &str) -> Vec<String> {
     query.split_whitespace().map(str::to_lowercase).collect()
 }
 
-/// Case-insensitive AND match: every term must be a substring of the title,
-/// folder, author, or any owned folder name.
+/// Case-insensitive AND match: every term must be a substring of the shown name, the TOC
+/// Title, folder, author, or any owned folder name.
 fn dashboard_item_filter_match(item: &DashboardItem, terms: &[String]) -> DashboardFilterMatch {
     if terms.is_empty() {
         return DashboardFilterMatch::Direct;
@@ -2161,6 +2165,7 @@ fn dashboard_item_filter_match(item: &DashboardItem, terms: &[String]) -> Dashbo
 
     let own_fields = [
         Some(item.name.as_str()),
+        Some(item.toc_name.as_str()),
         Some(item.folder.as_str()),
         item.author.as_deref(),
     ]
@@ -15237,6 +15242,83 @@ mod tests {
         press_key(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "author");
         assert_eq!(visible_folders(&app), vec!["Second".to_string()]);
+    }
+
+    /// Addons linked to Wago.io, WoWInterface or TukUI show the source's name; a Title the user
+    /// set wins, and GitHub and Not linked addons keep their TOC Title.
+    fn source_named_dashboard() -> DashboardState {
+        let mut dbm = AddonRecord::new("<DBM Core> Main Core", "DBM-Core", SourceKind::Wago);
+        dbm.source_name = Some("Deadly Boss Mods (DBM)".to_string());
+        let mut elvui = AddonRecord::new("ElvUI Toc", "ElvUI", SourceKind::Tukui);
+        elvui.source_name = Some("Alpha ElvUI".to_string());
+        let mut renamed = AddonRecord::new("Zed Mine", "Renamed", SourceKind::WowInterface);
+        renamed.toc_overrides =
+            std::collections::BTreeMap::from([("Title".to_string(), "Zed Mine".to_string())]);
+        renamed.source_name = Some("Alpha Renamed".to_string());
+        let mut repo = AddonRecord::new("Bravo Toc", "Repo", SourceKind::GitHub);
+        repo.source_name = Some("Alpha Repo".to_string());
+        let mut loose = AddonRecord::new("Charlie Toc", "Loose", SourceKind::Manual);
+        loose.source_name = Some("Alpha Loose".to_string());
+        DashboardState::from_addons(vec![dbm, elvui, renamed, repo, loose])
+    }
+
+    #[test]
+    fn linked_addons_show_their_sources_name_in_the_list_and_sort_by_it() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard = source_named_dashboard();
+        app.apply(AppAction::ToggleDashboardSort(DashboardSortColumn::Name));
+        assert_eq!(
+            app.dashboard.sort_config().column,
+            DashboardSortColumn::Name
+        );
+        let names = app
+            .dashboard
+            .rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect::<Vec<_>>();
+        let ascending = [
+            "Alpha ElvUI",
+            "Bravo Toc",
+            "Charlie Toc",
+            "Deadly Boss Mods (DBM)",
+            "Zed Mine",
+        ];
+        assert!(
+            names == ascending || names.iter().rev().eq(ascending.iter()),
+            "{names:?}"
+        );
+
+        for (width, height) in [(80u16, 24u16), (160, 40)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            for name in ["Alpha ElvUI", "Bravo Toc", "Charlie Toc", "Zed Mine"] {
+                assert!(text.contains(name), "{width}x{height}: {name}\n{text}");
+            }
+            assert!(text.contains("Deadly Boss"), "{width}x{height}\n{text}");
+            for hidden in ["<DBM Core>", "ElvUI Toc", "Alpha Renamed", "Alpha Repo"] {
+                assert!(!text.contains(hidden), "{width}x{height}: {hidden}\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_filter_matches_the_shown_name_and_the_toc_title() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.dashboard = source_named_dashboard();
+
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "deadly");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
+
+        app.dashboard.set_filter(TextInput::default(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "DBM Core");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
+
+        app.dashboard.set_filter(TextInput::default(), false);
+        press_key(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "main core");
+        assert_eq!(visible_folders(&app), vec!["DBM-Core".to_string()]);
     }
 
     #[test]

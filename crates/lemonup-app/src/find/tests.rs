@@ -475,6 +475,7 @@ fn found(source: FindSource, name: &str, folder: &str, version: &str, latest: &s
         source_id: "1".to_string(),
         source_url: String::new(),
         name: name.to_string(),
+        source_name: Some(name.to_string()),
         author: None,
         parent_folder: folder.to_string(),
         folders: vec![folder.to_string()],
