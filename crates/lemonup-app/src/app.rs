@@ -13137,8 +13137,8 @@ mod tests {
 
     #[test]
     fn list_columns_match_the_design_widths() {
-        use super::render_dashboard::ListColumns;
-        let wide = ListColumns::for_width(120);
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let wide = ListColumns::for_width(120, ColumnNeeds::default());
         assert_eq!(
             (
                 wide.name,
@@ -13149,7 +13149,7 @@ mod tests {
             ),
             (33, 21, 22, 26, 13)
         );
-        let narrow = ListColumns::for_width(80);
+        let narrow = ListColumns::for_width(80, ColumnNeeds::default());
         assert_eq!(
             (
                 narrow.name,
@@ -13160,22 +13160,88 @@ mod tests {
             ),
             (27, 21, 19, 0, 8)
         );
-        assert!(!ListColumns::for_width(109).wide);
-        assert!(ListColumns::for_width(110).wide);
+        assert!(!ListColumns::for_width(109, ColumnNeeds::default()).wide);
+        assert!(ListColumns::for_width(110, ColumnNeeds::default()).wide);
 
-        // Extra width: Addon to 40, then Author to 36, then Version to 26,
-        // then empty space. Nothing stretches to fill.
+        // Short content: the base widths hold at any window width, and the
+        // rest stays empty at the right edge.
         let widths = |width: u16| {
-            let c = ListColumns::for_width(width);
+            let c = ListColumns::for_width(width, ColumnNeeds::default());
             (c.name, c.status, c.version, c.author, c.source, c.total())
         };
-        assert_eq!(widths(127), (40, 21, 22, 26, 13, 127));
-        assert_eq!(widths(137), (40, 21, 22, 36, 13, 137));
-        assert_eq!(widths(138), (40, 21, 23, 36, 13, 138));
-        assert_eq!(widths(141), (40, 21, 26, 36, 13, 141));
-        assert_eq!(widths(200), (40, 21, 26, 36, 13, 141));
-        assert_eq!(widths(100), (40, 21, 26, 0, 8, 100));
-        assert_eq!(widths(160).5, 141);
+        assert_eq!(widths(110), (23, 21, 22, 26, 13, 110));
+        assert_eq!(widths(120), (33, 21, 22, 26, 13, 120));
+        assert_eq!(widths(250), (33, 21, 22, 26, 13, 120));
+        assert_eq!(widths(100), (27, 21, 19, 0, 8, 80));
+    }
+
+    #[test]
+    fn list_columns_grow_to_what_their_cells_need() {
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let needs = ColumnNeeds {
+            name: 60,
+            version: 40,
+            author: 50,
+            source: 13,
+        };
+        let c = ListColumns::for_width(250, needs);
+        // Every column shows its widest cell in full, with no fixed cap, and
+        // the rest of the window stays empty at the right.
+        assert_eq!(
+            (c.name, c.status, c.version, c.author, c.source),
+            (60, 21, 40, 50, 13)
+        );
+        assert_eq!(c.total(), 5 + 60 + 21 + 40 + 50 + 13);
+
+        // Little room: Version first, then Addon, then Author, then Source.
+        let widths = |width: u16| {
+            let c = ListColumns::for_width(width, needs);
+            (c.name, c.version, c.author, c.source)
+        };
+        let base = ListColumns::for_width(120, ColumnNeeds::default()).total();
+        assert_eq!(widths(base + 5), (33, 27, 26, 13));
+        assert_eq!(widths(base + 18), (33, 40, 26, 13));
+        assert_eq!(widths(base + 30), (45, 40, 26, 13));
+        assert_eq!(widths(base + 18 + 27 + 5), (60, 40, 31, 13));
+        // A column never shrinks below its base for short content.
+        let short = ColumnNeeds {
+            name: 5,
+            version: 5,
+            author: 5,
+            source: 5,
+        };
+        let c = ListColumns::for_width(250, short);
+        assert_eq!((c.name, c.version, c.author, c.source), (33, 22, 26, 13));
+        // Narrow windows grow the same way, without Author.
+        let c = ListColumns::for_width(109, needs);
+        assert_eq!((c.name, c.version, c.author, c.source), (35, 40, 0, 8));
+        // Too narrow for the design: Addon gives way first, as before.
+        assert_eq!(ListColumns::for_width(70, needs).name, 27 - 10);
+    }
+
+    #[test]
+    fn docked_list_columns_grow_to_what_their_cells_need() {
+        use super::render_dashboard::{ColumnNeeds, ListColumns};
+        let needs = ColumnNeeds {
+            name: 50,
+            version: 40,
+            author: 99,
+            source: 99,
+        };
+        let c = ListColumns::for_docked(150, needs);
+        assert_eq!(
+            (c.name, c.status, c.version, c.author, c.source),
+            (50, 21, 40, 0, 0)
+        );
+        // Version first, then Addon.
+        let c = ListColumns::for_docked(78 + 10, needs);
+        assert_eq!((c.name, c.version), (30, 32));
+        let c = ListColumns::for_docked(78 + 25, needs);
+        assert_eq!((c.name, c.version), (37, 40));
+        // Short content keeps the base widths.
+        let c = ListColumns::for_docked(150, ColumnNeeds::default());
+        assert_eq!((c.name, c.status, c.version), (30, 21, 22));
+        assert_eq!(c.total(), 78);
     }
 
     #[test]
@@ -13749,6 +13815,25 @@ mod tests {
                 assert!(at(last).contains("C check all"), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn wide_list_columns_measure_double_width_text_by_its_cells() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        // 16 and 18 CJK characters take 32 and 36 terminal cells.
+        let author = "\u{4f5c}\u{8005}".repeat(8);
+        let name = "\u{63d2}\u{4ef6}".repeat(9);
+        let mut addons = vec![versioned(SourceKind::Wago, "1.0.0", Some("1.0.1"))];
+        addons[0].name = name.clone();
+        addons[0].folder = "Wide".to_string();
+        addons[0].author = Some(author.clone());
+        app.dashboard = DashboardState::from_addons(addons);
+
+        let rows = render_rows(&mut app, 200, 30);
+        // Wide glyphs leave an empty buffer cell after them in the dump.
+        let text = rows.join("\n").replace(' ', "");
+        assert!(text.contains(&name), "name was cut\n{text}");
+        assert!(text.contains(&author), "author was cut\n{text}");
     }
 
     #[test]
@@ -17239,7 +17324,10 @@ mod tests {
 
         #[test]
         fn docked_columns_are_78_1_41_at_120_and_the_panel_stops_near_52() {
-            let columns = crate::app::render_dashboard::ListColumns::for_docked(78);
+            let columns = crate::app::render_dashboard::ListColumns::for_docked(
+                78,
+                crate::app::render_dashboard::ColumnNeeds::default(),
+            );
             assert_eq!(
                 (
                     columns.name,
