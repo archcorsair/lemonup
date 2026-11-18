@@ -1012,7 +1012,7 @@ impl App {
         let roles = self.ui_theme.roles;
         let width = room.width;
         let text = Style::default().fg(roles.text);
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let mut body = SheetBody::new();
         body.reserve(room.height);
         let ellipsis = self.ui_theme.symbols.ellipsis;
@@ -1098,7 +1098,7 @@ impl App {
                 key,
                 Style::default().fg(roles.blue).add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(text, Style::default().fg(roles.muted)));
+            spans.push(Span::styled(text, roles.muted));
         }
         vec![
             Line::from(""),
@@ -1109,7 +1109,7 @@ impl App {
     fn find_results_body(&self, body: &mut SheetBody<'static>, results: &FindResults, width: u16) {
         let roles = self.ui_theme.roles;
         let text = Style::default().fg(roles.text);
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let names = &results.names;
         let name_width = results
             .report
@@ -1151,16 +1151,13 @@ impl App {
                 continue;
             }
             let tone = match group {
-                0 => roles.green,
-                NOT_CHECKED_GROUP => roles.red,
+                0 => Style::default().fg(roles.green),
+                NOT_CHECKED_GROUP => Style::default().fg(roles.red),
                 6..=8 => roles.muted,
-                _ => roles.amber,
+                _ => Style::default().fg(roles.amber),
             };
             body.text(vec![Line::from(vec![
-                Span::styled(
-                    title.to_string(),
-                    Style::default().fg(tone).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(title.to_string(), tone.add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" ({})", members.len()), muted),
             ])]);
             match label {
@@ -1236,7 +1233,7 @@ impl App {
             body.text(hanging(
                 vec![Line::from(Span::styled(
                     format!("  {}", crate::find::problem_text(problem)),
-                    Style::default().fg(roles.muted),
+                    roles.muted,
                 ))],
                 width,
                 2,
@@ -1262,7 +1259,7 @@ impl App {
         width: u16,
     ) {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let result = &results.report.results[index];
         let Some(entry) = crate::find::result_entry(result, &results.names) else {
             return;
@@ -1333,7 +1330,7 @@ impl App {
         width: u16,
     ) {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let result = &results.report.results[index];
         let cursor = results.cursor == FindFocus::Result(index);
         let mut name_style = Style::default().fg(roles.text);
@@ -1411,7 +1408,11 @@ impl App {
             };
             (label, true)
         };
-        let mut style = Style::default().fg(if active { roles.lemon } else { roles.muted });
+        let mut style = if active {
+            Style::default().fg(roles.lemon)
+        } else {
+            roles.muted
+        };
         if on_action {
             style = style.add_modifier(Modifier::BOLD);
         }

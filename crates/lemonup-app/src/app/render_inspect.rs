@@ -170,10 +170,7 @@ impl App {
 
     fn details_empty_lines(&self) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        vec![Line::from(Span::styled(
-            "No addon selected",
-            Style::default().fg(roles.muted),
-        ))]
+        vec![Line::from(Span::styled("No addon selected", roles.muted))]
     }
 
     fn details_content(&self) -> Option<DetailsContent> {
@@ -184,7 +181,7 @@ impl App {
     fn details_content_for(&self, item: &DashboardItem) -> DetailsContent {
         let roles = self.ui_theme.roles;
         let text = Style::default().fg(roles.text);
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let status = self.dashboard_row_status(item);
         let spinner = self.spinner_frame();
         let status_spans = match status {
@@ -377,10 +374,7 @@ impl App {
             };
             for (index, row) in rows.into_iter().enumerate() {
                 let prefix = if index == 0 {
-                    Span::styled(
-                        format!("{label:<SHEET_LABEL_WIDTH$}"),
-                        Style::default().fg(roles.muted),
-                    )
+                    Span::styled(format!("{label:<SHEET_LABEL_WIDTH$}"), roles.muted)
                 } else {
                     Span::raw(" ".repeat(SHEET_LABEL_WIDTH))
                 };
@@ -445,7 +439,7 @@ impl App {
                 lines.push(Line::default());
             }
         };
-        let label = |text: &'static str| Span::styled(text, Style::default().fg(roles.muted));
+        let label = |text: &'static str| Span::styled(text, roles.muted);
         let indent = 3usize;
         let item_width = width.saturating_sub(indent - 1);
         let mut after_block = false;
@@ -601,7 +595,7 @@ impl App {
             lines.truncate(shown);
             lines.push(Line::from(Span::styled(
                 format!(" ↓ {hidden} more"),
-                Style::default().fg(roles.muted),
+                roles.muted,
             )));
         }
         frame.render_widget(Paragraph::new(lines), body);

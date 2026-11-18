@@ -181,7 +181,7 @@ impl App {
         let room = usize::from(area.width.saturating_sub(2));
         // Dimmed while an install runs: the box takes no text then.
         let text_style = if self.install_running() {
-            Style::default().fg(self.ui_theme.roles.muted)
+            self.ui_theme.roles.muted
         } else {
             Style::default()
                 .fg(self.ui_theme.roles.lemon)
@@ -216,7 +216,7 @@ impl App {
         if key.is_empty() {
             spans.push(Span::styled(
                 " paste your key here",
-                Style::default().fg(self.ui_theme.roles.muted),
+                self.ui_theme.roles.muted,
             ));
         }
         Paragraph::new(Line::from(spans))
@@ -227,7 +227,7 @@ impl App {
     /// The line under the box: what enter will do with the text.
     pub(super) fn search_hint_line(&self) -> Line<'static> {
         let pane = &self.search_pane;
-        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let muted = self.ui_theme.roles.muted;
         let quiet = matches!(
             pane.install_state,
             SearchInstallState::Success { .. }
@@ -308,7 +308,7 @@ impl App {
             ]),
             Line::from(Span::styled(
                 "GitHub, WoWInterface and TukUI links work without one.",
-                Style::default().fg(self.ui_theme.roles.muted),
+                self.ui_theme.roles.muted,
             )),
             Line::from(""),
         ]
@@ -337,7 +337,7 @@ impl App {
                 if *primary {
                     Style::default().fg(self.ui_theme.roles.text)
                 } else {
-                    Style::default().fg(self.ui_theme.roles.muted)
+                    self.ui_theme.roles.muted
                 },
             ));
         }
@@ -364,10 +364,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(Span::styled(
-                format!(" {link}"),
-                Style::default().fg(self.ui_theme.roles.muted),
-            )),
+            Line::from(Span::styled(format!(" {link}"), self.ui_theme.roles.muted)),
             Line::from(""),
             {
                 let mut line =
@@ -414,7 +411,7 @@ impl App {
             SearchInstallState::ConfirmDirectReplace { name, .. } => {
                 return Some(vec![Line::from(Span::styled(
                     format!("{name}'s folders are already in your AddOns folder."),
-                    Style::default().fg(self.ui_theme.roles.muted),
+                    self.ui_theme.roles.muted,
                 ))]);
             }
             SearchInstallState::Success {
@@ -486,7 +483,7 @@ impl App {
                 lines.extend(wrap_lines_hanging(
                     &[Line::from(Span::styled(
                         format!("  Technical detail: {detail}"),
-                        Style::default().fg(self.ui_theme.roles.muted),
+                        self.ui_theme.roles.muted,
                     ))],
                     width,
                     TECHNICAL_DETAIL_INDENT,
@@ -506,7 +503,7 @@ impl App {
 
     /// No results yet: the things you can type, or why a search found none.
     pub(super) fn search_empty_state_lines(&self) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let muted = self.ui_theme.roles.muted;
         if let Some(query) = &self.search_pane.last_query {
             return vec![
                 Line::from(Span::styled(
@@ -594,7 +591,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
-        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let muted = self.ui_theme.roles.muted;
         let mut area_index = 0;
         if show_above {
             Widget::render(
@@ -720,7 +717,7 @@ impl App {
         let Some(result) = self.search_pane.selected_result() else {
             return Vec::new();
         };
-        let muted = Style::default().fg(self.ui_theme.roles.muted);
+        let muted = self.ui_theme.roles.muted;
         let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(

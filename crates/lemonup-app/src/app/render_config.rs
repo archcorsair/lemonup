@@ -89,9 +89,7 @@ impl App {
             };
             body.text(vec![Line::from(Span::styled(
                 title,
-                Style::default()
-                    .fg(self.ui_theme.roles.muted)
-                    .add_modifier(Modifier::BOLD),
+                self.ui_theme.roles.muted.add_modifier(Modifier::BOLD),
             ))]);
             if *group == ConfigGroup::ThisGame {
                 body.text(vec![self.config_game_folder_line(width)]);
@@ -146,10 +144,7 @@ impl App {
                 format!("{:<label_width$}", "Game folder"),
                 Style::default().fg(roles.text),
             ),
-            Span::styled(
-                truncate_text(&value, room),
-                Style::default().fg(roles.muted),
-            ),
+            Span::styled(truncate_text(&value, room), roles.muted),
         ])
     }
 
@@ -204,10 +199,7 @@ impl App {
                 ),
             );
             if edit.value.is_empty() {
-                spans.push(Span::styled(
-                    " paste your key here",
-                    Style::default().fg(roles.muted),
-                ));
+                spans.push(Span::styled(" paste your key here", roles.muted));
             }
             return Line::from(spans);
         }
@@ -224,10 +216,7 @@ impl App {
                 Span::styled(" ›", arrows),
             ]);
         } else {
-            spans.push(Span::styled(
-                truncate_text(&value, room),
-                Style::default().fg(roles.muted),
-            ));
+            spans.push(Span::styled(truncate_text(&value, room), roles.muted));
         }
         Line::from(spans)
     }
@@ -299,7 +288,7 @@ impl App {
         long: bool,
     ) -> Vec<Line<'static>> {
         let roles = self.ui_theme.roles;
-        let muted = Style::default().fg(roles.muted);
+        let muted = roles.muted;
         let link = Style::default().fg(roles.blue);
         let key = Style::default().fg(roles.blue).add_modifier(Modifier::BOLD);
         let display = self.runtime.display;
