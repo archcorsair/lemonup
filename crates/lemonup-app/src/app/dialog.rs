@@ -279,8 +279,7 @@ impl Question {
             } => {
                 let mut lines = vec![Line::from(Span::styled(
                     format!(
-                        "{name} is already installed. Installing it from {source} replaces \
-                         the files in your AddOns folder, and LemonUp keeps it updated."
+                        "{name} is already installed. Installing it from {source} replaces it."
                     ),
                     text,
                 ))];
@@ -363,10 +362,7 @@ impl Question {
                     None => "LemonUp is still working out which addons to update.".to_string(),
                 };
                 vec![Line::from(Span::styled(
-                    format!(
-                        "{first} If you quit now, the update stops and the addons it has \
-                         not finished stay as they are."
-                    ),
+                    format!("{first} If you quit now, the update stops."),
                     text,
                 ))]
             }
@@ -381,7 +377,7 @@ impl Question {
             Self::RemoveGame { game, backups } => vec![
                 Line::from(Span::styled(
                     format!(
-                        "LemonUp forgets the addon list and settings it keeps for {game}. Its addons and game settings stay as they are."
+                        "LemonUp forgets the addon list and settings it keeps for {game}. It doesn't delete any addons or game settings."
                     ),
                     text,
                 )),
@@ -402,14 +398,12 @@ impl Question {
                 if *links > 0 {
                     lines.push(Line::from(Span::styled(
                         if *links == 1 {
-                            "LemonUp links 1 addon to its source and keeps it updated. Nothing \
-                             on disk changes now. From now on, updates replace these folders:"
+                            "Link 1 addon to its source? Its updates replace these folders:"
                                 .to_string()
                         } else {
                             format!(
-                                "LemonUp links {links} addons to their source and keeps them \
-                                 updated. Nothing on disk changes now. From now on, updates \
-                                 replace these folders:"
+                                "Link {links} addons to their source? Their updates replace \
+                                 these folders:"
                             )
                         },
                         text,

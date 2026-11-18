@@ -17500,6 +17500,21 @@ mod tests {
         }
 
         #[test]
+        fn details_for_a_not_linked_addon_says_only_how_to_find_it() {
+            for (width, height) in [(80, 24), (120, 30)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_inspect_not_linked(&mut app);
+                let text = render_rows(&mut app, width, height).join("\n");
+                assert!(text.contains("Press f to find it online."), "{text}");
+                assert!(!text.contains("keeps it updated"), "{text}");
+                assert!(
+                    !text.contains("Your addon settings stay as they are."),
+                    "{text}"
+                );
+            }
+        }
+
+        #[test]
         fn help_lists_the_details_keys_without_section_toggles() {
             let labels: Vec<&str> = help_page(HelpContext::Inspect)
                 .sections()
@@ -20604,7 +20619,7 @@ mod tests {
             let question = app.active_question().expect("question");
             assert_eq!(question.title(), "Remove WoW Forever from LemonUp?");
             let shown = screen(&mut app, 120, 30);
-            assert!(shown.contains("addons and game settings stay"), "{shown}");
+            assert!(shown.contains("It doesn't delete any addons"), "{shown}");
             assert!(
                 shown.contains("backups of your game settings stay in"),
                 "{shown}"

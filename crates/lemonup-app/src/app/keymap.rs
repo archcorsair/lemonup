@@ -426,8 +426,7 @@ static DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("x", "delete it", &[ch('x')]),
                 HelpRow::key("space", "select or unselect it", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
-                HelpRow::key("f", "find it online, so LemonUp keeps it updated", K_FIND)
-                    .when(HelpWhen::NotLinked),
+                HelpRow::key("f", "find it online", K_FIND).when(HelpWhen::NotLinked),
             ],
         },
         HelpSection {
@@ -470,12 +469,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("x", "delete it, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
-                HelpRow::key(
-                    "f",
-                    "find this one online, so LemonUp keeps it updated",
-                    K_FIND,
-                )
-                .when(HelpWhen::NotLinked),
+                HelpRow::key("f", "find this one online", K_FIND).when(HelpWhen::NotLinked),
                 HelpRow::key("F", "find your addons online", K_FIND_ALL),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
                 HelpRow::key(
@@ -821,7 +815,7 @@ static FIND_HELP: HelpPage = HelpPage {
         HelpSection {
             title: "Everywhere",
             rows: &[
-                HelpRow::key("esc  q", "close; stops a lookup, nothing changes", K_CLOSE),
+                HelpRow::key("esc  q", "close; stops a lookup", K_CLOSE),
                 THIS_HELP,
                 QUIT_ANYWHERE,
             ],

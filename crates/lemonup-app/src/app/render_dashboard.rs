@@ -1091,10 +1091,7 @@ impl App {
                 Line::from(vec![
                     Span::styled("Pick an addon and press ", text),
                     key("f"),
-                    Span::styled(
-                        " to find it online. Do that once per addon and LemonUp keeps it updated.",
-                        text,
-                    ),
+                    Span::styled(" to find it online.", text),
                 ]),
                 Line::from(Span::styled(
                     "Your addon settings are never touched.",

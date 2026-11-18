@@ -232,7 +232,7 @@ impl App {
         let sentence = match status {
             RowStatus::NewerThanSource => vec![Span::styled(
                 format!(
-                    "You have {installed}. {source_name} lists {}, which is older, so LemonUp leaves yours alone.",
+                    "You have {installed}. {source_name} lists {}, which is older.",
                     remote.as_deref().unwrap_or("an older version")
                 ),
                 text,
@@ -260,17 +260,11 @@ impl App {
         };
 
         let follow_up = if status == RowStatus::NotLinked {
-            vec![
-                vec![
-                    Span::styled("Press ", text),
-                    key("f"),
-                    Span::styled(" to find it online. LemonUp then keeps it updated.", text),
-                ],
-                vec![Span::styled(
-                    "Your addon settings stay as they are.",
-                    Style::default().fg(roles.muted),
-                )],
-            ]
+            vec![vec![
+                Span::styled("Press ", text),
+                key("f"),
+                Span::styled(" to find it online.", text),
+            ]]
         } else {
             Vec::new()
         };

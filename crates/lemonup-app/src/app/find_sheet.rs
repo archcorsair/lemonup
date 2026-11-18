@@ -1067,9 +1067,7 @@ impl App {
                     )
                 };
                 body.text(vec![Line::from(Span::styled(line, text))]);
-                body.footer(
-                    self.find_hint_footer(vec![("esc", " cancel, nothing changes")], width),
-                );
+                body.footer(self.find_hint_footer(vec![("esc", " cancel")], width));
             }
             Some(FindStep::Failed(error)) => {
                 body.text(vec![Line::from(Span::styled(
