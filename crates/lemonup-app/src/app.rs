@@ -17770,6 +17770,7 @@ mod tests {
                 let text = rows.join("\n");
                 assert!(text.contains("Welcome. One thing before LemonUp"), "{text}");
                 assert!(text.contains("LemonUp found 2 addons"), "{text}");
+                assert!(!text.contains("never touched"), "{text}");
                 assert!(text.contains("d hide this"), "{text}");
                 assert!(text.contains("Alpha"), "{text}");
                 assert!(text.contains("f find online"), "{text}");

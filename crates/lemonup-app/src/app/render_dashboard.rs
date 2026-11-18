@@ -1093,10 +1093,6 @@ impl App {
                     key("f"),
                     Span::styled(" to find it online.", text),
                 ]),
-                Line::from(Span::styled(
-                    "Your addon settings are never touched.",
-                    muted,
-                )),
             ]
             .into_iter()
             // `F` looks them all up at once.
