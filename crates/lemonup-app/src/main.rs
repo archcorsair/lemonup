@@ -51,8 +51,8 @@ use crate::tukui::install_tukui_addon;
 #[cfg(test)]
 use crate::update::refresh_managed_update_state;
 use crate::update::{
-    LiveUpdateResult, LiveUpdateStatus, apply_live_updates, refresh_live_update_checks,
-    serialize_live_update_status, serialize_update_status,
+    LiveUpdateResult, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates,
+    refresh_live_update_checks, serialize_live_update_status, serialize_update_status,
 };
 use crate::wago::{WagoStability, install_wago_addon, resolve_wago_api_key};
 use crate::wowinterface::install_wowinterface_addon;
@@ -928,11 +928,16 @@ async fn run_update(
                 dry_run
             );
             print_update_details(&addons, &run.results);
-            CommandOutcome::from_error_count(summary.errors)
+            update_outcome(&summary)
         }
     };
 
     Ok(outcome)
+}
+
+/// A run that held addons for a yes did not finish them, so it counts them with the errors.
+fn update_outcome(summary: &LiveUpdateSummary) -> CommandOutcome {
+    CommandOutcome::from_error_count(summary.errors + summary.held)
 }
 
 /// Backup settings from the loaded config; a missing config uses the defaults.
@@ -1701,11 +1706,11 @@ mod tests {
     use super::{
         CommandOutcome, LogDestination, build_update_detail_lines, count_check_errors,
         default_log_filter, log_destination, log_writer, open_log_file, pre_update_backup_settings,
-        refresh_managed_update_state, tui_command_hint,
+        refresh_managed_update_state, tui_command_hint, update_outcome,
     };
     use crate::update::{
-        CheckResult, LiveUpdateResult, LiveUpdateStatus, build_managed_update_record,
-        build_update_checks, determine_update_status,
+        CheckResult, LiveUpdateResult, LiveUpdateStatus, LiveUpdateSummary,
+        build_managed_update_record, build_update_checks, determine_update_status,
     };
     use lemonup_core::{
         AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
@@ -1884,6 +1889,28 @@ mod tests {
         );
         assert_eq!(CommandOutcome::from_error_count(1).exit_status(), 1);
         assert_eq!(CommandOutcome::from_error_count(7).exit_status(), 1);
+    }
+
+    #[test]
+    fn an_update_run_with_held_addons_exits_one() {
+        let clean = LiveUpdateSummary {
+            updated_addons: 2,
+            ..LiveUpdateSummary::default()
+        };
+        assert_eq!(update_outcome(&clean).exit_status(), 0);
+        let held = LiveUpdateSummary {
+            updated_addons: 1,
+            held: 1,
+            ..LiveUpdateSummary::default()
+        };
+        assert_eq!(update_outcome(&held), CommandOutcome::Failures(1));
+        assert_eq!(update_outcome(&held).exit_status(), 1);
+        let both = LiveUpdateSummary {
+            held: 1,
+            errors: 2,
+            ..LiveUpdateSummary::default()
+        };
+        assert_eq!(update_outcome(&both), CommandOutcome::Failures(3));
     }
 
     #[test]

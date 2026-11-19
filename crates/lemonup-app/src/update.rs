@@ -584,7 +584,7 @@ impl HeldUpdate {
             }
             Ok(finished) => {
                 result.message = Some(format!(
-                    "it would also replace these Not linked folders: {}",
+                    "it would also replace these Not linked folders: {}. Press u to update it again.",
                     finished.not_linked.join(", ")
                 ));
             }

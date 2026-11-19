@@ -1675,6 +1675,120 @@ mod tests {
     }
 
     #[test]
+    fn update_over_a_not_linked_folder_is_held_then_applied_after_a_yes() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            std::fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            std::fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale");
+        }
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked = AddonRecord::new("AdiBags", "AdiBags", SourceKind::GitHub);
+        tracked.version = Some("1.0.0".to_string());
+        tracked.git_commit = Some("abcdef0".to_string());
+        tracked.source_url = Some("https://github.com/AdiAddons/AdiBags".to_string());
+        database.upsert_addon(&tracked).expect("seed addon");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "AdiBags_Extras",
+                "AdiBags_Extras",
+                SourceKind::Manual,
+            ))
+            .expect("seed manual row");
+        let rows_before = database.list_addons().expect("rows");
+
+        let resolved = super::GithubResolvedRepo {
+            metadata: super::GithubRepoMetadata {
+                owner: "AdiAddons".to_string(),
+                repo: "AdiBags".to_string(),
+                default_branch: "main".to_string(),
+                html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
+                owner_login: "AdiAddons".to_string(),
+            },
+            head_sha: "abcdef0123456789".to_string(),
+        };
+        let toc = "## Title: AdiBags\n## Version: 1.1.0\n## Interface: 110205\n";
+        let bytes = build_zip(&[
+            ("wrapper/AdiBags/AdiBags.toc", toc),
+            ("wrapper/AdiBags_Extras/AdiBags_Extras.toc", toc),
+        ]);
+
+        // Nobody agreed yet: held, and nothing on disk or in the database changes.
+        let summary = update_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &resolved,
+            &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("held update");
+        assert!(!summary.updated);
+        assert_eq!(summary.not_linked, vec!["AdiBags_Extras".to_string()]);
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            assert!(
+                addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        assert_eq!(database.list_addons().expect("rows"), rows_before);
+
+        // A yes applies it from the kept package, without a download.
+        let package = crate::update::HeldPackage::keep(&bytes, {
+            let resolved = resolved.clone();
+            move |database, addon_dir, tracked, bytes, agree| {
+                update_downloaded_github_addon(
+                    database, addon_dir, tracked, &resolved, bytes, agree, false,
+                )
+                .map(super::GithubUpdateSummary::finished)
+            }
+        })
+        .expect("keep package");
+        let held =
+            crate::update::HeldUpdate::new(&tracked, &addon_dir, &summary.finished(), package);
+        let kept = held.package_path().to_path_buf();
+        assert!(kept.exists());
+        let result = held.apply(&mut database, &addon_dir);
+        assert_eq!(
+            result.status,
+            crate::update::LiveUpdateStatus::Updated,
+            "{:?}",
+            result.message
+        );
+        assert!(
+            !kept.exists(),
+            "the kept package is removed after the update"
+        );
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            assert!(
+                !addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        let stored = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(
+            stored
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name == "AdiBags_Extras")
+        );
+        assert!(
+            database
+                .get_addon_by_folder("AdiBags_Extras")
+                .expect("get manual")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn update_downloaded_github_addon_preserves_parent_folder_in_dry_run() {
         let temp = tempdir().expect("tempdir");
         let addon_dir = temp
