@@ -1,0 +1,15 @@
+.git
+.github
+target
+dist
+out
+test-output
+coverage
+docs
+packaging
+scripts
+testdata
+nix
+.env
+.env.*
+*.log

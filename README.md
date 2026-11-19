@@ -48,6 +48,40 @@ inputs.lemonup.url = "github:archcorsair/lemonup";
 
 Nix downloads LemonUp prebuilt from the `lemonup` Cachix cache; it asks once whether to trust it.
 
+**Docker or Podman** (Linux, x86-64): the image is published to the GitHub Container Registry.
+Bind mount your WoW folder at `/wow` and keep LemonUp's settings in a volume at `/state`:
+
+```sh
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  -v "/path/to/World of Warcraft:/wow" \
+  -v lemonup-state:/state \
+  ghcr.io/archcorsair/lemonup
+```
+
+With Podman, `--userns=keep-id` makes the container run as your user, so your user owns the files LemonUp writes:
+
+```sh
+podman run --rm -it \
+  --userns=keep-id \
+  -v "/path/to/World of Warcraft:/wow" \
+  -v lemonup-state:/state \
+  ghcr.io/archcorsair/lemonup
+```
+
+- Mount the whole WoW folder, not just `AddOns`. Backups of your game settings need the `WTF`
+  folder that sits next to it.
+- On first run, enter `/wow` when setup asks for your game folder.
+- The `lemonup-state` volume keeps your settings and linked addons. Without it, LemonUp starts
+  from scratch on every run.
+- On SELinux systems (Fedora, RHEL), add `:z` to the WoW mount: `-v "/path/to/World of Warcraft:/wow:z"`.
+- To use the CLI, put the command at the end, for example `... ghcr.io/archcorsair/lemonup update-all`.
+  Run the TUI once first, so LemonUp knows your game folder.
+- To pass a Wago.io or GitHub key, add `-e WAGO_API_KEY` or `-e GITHUB_TOKEN`. Docker and
+  Podman copy the value from your shell.
+
+To build the image yourself, run `docker build -t lemonup .` (or `podman build`) in this repo.
+
 **Arch Linux:** AUR packages (`lemonup` and `lemonup-bin`) are coming soon. Until then, build
 the package from this repo with `makepkg -si` in `packaging/aur/lemonup-bin`.
 
