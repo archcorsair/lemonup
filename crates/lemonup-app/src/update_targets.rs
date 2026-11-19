@@ -52,7 +52,9 @@ pub(crate) struct UpdateReplacements {
 ///   migrated from v1) replaces only its parent; the rest of the folder set comes from the
 ///   package, exactly as a fresh install would take it.
 /// - A package folder that is already the addon's own (its parent, or an owned folder whether the
-///   ownership is managed or scan-inferred) is replaced without asking.
+///   ownership is managed or scan-inferred) is replaced without asking, except a scan-inferred
+///   folder with a `.git` entry: the scan groups folders by name, so a developer's clone next to
+///   the addon lands there too, and it is asked about like a "Not linked" folder.
 /// - Any other package folder on disk is "Not linked" (a manual row or no row): it is replaced
 ///   only when `agree` allows it, and otherwise listed in `not_linked`. After the update it
 ///   becomes an owned folder of the updated addon, and `record_managed_addon` drops its separate
@@ -108,8 +110,10 @@ fn plan_update_replacements_from_rows(
         if !addon_dir.join(folder).exists() {
             continue;
         }
-        // Scan-inferred ownership (a row migrated from v1) still counts as the addon's own.
-        if tracked.claims_folder(folder) || agree.allows(folder) {
+        // Scan-inferred ownership (a row migrated from v1) still counts as the addon's own, unless
+        // the folder is a dev copy. Managed owned folders are already in `replaced`.
+        let inferred_own = tracked.claims_folder(folder) && !is_dev_copy(addon_dir, folder);
+        if inferred_own || agree.allows(folder) {
             replaced.push(folder.clone());
         } else {
             not_linked.push(folder.clone());
@@ -502,6 +506,82 @@ mod tests {
             plan.replaced,
             folders(&["BigWigs", "BigWigs_Core", "BigWigs_Options"])
         );
+        assert!(plan.not_linked.is_empty());
+    }
+
+    #[test]
+    fn an_inferred_folder_with_git_is_asked_about_but_a_managed_one_is_not() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(
+            temp.path(),
+            &[
+                "BigWigs",
+                "BigWigs_Core",
+                "BigWigs_Options",
+                "BigWigs_Plugins",
+            ],
+        );
+        std::fs::create_dir(temp.path().join("BigWigs_Core").join(".git")).expect("git dir");
+        std::fs::write(
+            temp.path().join("BigWigs_Plugins").join(".git"),
+            "gitdir: x",
+        )
+        .expect("git file");
+        let package = folders(&[
+            "BigWigs",
+            "BigWigs_Core",
+            "BigWigs_Options",
+            "BigWigs_Plugins",
+        ]);
+
+        // A v1-migrated row: the scan grouped all three folders under BigWigs by name.
+        let mut inferred = AddonRecord::new("BigWigs", "BigWigs", SourceKind::GitHub);
+        inferred.set_scan_owned_folders(owned(&[
+            "BigWigs_Core",
+            "BigWigs_Options",
+            "BigWigs_Plugins",
+        ]));
+        let plan = plan_update_replacements_from_rows(
+            std::slice::from_ref(&inferred),
+            temp.path(),
+            &inferred,
+            &package,
+            ReplaceNotLinked::NONE,
+        )
+        .expect("plan");
+        assert_eq!(plan.replaced, folders(&["BigWigs", "BigWigs_Options"]));
+        assert_eq!(
+            plan.not_linked,
+            folders(&["BigWigs_Core", "BigWigs_Plugins"])
+        );
+
+        let agreed = folders(&["BigWigs_Core", "BigWigs_Plugins"]);
+        let plan = plan_update_replacements_from_rows(
+            std::slice::from_ref(&inferred),
+            temp.path(),
+            &inferred,
+            &package,
+            ReplaceNotLinked::Only(&agreed),
+        )
+        .expect("plan");
+        assert!(plan.not_linked.is_empty());
+
+        // The same folders installed and managed by LemonUp stay silent.
+        let mut managed = inferred.clone();
+        managed.set_managed_owned_folders(owned(&[
+            "BigWigs_Core",
+            "BigWigs_Options",
+            "BigWigs_Plugins",
+        ]));
+        let plan = plan_update_replacements_from_rows(
+            std::slice::from_ref(&managed),
+            temp.path(),
+            &managed,
+            &package,
+            ReplaceNotLinked::NONE,
+        )
+        .expect("plan");
+        assert_eq!(plan.replaced, package);
         assert!(plan.not_linked.is_empty());
     }
 

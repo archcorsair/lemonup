@@ -3456,9 +3456,12 @@ impl App {
                     || items
                         .iter()
                         .any(|item| item.source == SourceKind::Manual && claims(item, name)))
-                    && !items
-                        .iter()
-                        .any(|item| item.source != SourceKind::Manual && claims(item, name))
+                    // The updating addon itself may claim a dev copy the scan grouped under it.
+                    && !items.iter().any(|item| {
+                        item.source != SourceKind::Manual
+                            && !item.folder.eq_ignore_ascii_case(folder)
+                            && claims(item, name)
+                    })
             })
             .cloned()
             .collect()
@@ -23390,6 +23393,27 @@ mod tests {
                 .collect();
             app.apply(AppAction::ReplaceDashboardAddons(addons));
             assert!(app.update_not_linked_folders("Third").is_empty());
+        }
+
+        #[test]
+        fn details_name_a_dev_copy_the_updating_addon_itself_claims() {
+            // A scan grouped a clone under the addon it updates; another addon's claim still hides it.
+            let (mut app, temp) = app_with_dev_copy();
+            fs::create_dir_all(temp.path().join("Second_Config").join(".git")).expect("clone");
+            open_question(
+                &mut app,
+                vec![held(
+                    temp.path(),
+                    "Second",
+                    SourceKind::GitHub,
+                    &["Second_Config"],
+                )],
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert_eq!(
+                app.update_not_linked_folders("Second"),
+                vec!["Second_Config"]
+            );
         }
 
         #[test]
