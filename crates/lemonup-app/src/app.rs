@@ -1318,6 +1318,7 @@ struct DashboardItem {
     author: Option<String>,
     interface: Option<String>,
     git_commit: Option<String>,
+    release_tag: Option<String>,
     remote_version: Option<String>,
     installed_at: OffsetDateTime,
     updated_at: OffsetDateTime,
@@ -1500,6 +1501,7 @@ impl DashboardState {
                     author: addon.author,
                     interface: addon.interface,
                     git_commit: addon.git_commit,
+                    release_tag: addon.release_tag,
                     remote_version: addon.remote_version,
                     installed_at: addon.installed_at,
                     updated_at: addon.updated_at,
@@ -8713,6 +8715,7 @@ fn dashboard_item_to_addon_record(item: &DashboardItem) -> AddonRecord {
     addon.version = item.version.clone();
     addon.remote_version = item.remote_version.clone();
     addon.git_commit = item.git_commit.clone();
+    addon.release_tag = item.release_tag.clone();
     addon.last_checked_at = item.last_checked_at;
     addon
 }
@@ -9346,7 +9349,9 @@ mod tests {
         let mut second = AddonRecord::new("Second", "Second", SourceKind::GitHub);
         second.kind = AddonKind::Addon;
         second.version = Some("2.0.0".to_string());
-        second.remote_version = Some("2.1.0".to_string());
+        // A commit (GitHub's remote version when the repo has no release zip); the installed
+        // commit below is too short to compare, so the row stays "Not checked yet".
+        second.remote_version = Some("2b1c0d0000000000000000000000000000000000".to_string());
         second.author = Some("Author".to_string());
         second.git_commit = Some("abcdef".to_string());
         second.required_deps = vec!["Ace3".to_string()];
@@ -13959,6 +13964,20 @@ mod tests {
         // Without a usable version of its own, the short commit stands in.
         github.version = Some("@project-version@".to_string());
         assert_eq!(text(github, true), "4f1c9a7");
+
+        // GitHub release zips: the release tags, like any other version.
+        let mut release = versioned(SourceKind::GitHub, "v427.9", Some("v428.0"));
+        release.release_tag = Some("v427.9".to_string());
+        assert_eq!(text(release.clone(), true), "v427.9 → v428.0");
+        // A tag that looks like a commit stays whole.
+        let mut dated = versioned(SourceKind::GitHub, "20241118", Some("20241201"));
+        dated.release_tag = Some("20241118".to_string());
+        assert_eq!(text(dated, true), "20241118 → 20241201");
+        // A source install whose repo now has a release zip for the game.
+        let mut source = versioned(SourceKind::GitHub, "v427.9", Some("v427.9"));
+        source.git_commit = Some("4f1c9a7123".to_string());
+        assert_eq!(text(source.clone(), true), "v427.9 → release zip");
+        assert_eq!(text(source, false), "v427.9 → release");
     }
 
     #[test]
@@ -20936,6 +20955,7 @@ mod tests {
                     addon.version = item.version.clone();
                     addon.remote_version = item.remote_version.clone();
                     addon.git_commit = item.git_commit.clone();
+                    addon.release_tag = item.release_tag.clone();
                     addon
                 })
                 .collect::<Vec<_>>();

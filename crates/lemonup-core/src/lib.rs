@@ -6,6 +6,7 @@ pub mod error;
 pub mod events;
 pub mod find;
 pub mod fingerprint;
+pub mod github_release;
 pub mod marquee;
 pub mod paths;
 pub mod profiles;

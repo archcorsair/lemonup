@@ -21,7 +21,7 @@ pub struct StateDatabase {
 
 const BOUND_ADDON_DIR_KEY: &str = "bound_addon_dir";
 /// The `addons` schema this version creates and migrates to (`PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// How long a connection waits for another process's write lock before failing, so a
 /// TUI session and a scheduled `lemonup sync` overlap instead of erroring with
@@ -95,24 +95,25 @@ impl StateDatabase {
 
     /// The addons the database at `path` lists, read without creating or modifying anything:
     /// a missing file, or one without the addons table, lists none. The database is not
-    /// migrated, so one from before schema version 4 lists its addons without source names.
+    /// migrated, so one from before schema version 4 lists its addons without source names, and
+    /// one from before version 5 without release tags.
     pub fn read_addons(path: &Path) -> Result<Vec<AddonRecord>> {
         if !path.is_file() {
             return Ok(Vec::new());
         }
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
-        let has_source_name = connection.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = 'source_name'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-        let source_name = if has_source_name {
-            "source_name"
-        } else {
-            "NULL"
+        let column_or_null = |name: &'static str| -> Result<&'static str> {
+            let present = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('addons') WHERE name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            Ok(if present { name } else { "NULL" })
         };
-        match Self::select_addons(&connection, source_name) {
+        let source_name = column_or_null("source_name")?;
+        let release_tag = column_or_null("release_tag")?;
+        match Self::select_addons(&connection, source_name, release_tag) {
             Ok(addons) => Ok(addons),
             Err(LemonupError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
                 if message.contains("no such table") =>
@@ -185,7 +186,7 @@ impl StateDatabase {
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version, toc_overrides,
-                source_name
+                source_name, release_tag
              FROM addons
              WHERE folder = ?1",
         )?;
@@ -677,9 +678,10 @@ impl StateDatabase {
                     last_checked_at INTEGER,
                     remote_version TEXT,
                     toc_overrides TEXT,
-                    source_name TEXT
+                    source_name TEXT,
+                    release_tag TEXT
                 );
-                PRAGMA user_version = 4;
+                PRAGMA user_version = 5;
                 ",
             )?;
             return Ok(());
@@ -717,23 +719,41 @@ impl StateDatabase {
                 ",
             )?;
         }
+
+        // Version 5 checks GitHub addons against release zips, so a check an older LemonUp
+        // stored (the head commit, maybe just now at install) says nothing anymore: forget it,
+        // so the next check is a live one and the list says "Not checked yet" until then.
+        if (1..=4).contains(&user_version) {
+            connection.execute_batch(
+                "
+                ALTER TABLE addons ADD COLUMN release_tag TEXT;
+                UPDATE addons SET remote_version = NULL, last_checked_at = NULL
+                WHERE source = 'github';
+                PRAGMA user_version = 5;
+                ",
+            )?;
+        }
         Ok(())
     }
 
     fn list_addons_from_connection(connection: &Connection) -> Result<Vec<AddonRecord>> {
-        Self::select_addons(connection, "source_name")
+        Self::select_addons(connection, "source_name", "release_tag")
     }
 
-    /// Every row, with `source_name` read from the expression given (`NULL` for a database
-    /// from before the column).
-    fn select_addons(connection: &Connection, source_name: &str) -> Result<Vec<AddonRecord>> {
+    /// Every row, with `source_name` and `release_tag` read from the expressions given (`NULL`
+    /// for a database from before the column).
+    fn select_addons(
+        connection: &Connection,
+        source_name: &str,
+        release_tag: &str,
+    ) -> Result<Vec<AddonRecord>> {
         let mut statement = connection.prepare(&format!(
             "SELECT
                 id, name, folder, owned_folders, ownership_source, kind, kind_override, flavor,
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version, toc_overrides,
-                {source_name}
+                {source_name}, {release_tag}
              FROM addons
              ORDER BY name ASC"
         ))?;
@@ -772,8 +792,8 @@ impl StateDatabase {
                 version, git_commit, author, interface, source, source_url,
                 required_deps, optional_deps, embedded_libs,
                 installed_at, updated_at, last_checked_at, remote_version, toc_overrides,
-                source_name
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                source_name, release_tag
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(folder) DO UPDATE SET
                 name = excluded.name,
                 owned_folders = excluded.owned_folders,
@@ -794,6 +814,7 @@ impl StateDatabase {
                 updated_at = excluded.updated_at,
                 last_checked_at = excluded.last_checked_at,
                 remote_version = excluded.remote_version,
+                release_tag = excluded.release_tag,
                 source_name = CASE
                     WHEN excluded.source = source
                         AND (excluded.source_url IS NULL OR source_url IS NULL
@@ -824,6 +845,7 @@ impl StateDatabase {
                 addon.remote_version,
                 toc_overrides,
                 addon.source_name,
+                addon.release_tag,
             ],
         )?;
 
@@ -901,6 +923,7 @@ impl StateDatabase {
                 .transpose()?
                 .unwrap_or_default(),
             source_name: row.get(22)?,
+            release_tag: row.get(23)?,
             unrecognized: any_unrecognized.then_some(unrecognized),
         })
     }
@@ -973,6 +996,10 @@ fn merge_scanned_addon(
         source_name: existing
             .filter(|addon| addon.source == merged_source)
             .and_then(|addon| addon.source_name.clone()),
+        // Likewise the release a GitHub addon was installed from.
+        release_tag: existing
+            .filter(|addon| addon.source == merged_source)
+            .and_then(|addon| addon.release_tag.clone()),
         unrecognized: existing.and_then(|addon| addon.unrecognized.clone()),
     }
 }
@@ -1186,6 +1213,8 @@ fn merge_managed_addon(
                 .filter(|addon| same_link(addon, incoming))
                 .and_then(|addon| addon.source_name.clone())
         }),
+        // An install or update says which release it installed, if any.
+        release_tag: incoming.release_tag.clone(),
         unrecognized: incoming
             .unrecognized
             .clone()
@@ -3128,32 +3157,189 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_is_schema_version_4() {
+    fn fresh_database_is_schema_version_5() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("state.sqlite");
         let database = StateDatabase::open(&path).expect("open db");
         let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::Wago);
         addon.toc_overrides = toc_overrides(&[("Title", "Bar")]);
         addon.source_name = Some("Foo at the source".to_string());
+        addon.release_tag = Some("v1.0".to_string());
         database.upsert_addon(&addon).expect("upsert");
         drop(database);
-        assert_eq!(user_version(&path), 4);
+        assert_eq!(user_version(&path), 5);
         let reopened = StateDatabase::open(&path).expect("reopen");
         let stored = reopened
             .get_addon_by_folder("Foo")
             .expect("get")
             .expect("row");
         assert_eq!(stored.source_name.as_deref(), Some("Foo at the source"));
+        assert_eq!(stored.release_tag.as_deref(), Some("v1.0"));
+        assert_eq!(
+            reopened.list_addons().expect("list")[0]
+                .release_tag
+                .as_deref(),
+            Some("v1.0")
+        );
+    }
+
+    /// Creates a schema version 4 database at `path` with one GitHub row, `Foo`.
+    fn seed_v4_database(path: &std::path::Path) {
+        let raw = rusqlite::Connection::open(path).expect("open raw");
+        raw.execute_batch(&format!(
+            "{}
+             INSERT INTO addons (name, folder, owned_folders, ownership_source, kind, kind_override, flavor, git_commit, source, source_url, required_deps, optional_deps, embedded_libs, installed_at, updated_at)
+             VALUES ('Foo', 'Foo', '[]', 'managed', 'addon', 0, 'retail', 'abcdef1234567890', 'github', 'https://github.com/owner/Foo', '[]', '[]', '[]', 1, 1);
+             UPDATE addons SET remote_version = 'abcdef1234567890', last_checked_at = 1795121719
+             WHERE folder = 'Foo';
+             INSERT INTO addons (name, folder, owned_folders, ownership_source, kind, kind_override, flavor, source, required_deps, optional_deps, embedded_libs, installed_at, updated_at, remote_version, last_checked_at)
+             VALUES ('Bar', 'Bar', '[]', 'managed', 'addon', 0, 'retail', 'wago', '[]', '[]', '[]', 1, 1, '2.0', 1795121719);
+             PRAGMA user_version = 4;",
+            v3_addons_table().replace("toc_overrides TEXT", "toc_overrides TEXT, source_name TEXT")
+        ))
+        .expect("seed v4 database");
     }
 
     #[test]
-    fn a_version_3_database_migrates_to_4_and_keeps_its_rows() {
+    fn a_version_4_database_migrates_to_5_and_keeps_its_rows() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("v4.sqlite");
+        seed_v4_database(&path);
+
+        let database = StateDatabase::open(&path).expect("migrate");
+        assert_eq!(user_version(&path), 5);
+        let mut stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.source, SourceKind::GitHub);
+        assert_eq!(stored.git_commit.as_deref(), Some("abcdef1234567890"));
+        assert_eq!(stored.release_tag, None);
+        // The commit check LemonUp 2.5 stored is forgotten, so the next check is live.
+        assert_eq!(stored.remote_version, None);
+        assert_eq!(stored.last_checked_at, None);
+        let wago = database
+            .get_addon_by_folder("Bar")
+            .expect("get")
+            .expect("row");
+        assert_eq!(wago.remote_version.as_deref(), Some("2.0"));
+        assert!(wago.last_checked_at.is_some());
+        stored.git_commit = None;
+        stored.release_tag = Some("v2.0".to_string());
+        database
+            .upsert_addon(&stored)
+            .expect("write after migration");
+        drop(database);
+
+        let reopened = StateDatabase::open(&path).expect("reopen");
+        let stored = reopened
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.installed_release_tag(), Some("v2.0"));
+    }
+
+    #[test]
+    fn an_older_lemonup_writing_a_version_5_row_leaves_a_tag_that_is_ignored() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let database = StateDatabase::open(&path).expect("open db");
+        let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        addon.release_tag = Some("v1.0".to_string());
+        database.upsert_addon(&addon).expect("release install");
+        drop(database);
+
+        // LemonUp 2.5's upsert, which names only the columns it knows, after a source update.
+        rusqlite::Connection::open(&path)
+            .expect("open raw")
+            .execute_batch(
+                "INSERT INTO addons (name, folder, owned_folders, ownership_source, kind, kind_override, flavor, git_commit, source, required_deps, optional_deps, embedded_libs, installed_at, updated_at)
+                 VALUES ('Foo', 'Foo', '[]', 'managed', 'addon', 0, 'retail', 'abcdef1234567890', 'github', '[]', '[]', '[]', 1, 2)
+                 ON CONFLICT(folder) DO UPDATE SET git_commit = excluded.git_commit, updated_at = excluded.updated_at;",
+            )
+            .expect("older upsert");
+
+        let stored = StateDatabase::open(&path)
+            .expect("reopen")
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.release_tag.as_deref(), Some("v1.0"));
+        assert_eq!(stored.installed_release_tag(), None);
+    }
+
+    #[test]
+    fn read_addons_lists_a_version_4_database_without_migrating_it() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("other-profile.sqlite");
+        seed_v4_database(&path);
+
+        let addons = StateDatabase::read_addons(&path).expect("read v4");
+        assert_eq!(addons.len(), 2);
+        assert_eq!(addons[0].release_tag, None);
+        assert_eq!(user_version(&path), 4, "reading must not migrate");
+    }
+
+    #[test]
+    fn a_scan_keeps_the_release_tag_and_a_source_install_clears_it() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        addon.version = Some("v1.0".to_string());
+        addon.source_url = Some("https://github.com/owner/Foo".to_string());
+        addon.release_tag = Some("v1.0".to_string());
+        database
+            .record_managed_addon(&addon)
+            .expect("release install");
+
+        let scanned = ScannedAddon {
+            name: "Foo".to_string(),
+            folder: "Foo".to_string(),
+            owned_folders: Vec::new(),
+            kind: AddonKind::Addon,
+            flavor: GameFlavor::Retail,
+            version: Some("v1.0".to_string()),
+            git_commit: None,
+            author: None,
+            interface: Some("110002".to_string()),
+            source: SourceKind::Manual,
+            required_deps: Vec::new(),
+            optional_deps: Vec::new(),
+            embedded_libs: Vec::new(),
+            notes: None,
+            category: None,
+            toc_title: None,
+        };
+        database
+            .reconcile_scanned_addons(std::slice::from_ref(&scanned))
+            .expect("scan");
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.installed_release_tag(), Some("v1.0"));
+
+        let mut from_source = stored.clone();
+        from_source.release_tag = None;
+        from_source.git_commit = Some("abcdef1234567890".to_string());
+        database
+            .record_managed_addon(&from_source)
+            .expect("source install");
+        let stored = database
+            .get_addon_by_folder("Foo")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.release_tag, None);
+    }
+
+    #[test]
+    fn a_version_3_database_migrates_to_5_and_keeps_its_rows() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("v3.sqlite");
         seed_v3_database(&path);
 
         let database = StateDatabase::open(&path).expect("migrate");
-        assert_eq!(user_version(&path), 4);
+        assert_eq!(user_version(&path), 5);
         let stored = database
             .get_addon_by_folder("Foo")
             .expect("get")
@@ -3340,7 +3526,7 @@ mod tests {
     }
 
     #[test]
-    fn older_databases_migrate_to_4_and_keep_their_rows() {
+    fn older_databases_migrate_to_5_and_keep_their_rows() {
         let temp = tempdir().expect("tempdir");
         for (version, create) in [
             (3, v3_addons_table()),
@@ -3381,7 +3567,7 @@ mod tests {
                 .set_toc_override("Foo", TocField::Title, Some("Bar"))
                 .expect("set after migration");
             drop(database);
-            assert_eq!(user_version(&path), 4, "v{version}");
+            assert_eq!(user_version(&path), 5, "v{version}");
 
             let reopened = StateDatabase::open(&path).expect("reopen");
             assert_eq!(

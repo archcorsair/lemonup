@@ -331,11 +331,19 @@ impl VersionCell {
     pub(super) fn for_item(item: &DashboardItem, wide: bool) -> Self {
         let new = (dashboard_item_row_status(item) == RowStatus::UpdateReady).then(|| {
             if item.source == SourceKind::GitHub {
-                // A commit hash means nothing to a player; the hash is in Details.
-                if wide { "new build" } else { "newer" }.to_string()
-            } else {
-                dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string())
+                match github_remote(item) {
+                    // A commit hash means nothing to a player; the hash is in Details.
+                    Some(GithubRemote::Commit(_)) => {
+                        return if wide { "new build" } else { "newer" }.to_string();
+                    }
+                    // The tag may be the installed version: what changes is the package.
+                    Some(GithubRemote::ReleaseForSource(_)) => {
+                        return if wide { "release zip" } else { "release" }.to_string();
+                    }
+                    Some(GithubRemote::Release(_)) | None => {}
+                }
             }
+            dashboard_item_remote_label(item).unwrap_or_else(|| "update".to_string())
         });
         Self {
             installed: dashboard_item_installed_version(item),
@@ -388,6 +396,10 @@ pub(super) fn dashboard_item_installed_version(item: &DashboardItem) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty() && !is_placeholder_version(value));
     if item.source == SourceKind::GitHub {
+        // A release zip's version is never a commit, whatever it looks like.
+        if let Some(tag) = github_installed_release_tag(item) {
+            return own.unwrap_or(tag).to_string();
+        }
         if let Some(version) = own.filter(|value| !looks_like_commit_hash(value)) {
             return version.to_string();
         }
@@ -1690,13 +1702,48 @@ pub(super) fn dashboard_item_version_label(item: &DashboardItem) -> String {
     }
 }
 
+/// What a GitHub addon's remote version is (see `github::GithubPackage`).
+enum GithubRemote<'a> {
+    /// The head commit: the repo has no release zip for the game.
+    Commit(&'a str),
+    /// A release tag, for an addon installed from a release zip.
+    Release(&'a str),
+    /// A release tag, for an addon installed from source: the update moves it to the zip.
+    ReleaseForSource(&'a str),
+}
+
+/// The release a GitHub addon was installed from; see `AddonRecord::installed_release_tag`.
+fn github_installed_release_tag(item: &DashboardItem) -> Option<&str> {
+    item.release_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && item.git_commit.is_none())
+}
+
+fn github_remote(item: &DashboardItem) -> Option<GithubRemote<'_>> {
+    let remote = item
+        .remote_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let release_install = github_installed_release_tag(item).is_some();
+    // Checks store full 40 character commits, so a shorter hex string next to an installed
+    // release is a tag that happens to look like one (`20241118`).
+    let commit = looks_like_commit_hash(remote) && (remote.len() >= 40 || !release_install);
+    Some(match (commit, release_install) {
+        (true, _) => GithubRemote::Commit(remote),
+        (false, true) => GithubRemote::Release(remote),
+        (false, false) => GithubRemote::ReleaseForSource(remote),
+    })
+}
+
 pub(super) fn dashboard_item_remote_label(item: &DashboardItem) -> Option<String> {
     match item.source {
-        SourceKind::GitHub => item
-            .remote_version
-            .as_deref()
-            .filter(|value| looks_like_commit_hash(value))
-            .map(shorten_commit),
+        SourceKind::GitHub => github_remote(item).map(|remote| match remote {
+            GithubRemote::Commit(commit) => shorten_commit(commit),
+            GithubRemote::Release(tag) => tag.to_string(),
+            GithubRemote::ReleaseForSource(tag) => format!("{tag} release zip"),
+        }),
         _ => item
             .remote_version
             .as_deref()
@@ -1796,6 +1843,7 @@ pub(super) fn dashboard_item_update_status(item: &DashboardItem) -> UpdateStatus
     addon.version = item.version.clone();
     addon.remote_version = item.remote_version.clone();
     addon.git_commit = item.git_commit.clone();
+    addon.release_tag = item.release_tag.clone();
     let (status, _) = crate::update::determine_update_status(&addon);
     status
 }
