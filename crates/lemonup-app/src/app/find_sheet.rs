@@ -1042,7 +1042,8 @@ impl App {
                                 },
                             ]);
                         }
-                        let (extra, follow_up) = self.curseforge_follow_up(linked_mark(&outcome));
+                        let (extra, follow_up) =
+                            self.curseforge_follow_up(linked_folders(&outcome));
                         let (kind, text) = linked_status(&outcome, extra);
                         actions.push(self.find_note(kind, &text));
                         actions.extend(follow_up);
@@ -2073,9 +2074,9 @@ pub(crate) fn link_found(
     })
 }
 
-/// The linked addons CurseForge also manages, with every folder they own.
-fn linked_mark(outcome: &FindLinkOutcome) -> super::CurseForgeMark {
-    let folders = outcome
+/// Every folder of the linked addons CurseForge also manages.
+fn linked_folders(outcome: &FindLinkOutcome) -> Vec<String> {
+    outcome
         .rows
         .iter()
         .filter(|row| outcome.curseforge.contains(&row.name))
@@ -2083,11 +2084,7 @@ fn linked_mark(outcome: &FindLinkOutcome) -> super::CurseForgeMark {
             std::iter::once(row.folder.clone())
                 .chain(row.owned_folders.iter().map(|owned| owned.name.clone()))
         })
-        .collect();
-    super::CurseForgeMark {
-        names: outcome.curseforge.clone(),
-        folders,
-    }
+        .collect()
 }
 
 /// The status line after linking, from what the database holds. `extra`

@@ -2857,6 +2857,8 @@ pub struct App {
     curseforge_can_mark: bool,
     /// Whether CurseForge may be running; asked before every change.
     curseforge_running: fn() -> bool,
+    /// How LemonUp changes CurseForge's list.
+    curseforge_writer: curseforge_mark::CurseForgeWriter,
     /// What the last mark did, for Details and the Search result to show on
     /// the addons it was about, as neither has a status line: their folders,
     /// how it went, and the text. Cleared when Details opens or closes.
@@ -3069,6 +3071,7 @@ impl App {
             curseforge_mark: None,
             curseforge_can_mark: cfg!(target_os = "linux"),
             curseforge_running: lemonup_core::curseforge::is_running,
+            curseforge_writer: lemonup_core::curseforge::mark_ignored,
             curseforge_details_note: None,
             wago_install_in_progress: false,
             direct_install_in_progress: false,
@@ -5869,7 +5872,6 @@ impl App {
                 ))) => {
                     let (status, follow_up) = self.with_curseforge_note(
                         format!("{} is installed", outcome.summary.addon_name),
-                        &outcome.summary.addon_name,
                         outcome.summary.installed_folders.iter().map(String::as_str),
                     );
                     let mut actions = vec![
@@ -5958,7 +5960,6 @@ impl App {
                             outcome.addon_name,
                             request.provider.label()
                         ),
-                        &outcome.addon_name,
                         folders,
                     );
                     if let Some(warning) = &outcome.warning {
@@ -7286,12 +7287,11 @@ impl App {
 
     /// `text` with ". CurseForge also manages it. Mark it Ignored there."
     /// when it manages any of `folders`: the short form for the status line.
-    /// Where LemonUp can mark `name` itself, also the question to ask, or
+    /// Where LemonUp can mark them itself, also the question to ask, or
     /// while CurseForge runs, the sentence that says to quit it.
     fn with_curseforge_note<'a>(
         &self,
         text: String,
-        name: &str,
         folders: impl IntoIterator<Item = &'a str>,
     ) -> (String, Vec<AppAction>) {
         let folders = folders.into_iter().map(str::to_string).collect::<Vec<_>>();
@@ -7302,10 +7302,7 @@ impl App {
             return (text, Vec::new());
         }
         let mut text = format!("{text}. CurseForge also manages it. Mark it Ignored there.");
-        let (extra, actions) = self.curseforge_follow_up(CurseForgeMark {
-            names: vec![name.to_string()],
-            folders,
-        });
+        let (extra, actions) = self.curseforge_follow_up(folders);
         if let Some(extra) = extra {
             text.push(' ');
             text.push_str(extra);
@@ -9059,6 +9056,7 @@ mod tests {
             // As on Windows and macOS, unless a test says otherwise.
             curseforge_can_mark: false,
             curseforge_running: || true,
+            curseforge_writer: lemonup_core::curseforge::mark_ignored,
             curseforge_details_note: None,
             wago_install_in_progress: false,
             direct_install_in_progress: false,

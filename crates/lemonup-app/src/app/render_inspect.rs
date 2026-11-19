@@ -267,11 +267,7 @@ impl App {
             // while CurseForge still manages it.
             let mut lines = Vec::new();
             if let Some((kind, note)) = self.curseforge_details_note(&item.folder) {
-                let color = if kind == StatusKind::Done {
-                    roles.green
-                } else {
-                    roles.red
-                };
+                let color = super::curseforge_mark::note_color(kind, roles);
                 lines.push(vec![Span::styled(note, Style::default().fg(color))]);
             }
             if linked

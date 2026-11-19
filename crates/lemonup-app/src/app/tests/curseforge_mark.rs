@@ -5,6 +5,7 @@ use super::*;
 use crate::app::dialog::Question;
 use crate::app::find_sheet::link_found;
 use crate::app::{CurseForgeMessage, FindTaskEvent, curseforge_mark};
+use lemonup_core::curseforge::MarkError;
 use lemonup_core::find::{FindLabel, FindSource, FoundAddon};
 
 fn closed() -> bool {
@@ -17,14 +18,64 @@ fn open() -> bool {
 
 /// An app that can mark addons, with CurseForge closed, on a synthetic game
 /// whose record manages `managed`.
-fn marking_app(managed: &[&str]) -> (App, tempfile::TempDir, PathBuf) {
+fn marking_app(managed: &[(&str, &[&str])]) -> (App, tempfile::TempDir, PathBuf) {
+    let (temp, addons, record) = named_game(managed, None);
+    (app_on(addons, &record), temp, record)
+}
+
+/// An app that can mark addons in the game at `addons`, CurseForge closed.
+fn app_on(addons: PathBuf, record: &Path) -> App {
     let mut app = app_for_tests(ShellMode::Dashboard);
-    let (temp, addons, record) = curseforge_game(managed);
     app.effective_addon_dir = Some(addons);
-    app.curseforge_files = vec![record.clone()];
+    app.curseforge_files = vec![record.to_path_buf()];
     app.curseforge_can_mark = true;
     app.curseforge_running = closed;
-    (app, temp, record)
+    app
+}
+
+/// A synthetic `_retail_` game whose CurseForge record has one named entry,
+/// not Ignored, for each `(name, folders)`. Its install path is the flavor
+/// folder, or `elsewhere` (a copy of the game folder keeps the GUID).
+fn named_game(
+    entries: &[(&str, &[&str])],
+    elsewhere: Option<&str>,
+) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    const GUID: &str = "00000000-0000-4000-8000-0000000000bb";
+    let temp = tempdir().expect("temp");
+    let root = temp.path().join("World of Warcraft");
+    let flavor = root.join("_retail_");
+    let addons = flavor.join("Interface").join("AddOns");
+    fs::create_dir_all(&addons).expect("addons");
+    fs::write(flavor.join(".curseclient"), GUID).expect("client");
+    let install = match elsewhere {
+        Some(other) => {
+            fs::create_dir_all(root.join(other)).expect("other");
+            root.join(other)
+        }
+        None => flavor,
+    };
+    let entries = entries
+        .iter()
+        .map(|(name, folders)| {
+            let modules = folders
+                .iter()
+                .map(|folder| serde_json::json!({ "foldername": folder }))
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "name": name,
+                "preferenceIsIgnored": false,
+                "installedFile": { "modules": modules },
+            })
+        })
+        .collect::<Vec<_>>();
+    let record = serde_json::json!([{
+        "guid": GUID,
+        "installPath": format!("{}/", install.display()),
+        "installedAddons": entries,
+    }]);
+    let file = temp.path().join("AddonGameInstance.json");
+    fs::write(&file, serde_json::to_vec(&record).expect("json")).expect("record");
+    (temp, addons, file)
 }
 
 fn flags(record: &Path) -> Vec<serde_json::Value> {
@@ -101,7 +152,7 @@ fn answer(app: &mut App, code: KeyCode) -> Vec<AppMessage> {
 
 #[test]
 fn after_a_link_curseforge_still_manages_the_second_question_asks_and_y_marks() {
-    let (mut app, _game, record) = marking_app(&["Pawn"]);
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
     link_two(&mut app);
     assert!(
         app.status_line.text.contains(
@@ -147,7 +198,7 @@ fn after_a_link_curseforge_still_manages_the_second_question_asks_and_y_marks() 
 
 #[test]
 fn n_skips_the_question_and_changes_nothing() {
-    let (mut app, _game, record) = marking_app(&["Pawn"]);
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
     let before = fs::read(&record).expect("record");
     link_two(&mut app);
     let status = app.status_line.text.clone();
@@ -165,7 +216,7 @@ fn n_skips_the_question_and_changes_nothing() {
 
 #[test]
 fn a_y_typed_before_the_question_showed_does_not_answer_it() {
-    let (mut app, _game, record) = marking_app(&["Pawn"]);
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
     app.key_read_at = Some(Instant::now());
     std::thread::sleep(std::time::Duration::from_millis(2));
     link_two(&mut app);
@@ -179,7 +230,7 @@ fn a_y_typed_before_the_question_showed_does_not_answer_it() {
 
 #[test]
 fn while_curseforge_runs_the_hint_says_to_quit_it_and_nothing_is_asked() {
-    let (mut app, _game, record) = marking_app(&["Pawn"]);
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
     app.curseforge_running = open;
     link_two(&mut app);
     assert!(
@@ -192,7 +243,7 @@ fn while_curseforge_runs_the_hint_says_to_quit_it_and_nothing_is_asked() {
     );
     assert_eq!(app.active_question(), None);
 
-    let (mut app, _game, _) = marking_app(&["WeakAurasOptions"]);
+    let (mut app, _game, _) = marking_app(&[("WeakAuras", &["WeakAuras", "WeakAurasOptions"])]);
     app.curseforge_running = open;
     apply_all(&mut app, weakauras_installed());
     let (text, _) = app.status_line_message().expect("result line");
@@ -207,7 +258,8 @@ fn while_curseforge_runs_the_hint_says_to_quit_it_and_nothing_is_asked() {
 
 #[test]
 fn after_an_install_the_question_names_the_addon_and_marks_its_folders() {
-    let (mut app, _game, record) = marking_app(&["WeakAurasOptions"]);
+    let (mut app, _game, record) =
+        marking_app(&[("WeakAuras", &["WeakAuras", "WeakAurasOptions"])]);
     apply_all(&mut app, weakauras_installed());
     let (text, _) = app.status_line_message().expect("result line");
     assert_eq!(
@@ -228,7 +280,7 @@ fn after_an_install_the_question_names_the_addon_and_marks_its_folders() {
     );
 
     // Where LemonUp can't mark (Windows, macOS), today's hint only.
-    let (mut app, _game, _) = marking_app(&["WeakAurasOptions"]);
+    let (mut app, _game, _) = marking_app(&[("WeakAuras", &["WeakAuras", "WeakAurasOptions"])]);
     app.curseforge_can_mark = false;
     apply_all(&mut app, weakauras_installed());
     assert_eq!(app.active_question(), None);
@@ -236,7 +288,7 @@ fn after_an_install_the_question_names_the_addon_and_marks_its_folders() {
 
 #[test]
 fn a_record_that_cant_be_changed_says_so_and_keeps_the_hint() {
-    let (mut app, _game, record) = marking_app(&["Pawn"]);
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
     link_two(&mut app);
     // A flag LemonUp can't place: it refuses to touch the record.
     let mut value: serde_json::Value =
@@ -255,7 +307,7 @@ fn a_record_that_cant_be_changed_says_so_and_keeps_the_hint() {
 
 #[test]
 fn a_question_naming_many_addons_fits_at_80x24() {
-    let (mut app, _game, _) = marking_app(&["Pawn"]);
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
     let names = (0..40)
         .map(|index| format!("Addon{index:02}"))
         .collect::<Vec<_>>();
@@ -290,7 +342,7 @@ fn details_on_second(app: &mut App) {
 
 #[test]
 fn m_in_details_marks_the_addon_where_curseforge_manages_it() {
-    let (mut app, _game, record) = marking_app(&["second_config"]);
+    let (mut app, _game, record) = marking_app(&[("Second", &["second_config"])]);
     details_on_second(&mut app);
     let line = |app: &App, width| {
         app.key_table(width)
@@ -337,7 +389,7 @@ fn m_in_details_marks_the_addon_where_curseforge_manages_it() {
 
 #[test]
 fn m_in_details_while_curseforge_runs_says_to_quit_it() {
-    let (mut app, _game, record) = marking_app(&["second_config"]);
+    let (mut app, _game, record) = marking_app(&[("Second", &["second_config"])]);
     app.curseforge_running = open;
     details_on_second(&mut app);
     apply_all(
@@ -375,7 +427,7 @@ fn m_in_details_while_curseforge_runs_says_to_quit_it() {
 #[test]
 fn m_in_details_does_nothing_where_it_cant_mark() {
     // CurseForge doesn't manage Second.
-    let (mut app, _game, _) = marking_app(&["Other"]);
+    let (mut app, _game, _) = marking_app(&[("Other", &["Other"])]);
     details_on_second(&mut app);
     assert!(
         app.messages_for_key(KeyEvent::from(KeyCode::Char('m')))
@@ -384,7 +436,7 @@ fn m_in_details_does_nothing_where_it_cant_mark() {
     assert!(!app.key_table(u16::MAX).iter().any(|hint| hint.key == "m"));
 
     // Managed, but LemonUp can't change CurseForge's list on this system.
-    let (mut app, _game, _) = marking_app(&["second_config"]);
+    let (mut app, _game, _) = marking_app(&[("Second", &["second_config"])]);
     app.curseforge_can_mark = false;
     details_on_second(&mut app);
     assert!(
@@ -396,7 +448,7 @@ fn m_in_details_does_nothing_where_it_cant_mark() {
 
 #[test]
 fn the_details_key_line_offers_m_at_80x24_and_wide() {
-    let (mut app, _game, _) = marking_app(&["second_config"]);
+    let (mut app, _game, _) = marking_app(&[("Second", &["second_config"])]);
     details_on_second(&mut app);
     for (width, height, want) in [
         (80, 24, "m mark Ignored"),
@@ -411,7 +463,7 @@ fn the_details_key_line_offers_m_at_80x24_and_wide() {
     }
 
     // Docked beside the list, `m` works the same.
-    let (mut app, _game, _) = marking_app(&["second_config"]);
+    let (mut app, _game, _) = marking_app(&[("Second", &["second_config"])]);
     app.dashboard.detail_mode = DetailMode::Overview;
     details_on_second(&mut app);
     let rows = render_rows(&mut app, 200, 40);
@@ -427,7 +479,7 @@ fn the_details_key_line_offers_m_at_80x24_and_wide() {
 
 #[test]
 fn the_question_renders_at_80x24_and_wide() {
-    let (mut app, _game, _) = marking_app(&["Pawn"]);
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
     app.curseforge_mark = Some(curseforge_mark::CurseForgeMark {
         names: vec!["Pawn".into(), "Clique".into(), "Spy".into()],
         folders: vec!["Pawn".into()],
@@ -444,7 +496,8 @@ fn the_question_renders_at_80x24_and_wide() {
 
 #[test]
 fn after_an_install_from_search_the_sheet_says_what_marking_did() {
-    let (mut app, _game, record) = marking_app(&["WeakAurasOptions"]);
+    let (mut app, _game, record) =
+        marking_app(&[("WeakAuras", &["WeakAuras", "WeakAurasOptions"])]);
     app.apply(AppAction::SetDetailMode(DetailMode::Search));
     apply_all(&mut app, weakauras_installed());
     assert!(app.active_question().is_some());
@@ -458,4 +511,119 @@ fn after_an_install_from_search_the_sheet_says_what_marking_did() {
             "{rows}"
         );
     }
+}
+
+#[test]
+fn the_question_names_every_curseforge_addon_a_yes_changes() {
+    // A CurseForge pack shares Pawn's folder: a yes marks both.
+    let (mut app, _game, record) =
+        marking_app(&[("Pawn", &["Pawn"]), ("X Pack", &["Pawn", "XPack"])]);
+    link_two(&mut app);
+    assert_eq!(
+        app.active_question(),
+        Some(Question::MarkIgnored {
+            names: vec!["Pawn".to_string(), "X Pack".to_string()]
+        })
+    );
+    for (width, height) in [(80, 24), (160, 40)] {
+        let rows = render_rows(&mut app, width, height);
+        println!("--- Question {width}x{height}\n{}", rows.join("\n"));
+        let rows = rows.join("\n");
+        assert!(
+            rows.contains("Mark these 2 addons Ignored in CurseForge?"),
+            "{rows}"
+        );
+        assert!(rows.contains("Pawn, X Pack"), "{rows}");
+    }
+    answer(&mut app, KeyCode::Char('y'));
+    assert_eq!(
+        flags(&record),
+        [serde_json::json!(true), serde_json::json!(true)]
+    );
+    assert_eq!(
+        app.status_line_message().expect("result line").0,
+        "Marked 2 addons Ignored in CurseForge."
+    );
+}
+
+#[test]
+fn the_result_line_names_what_the_write_marked() {
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
+    app.curseforge_writer = |_, _, _| Ok(vec!["Pawn Classic".to_string()]);
+    link_two(&mut app);
+    answer(&mut app, KeyCode::Char('y'));
+    assert_eq!(
+        app.status_line_message().expect("result line").0,
+        "Marked Pawn Classic Ignored in CurseForge."
+    );
+}
+
+#[test]
+fn a_change_that_cant_be_confirmed_never_says_nothing_changed() {
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
+    app.curseforge_writer = |_, _, _| Err(MarkError::NotConfirmed);
+    link_two(&mut app);
+    answer(&mut app, KeyCode::Char('y'));
+    let (text, kind) = app.status_line_message().expect("result line");
+    assert_eq!(kind, StatusKind::Problem);
+    assert_eq!(
+        text,
+        "LemonUp changed CurseForge's list but couldn't confirm it. Check these addons in \
+         CurseForge."
+    );
+    // The record wasn't changed after all here, so the hint stays.
+    assert!(app.curseforge.manages("Pawn"));
+
+    // Refused before writing: nothing changed.
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
+    app.curseforge_writer = |_, _, _| Err(MarkError::Changed);
+    link_two(&mut app);
+    answer(&mut app, KeyCode::Char('y'));
+    assert_eq!(
+        app.status_line_message().expect("result line").0,
+        "Couldn't change CurseForge's list. Nothing changed."
+    );
+}
+
+#[test]
+fn a_copied_game_folder_gets_the_hint_but_no_question() {
+    // The GUID is the real game's, its install path another folder.
+    for running in [closed as fn() -> bool, open] {
+        let (_game, addons, record) = named_game(&[("Pawn", &["Pawn"])], Some("_real_"));
+        let before = fs::read(&record).expect("record");
+        let mut app = app_on(addons, &record);
+        app.curseforge_running = running;
+        link_two(&mut app);
+        assert!(
+            app.status_line
+                .text
+                .contains("CurseForge also manages Pawn. Mark it Ignored there."),
+            "{}",
+            app.status_line.text
+        );
+        assert!(!app.status_line.text.contains("Quit CurseForge"));
+        assert_eq!(app.active_question(), None);
+        assert_eq!(fs::read(&record).expect("record"), before);
+    }
+}
+
+#[test]
+fn a_second_ask_names_what_both_change() {
+    let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"]), ("Clique", &["Clique"])]);
+    let ask = |folder: &str| {
+        AppAction::CurseForge(curseforge_mark::CurseForgeAction::Ask(
+            curseforge_mark::CurseForgeMark {
+                names: vec![folder.to_string()],
+                folders: vec![folder.to_string()],
+            },
+        ))
+    };
+    app.apply(ask("Pawn"));
+    app.apply(ask("clique"));
+    assert_eq!(
+        app.active_question(),
+        Some(Question::MarkIgnored {
+            names: vec!["Pawn".to_string(), "Clique".to_string()]
+        })
+    );
 }

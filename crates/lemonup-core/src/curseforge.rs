@@ -266,23 +266,48 @@ pub fn record_in_use(record_files: &[PathBuf]) -> Option<PathBuf> {
 /// before it changes the record: `AddonGameInstance.json.lemonup-backup`.
 pub const BACKUP_SUFFIX: &str = ".lemonup-backup";
 
-/// Why LemonUp left CurseForge's record as it was.
+/// Why LemonUp didn't change CurseForge's record, or couldn't confirm it.
 #[derive(Debug, thiserror::Error)]
 pub enum MarkError {
     #[error("couldn't read CurseForge's record: {0}")]
     Read(#[source] io::Error),
+    #[error("CurseForge's record is a link to another file")]
+    Symlink,
     #[error("CurseForge's record is not in the shape LemonUp knows")]
     Shape,
     #[error("CurseForge's record has no game for this AddOns folder")]
     NoGame,
+    #[error("CurseForge's game for this GUID is in another folder")]
+    GameElsewhere,
     #[error("CurseForge already ignores these addons, or doesn't manage them")]
     NothingToChange,
     #[error("CurseForge's record changed while LemonUp was reading it")]
     Changed,
     #[error("couldn't write CurseForge's record: {0}")]
     Write(#[source] io::Error),
-    #[error("CurseForge's record didn't read back as written")]
+    #[error("CurseForge's record was written but didn't read back as written")]
     NotConfirmed,
+}
+
+impl MarkError {
+    /// The record was replaced before this went wrong, so it may have
+    /// changed. Every other error leaves it as it was.
+    pub fn changed_record(&self) -> bool {
+        matches!(self, Self::NotConfirmed)
+    }
+}
+
+/// The names of the CurseForge addons [`mark_ignored`] would mark, without
+/// changing anything: every addon of the game for `addons_dir` that lists
+/// one of `folders` and isn't Ignored yet. One may be a pack that shares a
+/// folder with the addon asked about.
+pub fn names_to_mark(
+    record_file: &Path,
+    addons_dir: &Path,
+    folders: &[String],
+) -> Result<Vec<String>, MarkError> {
+    let original = read_plain_file(record_file)?;
+    Ok(plan_mark(&original, addons_dir, folders)?.names)
 }
 
 /// Sets `preferenceIsIgnored` to true on every addon of the game instance
@@ -293,48 +318,131 @@ pub enum MarkError {
 /// byte of the record stays as it was. Before writing, the record is copied
 /// to its [`BACKUP_SUFFIX`] file next to it, replacing an older copy. The
 /// new record is written beside it and moved over it, then read back. When
-/// anything is not as expected, the record is left as it was.
+/// anything is not as expected before that move, the record is left as it
+/// was; see [`MarkError::changed_record`].
 pub fn mark_ignored(
     record_file: &Path,
     addons_dir: &Path,
     folders: &[String],
 ) -> Result<Vec<String>, MarkError> {
-    let original = fs::read(record_file).map_err(MarkError::Read)?;
-    let (edited, names) = plan_mark(&original, addons_dir, folders)?;
-    fs::write(sibling(record_file, BACKUP_SUFFIX), &original).map_err(MarkError::Write)?;
+    mark_ignored_with(record_file, addons_dir, folders, || {})
+}
+
+/// [`mark_ignored`], running `before_write` just before the record is read
+/// the second time, the last check before it is replaced.
+fn mark_ignored_with(
+    record_file: &Path,
+    addons_dir: &Path,
+    folders: &[String],
+    before_write: impl FnOnce(),
+) -> Result<Vec<String>, MarkError> {
+    let original = read_plain_file(record_file)?;
+    let plan = plan_mark(&original, addons_dir, folders)?;
+    let permissions = fs::metadata(record_file)
+        .map_err(MarkError::Read)?
+        .permissions();
+    replace_file(
+        &sibling(record_file, BACKUP_SUFFIX),
+        &original,
+        permissions.clone(),
+    )
+    .map_err(MarkError::Write)?;
+    before_write();
     // CurseForge may have written the record since it was read.
-    if fs::read(record_file).map_err(MarkError::Read)? != original {
+    if read_plain_file(record_file)? != original {
         return Err(MarkError::Changed);
     }
-    replace_file(record_file, &edited).map_err(MarkError::Write)?;
-    let read_back = fs::read(record_file).map_err(MarkError::Read)?;
-    if read_back == edited
-        || matches!(
-            plan_mark(&read_back, addons_dir, folders),
-            Err(MarkError::NothingToChange)
-        )
-    {
-        Ok(names)
-    } else {
-        Err(MarkError::NotConfirmed)
+    replace_file(record_file, &plan.edited, permissions).map_err(MarkError::Write)?;
+    // From here on the record has changed.
+    match fs::read(record_file) {
+        Ok(read_back) if confirmed(&read_back, &plan.flipped) => Ok(plan.names),
+        _ => Err(MarkError::NotConfirmed),
     }
+}
+
+/// The record's bytes; a link to another file is refused, so LemonUp never
+/// writes through it.
+fn read_plain_file(path: &Path) -> Result<Vec<u8>, MarkError> {
+    let metadata = fs::symlink_metadata(path).map_err(MarkError::Read)?;
+    if metadata.file_type().is_symlink() {
+        return Err(MarkError::Symlink);
+    }
+    fs::read(path).map_err(MarkError::Read)
+}
+
+/// One addon entry LemonUp sets to Ignored: where it is (instance, entry)
+/// and its name, if it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Flipped {
+    instance: usize,
+    entry: usize,
+    name: Option<String>,
+}
+
+/// What a mark changes: the new text, the names of the addons it marks, and
+/// where they are.
+struct MarkPlan {
+    edited: Vec<u8>,
+    names: Vec<String>,
+    flipped: Vec<Flipped>,
+}
+
+/// Whether every flipped entry is in `read_back` where it was, with the same
+/// name, and Ignored.
+fn confirmed(read_back: &[u8], flipped: &[Flipped]) -> bool {
+    let Ok(record) = serde_json::from_slice::<Value>(without_bom(read_back)) else {
+        return false;
+    };
+    flipped.iter().all(|flipped| {
+        let Some(entry) = record
+            .get(flipped.instance)
+            .and_then(|instance| instance.get("installedAddons"))
+            .and_then(|addons| addons.get(flipped.entry))
+        else {
+            return false;
+        };
+        entry.get("name").and_then(Value::as_str) == flipped.name.as_deref()
+            && entry.get("preferenceIsIgnored") == Some(&Value::Bool(true))
+    })
+}
+
+/// Whether `install_path` is `flavor_dir`: the same folder once both are
+/// resolved, or when either can't be, the same path written either way,
+/// without a trailing separator.
+fn same_folder(install_path: &str, flavor_dir: &Path) -> bool {
+    let install = Path::new(install_path);
+    if let (Ok(install), Ok(flavor)) = (fs::canonicalize(install), fs::canonicalize(flavor_dir)) {
+        return install == flavor;
+    }
+    let plain = |path: &str| path.replace('\\', "/").trim_end_matches('/').to_string();
+    plain(install_path) == plain(&flavor_dir.to_string_lossy())
 }
 
 /// The record with the flags of the addons to mark set to true, and their
 /// names. Each `"preferenceIsIgnored":` in the text belongs to the addon
 /// entry in the same place in document order, so their counts must agree.
 /// The edited text must parse to the original with exactly those flags set.
+/// The game must be the one in the AddOns folder's own flavor folder: a
+/// copy of a game folder keeps its `.curseclient`, so a GUID alone could
+/// name the real game.
 fn plan_mark(
     original: &[u8],
     addons_dir: &Path,
     folders: &[String],
-) -> Result<(Vec<u8>, Vec<String>), MarkError> {
+) -> Result<MarkPlan, MarkError> {
     let flavor = flavor_dir(addons_dir).ok_or(MarkError::NoGame)?;
     let guid = read_client_guid(&flavor).ok_or(MarkError::NoGame)?;
     let text = without_bom(original);
     let bom = original.len() - text.len();
     let instances = parse_record(text).ok_or(MarkError::Shape)?;
     let wanted_instance = instance_index(&instances, &guid, &flavor).ok_or(MarkError::NoGame)?;
+    let in_this_folder = instances[wanted_instance]
+        .as_ref()
+        .and_then(|instance| instance.install_path.as_deref())
+        .is_some_and(|path| same_folder(path, &flavor));
+    if !in_this_folder {
+        return Err(MarkError::GameElsewhere);
+    }
     let record: Value = serde_json::from_slice(text).map_err(|_| MarkError::Shape)?;
     let root = record.as_array().ok_or(MarkError::Shape)?;
 
@@ -388,22 +496,32 @@ fn plan_mark(
 
     let mut expected = record.clone();
     let mut names = Vec::new();
+    let mut flipped = Vec::new();
     for &index in &chosen {
         let (instance, addon, entry) = entries[index];
         expected[instance]["installedAddons"][addon]["preferenceIsIgnored"] = Value::Bool(true);
-        let name = entry
-            .get("name")
-            .and_then(Value::as_str)
-            .or_else(|| entry_folders(entry).next())
-            .unwrap_or_default();
-        names.push(name.to_string());
+        let name = entry.get("name").and_then(Value::as_str);
+        names.push(
+            name.or_else(|| entry_folders(entry).next())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        flipped.push(Flipped {
+            instance,
+            entry: addon,
+            name: name.map(str::to_string),
+        });
     }
     let parsed: Value =
         serde_json::from_slice(without_bom(&edited)).map_err(|_| MarkError::Shape)?;
     if parsed != expected {
         return Err(MarkError::Shape);
     }
-    Ok((edited, names))
+    Ok(MarkPlan {
+        edited,
+        names,
+        flipped,
+    })
 }
 
 /// The folder names an addon entry lists among its modules.
@@ -449,16 +567,23 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Writes `bytes` to a new file next to `path`, then moves it over `path`,
-/// so `path` is never half written.
-fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// so `path` is never half written and a link at `path` is replaced, not
+/// followed.
+fn replace_file(path: &Path, bytes: &[u8], permissions: fs::Permissions) -> io::Result<()> {
     let temp = sibling(path, ".lemonup-new");
+    // A file left by an earlier try, never one to write through.
+    match fs::remove_file(&temp) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let result = (|| {
-        let mut file = fs::File::create(&temp)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        if let Ok(metadata) = fs::metadata(path) {
-            fs::set_permissions(&temp, metadata.permissions())?;
-        }
+        fs::set_permissions(&temp, permissions)?;
         fs::rename(&temp, path)
     })();
     if result.is_err() {
@@ -478,14 +603,25 @@ pub fn is_running() -> bool {
     }
 }
 
-/// Whether a process in `proc_dir` (laid out like `/proc`) is named
-/// `curseforge`, in any case, by its `comm` or the file name of its `exe`.
+/// How the name of CurseForge's agent process starts.
+const AGENT: &str = "Curse.Agent";
+
+/// Whether a process in `proc_dir` (laid out like `/proc`) is CurseForge,
+/// in any case, by its `comm` or the file name of its `exe`: `curseforge`,
+/// or its agent, whose name starts with `Curse.Agent`.
 /// A folder that can't be read, or lists no process, may hide one: true.
 pub fn running_in(proc_dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(proc_dir) else {
         return true;
     };
-    let named = |name: &str| name.trim().eq_ignore_ascii_case("curseforge");
+    // The app, or its agent: `comm` keeps 15 characters, "Curse.Agent.Hos".
+    let named = |name: &str| {
+        let name = name.trim();
+        name.eq_ignore_ascii_case("curseforge")
+            || name
+                .get(..AGENT.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(AGENT))
+    };
     let mut processes = 0;
     for entry in entries.flatten() {
         let is_process = entry
@@ -1204,5 +1340,221 @@ mod tests {
         assert!(running_in(&proc.path().join("missing")));
         // No process at all is not a real /proc.
         assert!(running_in(proc.path()));
+    }
+
+    #[test]
+    fn a_guid_match_in_another_folder_is_refused() {
+        // A copy of the game folder keeps the real game's `.curseclient`.
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        let real = game.root.join("_real_");
+        fs::create_dir_all(&real).expect("real");
+        write(
+            &game.record,
+            &json!([instance(GUID, &real, vec![named("Pawn", &["Pawn"], false)])]),
+        );
+        let before = fs::read(&game.record).expect("record");
+        // Reading still says CurseForge manages it, so the hint stays.
+        assert!(managed(&game).manages("Pawn"));
+        for result in [
+            names_to_mark(&game.record, &game.addons, &folders(&["Pawn"])),
+            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])),
+        ] {
+            assert!(
+                matches!(result, Err(MarkError::GameElsewhere)),
+                "{result:?}"
+            );
+        }
+        assert_eq!(fs::read(&game.record).expect("record"), before);
+        assert!(!backup(&game).exists());
+
+        // A path that can't be resolved compares as written.
+        assert!(same_folder(
+            "/no/such/_retail_/",
+            Path::new("/no/such/_retail_")
+        ));
+        assert!(!same_folder(
+            "/no/such/_retail_",
+            Path::new("/no/such/_classic_")
+        ));
+    }
+
+    #[test]
+    fn names_to_mark_names_every_entry_that_changes_and_writes_nothing() {
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        write(
+            &game.record,
+            &json!([instance(
+                GUID,
+                &game.flavor,
+                vec![
+                    named("Pawn", &["Pawn"], false),
+                    named("X Pack", &["Pawn", "XPack"], false),
+                    named("Clique", &["Clique"], false),
+                ]
+            )]),
+        );
+        let before = fs::read(&game.record).expect("record");
+        assert_eq!(
+            names_to_mark(&game.record, &game.addons, &folders(&["pawn"])).expect("names"),
+            ["Pawn", "X Pack"]
+        );
+        assert_eq!(fs::read(&game.record).expect("record"), before);
+        assert!(!backup(&game).exists());
+        assert_eq!(
+            mark_ignored(&game.record, &game.addons, &folders(&["pawn"])).expect("marked"),
+            ["Pawn", "X Pack"]
+        );
+    }
+
+    #[test]
+    fn curseforge_is_running_when_its_agent_runs() {
+        // `comm` keeps 15 characters.
+        let proc = proc_dir(&[("1", "systemd"), ("900", "Curse.Agent.Hos")]);
+        assert!(running_in(proc.path()));
+        let proc = proc_dir(&[("1", "curse.agent")]);
+        assert!(running_in(proc.path()));
+        let proc = proc_dir(&[("1", "Curse")]);
+        assert!(!running_in(proc.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curseforge_is_running_when_its_agent_program_runs() {
+        let proc = proc_dir(&[("1", "systemd"), ("901", "dotnet")]);
+        std::os::unix::fs::symlink(
+            "/opt/CurseForge/agent/Curse.Agent.Host",
+            proc.path().join("901").join("exe"),
+        )
+        .expect("exe");
+        assert!(running_in(proc.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_is_a_link_is_refused() {
+        let game = game();
+        two_instances(&game);
+        let real = game.record.with_file_name("real.json");
+        fs::rename(&game.record, &real).expect("move");
+        std::os::unix::fs::symlink(&real, &game.record).expect("link");
+        let before = fs::read(&real).expect("real");
+        for result in [
+            names_to_mark(&game.record, &game.addons, &folders(&["Pawn"])),
+            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])),
+        ] {
+            assert!(matches!(result, Err(MarkError::Symlink)), "{result:?}");
+        }
+        assert_eq!(fs::read(&real).expect("real"), before);
+        assert!(
+            fs::symlink_metadata(&game.record)
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!backup(&game).exists());
+    }
+
+    #[test]
+    fn a_record_changed_while_marking_is_left_to_the_other_writer() {
+        let game = game();
+        let original = two_instances(&game);
+        let theirs = b"[]".to_vec();
+        let result = mark_ignored_with(&game.record, &game.addons, &folders(&["Pawn"]), || {
+            fs::write(&game.record, &theirs).expect("their write");
+        });
+        assert!(matches!(result, Err(MarkError::Changed)), "{result:?}");
+        assert!(!result.expect_err("changed").changed_record());
+        assert_eq!(fs::read(&game.record).expect("record"), theirs);
+        assert_eq!(fs::read(backup(&game)).expect("backup"), original);
+    }
+
+    #[test]
+    fn the_read_back_confirms_each_flipped_entry_by_place_and_name() {
+        let flipped = [Flipped {
+            instance: 0,
+            entry: 1,
+            name: Some("Pawn".to_string()),
+        }];
+        let record = |entries: serde_json::Value| {
+            serde_json::to_vec(&json!([{ "installedAddons": entries }])).expect("json")
+        };
+        let other = json!({ "name": "Spy", "preferenceIsIgnored": false });
+        let ok = record(json!([other, { "name": "Pawn", "preferenceIsIgnored": true }]));
+        assert!(confirmed(&ok, &flipped));
+        for bad in [
+            record(json!([other, { "name": "Pawn", "preferenceIsIgnored": false }])),
+            record(json!([other, { "name": "Pawn" }])),
+            record(json!([other, { "name": "Clique", "preferenceIsIgnored": true }])),
+            record(json!([{ "name": "Pawn", "preferenceIsIgnored": true }])),
+            b"[]".to_vec(),
+            b"not json".to_vec(),
+        ] {
+            assert!(
+                !confirmed(&bad, &flipped),
+                "{}",
+                String::from_utf8_lossy(&bad)
+            );
+        }
+        assert!(MarkError::NotConfirmed.changed_record());
+        assert!(!MarkError::Shape.changed_record());
+    }
+
+    #[test]
+    fn crlf_and_names_beyond_ascii_survive_the_edit() {
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        let path = game.flavor.display().to_string().replace('\\', "\\\\");
+        let text = format!(
+            "[\r\n {{\r\n  \"guid\": \"{GUID}\",\r\n  \"installPath\": \"{path}\",\r\n  \
+             \"installedAddons\": [\r\n   {{ \"name\": \"Señor Pâté «Ünï»\", \
+             \"preferenceIsIgnored\":\r\n false, \"installedFile\": {{ \"modules\": \
+             [ {{ \"foldername\": \"Pâté\" }} ] }} }}\r\n  ]\r\n }}\r\n]\r\n"
+        );
+        fs::write(&game.record, &text).expect("record");
+        assert_eq!(
+            mark_ignored(&game.record, &game.addons, &folders(&["PÂTÉ"])).expect("marked"),
+            ["Señor Pâté «Ünï»"]
+        );
+        let edited = fs::read(&game.record).expect("record");
+        assert_eq!(flips(text.as_bytes(), &edited), 1);
+        assert_eq!(edited, text.replacen("false", "true", 1).into_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_record_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let game = game();
+        two_instances(&game);
+        fs::set_permissions(&game.record, fs::Permissions::from_mode(0o600)).expect("mode");
+        mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])).expect("marked");
+        let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&game.record), 0o600);
+        assert_eq!(mode(&backup(&game)), 0o600);
+    }
+
+    #[test]
+    fn a_flag_counted_in_the_wrong_place_is_caught_by_the_final_check() {
+        // Counts agree (two keys in the text, two entries with the key), but
+        // the first key in the text is part of another key's name, and
+        // Pawn's own key is written with an escape the text search can't see.
+        let game = game();
+        fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
+        let path = game.flavor.display().to_string().replace('\\', "\\\\");
+        let text = format!(
+            "[{{\"guid\":\"{GUID}\",\"installPath\":\"{path}\",\"installedAddons\":[\
+             {{\"name\":\"Pawn\",\"preferenceIsIgnor\\u0065d\":false,\
+             \"installedFile\":{{\"modules\":[{{\"foldername\":\"Pawn\"}}]}}}},\
+             {{\"name\":\"Clique\",\"x\\\"preferenceIsIgnored\":false,\"preferenceIsIgnored\":false,\
+             \"installedFile\":{{\"modules\":[{{\"foldername\":\"Clique\"}}]}}}}]}}]"
+        );
+        fs::write(&game.record, &text).expect("record");
+        assert_eq!(flag_values(text.as_bytes()).len(), 2);
+        let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+        assert!(matches!(result, Err(MarkError::Shape)), "{result:?}");
+        assert_eq!(fs::read_to_string(&game.record).expect("record"), text);
+        assert!(!backup(&game).exists());
     }
 }
