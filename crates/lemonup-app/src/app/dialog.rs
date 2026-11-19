@@ -485,7 +485,7 @@ impl Question {
                     text,
                 )));
                 lines.push(Line::from(Span::styled(
-                    "LemonUp keeps a copy of CurseForge's list next to it first.",
+                    "LemonUp backs up CurseForge's list first.",
                     muted,
                 )));
                 lines

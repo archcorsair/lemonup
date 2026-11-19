@@ -490,6 +490,7 @@ fn the_question_renders_at_80x24_and_wide() {
         let rows = rows.join("\n");
         assert!(rows.contains("Mark these 3 addons Ignored in CurseForge?"));
         assert!(rows.contains("Pawn, Clique, Spy"));
+        assert!(rows.contains("LemonUp backs up CurseForge's list first."));
         assert!(rows.contains("y  mark"));
     }
 }
