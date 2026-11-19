@@ -550,7 +550,7 @@ fn the_question_names_every_curseforge_addon_a_yes_changes() {
 #[test]
 fn the_result_line_names_what_the_write_marked() {
     let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
-    app.curseforge_writer = |_, _, _| Ok(vec!["Pawn Classic".to_string()]);
+    app.curseforge_writer = |_, _, _, _| Ok(vec!["Pawn Classic".to_string()]);
     link_two(&mut app);
     answer(&mut app, KeyCode::Char('y'));
     assert_eq!(
@@ -562,7 +562,7 @@ fn the_result_line_names_what_the_write_marked() {
 #[test]
 fn a_change_that_cant_be_confirmed_never_says_nothing_changed() {
     let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
-    app.curseforge_writer = |_, _, _| Err(MarkError::NotConfirmed);
+    app.curseforge_writer = |_, _, _, _| Err(MarkError::NotConfirmed);
     link_two(&mut app);
     answer(&mut app, KeyCode::Char('y'));
     let (text, kind) = app.status_line_message().expect("result line");
@@ -577,7 +577,7 @@ fn a_change_that_cant_be_confirmed_never_says_nothing_changed() {
 
     // Refused before writing: nothing changed.
     let (mut app, _game, _) = marking_app(&[("Pawn", &["Pawn"])]);
-    app.curseforge_writer = |_, _, _| Err(MarkError::Changed);
+    app.curseforge_writer = |_, _, _, _| Err(MarkError::Changed);
     link_two(&mut app);
     answer(&mut app, KeyCode::Char('y'));
     assert_eq!(
@@ -627,4 +627,49 @@ fn a_second_ask_names_what_both_change() {
             names: vec!["Pawn".to_string(), "Clique".to_string()]
         })
     );
+}
+
+#[test]
+fn a_yes_marks_only_what_the_question_named() {
+    let (mut app, _game, record) = marking_app(&[("Pawn", &["Pawn"])]);
+    link_two(&mut app);
+    assert_eq!(
+        app.active_question(),
+        Some(Question::MarkIgnored {
+            names: vec!["Pawn".to_string()]
+        })
+    );
+    // While the question waits, CurseForge installs a pack that lists Pawn too.
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record).expect("record")).expect("json");
+    value[0]["installedAddons"]
+        .as_array_mut()
+        .expect("addons")
+        .push(serde_json::json!({
+            "name": "Pawn Pack",
+            "preferenceIsIgnored": false,
+            "installedFile": { "modules": [{ "foldername": "Pawn" }] },
+        }));
+    fs::write(&record, serde_json::to_vec(&value).expect("json")).expect("record");
+
+    answer(&mut app, KeyCode::Char('y'));
+    assert_eq!(app.active_question(), None);
+    assert_eq!(
+        flags(&record),
+        [serde_json::json!(false), serde_json::json!(false)]
+    );
+    let (text, kind) = app.status_line_message().expect("result line");
+    assert_eq!(kind, StatusKind::Problem);
+    assert_eq!(
+        text,
+        "CurseForge's list changed. Nothing was marked. Press m in Details."
+    );
+    assert!(app.curseforge.manages("Pawn"));
+    for (width, height) in [(80, 24), (160, 40)] {
+        let rows = render_rows(&mut app, width, height).join("\n");
+        assert!(
+            rows.contains("CurseForge's list changed. Nothing was marked. Press m in Details."),
+            "{rows}"
+        );
+    }
 }

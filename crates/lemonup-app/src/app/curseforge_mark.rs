@@ -18,6 +18,9 @@ pub(super) const RUNNING_NOTHING_CHANGED: &str =
     "CurseForge is running. Nothing changed. Quit it, then press m in Details.";
 /// The change was refused or failed; CurseForge's record is as it was.
 pub(super) const MARK_FAILED: &str = "Couldn't change CurseForge's list. Nothing changed.";
+/// A yes to a question whose addons are no longer what a mark would change.
+pub(super) const ASK_AGAIN: &str =
+    "CurseForge's list changed. Nothing was marked. Press m in Details.";
 
 /// Shown when LemonUp replaced CurseForge's list but couldn't read the
 /// change back.
@@ -25,7 +28,8 @@ pub(super) const MARK_UNCONFIRMED: &str =
     "LemonUp changed CurseForge's list but couldn't confirm it. Check these addons in CurseForge.";
 
 /// How LemonUp changes CurseForge's list: [`lemonup_core::curseforge::mark_ignored`].
-pub(super) type CurseForgeWriter = fn(&Path, &Path, &[String]) -> Result<Vec<String>, MarkError>;
+pub(super) type CurseForgeWriter =
+    fn(&Path, &Path, &[String], &[String]) -> Result<Vec<String>, MarkError>;
 
 /// The question to mark addons Ignored in CurseForge: the names of the
 /// CurseForge addons a yes changes, as CurseForge calls them (a pack that
@@ -212,6 +216,9 @@ impl App {
                             tracing::warn!(%error, "LemonUp couldn't confirm CurseForge's list");
                             (StatusKind::Problem, MARK_UNCONFIRMED.to_string())
                         }
+                        Err(Some(MarkError::NotAsAsked)) => {
+                            (StatusKind::Problem, ASK_AGAIN.to_string())
+                        }
                         Err(error) => {
                             if let Some(error) = error {
                                 tracing::warn!(%error, "LemonUp left CurseForge's list as it was");
@@ -240,13 +247,14 @@ impl App {
             .then(|| (*kind, text.clone()))
     }
 
-    /// The names the write marked. `Err(None)` when it couldn't start.
+    /// The names the write marked, only when they are the ones the question
+    /// named. `Err(None)` when it couldn't start.
     fn write_curseforge_mark(
         &self,
         mark: &CurseForgeMark,
     ) -> Result<Vec<String>, Option<MarkError>> {
         let addon_dir = self.effective_addon_dir.as_deref().ok_or(None)?;
         let record = lemonup_core::curseforge::record_in_use(&self.curseforge_files).ok_or(None)?;
-        (self.curseforge_writer)(&record, addon_dir, &mark.folders).map_err(Some)
+        (self.curseforge_writer)(&record, addon_dir, &mark.folders, &mark.names).map_err(Some)
     }
 }

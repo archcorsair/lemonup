@@ -266,6 +266,10 @@ pub fn record_in_use(record_files: &[PathBuf]) -> Option<PathBuf> {
 /// before it changes the record: `AddonGameInstance.json.lemonup-backup`.
 pub const BACKUP_SUFFIX: &str = ".lemonup-backup";
 
+/// What is added to the record's file name for the file LemonUp locks while
+/// it changes the record, so two LemonUp windows never change it at once.
+pub const LOCK_SUFFIX: &str = ".lemonup-lock";
+
 /// Why LemonUp didn't change CurseForge's record, or couldn't confirm it.
 #[derive(Debug, thiserror::Error)]
 pub enum MarkError {
@@ -281,6 +285,8 @@ pub enum MarkError {
     GameElsewhere,
     #[error("CurseForge already ignores these addons, or doesn't manage them")]
     NothingToChange,
+    #[error("CurseForge's record changed since LemonUp asked about these addons")]
+    NotAsAsked,
     #[error("CurseForge's record changed while LemonUp was reading it")]
     Changed,
     #[error("couldn't write CurseForge's record: {0}")]
@@ -312,7 +318,12 @@ pub fn names_to_mark(
 
 /// Sets `preferenceIsIgnored` to true on every addon of the game instance
 /// for `addons_dir` that lists one of `folders` (in any case) and isn't
-/// Ignored yet. Returns the names of the addons it marked.
+/// Ignored yet. Returns the names of the addons it marked. `asked` is what
+/// [`names_to_mark`] named when the user was asked; when the record would
+/// now mark other addons, nothing changes ([`MarkError::NotAsAsked`]).
+///
+/// The whole read and write holds a lock on the record's [`LOCK_SUFFIX`]
+/// file, so another LemonUp window waits for it.
 ///
 /// Only the `false` after each of those keys becomes `true`; every other
 /// byte of the record stays as it was. Before writing, the record is copied
@@ -324,8 +335,9 @@ pub fn mark_ignored(
     record_file: &Path,
     addons_dir: &Path,
     folders: &[String],
+    asked: &[String],
 ) -> Result<Vec<String>, MarkError> {
-    mark_ignored_with(record_file, addons_dir, folders, || {})
+    mark_ignored_with(record_file, addons_dir, folders, asked, || {})
 }
 
 /// [`mark_ignored`], running `before_write` just before the record is read
@@ -334,10 +346,15 @@ fn mark_ignored_with(
     record_file: &Path,
     addons_dir: &Path,
     folders: &[String],
+    asked: &[String],
     before_write: impl FnOnce(),
 ) -> Result<Vec<String>, MarkError> {
+    let _lock = lock_record(record_file).map_err(MarkError::Write)?;
     let original = read_plain_file(record_file)?;
     let plan = plan_mark(&original, addons_dir, folders)?;
+    if plan.names != asked {
+        return Err(MarkError::NotAsAsked);
+    }
     let permissions = fs::metadata(record_file)
         .map_err(MarkError::Read)?
         .permissions();
@@ -358,6 +375,20 @@ fn mark_ignored_with(
         Ok(read_back) if confirmed(&read_back, &plan.flipped) => Ok(plan.names),
         _ => Err(MarkError::NotConfirmed),
     }
+}
+
+/// LemonUp's lock on `record_file`, held until the file is dropped. It waits
+/// while another LemonUp holds it. The lock file stays, empty, so a window
+/// that opened it before it was removed can't lock a file the next one
+/// doesn't see.
+fn lock_record(record_file: &Path) -> io::Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(sibling(record_file, LOCK_SUFFIX))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// The record's bytes; a link to another file is refused, so LemonUp never
@@ -571,7 +602,8 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// followed.
 fn replace_file(path: &Path, bytes: &[u8], permissions: fs::Permissions) -> io::Result<()> {
     let temp = sibling(path, ".lemonup-new");
-    // A file left by an earlier try, never one to write through.
+    // A file left by an earlier try, never one to write through. Only the
+    // LemonUp holding the record's lock writes it.
     match fs::remove_file(&temp) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -1129,6 +1161,13 @@ mod tests {
         names.iter().map(|name| name.to_string()).collect()
     }
 
+    /// Marks the addons for `asked`, as a yes to a question naming what
+    /// [`names_to_mark`] names now.
+    fn mark(game: &Game, asked: &[String]) -> Result<Vec<String>, MarkError> {
+        let names = names_to_mark(&game.record, &game.addons, asked).unwrap_or_default();
+        mark_ignored(&game.record, &game.addons, asked, &names)
+    }
+
     fn backup(game: &Game) -> PathBuf {
         game.record
             .with_file_name(format!("AddonGameInstance.json{BACKUP_SUFFIX}"))
@@ -1141,8 +1180,7 @@ mod tests {
         assert!(managed(&game).manages("DBM-Core"));
 
         // The folder in another case still matches; Clique is not asked for.
-        let marked = mark_ignored(&game.record, &game.addons, &folders(&["Pawn", "dbm-core"]))
-            .expect("marked");
+        let marked = mark(&game, &folders(&["Pawn", "dbm-core"])).expect("marked");
         assert_eq!(marked, ["Pawn", "Deadly Boss Mods"]);
 
         let edited = fs::read(&game.record).expect("record");
@@ -1172,7 +1210,7 @@ mod tests {
         let game = game();
         let original = two_instances(&game);
         for asked in [&["Spy"][..], &["NotThere"], &[]] {
-            let result = mark_ignored(&game.record, &game.addons, &folders(asked));
+            let result = mark(&game, &folders(asked));
             assert!(
                 matches!(result, Err(MarkError::NothingToChange)),
                 "{asked:?}: {result:?}"
@@ -1192,7 +1230,7 @@ mod tests {
         let original = serde_json::to_vec(&record).expect("json");
         fs::write(&game.record, &original).expect("record");
 
-        let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+        let result = mark(&game, &folders(&["Pawn"]));
         assert!(matches!(result, Err(MarkError::Shape)), "{result:?}");
         assert_eq!(fs::read(&game.record).expect("record"), original);
         assert!(!backup(&game).exists());
@@ -1206,7 +1244,7 @@ mod tests {
         );
         assert!(escaped.contains("Ignor\\u0065d"));
         fs::write(&game.record, &escaped).expect("record");
-        let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+        let result = mark(&game, &folders(&["Pawn"]));
         assert!(matches!(result, Err(MarkError::Shape)), "{result:?}");
         assert_eq!(fs::read_to_string(&game.record).expect("record"), escaped);
     }
@@ -1215,11 +1253,11 @@ mod tests {
     fn the_backup_is_replaced_on_the_next_mark() {
         let game = game();
         let original = two_instances(&game);
-        mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])).expect("first");
+        mark(&game, &folders(&["Pawn"])).expect("first");
         assert_eq!(fs::read(backup(&game)).expect("backup"), original);
         let after_first = fs::read(&game.record).expect("record");
 
-        mark_ignored(&game.record, &game.addons, &folders(&["Clique"])).expect("second");
+        mark(&game, &folders(&["Clique"])).expect("second");
         assert_eq!(fs::read(backup(&game)).expect("backup"), after_first);
         let after_second = fs::read(&game.record).expect("record");
         assert_eq!(flips(&original, &after_second), 2);
@@ -1235,13 +1273,13 @@ mod tests {
     fn an_unknown_shape_or_no_matching_game_is_refused() {
         let game = game();
         assert!(matches!(
-            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])),
+            mark(&game, &folders(&["Pawn"])),
             Err(MarkError::Read(_))
         ));
         fs::write(game.flavor.join(CLIENT_FILE), GUID).expect("client");
         for shape in [&b"{\"a\": 1}"[..], b"not json", b""] {
             fs::write(&game.record, shape).expect("record");
-            let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+            let result = mark(&game, &folders(&["Pawn"]));
             assert!(matches!(result, Err(MarkError::Shape)), "{result:?}");
             assert_eq!(fs::read(&game.record).expect("record"), shape);
         }
@@ -1253,7 +1291,7 @@ mod tests {
         )]);
         write(&game.record, &elsewhere);
         let before = fs::read(&game.record).expect("record");
-        let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+        let result = mark(&game, &folders(&["Pawn"]));
         assert!(matches!(result, Err(MarkError::NoGame)), "{result:?}");
         assert_eq!(fs::read(&game.record).expect("record"), before);
         assert!(!backup(&game).exists());
@@ -1272,10 +1310,7 @@ mod tests {
              {{ \"modules\": [ {{ \"foldername\": \"Spy\" }} ] }} }}\n    ]\n  }}\n]\n"
         );
         fs::write(&game.record, &text).expect("record");
-        assert_eq!(
-            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])).expect("marked"),
-            ["Pawn"]
-        );
+        assert_eq!(mark(&game, &folders(&["Pawn"])).expect("marked"), ["Pawn"]);
         let edited = fs::read_to_string(&game.record).expect("record");
         assert_eq!(edited, text.replacen("false", "true", 1));
         assert!(managed(&game).manages("Spy"));
@@ -1358,7 +1393,7 @@ mod tests {
         assert!(managed(&game).manages("Pawn"));
         for result in [
             names_to_mark(&game.record, &game.addons, &folders(&["Pawn"])),
-            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])),
+            mark(&game, &folders(&["Pawn"])),
         ] {
             assert!(
                 matches!(result, Err(MarkError::GameElsewhere)),
@@ -1403,7 +1438,7 @@ mod tests {
         assert_eq!(fs::read(&game.record).expect("record"), before);
         assert!(!backup(&game).exists());
         assert_eq!(
-            mark_ignored(&game.record, &game.addons, &folders(&["pawn"])).expect("marked"),
+            mark(&game, &folders(&["pawn"])).expect("marked"),
             ["Pawn", "X Pack"]
         );
     }
@@ -1442,7 +1477,7 @@ mod tests {
         let before = fs::read(&real).expect("real");
         for result in [
             names_to_mark(&game.record, &game.addons, &folders(&["Pawn"])),
-            mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])),
+            mark(&game, &folders(&["Pawn"])),
         ] {
             assert!(matches!(result, Err(MarkError::Symlink)), "{result:?}");
         }
@@ -1461,13 +1496,86 @@ mod tests {
         let game = game();
         let original = two_instances(&game);
         let theirs = b"[]".to_vec();
-        let result = mark_ignored_with(&game.record, &game.addons, &folders(&["Pawn"]), || {
+        let asked = folders(&["Pawn"]);
+        let names = names_to_mark(&game.record, &game.addons, &asked).expect("names");
+        let result = mark_ignored_with(&game.record, &game.addons, &asked, &names, || {
             fs::write(&game.record, &theirs).expect("their write");
         });
         assert!(matches!(result, Err(MarkError::Changed)), "{result:?}");
         assert!(!result.expect_err("changed").changed_record());
         assert_eq!(fs::read(&game.record).expect("record"), theirs);
         assert_eq!(fs::read(backup(&game)).expect("backup"), original);
+    }
+
+    #[test]
+    fn a_mark_that_would_change_other_addons_than_asked_changes_nothing() {
+        let game = game();
+        let original = two_instances(&game);
+        let pawn = folders(&["Pawn"]);
+        // Asked about Pawn alone, but the record now has a pack listing it too.
+        let mut record: serde_json::Value = serde_json::from_slice(&original).expect("json");
+        record[1]["installedAddons"]
+            .as_array_mut()
+            .expect("addons")
+            .push(named("Pawn Pack", &["Pawn"], false));
+        let grown = serde_json::to_vec(&record).expect("json");
+        fs::write(&game.record, &grown).expect("record");
+        for asked in [&["Pawn"][..], &[], &["Pawn Pack", "Pawn"]] {
+            let result = mark_ignored(&game.record, &game.addons, &pawn, &folders(asked));
+            assert!(
+                matches!(result, Err(MarkError::NotAsAsked)),
+                "{asked:?}: {result:?}"
+            );
+            assert!(!result.expect_err("refused").changed_record());
+        }
+        assert_eq!(fs::read(&game.record).expect("record"), grown);
+        assert!(!backup(&game).exists());
+
+        let marked = mark_ignored(
+            &game.record,
+            &game.addons,
+            &pawn,
+            &folders(&["Pawn", "Pawn Pack"]),
+        )
+        .expect("marked");
+        assert_eq!(marked, ["Pawn", "Pawn Pack"]);
+    }
+
+    #[test]
+    fn a_second_lemonup_waits_for_the_first_to_finish() {
+        let game = game();
+        let original = two_instances(&game);
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sibling(&game.record, LOCK_SUFFIX))
+            .expect("lock file");
+        held.lock().expect("lock");
+
+        let (record, addons) = (game.record.clone(), game.addons.clone());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let asked = vec!["Pawn".to_string()];
+            let result = mark_ignored(&record, &addons, &asked, &asked);
+            done_tx.send(()).expect("done");
+            result
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "marked while the lock was held"
+        );
+        assert_eq!(fs::read(&game.record).expect("record"), original);
+        assert!(!backup(&game).exists());
+
+        drop(held);
+        assert_eq!(second.join().expect("thread").expect("marked"), ["Pawn"]);
+        assert_eq!(
+            flips(&original, &fs::read(&game.record).expect("record")),
+            1
+        );
     }
 
     #[test]
@@ -1514,7 +1622,7 @@ mod tests {
         );
         fs::write(&game.record, &text).expect("record");
         assert_eq!(
-            mark_ignored(&game.record, &game.addons, &folders(&["PÂTÉ"])).expect("marked"),
+            mark(&game, &folders(&["PÂTÉ"])).expect("marked"),
             ["Señor Pâté «Ünï»"]
         );
         let edited = fs::read(&game.record).expect("record");
@@ -1529,7 +1637,7 @@ mod tests {
         let game = game();
         two_instances(&game);
         fs::set_permissions(&game.record, fs::Permissions::from_mode(0o600)).expect("mode");
-        mark_ignored(&game.record, &game.addons, &folders(&["Pawn"])).expect("marked");
+        mark(&game, &folders(&["Pawn"])).expect("marked");
         let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode(&game.record), 0o600);
         assert_eq!(mode(&backup(&game)), 0o600);
@@ -1552,7 +1660,7 @@ mod tests {
         );
         fs::write(&game.record, &text).expect("record");
         assert_eq!(flag_values(text.as_bytes()).len(), 2);
-        let result = mark_ignored(&game.record, &game.addons, &folders(&["Pawn"]));
+        let result = mark(&game, &folders(&["Pawn"]));
         assert!(matches!(result, Err(MarkError::Shape)), "{result:?}");
         assert_eq!(fs::read_to_string(&game.record).expect("record"), text);
         assert!(!backup(&game).exists());
