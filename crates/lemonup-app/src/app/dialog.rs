@@ -25,6 +25,18 @@ pub(super) struct DeleteTarget {
     pub(super) folders: usize,
 }
 
+/// An addon whose update waits for a yes, with every "Not linked" folder it
+/// replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldEntry {
+    /// The linked addon's folder.
+    pub(crate) folder: String,
+    pub(crate) name: String,
+    pub(crate) folders: Vec<String>,
+    /// Those of `folders` with a `.git` entry inside.
+    pub(crate) dev_copies: Vec<String>,
+}
+
 /// The question that is open, if any. Built fresh from the app's state on
 /// every draw and key press, so it never says anything that stopped being true.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +104,12 @@ pub(super) enum Question {
     MarkIgnored {
         names: Vec<String>,
     },
+    /// After an update run: these addons' new versions replace folders
+    /// LemonUp didn't install. The list scrolls from `offset`.
+    ReplaceNotLinked {
+        addons: Vec<HeldEntry>,
+        offset: u16,
+    },
 }
 
 impl Question {
@@ -120,6 +138,10 @@ impl Question {
             Self::MarkIgnored { names } => match names.as_slice() {
                 [one] => format!("Mark {one} Ignored in CurseForge?"),
                 _ => format!("Mark these {} addons Ignored in CurseForge?", names.len()),
+            },
+            Self::ReplaceNotLinked { addons, .. } => match addons.as_slice() {
+                [one] => format!("Replace Not linked folders for {}?", one.name),
+                _ => format!("Replace Not linked folders for {} addons?", addons.len()),
             },
         }
     }
@@ -152,6 +174,7 @@ impl Question {
             Self::LinkFound { links: 0, .. } => ("replace", "skip"),
             Self::LinkFound { .. } => ("link and replace", "skip"),
             Self::MarkIgnored { .. } => ("mark", "skip"),
+            Self::ReplaceNotLinked { .. } => ("replace", "skip"),
         }
     }
 
@@ -201,6 +224,9 @@ impl Question {
                 AppMessage::CurseForge(CurseForgeMessage::Confirm),
                 AppMessage::CurseForge(CurseForgeMessage::Skip),
             ),
+            Self::ReplaceNotLinked { .. } => {
+                (AppMessage::HeldUpdatesConfirm, AppMessage::HeldUpdatesSkip)
+            }
         }
     }
 
@@ -490,6 +516,33 @@ impl Question {
                 )));
                 lines
             }
+            Self::ReplaceNotLinked { addons, .. } => {
+                let mut lines = vec![Line::from(Span::styled(
+                    if addons.len() == 1 {
+                        "The update replaces folders LemonUp didn't install:"
+                    } else {
+                        "These updates replace folders LemonUp didn't install:"
+                    },
+                    text,
+                ))];
+                for addon in addons {
+                    let mut spans = vec![Span::styled(format!("{}: ", addon.name), strong)];
+                    for (index, folder) in addon.folders.iter().enumerate() {
+                        if index > 0 {
+                            spans.push(Span::styled(", ", text));
+                        }
+                        spans.push(Span::styled(folder.clone(), text));
+                        if addon.dev_copies.contains(folder) {
+                            spans.push(Span::styled(
+                                " (has .git, likely a dev copy)",
+                                Style::default().fg(roles.amber),
+                            ));
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines
+            }
         }
     }
 
@@ -538,7 +591,7 @@ impl Question {
     /// Every row inside the border at `width` columns, at most `max_rows`
     /// of them: a long list of addons gives way to "and N more" first.
     pub(super) fn lines(&self, roles: ColorRoles, width: u16, max_rows: u16) -> Vec<Line<'static>> {
-        if let Self::LinkFound { offset, .. } = self {
+        if let Self::LinkFound { offset, .. } | Self::ReplaceNotLinked { offset, .. } = self {
             return self.scrolled_lines(roles, width, max_rows, *offset).0;
         }
         let note = self.curseforge_note(roles);
@@ -683,6 +736,12 @@ impl App {
                 .collect();
             return Some(Question::DeleteAddons(targets));
         }
+        if let Some(held) = &self.held_question {
+            return Some(Question::ReplaceNotLinked {
+                addons: held.entries.clone(),
+                offset: held.offset,
+            });
+        }
         if let Some(confirmation) = self.pending_wago_install_confirmation.as_ref() {
             return Some(Question::ReplaceAddon {
                 name: confirmation.inspection.addon_name.clone(),
@@ -745,7 +804,9 @@ impl App {
         if key.code == KeyCode::Char('y')
             && matches!(
                 question,
-                Question::ReplaceAddon { .. } | Question::MarkIgnored { .. }
+                Question::ReplaceAddon { .. }
+                    | Question::MarkIgnored { .. }
+                    | Question::ReplaceNotLinked { .. }
             )
             && !self.question_seen_before_key(&question)
         {
@@ -753,6 +814,19 @@ impl App {
         }
         let (yes, no) = question.messages();
         // The Find question's folder list scrolls, when it doesn't fit.
+        if matches!(question, Question::ReplaceNotLinked { .. })
+            && let Some(delta) = question_scroll_delta(key.code)
+        {
+            let scrolls = self
+                .held_question
+                .as_ref()
+                .is_some_and(|held| held.max.get() > 0);
+            return Some(if scrolls {
+                vec![AppMessage::HeldUpdatesScroll(delta)]
+            } else {
+                vec![]
+            });
+        }
         if matches!(question, Question::LinkFound { .. })
             && let Some(delta) = question_scroll_delta(key.code)
         {
@@ -772,9 +846,15 @@ impl App {
     /// The key line while a question is open.
     pub(super) fn question_key_table(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
-        if matches!(self.active_question(), Some(Question::LinkFound { .. }))
-            && self.find.question_max.get() > 0
-        {
+        let scrolls = match self.active_question() {
+            Some(Question::LinkFound { .. }) => self.find.question_max.get() > 0,
+            Some(Question::ReplaceNotLinked { .. }) => self
+                .held_question
+                .as_ref()
+                .is_some_and(|held| held.max.get() > 0),
+            _ => false,
+        };
+        if scrolls {
             hints.push(KeyHint::key(
                 FooterHintId::Scroll,
                 "↑/↓",
@@ -820,6 +900,13 @@ impl App {
             Question::LinkFound { offset, .. } => {
                 let (lines, max) = question.scrolled_lines(roles, text_width, max_rows, *offset);
                 self.find.question_max.set(max);
+                lines
+            }
+            Question::ReplaceNotLinked { offset, .. } => {
+                let (lines, max) = question.scrolled_lines(roles, text_width, max_rows, *offset);
+                if let Some(held) = &self.held_question {
+                    held.max.set(max);
+                }
                 lines
             }
             _ => question.lines(roles, text_width, max_rows),

@@ -49,8 +49,8 @@ use crate::transfer::{
 };
 use crate::tui::Backend;
 use crate::update::{
-    CheckResult, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates,
-    build_update_checks, refresh_live_update_checks,
+    CheckResult, HeldUpdate, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary,
+    apply_held_updates, apply_live_updates, build_update_checks, refresh_live_update_checks,
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
@@ -407,6 +407,12 @@ enum AppMessage {
     QuitConfirmed,
     /// No to "quit while updating?".
     QuitCancelled,
+    /// Yes to replacing the "Not linked" folders of held updates.
+    HeldUpdatesConfirm,
+    /// No to it: the held updates are skipped.
+    HeldUpdatesSkip,
+    /// Scrolls that question's list.
+    HeldUpdatesScroll(i16),
     /// Bracketed-paste text, routed to whichever text field is being edited.
     Paste(String),
     /// A cursor move, delete or clear in the focused text box.
@@ -612,6 +618,79 @@ struct DashboardUpdateOutcome {
     updated_addon_name: Option<String>,
     warnings: Vec<String>,
     sync: AddonScanOutcome,
+    /// Updates held because they would replace "Not linked" folders, with their packages kept.
+    held: HeldUpdates,
+}
+
+/// Updates held for a yes, on their way from the update task to the question. Clones share one
+/// list: the first `take` gets the updates, and dropping the last clone removes their kept
+/// packages.
+#[derive(Clone, Default)]
+pub(crate) struct HeldUpdates(std::sync::Arc<std::sync::Mutex<Vec<HeldUpdate>>>);
+
+impl HeldUpdates {
+    fn new(updates: Vec<HeldUpdate>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(updates)))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<HeldUpdate>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    fn take(&self) -> Vec<HeldUpdate> {
+        std::mem::take(&mut *self.lock())
+    }
+
+    /// Skips every held update and removes its kept package.
+    fn discard(&self) {
+        for update in self.take() {
+            update.discard();
+        }
+    }
+
+    /// Each held addon as the question names it.
+    fn entries(&self) -> Vec<dialog::HeldEntry> {
+        self.lock()
+            .iter()
+            .map(|update| dialog::HeldEntry {
+                folder: update.folder.clone(),
+                name: update.name.clone(),
+                folders: update.folders.clone(),
+                dev_copies: update.dev_copies.clone(),
+            })
+            .collect()
+    }
+}
+
+impl PartialEq for HeldUpdates {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for HeldUpdates {}
+
+impl std::fmt::Debug for HeldUpdates {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "HeldUpdates({})", self.lock().len())
+    }
+}
+
+/// The question after an update run held addons whose update would replace "Not linked"
+/// folders. The kept packages go when it is answered, or when LemonUp quits.
+struct HeldQuestion {
+    updates: HeldUpdates,
+    entries: Vec<dialog::HeldEntry>,
+    addon_dir: PathBuf,
+    offset: u16,
+    /// How far the list scrolls at the last draw.
+    max: std::cell::Cell<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1374,6 +1453,8 @@ struct DashboardState {
     /// reached so far, so each row can show Waiting, Updating or Updated.
     job_targets: Vec<String>,
     job_reached: Vec<String>,
+    /// Folders the running update held for a yes: their rows keep saying Update ready.
+    job_held: Vec<String>,
     /// What the last update run reported per folder, kept until the next
     /// job starts, so a row only says Updated or Update failed when the run
     /// said so.
@@ -1448,6 +1529,7 @@ impl DashboardState {
             job_ui: None,
             job_targets: Vec::new(),
             job_reached: Vec::new(),
+            job_held: Vec::new(),
             updated_folders: Vec::new(),
             failed_folders: Vec::new(),
             results_at: None,
@@ -1882,6 +1964,7 @@ impl DashboardState {
             None => {
                 self.job_targets.clear();
                 self.job_reached.clear();
+                self.job_held.clear();
                 self.job_results.clear();
                 self.job_note = None;
                 self.job_is_update = false;
@@ -1895,6 +1978,7 @@ impl DashboardState {
         self.job_is_update = true;
         self.job_targets = folders.to_vec();
         self.job_reached.clear();
+        self.job_held.clear();
         self.updated_folders.clear();
         self.failed_folders.clear();
     }
@@ -1951,15 +2035,24 @@ impl DashboardState {
                     self.check_failures.insert(folder, failure);
                 }
             },
+            DashboardJobStep::Updated {
+                folder,
+                status: LiveUpdateStatus::Held,
+            } => {
+                // Held for a yes: nothing changed, so it has no result.
+                if !self.job_held.contains(&folder) {
+                    self.job_held.push(folder);
+                }
+            }
             DashboardJobStep::Updated { folder, status } => {
                 let state = match status {
                     LiveUpdateStatus::Updated => UpdateJobRowState::Updated,
                     LiveUpdateStatus::UpToDate => UpdateJobRowState::UpToDate,
                     LiveUpdateStatus::RemoteOlder => UpdateJobRowState::NewerThanSource,
                     LiveUpdateStatus::Error => UpdateJobRowState::Failed,
-                    LiveUpdateStatus::SkippedManual | LiveUpdateStatus::SkippedNoApiKey => {
-                        UpdateJobRowState::Done
-                    }
+                    LiveUpdateStatus::SkippedManual
+                    | LiveUpdateStatus::SkippedNoApiKey
+                    | LiveUpdateStatus::Held => UpdateJobRowState::Done,
                 };
                 if matches!(
                     state,
@@ -1988,6 +2081,10 @@ impl DashboardState {
     /// Where a row stands in the running job, if it is part of it.
     fn update_job_row_state(&self, folder: &str) -> Option<UpdateJobRowState> {
         let job = self.job_ui.as_ref()?;
+        if self.job_held.iter().any(|held| held == folder) {
+            // Held for a yes: the row says what is true, Update ready.
+            return None;
+        }
         if job.kind != DashboardJobKind::Update {
             if self.job_is_update {
                 // An update's preflight check: its targets are still
@@ -2816,6 +2913,14 @@ enum ScanState {
 pub struct App {
     shell_mode: ShellMode,
     quit_requested: bool,
+    /// The question about updates held for "Not linked" folders, while it is open.
+    held_question: Option<HeldQuestion>,
+    /// The "Not linked" folders each addon's (by folder) downloaded update would replace, as
+    /// this session's update runs found them.
+    update_not_linked: HashMap<String, Vec<String>>,
+    /// Those of `update_not_linked`'s folders found in the AddOns folder, lowercased, as of
+    /// the last look.
+    update_not_linked_on_disk: HashSet<String>,
     status_line: StatusMessage,
     ui_theme: UiTheme,
     /// The terminal does not report 24-bit color, so the Terminal theme is
@@ -3033,6 +3138,9 @@ impl App {
         let mut app = Self {
             shell_mode,
             quit_requested: false,
+            held_question: None,
+            update_not_linked: HashMap::new(),
+            update_not_linked_on_disk: HashSet::new(),
             status_line: StatusMessage::cleared(),
             ui_theme: UiTheme::for_config(
                 &loaded_config,
@@ -3298,6 +3406,65 @@ impl App {
                 ]
             }
         }
+    }
+
+    /// Notes which of the folders in `update_not_linked` are in the AddOns folder now. A
+    /// folder that can't be read keeps what was noted.
+    fn refresh_update_not_linked_on_disk(&mut self) {
+        if self.update_not_linked.is_empty() {
+            self.update_not_linked_on_disk.clear();
+            return;
+        }
+        let Some(Ok(entries)) = self.effective_addon_dir.as_deref().map(fs::read_dir) else {
+            return;
+        };
+        let on_disk: HashSet<String> = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
+            .collect();
+        self.update_not_linked_on_disk = self
+            .update_not_linked
+            .values()
+            .flatten()
+            .map(|name| name.to_lowercase())
+            .filter(|name| on_disk.contains(name))
+            .collect();
+    }
+
+    /// The "Not linked" folders this session's download of `folder`'s update would replace,
+    /// while they still are Not linked: on disk, with or without a "Not linked" row, and
+    /// claimed by no linked addon.
+    pub(super) fn update_not_linked_folders(&self, folder: &str) -> Vec<String> {
+        let Some(folders) = self.update_not_linked.get(folder) else {
+            return Vec::new();
+        };
+        let claims = |item: &DashboardItem, name: &str| {
+            item.folder.eq_ignore_ascii_case(name)
+                || item
+                    .owned_folders
+                    .iter()
+                    .any(|owned| owned.eq_ignore_ascii_case(name))
+        };
+        folders
+            .iter()
+            .filter(|name| {
+                let items = &self.dashboard.items;
+                (self
+                    .update_not_linked_on_disk
+                    .contains(&name.to_lowercase())
+                    || items
+                        .iter()
+                        .any(|item| item.source == SourceKind::Manual && claims(item, name)))
+                    // The updating addon itself may claim a dev copy the scan grouped under it.
+                    && !items.iter().any(|item| {
+                        item.source != SourceKind::Manual
+                            && !item.folder.eq_ignore_ascii_case(folder)
+                            && claims(item, name)
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     /// Starts an update of `targets` through the usual update flow, or says
@@ -4267,6 +4434,45 @@ impl App {
             }
             AppMessage::QuitRequested | AppMessage::QuitConfirmed => vec![AppAction::Quit],
             AppMessage::QuitCancelled => vec![AppAction::SetQuitQuestion(false)],
+            AppMessage::HeldUpdatesConfirm => match &self.held_question {
+                // The question stays open until the running job ends.
+                Some(_) if self.dashboard_job_running().is_some() => {
+                    self.dashboard_job_running_note().into_iter().collect()
+                }
+                Some(question) => {
+                    let count = question.entries.len();
+                    vec![
+                        AppAction::SetDashboardUpdateInProgress(true),
+                        AppAction::StartApplyHeldUpdates,
+                        AppAction::SetStatus(self.dashboard_status_for(
+                            StatusKind::Working,
+                            self.dashboard.detail_mode,
+                            &format!("Updating {count} addon{}", plural_suffix(count)),
+                        )),
+                    ]
+                }
+                None => Vec::new(),
+            },
+            AppMessage::HeldUpdatesSkip => match &self.held_question {
+                Some(question) => vec![
+                    AppAction::SkipHeldUpdates,
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Done,
+                        self.dashboard.detail_mode,
+                        &held_skipped_message(&question.entries),
+                    )),
+                ],
+                None => Vec::new(),
+            },
+            AppMessage::HeldUpdatesScroll(delta) => match &self.held_question {
+                Some(question) => vec![AppAction::SetHeldQuestionOffset(
+                    question
+                        .offset
+                        .saturating_add_signed(delta)
+                        .min(question.max.get()),
+                )],
+                None => Vec::new(),
+            },
             AppMessage::Paste(text) => self.paste_actions(&text),
             AppMessage::TextBoxEdit(edit) => match self.focused_text_box() {
                 Some(target) => self.text_box_actions(target, |input| input.apply(edit)),
@@ -5669,7 +5875,7 @@ impl App {
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => {
                     let failed_names = self.dashboard_names(&outcome.failed_folders);
                     let status_message = dashboard_update_status_message(&outcome, &failed_names);
-                    vec![
+                    let mut actions = vec![
                         AppAction::ReplaceDashboardAddons(outcome.sync.addons),
                         AppAction::SetDashboardDriftReport(Some(outcome.sync.drift_report)),
                         AppAction::CompleteAddonScan {
@@ -5694,7 +5900,12 @@ impl App {
                             self.dashboard.detail_mode,
                             &status_message,
                         )),
-                    ]
+                    ];
+                    // The question about held updates comes once the run is over.
+                    if !outcome.held.is_empty() {
+                        actions.push(AppAction::OpenHeldQuestion(outcome.held.clone()));
+                    }
+                    actions
                 }
                 AppTaskEvent::DashboardUpdateFinished(Err(error)) => vec![
                     AppAction::SetDashboardUpdateInProgress(false),
@@ -6047,7 +6258,71 @@ impl App {
 
     fn apply(&mut self, action: AppAction) {
         match action {
-            AppAction::Quit => self.quit_requested = true,
+            AppAction::Quit => {
+                // Quitting with the question open skips the held updates.
+                if let Some(question) = self.held_question.take() {
+                    question.updates.discard();
+                }
+                self.quit_requested = true;
+            }
+            AppAction::OpenHeldQuestion(updates) => {
+                let entries = updates.entries();
+                for entry in &entries {
+                    self.update_not_linked
+                        .insert(entry.folder.clone(), entry.folders.clone());
+                }
+                self.refresh_update_not_linked_on_disk();
+                match self.effective_addon_dir.clone() {
+                    Some(addon_dir) if !entries.is_empty() => {
+                        // The same updates asked again keep their packages.
+                        if let Some(old) = self.held_question.take()
+                            && old.updates != updates
+                        {
+                            old.updates.discard();
+                        }
+                        self.held_question = Some(HeldQuestion {
+                            updates,
+                            entries,
+                            addon_dir,
+                            offset: 0,
+                            max: std::cell::Cell::new(0),
+                        });
+                    }
+                    _ => updates.discard(),
+                }
+            }
+            AppAction::StartApplyHeldUpdates => {
+                if let Some(question) = self.held_question.take() {
+                    let folders: Vec<String> = question
+                        .entries
+                        .iter()
+                        .map(|entry| entry.folder.clone())
+                        .collect();
+                    self.dashboard.begin_update_targets(&folders);
+                    let updates = question.updates.take();
+                    let sender = self.task_events_tx.clone();
+                    let state_db_file = self.state_db_file.clone();
+                    let addon_dir = question.addon_dir;
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            run_held_updates_task(&state_db_file, &addon_dir, updates)
+                        })
+                        .await
+                        .unwrap_or_else(|join_error| Err(join_error.to_string()));
+                        let _ = sender.send(AppTaskEvent::DashboardUpdateFinished(result));
+                    });
+                }
+            }
+            AppAction::SkipHeldUpdates => {
+                if let Some(question) = self.held_question.take() {
+                    question.updates.discard();
+                }
+            }
+            AppAction::SetHeldQuestionOffset(offset) => {
+                if let Some(question) = self.held_question.as_mut() {
+                    question.offset = offset;
+                }
+            }
             AppAction::SetQuitQuestion(open) => self.quit_question_open = open,
             AppAction::AdvanceMotionTick => {
                 self.shell_ui.motion = self.shell_ui.motion.advance();
@@ -6172,6 +6447,10 @@ impl App {
                 self.dashboard.set_last_update_summary(summary);
             }
             AppAction::SetDashboardUpdateResults { updated, failed } => {
+                // An updated addon owns its folders now.
+                for folder in &updated {
+                    self.update_not_linked.remove(folder);
+                }
                 self.dashboard.set_update_results(updated, failed);
             }
             AppAction::SetSelectedDashboardParents(folders) => {
@@ -6808,6 +7087,7 @@ impl App {
             }
             AppAction::ReplaceDashboardAddons(addons) => {
                 self.dashboard.replace_addons(addons);
+                self.refresh_update_not_linked_on_disk();
                 if !self.list_opened {
                     self.list_opened = true;
                     if self.config_pane.persisted.show_libs {
@@ -7486,6 +7766,7 @@ impl App {
             || self.pending_wago_install_confirmation.is_some()
             || self.find.linking
             || !self.find.replacements.is_empty()
+            || self.held_question.is_some()
             || self.effective_addon_dir.is_none()
             || !matches!(self.scan_state, ScanState::Succeeded { .. })
         {
@@ -8027,10 +8308,7 @@ async fn run_dashboard_update_task(
     }
     // One addon at a time, so each row shows its result as it comes in.
     let total = folders.len();
-    let mut run = LiveUpdateRun {
-        summary: LiveUpdateSummary::default(),
-        results: Vec::new(),
-    };
+    let mut run = LiveUpdateRun::default();
     for (index, folder) in folders.iter().enumerate() {
         on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
             kind: DashboardJobKind::Update,
@@ -8045,6 +8323,7 @@ async fn run_dashboard_update_task(
             wago_api_key.as_deref(),
             false,
             false,
+            false,
             |_, _, _| {},
         )
         .await
@@ -8057,7 +8336,9 @@ async fn run_dashboard_update_task(
         }
         run.summary.add(&one.summary);
         run.results.extend(one.results);
+        run.held.extend(one.held);
     }
+    let held = HeldUpdates::new(std::mem::take(&mut run.held));
     let updated_addon_name = if run.summary.updated_addons == 1 {
         run.results
             .iter()
@@ -8094,7 +8375,71 @@ async fn run_dashboard_update_task(
         updated_addon_name,
         warnings,
         sync,
+        held,
     })
+}
+
+/// Applies the held updates the person said yes to, from their kept packages.
+fn run_held_updates_task(
+    state_db_file: &Path,
+    addon_dir: &Path,
+    updates: Vec<HeldUpdate>,
+) -> std::result::Result<DashboardUpdateOutcome, String> {
+    let names: HashMap<String, String> = updates
+        .iter()
+        .map(|update| (update.folder.clone(), update.name.clone()))
+        .collect();
+    let run = match StateDatabase::open(state_db_file) {
+        Ok(mut database) => apply_held_updates(&mut database, addon_dir, updates),
+        Err(error) => {
+            for update in updates {
+                update.discard();
+            }
+            return Err(error.to_string());
+        }
+    };
+    let folders_with = |status: LiveUpdateStatus| {
+        run.results
+            .iter()
+            .filter(|result| result.status == status)
+            .map(|result| result.addon_name.clone())
+            .collect::<Vec<_>>()
+    };
+    let updated_folders = folders_with(LiveUpdateStatus::Updated);
+    let failed_folders = folders_with(LiveUpdateStatus::Error);
+    let updated_addon_name = match updated_folders.as_slice() {
+        [only] => names.get(only).cloned(),
+        _ => None,
+    };
+    let warnings = run
+        .results
+        .iter()
+        .filter(|result| {
+            result.status == LiveUpdateStatus::Updated && result.source == SourceKind::WowInterface
+        })
+        .filter_map(|result| result.message.clone())
+        .collect();
+    let sync = sync_dashboard_state(state_db_file, addon_dir)?;
+    Ok(DashboardUpdateOutcome {
+        summary: run.summary,
+        updated_folders,
+        failed_folders,
+        updated_addon_name,
+        warnings,
+        sync,
+        held: HeldUpdates::default(),
+    })
+}
+
+/// `Skipped BigWigs: it would replace Not linked folders`.
+fn held_skipped_message(entries: &[dialog::HeldEntry]) -> String {
+    match entries {
+        [one] => format!("Skipped {}: it would replace Not linked folders", one.name),
+        _ => format!(
+            "Skipped {}: they would replace Not linked folders",
+            addon_count_label(entries.len())
+        ),
+    }
 }
 
 fn transfer_import_status_message(
@@ -8499,6 +8844,9 @@ fn dashboard_update_status_message(
     }
     if summary.remote_older > 0 {
         parts.push(format!("{} newer than source", summary.remote_older));
+    }
+    if summary.held > 0 {
+        parts.push(format!("{} would replace Not linked folders", summary.held));
     }
     if summary.skipped_no_api_key > 0 {
         parts.push(format!(
@@ -8911,12 +9259,13 @@ mod tests {
         ConfigEditState, ConfigField, ConfigPaneState, DashboardChildConnector,
         DashboardDeleteOutcome, DashboardJobKind, DashboardJobUiState, DashboardRow,
         DashboardSortColumn, DashboardState, DashboardUpdateOutcome, DetailMode, FooterHintId,
-        FooterKeyPulse, HelpContext, InstallPaneState, OverlayKind, PendingWagoInstallRequest,
-        ScanState, SearchFocus, SearchInstallState, SearchPaneState, SearchPresentationMode,
-        ShellMode, ShellUiState, TextBox, UiTheme, WagoInstallConfirmation, WagoInstallOutcome,
-        WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome, child_row_detail_prefix,
-        child_row_prefix, dashboard_item_version_label, format_download_count, human_duration,
-        step_seconds, summarize_owned_folders, truncate_middle_text, visible_search_result_window,
+        FooterKeyPulse, HeldUpdates, HelpContext, InstallPaneState, OverlayKind,
+        PendingWagoInstallRequest, ScanState, SearchFocus, SearchInstallState, SearchPaneState,
+        SearchPresentationMode, ShellMode, ShellUiState, TextBox, UiTheme, WagoInstallConfirmation,
+        WagoInstallOutcome, WagoInstallSource, WagoInstallTaskOutcome, WagoSearchOutcome,
+        child_row_detail_prefix, child_row_prefix, dashboard_item_version_label,
+        format_download_count, human_duration, step_seconds, summarize_owned_folders,
+        truncate_middle_text, visible_search_result_window,
     };
     use super::{
         DashboardItem, DashboardUndoDeleteState, SheetMove, SheetScroll, StatusKind, StatusMessage,
@@ -9020,6 +9369,9 @@ mod tests {
         App {
             shell_mode,
             quit_requested: false,
+            held_question: None,
+            update_not_linked: HashMap::new(),
+            update_not_linked_on_disk: std::collections::HashSet::new(),
             status_line: StatusMessage::new(
                 StatusKind::Quiet,
                 format!("profile {} | q quit", DEFAULT_PROFILE),
@@ -13163,6 +13515,7 @@ mod tests {
         };
 
         let refresh = LiveUpdateSummary {
+            held: 0,
             target_addons: 1,
             updated_addons: 1,
             up_to_date: 0,
@@ -13174,6 +13527,7 @@ mod tests {
 
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
+                held: HeldUpdates::default(),
                 summary: refresh,
                 updated_folders: vec!["Second".to_string()],
                 failed_folders: Vec::new(),
@@ -13235,6 +13589,7 @@ mod tests {
         };
 
         let refresh = LiveUpdateSummary {
+            held: 0,
             target_addons: 1,
             updated_addons: 0,
             up_to_date: 0,
@@ -13246,6 +13601,7 @@ mod tests {
 
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::DashboardUpdateFinished(Ok(DashboardUpdateOutcome {
+                held: HeldUpdates::default(),
                 summary: refresh,
                 updated_folders: Vec::new(),
                 failed_folders: Vec::new(),
@@ -13268,7 +13624,9 @@ mod tests {
     #[test]
     fn dashboard_update_status_uses_single_addon_name_when_available() {
         let outcome = DashboardUpdateOutcome {
+            held: HeldUpdates::default(),
             summary: LiveUpdateSummary {
+                held: 0,
                 target_addons: 1,
                 updated_addons: 1,
                 up_to_date: 0,
@@ -13303,6 +13661,7 @@ mod tests {
     #[test]
     fn dashboard_update_status_names_the_addons_that_failed() {
         let summary = |updated, errors| LiveUpdateSummary {
+            held: 0,
             target_addons: updated + errors,
             updated_addons: updated,
             up_to_date: 0,
@@ -13312,6 +13671,7 @@ mod tests {
             errors,
         };
         let outcome = |updated, errors| DashboardUpdateOutcome {
+            held: HeldUpdates::default(),
             summary: summary(updated, errors),
             updated_folders: Vec::new(),
             failed_folders: Vec::new(),
@@ -22601,5 +22961,553 @@ mod tests {
 
         #[allow(dead_code)]
         fn _entry(_: GameEntry) {}
+    }
+
+    mod held_updates {
+        use super::*;
+        use crate::app::DashboardRowKind;
+        use crate::app::dialog::Question;
+        use crate::update::{FinishedUpdate, HeldPackage, HeldUpdate};
+
+        fn held(
+            addon_dir: &Path,
+            folder: &str,
+            source: SourceKind,
+            folders: &[&str],
+        ) -> HeldUpdate {
+            let package = HeldPackage::keep(b"zip", |_, _, _, _, _| {
+                Err("not applied in this test".to_string())
+            })
+            .expect("keep package");
+            let tracked = AddonRecord::new(folder, folder, source);
+            let finished = FinishedUpdate {
+                previous_version: None,
+                remote_version: None,
+                not_linked: folders.iter().map(|name| (*name).to_string()).collect(),
+                warning: None,
+            };
+            HeldUpdate::new(&tracked, addon_dir, &finished, package)
+        }
+
+        /// An app with an AddOns folder where `First` (Not linked) is a git checkout.
+        fn app_with_dev_copy() -> (App, tempfile::TempDir) {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let temp = tempdir().expect("tempdir");
+            for folder in ["First/.git", "Second", "Third"] {
+                fs::create_dir_all(temp.path().join(folder)).expect("folder");
+            }
+            app.effective_addon_dir = Some(temp.path().to_path_buf());
+            (app, temp)
+        }
+
+        fn finished_run(addon_dir: &Path, updates: Vec<HeldUpdate>) -> AppMessage {
+            AppMessage::BackgroundTask(AppTaskEvent::DashboardUpdateFinished(Ok(
+                DashboardUpdateOutcome {
+                    summary: LiveUpdateSummary {
+                        target_addons: updates.len(),
+                        held: updates.len(),
+                        ..LiveUpdateSummary::default()
+                    },
+                    updated_folders: Vec::new(),
+                    failed_folders: Vec::new(),
+                    updated_addon_name: None,
+                    warnings: Vec::new(),
+                    sync: AddonScanOutcome {
+                        path: addon_dir.to_path_buf(),
+                        summary: ScanSummary::default(),
+                        addons: Vec::new(),
+                        drift_report: DriftReport::empty(),
+                    },
+                    held: HeldUpdates::new(updates),
+                },
+            )))
+        }
+
+        /// The question the finished run asks, opened.
+        fn open_question(app: &mut App, updates: Vec<HeldUpdate>) {
+            let addon_dir = app.effective_addon_dir.clone().expect("addon dir");
+            let actions = app.update(finished_run(&addon_dir, updates));
+            let open = actions
+                .into_iter()
+                .find(|action| matches!(action, AppAction::OpenHeldQuestion(_)))
+                .expect("the run asks about held updates");
+            app.apply(open);
+        }
+
+        #[test]
+        fn update_all_asks_one_question_naming_every_held_folder_after_the_run() {
+            let (mut app, temp) = app_with_dev_copy();
+            let updates = vec![
+                held(temp.path(), "Third", SourceKind::Wago, &["First"]),
+                held(
+                    temp.path(),
+                    "Second",
+                    SourceKind::GitHub,
+                    &["Second_Extra", "Second_Lib"],
+                ),
+            ];
+            let kept: Vec<PathBuf> = updates
+                .iter()
+                .map(|update| update.package_path().to_path_buf())
+                .collect();
+            open_question(&mut app, updates);
+
+            match app.active_question() {
+                Some(Question::ReplaceNotLinked { addons, .. }) => {
+                    assert_eq!(addons.len(), 2);
+                    assert_eq!(addons[0].dev_copies, vec!["First".to_string()]);
+                }
+                other => panic!("expected the held question, got {other:?}"),
+            }
+            for (width, height) in [(80, 24), (120, 36)] {
+                let text = render_rows(&mut app, width, height).join("\n");
+                assert!(
+                    text.contains("Replace Not linked folders for 2 addons?"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("Third: First (has .git, likely a dev copy)"),
+                    "{text}"
+                );
+                assert!(text.contains("Second: Second_Extra, Second_Lib"), "{text}");
+                assert!(text.contains("replace"), "{text}");
+                assert!(text.contains("skip"), "{text}");
+            }
+
+            // Enter never says yes; n skips them all and removes the kept packages.
+            assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('n'))),
+                vec![AppMessage::HeldUpdatesSkip]
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Esc)),
+                vec![AppMessage::HeldUpdatesSkip]
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert!(app.active_question().is_none());
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Skipped 2 addons: they would replace Not linked folders"),
+                "{}",
+                app.status_line.text
+            );
+            for dir in kept {
+                assert!(!dir.exists(), "{}", dir.display());
+            }
+        }
+
+        #[test]
+        fn y_applies_a_single_held_update() {
+            let (mut app, temp) = app_with_dev_copy();
+            open_question(
+                &mut app,
+                vec![held(temp.path(), "Third", SourceKind::Wago, &["First"])],
+            );
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(
+                text.contains("Replace Not linked folders for Third?"),
+                "{text}"
+            );
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Char('y'))),
+                vec![AppMessage::HeldUpdatesConfirm]
+            );
+            let actions = app.update(AppMessage::HeldUpdatesConfirm);
+            assert!(
+                actions.contains(&AppAction::StartApplyHeldUpdates),
+                "{actions:?}"
+            );
+            assert!(actions.contains(&AppAction::SetDashboardUpdateInProgress(true)));
+        }
+
+        #[test]
+        fn skipping_one_held_update_says_which() {
+            let (mut app, temp) = app_with_dev_copy();
+            open_question(
+                &mut app,
+                vec![held(temp.path(), "Third", SourceKind::Wago, &["First"])],
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert!(
+                app.status_line
+                    .text
+                    .contains("Skipped Third: it would replace Not linked folders"),
+                "{}",
+                app.status_line.text
+            );
+        }
+
+        #[test]
+        fn quitting_with_the_question_open_removes_the_kept_packages() {
+            let (mut app, temp) = app_with_dev_copy();
+            let update = held(temp.path(), "Third", SourceKind::Wago, &["First"]);
+            let kept = update.package_path().to_path_buf();
+            open_question(&mut app, vec![update]);
+            assert!(kept.exists());
+            app.apply(AppAction::Quit);
+            assert!(app.quit_requested);
+            assert!(!kept.exists());
+        }
+
+        #[test]
+        fn details_name_the_not_linked_folders_while_they_still_are() {
+            let (mut app, temp) = app_with_dev_copy();
+            let third = app
+                .dashboard
+                .items
+                .iter_mut()
+                .find(|item| item.folder == "Third")
+                .expect("third");
+            third.remote_version = Some("3.1.0".to_string());
+            open_question(
+                &mut app,
+                vec![held(temp.path(), "Third", SourceKind::Wago, &["First"])],
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            let index = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Third" && row.kind == DashboardRowKind::Parent)
+                .expect("row");
+            app.dashboard.list_state.select(Some(index));
+            app.apply(AppAction::SetInspectOverlay(true));
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(
+                text.contains("Update ready, replaces Not linked: First"),
+                "{text}"
+            );
+
+            // Once First is linked, it is no longer Not linked.
+            app.dashboard
+                .items
+                .iter_mut()
+                .find(|item| item.folder == "First")
+                .expect("first")
+                .source = SourceKind::Wago;
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(!text.contains("replaces Not linked"), "{text}");
+
+            // An update of the addon forgets them.
+            app.apply(AppAction::SetDashboardUpdateResults {
+                updated: vec!["Third".to_string()],
+                failed: Vec::new(),
+            });
+            assert!(app.update_not_linked_folders("Third").is_empty());
+            assert!(!app.update_not_linked.contains_key("Third"));
+        }
+
+        /// The `OpenHeldQuestion` the finished run asks with, not applied yet.
+        fn open_action(app: &App, updates: Vec<HeldUpdate>) -> AppAction {
+            let addon_dir = app.effective_addon_dir.clone().expect("addon dir");
+            app.update(finished_run(&addon_dir, updates))
+                .into_iter()
+                .find(|action| matches!(action, AppAction::OpenHeldQuestion(_)))
+                .expect("the run asks about held updates")
+        }
+
+        fn row_status(app: &App, folder: &str) -> crate::app::render_dashboard::RowStatus {
+            let item = app
+                .dashboard
+                .items
+                .iter()
+                .find(|item| item.folder == folder)
+                .expect("item");
+            app.dashboard_row_status(item)
+        }
+
+        #[test]
+        fn auto_check_waits_while_the_held_question_is_open() {
+            let (mut app, temp) = app_with_dev_copy();
+            app.scan_state = ScanState::Succeeded {
+                path: temp.path().to_path_buf(),
+                summary: ScanSummary::default(),
+            };
+            app.config_pane.draft.auto_check_enabled = true;
+            assert!(app.auto_check_due_targets().is_some());
+            open_question(
+                &mut app,
+                vec![held(temp.path(), "Third", SourceKind::Wago, &["First"])],
+            );
+            assert!(app.auto_check_due_targets().is_none());
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert!(app.auto_check_due_targets().is_some());
+        }
+
+        #[test]
+        fn y_waits_for_a_running_job_and_keeps_the_question_open() {
+            let (mut app, temp) = app_with_dev_copy();
+            open_question(
+                &mut app,
+                vec![held(temp.path(), "Third", SourceKind::Wago, &["First"])],
+            );
+            app.apply(AppAction::SetDashboardJobUi(Some(
+                crate::app::DashboardJobUiState {
+                    kind: DashboardJobKind::Check,
+                    current_index: 1,
+                    total: 2,
+                    current_addon: "Second".to_string(),
+                },
+            )));
+            let actions = app.update(AppMessage::HeldUpdatesConfirm);
+            assert!(
+                !actions.contains(&AppAction::StartApplyHeldUpdates),
+                "{actions:?}"
+            );
+            assert!(
+                !actions.contains(&AppAction::SetDashboardUpdateInProgress(true)),
+                "{actions:?}"
+            );
+            for action in actions {
+                app.apply(action);
+            }
+            assert!(
+                app.status_line.text.contains("A check is already running"),
+                "{}",
+                app.status_line.text
+            );
+            assert!(matches!(
+                app.active_question(),
+                Some(Question::ReplaceNotLinked { .. })
+            ));
+        }
+
+        #[test]
+        fn the_same_held_updates_asked_again_keep_their_package() {
+            let (mut app, temp) = app_with_dev_copy();
+            let update = held(temp.path(), "Third", SourceKind::Wago, &["First"]);
+            let kept = update.package_path().to_path_buf();
+            let open = open_action(&app, vec![update]);
+            app.apply(open.clone());
+            app.apply(open);
+            assert!(kept.exists(), "the kept package is still there");
+            assert!(matches!(
+                app.active_question(),
+                Some(Question::ReplaceNotLinked { .. })
+            ));
+            app.apply(AppAction::Quit);
+            assert!(!kept.exists());
+        }
+
+        #[test]
+        fn a_held_row_says_update_ready_during_and_after_the_run() {
+            use crate::app::render_dashboard::RowStatus;
+            use crate::app::{DashboardJobStep, DashboardJobUiState};
+            use crate::update::LiveUpdateStatus;
+
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.dashboard
+                .items
+                .iter_mut()
+                .find(|item| item.folder == "Third")
+                .expect("third")
+                .remote_version = Some("9.9.9".to_string());
+            assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
+            let progress = |index: usize, folder: &str| {
+                AppMessage::BackgroundTask(AppTaskEvent::DashboardJobProgress(
+                    DashboardJobUiState {
+                        kind: DashboardJobKind::Update,
+                        current_index: index,
+                        total: 2,
+                        current_addon: folder.to_string(),
+                    },
+                ))
+            };
+            let updated = |folder: &str, status: LiveUpdateStatus| {
+                AppMessage::BackgroundTask(AppTaskEvent::DashboardJobStep(
+                    DashboardJobStep::Updated {
+                        folder: folder.to_string(),
+                        status,
+                    },
+                ))
+            };
+            app.apply(AppAction::SetDashboardUpdateInProgress(true));
+            app.dashboard
+                .begin_update_targets(&["Third".to_string(), "Second".to_string()]);
+            apply_all(&mut app, progress(1, "Third"));
+            apply_all(&mut app, updated("Third", LiveUpdateStatus::Held));
+            assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
+            apply_all(&mut app, progress(2, "Second"));
+            assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
+            apply_all(&mut app, updated("Second", LiveUpdateStatus::Updated));
+            assert_eq!(row_status(&app, "Second"), RowStatus::Updated);
+            assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
+
+            app.apply(AppAction::SetDashboardJobUi(None));
+            app.apply(AppAction::SetDashboardUpdateInProgress(false));
+            assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
+            assert!(app.dashboard.job_held.is_empty());
+        }
+
+        #[test]
+        fn details_name_a_held_folder_without_a_row_while_it_is_on_disk() {
+            let (mut app, temp) = app_with_dev_copy();
+            fs::create_dir_all(temp.path().join("Second_Extra")).expect("folder");
+            app.dashboard
+                .items
+                .iter_mut()
+                .find(|item| item.folder == "Third")
+                .expect("third")
+                .remote_version = Some("3.1.0".to_string());
+            assert!(
+                !app.dashboard
+                    .items
+                    .iter()
+                    .any(|item| item.folder == "Second_Extra"),
+                "Second_Extra has no row"
+            );
+            open_question(
+                &mut app,
+                vec![held(
+                    temp.path(),
+                    "Third",
+                    SourceKind::Wago,
+                    &["Second_Extra"],
+                )],
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert_eq!(app.update_not_linked_folders("Third"), vec!["Second_Extra"]);
+            let index = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Third" && row.kind == DashboardRowKind::Parent)
+                .expect("row");
+            app.dashboard.list_state.select(Some(index));
+            app.apply(AppAction::SetInspectOverlay(true));
+            let text = render_rows(&mut app, 80, 24).join("\n");
+            assert!(
+                text.contains("Update ready, replaces Not linked: Second_Extra"),
+                "{text}"
+            );
+
+            // Once the folder is gone, the next look at the list forgets it.
+            fs::remove_dir_all(temp.path().join("Second_Extra")).expect("remove");
+            let addons = app
+                .dashboard
+                .items
+                .iter()
+                .map(crate::app::dashboard_item_to_addon_record)
+                .collect();
+            app.apply(AppAction::ReplaceDashboardAddons(addons));
+            assert!(app.update_not_linked_folders("Third").is_empty());
+        }
+
+        #[test]
+        fn details_name_a_dev_copy_the_updating_addon_itself_claims() {
+            // A scan grouped a clone under the addon it updates; another addon's claim still hides it.
+            let (mut app, temp) = app_with_dev_copy();
+            fs::create_dir_all(temp.path().join("Second_Config").join(".git")).expect("clone");
+            open_question(
+                &mut app,
+                vec![held(
+                    temp.path(),
+                    "Second",
+                    SourceKind::GitHub,
+                    &["Second_Config"],
+                )],
+            );
+            apply_all(&mut app, AppMessage::HeldUpdatesSkip);
+            assert_eq!(
+                app.update_not_linked_folders("Second"),
+                vec!["Second_Config"]
+            );
+        }
+
+        #[test]
+        fn a_yes_applies_the_kept_package_and_records_the_folder_as_owned() {
+            let temp = tempdir().expect("tempdir");
+            let addon_dir = temp.path().join("AddOns");
+            for folder in ["Third", "First"] {
+                fs::create_dir_all(addon_dir.join(folder)).expect("folder");
+                fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale");
+                fs::write(
+                    addon_dir.join(folder).join(format!("{folder}.toc")),
+                    format!("## Title: {folder}\n## Version: 3.0.0\n"),
+                )
+                .expect("toc");
+            }
+            let state_db_file = temp.path().join("state.sqlite");
+            let database = StateDatabase::open(&state_db_file).expect("open db");
+            let mut tracked = AddonRecord::new("Third", "Third", SourceKind::Wago);
+            tracked.version = Some("3.0.0".to_string());
+            database.upsert_addon(&tracked).expect("seed tracked");
+            database
+                .upsert_addon(&AddonRecord::new("First", "First", SourceKind::Manual))
+                .expect("seed manual");
+            drop(database);
+
+            let package = HeldPackage::keep(b"zip", |database, addon_dir, tracked, bytes, _| {
+                for folder in ["Third", "First"] {
+                    let path = addon_dir.join(folder);
+                    fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+                    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+                    fs::write(path.join("new.lua"), bytes).map_err(|error| error.to_string())?;
+                    fs::write(
+                        path.join(format!("{folder}.toc")),
+                        format!("## Title: {folder}\n## Version: 3.1.0\n"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                let mut record = tracked.clone();
+                record.version = Some("3.1.0".to_string());
+                record.set_managed_owned_folders(vec![lemonup_core::OwnedFolder {
+                    name: "First".to_string(),
+                }]);
+                database
+                    .record_managed_addon(&record)
+                    .map_err(|error| error.to_string())?;
+                Ok(FinishedUpdate {
+                    previous_version: Some("3.0.0".to_string()),
+                    remote_version: Some("3.1.0".to_string()),
+                    not_linked: Vec::new(),
+                    warning: None,
+                })
+            })
+            .expect("keep package");
+            let finished = FinishedUpdate {
+                previous_version: Some("3.0.0".to_string()),
+                remote_version: Some("3.1.0".to_string()),
+                not_linked: vec!["First".to_string()],
+                warning: None,
+            };
+            let update = HeldUpdate::new(&tracked, &addon_dir, &finished, package);
+            let kept = update.package_path().to_path_buf();
+
+            let outcome =
+                crate::app::run_held_updates_task(&state_db_file, &addon_dir, vec![update])
+                    .expect("run");
+            assert_eq!(outcome.updated_folders, vec!["Third".to_string()]);
+            assert!(outcome.failed_folders.is_empty());
+            assert_eq!(outcome.summary.updated_addons, 1);
+            assert!(!kept.exists(), "the kept package is removed");
+            for folder in ["Third", "First"] {
+                assert!(addon_dir.join(folder).join("new.lua").exists(), "{folder}");
+                assert!(
+                    !addon_dir.join(folder).join("stale.lua").exists(),
+                    "{folder}"
+                );
+            }
+            let database = StateDatabase::open(&state_db_file).expect("open db");
+            let stored = database
+                .get_addon_by_folder("Third")
+                .expect("get addon")
+                .expect("addon exists");
+            assert_eq!(stored.version.as_deref(), Some("3.1.0"));
+            let owned: Vec<&str> = stored
+                .owned_folders
+                .iter()
+                .map(|owned| owned.name.as_str())
+                .collect();
+            assert_eq!(owned, vec!["First"]);
+            assert!(
+                database
+                    .get_addon_by_folder("First")
+                    .expect("get row")
+                    .is_none()
+            );
+        }
     }
 }

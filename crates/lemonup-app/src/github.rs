@@ -1,3 +1,5 @@
+use crate::update::HeldPackage;
+use crate::update_targets::ReplaceNotLinked;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -39,6 +41,28 @@ pub(crate) struct GithubUpdateSummary {
     pub(crate) remote_version: Option<String>,
     pub(crate) updated: bool,
     pub(crate) dry_run: bool,
+    /// "Not linked" folders the new package would replace that nobody agreed to. While this is
+    /// not empty nothing was updated.
+    pub(crate) not_linked: Vec<String>,
+}
+
+impl GithubUpdateSummary {
+    fn finished(self) -> crate::update::FinishedUpdate {
+        crate::update::FinishedUpdate {
+            previous_version: self.previous_version,
+            remote_version: self.remote_version,
+            not_linked: self.not_linked,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn outcome(self) -> crate::update::ProviderOutcome {
+        crate::update::ProviderOutcome {
+            updated: self.updated,
+            remote_older: false,
+            finished: self.finished(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +182,8 @@ pub(crate) async fn update_github_addon(
     tracked: &AddonRecord,
     force: bool,
     dry_run: bool,
-) -> Result<GithubUpdateSummary, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<(GithubUpdateSummary, Option<HeldPackage>), String> {
     if tracked.source != SourceKind::GitHub {
         return Err(format!(
             "addon '{}' is not linked to GitHub",
@@ -182,30 +207,43 @@ pub(crate) async fn update_github_addon(
             None,
             dry_run,
         )?;
-        return Ok(GithubUpdateSummary {
-            repo_url: resolved.metadata.html_url.clone(),
-            repo_name: resolved.metadata.repo.clone(),
-            parent_folder: tracked.folder.clone(),
-            installed_folders: std::iter::once(tracked.folder.clone())
-                .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-                .collect(),
-            previous_version: tracked.version.clone(),
-            previous_commit: tracked.git_commit.clone(),
-            remote_version,
-            updated: false,
-            dry_run,
-        });
+        return Ok((
+            GithubUpdateSummary {
+                repo_url: resolved.metadata.html_url.clone(),
+                repo_name: resolved.metadata.repo.clone(),
+                parent_folder: tracked.folder.clone(),
+                installed_folders: std::iter::once(tracked.folder.clone())
+                    .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
+                    .collect(),
+                previous_version: tracked.version.clone(),
+                previous_commit: tracked.git_commit.clone(),
+                remote_version,
+                updated: false,
+                dry_run,
+                not_linked: Vec::new(),
+            },
+            None,
+        ));
     }
 
     let bytes = download_github_zipball_bytes(&client, &resolved).await?;
-    update_downloaded_github_addon(
+    let summary = update_downloaded_github_addon(
         state_database,
         addon_dir,
         tracked,
         &resolved,
         &bytes,
+        agree,
         dry_run,
-    )
+    )?;
+    if summary.not_linked.is_empty() || dry_run {
+        return Ok((summary, None));
+    }
+    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
+        update_downloaded_github_addon(database, addon_dir, tracked, &resolved, bytes, agree, false)
+            .map(GithubUpdateSummary::finished)
+    })?;
+    Ok((summary, Some(package)))
 }
 
 const GITHUB_TOKEN_ENV_VARS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
@@ -514,6 +552,7 @@ fn update_downloaded_github_addon(
     tracked: &AddonRecord,
     resolved: &GithubResolvedRepo,
     archive_bytes: &[u8],
+    agree: ReplaceNotLinked<'_>,
     dry_run: bool,
 ) -> Result<GithubUpdateSummary, String> {
     let temp_root = create_temp_work_dir("github-update")?;
@@ -550,15 +589,19 @@ fn update_downloaded_github_addon(
             })?;
 
         // Parent plus owned folders (authoritative ownership only) and any package folders
-        // taken over from manual rows; refuses folders of other tracked addons.
-        let managed_folders = crate::update_targets::plan_update_replacements(
+        // agreed to take over from manual rows; refuses folders of other tracked addons.
+        let plan = crate::update_targets::plan_update_replacements(
             state_database,
             addon_dir,
             tracked,
             &extracted.folders,
+            agree,
         )?;
+        let managed_folders = plan.replaced;
+        // A package that would replace "Not linked" folders nobody agreed to changes nothing.
+        let held = !plan.not_linked.is_empty();
 
-        if dry_run {
+        if dry_run || held {
             return Ok(GithubUpdateSummary {
                 repo_url: resolved.metadata.html_url.clone(),
                 repo_name: resolved.metadata.repo.clone(),
@@ -567,8 +610,9 @@ fn update_downloaded_github_addon(
                 previous_version,
                 previous_commit,
                 remote_version: Some(resolved.head_sha.clone()),
-                updated: true,
-                dry_run: true,
+                updated: !held,
+                dry_run,
+                not_linked: plan.not_linked,
             });
         }
 
@@ -600,6 +644,7 @@ fn update_downloaded_github_addon(
             remote_version: Some(resolved.head_sha.clone()),
             updated: true,
             dry_run: false,
+            not_linked: Vec::new(),
         })
     })();
 
@@ -1595,6 +1640,8 @@ mod tests {
             &tracked,
             &resolved,
             &bytes,
+            // The person said yes to replacing the Not linked folders.
+            crate::update_targets::ReplaceNotLinked::Any,
             false,
         )
         .expect("update");
@@ -1623,6 +1670,120 @@ mod tests {
             database
                 .get_addon_by_folder("AdiBags_Extras")
                 .expect("get row")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn update_over_a_not_linked_folder_is_held_then_applied_after_a_yes() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            std::fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            std::fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale");
+        }
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked = AddonRecord::new("AdiBags", "AdiBags", SourceKind::GitHub);
+        tracked.version = Some("1.0.0".to_string());
+        tracked.git_commit = Some("abcdef0".to_string());
+        tracked.source_url = Some("https://github.com/AdiAddons/AdiBags".to_string());
+        database.upsert_addon(&tracked).expect("seed addon");
+        database
+            .upsert_addon(&AddonRecord::new(
+                "AdiBags_Extras",
+                "AdiBags_Extras",
+                SourceKind::Manual,
+            ))
+            .expect("seed manual row");
+        let rows_before = database.list_addons().expect("rows");
+
+        let resolved = super::GithubResolvedRepo {
+            metadata: super::GithubRepoMetadata {
+                owner: "AdiAddons".to_string(),
+                repo: "AdiBags".to_string(),
+                default_branch: "main".to_string(),
+                html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
+                owner_login: "AdiAddons".to_string(),
+            },
+            head_sha: "abcdef0123456789".to_string(),
+        };
+        let toc = "## Title: AdiBags\n## Version: 1.1.0\n## Interface: 110205\n";
+        let bytes = build_zip(&[
+            ("wrapper/AdiBags/AdiBags.toc", toc),
+            ("wrapper/AdiBags_Extras/AdiBags_Extras.toc", toc),
+        ]);
+
+        // Nobody agreed yet: held, and nothing on disk or in the database changes.
+        let summary = update_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &resolved,
+            &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("held update");
+        assert!(!summary.updated);
+        assert_eq!(summary.not_linked, vec!["AdiBags_Extras".to_string()]);
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            assert!(
+                addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        assert_eq!(database.list_addons().expect("rows"), rows_before);
+
+        // A yes applies it from the kept package, without a download.
+        let package = crate::update::HeldPackage::keep(&bytes, {
+            let resolved = resolved.clone();
+            move |database, addon_dir, tracked, bytes, agree| {
+                update_downloaded_github_addon(
+                    database, addon_dir, tracked, &resolved, bytes, agree, false,
+                )
+                .map(super::GithubUpdateSummary::finished)
+            }
+        })
+        .expect("keep package");
+        let held =
+            crate::update::HeldUpdate::new(&tracked, &addon_dir, &summary.finished(), package);
+        let kept = held.package_path().to_path_buf();
+        assert!(kept.exists());
+        let result = held.apply(&mut database, &addon_dir);
+        assert_eq!(
+            result.status,
+            crate::update::LiveUpdateStatus::Updated,
+            "{:?}",
+            result.message
+        );
+        assert!(
+            !kept.exists(),
+            "the kept package is removed after the update"
+        );
+        for folder in ["AdiBags", "AdiBags_Extras"] {
+            assert!(
+                !addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        let stored = database
+            .get_addon_by_folder("AdiBags")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(
+            stored
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name == "AdiBags_Extras")
+        );
+        assert!(
+            database
+                .get_addon_by_folder("AdiBags_Extras")
+                .expect("get manual")
                 .is_none()
         );
     }
@@ -1670,6 +1831,7 @@ mod tests {
             &tracked,
             &resolved,
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             true,
         )
         .expect("dry-run update");
@@ -1892,6 +2054,7 @@ mod tests {
             &tracked,
             &resolved_repo("AdiAddons", "AdiBags"),
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update");
@@ -1930,6 +2093,7 @@ mod tests {
             &tracked,
             &resolved_repo("x", "Foo"),
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update");
@@ -2115,6 +2279,7 @@ mod tests {
             &tracked,
             &resolved_repo("x", "Foo"),
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
@@ -2168,6 +2333,7 @@ mod tests {
             &tracked,
             &resolved_repo("x", "Foo"),
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         );
 
@@ -2547,6 +2713,7 @@ mod tests {
             &tracked,
             &resolved,
             &adibags_shaped_zip("-- v2"),
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update");
@@ -2610,6 +2777,8 @@ mod tests {
             &tracked,
             &resolved_repo("AdiAddons", "AdiBags"),
             &adibags_shaped_zip("-- new"),
+            // The person said yes to replacing the Not linked folders.
+            crate::update_targets::ReplaceNotLinked::Any,
             false,
         )
         .expect("update");

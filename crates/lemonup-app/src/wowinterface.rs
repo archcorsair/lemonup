@@ -1,3 +1,5 @@
+use crate::update::HeldPackage;
+use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -38,7 +40,29 @@ pub(crate) struct WowinterfaceUpdateSummary {
     /// Not updated because the remote version is older than the installed one.
     pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
+    /// "Not linked" folders the new package would replace that nobody agreed to. While this is
+    /// not empty nothing was updated.
+    pub(crate) not_linked: Vec<String>,
     pub(crate) warning: Option<String>,
+}
+
+impl WowinterfaceUpdateSummary {
+    fn finished(self) -> crate::update::FinishedUpdate {
+        crate::update::FinishedUpdate {
+            previous_version: self.previous_version,
+            remote_version: self.remote_version,
+            not_linked: self.not_linked,
+            warning: self.warning,
+        }
+    }
+
+    pub(crate) fn outcome(self) -> crate::update::ProviderOutcome {
+        crate::update::ProviderOutcome {
+            updated: self.updated,
+            remote_older: self.remote_older,
+            finished: self.finished(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +191,8 @@ pub(crate) async fn update_wowinterface_addon(
     tracked: &AddonRecord,
     force: bool,
     dry_run: bool,
-) -> Result<WowinterfaceUpdateSummary, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<(WowinterfaceUpdateSummary, Option<HeldPackage>), String> {
     if tracked.source != SourceKind::WowInterface {
         return Err(format!(
             "addon '{}' is not linked to WoWInterface",
@@ -193,31 +218,46 @@ pub(crate) async fn update_wowinterface_addon(
             Some(&remote.ui_name),
             dry_run,
         )?;
-        return Ok(WowinterfaceUpdateSummary {
-            addon_id: remote.uid.clone(),
-            addon_name: remote.ui_name.clone(),
-            parent_folder: tracked.folder.clone(),
-            installed_folders: std::iter::once(tracked.folder.clone())
-                .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-                .collect(),
-            previous_version: tracked.version.clone(),
-            remote_version,
-            updated: false,
-            remote_older,
-            dry_run,
-            warning: None,
-        });
+        return Ok((
+            WowinterfaceUpdateSummary {
+                addon_id: remote.uid.clone(),
+                addon_name: remote.ui_name.clone(),
+                parent_folder: tracked.folder.clone(),
+                installed_folders: std::iter::once(tracked.folder.clone())
+                    .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
+                    .collect(),
+                previous_version: tracked.version.clone(),
+                remote_version,
+                updated: false,
+                remote_older,
+                dry_run,
+                not_linked: Vec::new(),
+                warning: None,
+            },
+            None,
+        ));
     }
 
     let bytes = download_wowinterface_release_bytes(&client, &remote).await?;
-    update_downloaded_wowinterface_addon(
+    let summary = update_downloaded_wowinterface_addon(
         state_database,
         addon_dir,
         tracked,
         &remote,
         &bytes,
+        agree,
         dry_run,
-    )
+    )?;
+    if summary.not_linked.is_empty() || dry_run {
+        return Ok((summary, None));
+    }
+    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
+        update_downloaded_wowinterface_addon(
+            database, addon_dir, tracked, &remote, bytes, agree, false,
+        )
+        .map(WowinterfaceUpdateSummary::finished)
+    })?;
+    Ok((summary, Some(package)))
 }
 
 fn build_wowinterface_client() -> Result<Client, String> {
@@ -380,6 +420,7 @@ fn update_downloaded_wowinterface_addon(
     tracked: &AddonRecord,
     addon: &WowinterfaceAddon,
     archive_bytes: &[u8],
+    agree: ReplaceNotLinked<'_>,
     dry_run: bool,
 ) -> Result<WowinterfaceUpdateSummary, String> {
     let temp_root = create_temp_work_dir("wowi-update")?;
@@ -417,15 +458,19 @@ fn update_downloaded_wowinterface_addon(
             })?;
 
         // Parent plus owned folders (authoritative ownership only) and any package folders
-        // taken over from manual rows; refuses folders of other tracked addons.
-        let managed_folders = crate::update_targets::plan_update_replacements(
+        // agreed to take over from manual rows; refuses folders of other tracked addons.
+        let plan = crate::update_targets::plan_update_replacements(
             state_database,
             addon_dir,
             tracked,
             &extracted.folders,
+            agree,
         )?;
+        let managed_folders = plan.replaced;
+        // A package that would replace "Not linked" folders nobody agreed to changes nothing.
+        let held = !plan.not_linked.is_empty();
 
-        if dry_run {
+        if dry_run || held {
             return Ok(WowinterfaceUpdateSummary {
                 addon_id: addon.uid.clone(),
                 addon_name: addon.ui_name.clone(),
@@ -433,9 +478,10 @@ fn update_downloaded_wowinterface_addon(
                 installed_folders: extracted.folders,
                 previous_version,
                 remote_version: Some(addon.ui_version.clone()),
-                updated: true,
+                updated: !held,
                 remote_older: false,
-                dry_run: true,
+                dry_run,
+                not_linked: plan.not_linked,
                 warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
@@ -468,6 +514,7 @@ fn update_downloaded_wowinterface_addon(
             updated: true,
             remote_older: false,
             dry_run: false,
+            not_linked: Vec::new(),
             warning: forever_install_warning(addon_dir, &addon.ui_name),
         })
     })();
@@ -958,6 +1005,7 @@ mod tests {
             &tracked,
             &addon,
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update");
@@ -1042,6 +1090,8 @@ mod tests {
             &tracked,
             &addon,
             &bytes,
+            // The person said yes to replacing the Not linked folders.
+            crate::update_targets::ReplaceNotLinked::Any,
             false,
         )
         .expect("update");
@@ -1093,6 +1143,7 @@ mod tests {
             &tracked,
             &addon,
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect_err("a separately tracked folder must not be taken over");

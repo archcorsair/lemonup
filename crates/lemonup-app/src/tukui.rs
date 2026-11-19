@@ -1,3 +1,5 @@
+use crate::update::HeldPackage;
+use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,28 @@ pub(crate) struct TukuiUpdateSummary {
     /// Not updated because the remote version is older than the installed one.
     pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
+    /// "Not linked" folders the new package would replace that nobody agreed to. While this is
+    /// not empty nothing was updated.
+    pub(crate) not_linked: Vec<String>,
+}
+
+impl TukuiUpdateSummary {
+    fn finished(self) -> crate::update::FinishedUpdate {
+        crate::update::FinishedUpdate {
+            previous_version: self.previous_version,
+            remote_version: self.remote_version,
+            not_linked: self.not_linked,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn outcome(self) -> crate::update::ProviderOutcome {
+        crate::update::ProviderOutcome {
+            updated: self.updated,
+            remote_older: self.remote_older,
+            finished: self.finished(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +253,8 @@ pub(crate) async fn update_tukui_addon(
     tracked: &AddonRecord,
     force: bool,
     dry_run: bool,
-) -> Result<TukuiUpdateSummary, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<(TukuiUpdateSummary, Option<HeldPackage>), String> {
     if tracked.source != SourceKind::Tukui {
         return Err(format!("addon '{}' is not linked to TukUI", tracked.folder));
     }
@@ -253,11 +278,27 @@ pub(crate) async fn update_tukui_addon(
             Some(&addon.name),
             dry_run,
         )?;
-        return Ok(summary);
+        return Ok((summary, None));
     }
 
     let bytes = download_tukui_release_bytes(&client, &addon).await?;
-    update_downloaded_tukui_addon(state_database, addon_dir, tracked, &addon, &bytes, dry_run)
+    let summary = update_downloaded_tukui_addon(
+        state_database,
+        addon_dir,
+        tracked,
+        &addon,
+        &bytes,
+        agree,
+        dry_run,
+    )?;
+    if summary.not_linked.is_empty() || dry_run {
+        return Ok((summary, None));
+    }
+    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
+        update_downloaded_tukui_addon(database, addon_dir, tracked, &addon, bytes, agree, false)
+            .map(TukuiUpdateSummary::finished)
+    })?;
+    Ok((summary, Some(package)))
 }
 
 enum TukuiUpdatePlan {
@@ -291,6 +332,7 @@ fn plan_tukui_update(
             updated: false,
             remote_older,
             dry_run,
+            not_linked: Vec::new(),
         }));
     }
 
@@ -495,6 +537,7 @@ fn update_downloaded_tukui_addon(
     tracked: &AddonRecord,
     addon: &TukuiAddon,
     archive_bytes: &[u8],
+    agree: ReplaceNotLinked<'_>,
     dry_run: bool,
 ) -> Result<TukuiUpdateSummary, String> {
     let temp_root = create_temp_work_dir("tukui-update")?;
@@ -527,15 +570,19 @@ fn update_downloaded_tukui_addon(
             })?;
 
         // Parent plus owned folders (authoritative ownership only) and any package folders
-        // taken over from manual rows; refuses folders of other tracked addons.
-        let managed_folders = crate::update_targets::plan_update_replacements(
+        // agreed to take over from manual rows; refuses folders of other tracked addons.
+        let plan = crate::update_targets::plan_update_replacements(
             state_database,
             addon_dir,
             tracked,
             &layout.folders,
+            agree,
         )?;
+        let managed_folders = plan.replaced;
+        // A package that would replace "Not linked" folders nobody agreed to changes nothing.
+        let held = !plan.not_linked.is_empty();
 
-        if dry_run {
+        if dry_run || held {
             return Ok(TukuiUpdateSummary {
                 addon_slug: addon.slug.clone(),
                 addon_name: addon.name.clone(),
@@ -543,9 +590,10 @@ fn update_downloaded_tukui_addon(
                 installed_folders: layout.folders,
                 previous_version,
                 remote_version: Some(addon.version.clone()),
-                updated: true,
+                updated: !held,
                 remote_older: false,
-                dry_run: true,
+                dry_run,
+                not_linked: plan.not_linked,
             });
         }
 
@@ -577,6 +625,7 @@ fn update_downloaded_tukui_addon(
             updated: true,
             remote_older: false,
             dry_run: false,
+            not_linked: Vec::new(),
         })
     })();
 
@@ -1135,6 +1184,7 @@ mod tests {
             &tracked,
             &addon,
             &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update addon");
@@ -1195,8 +1245,16 @@ mod tests {
             "## Title: Tukui\n## Version: 20.463\n## Category: UI\n## Interface: 110205\n",
         )]);
 
-        update_downloaded_tukui_addon(&mut database, &addon_dir, &tracked, &addon, &bytes, false)
-            .expect("update addon");
+        update_downloaded_tukui_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("update addon");
 
         assert_eq!(
             std::fs::read_to_string(addon_dir.join("Tukui").join("Tukui.toc")).expect("toc"),
@@ -1257,6 +1315,8 @@ mod tests {
             &tracked,
             &addon,
             &bytes,
+            // The person said yes to replacing the Not linked folders.
+            crate::update_targets::ReplaceNotLinked::Any,
             false,
         )
         .expect("update addon");

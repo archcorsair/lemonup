@@ -253,6 +253,17 @@ impl App {
                 }
             })
             .collect(),
+            RowStatus::UpdateReady => {
+                let folders = self.update_not_linked_folders(&item.folder);
+                if folders.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Span::styled(
+                        format!("Update ready, replaces Not linked: {}", folders.join(", ")),
+                        text,
+                    )]
+                }
+            }
             _ => Vec::new(),
         };
 
