@@ -6,6 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::source_error::{SourceError, SourceErrorKind};
+use lemonup_core::github_release::{
+    ReleaseAsset, ReleaseJson, choose_release_asset, release_json_asset,
+};
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
 };
@@ -26,7 +29,10 @@ pub(crate) struct GithubInstallSummary {
     pub(crate) parent_folder: String,
     pub(crate) installed_folders: Vec<String>,
     pub(crate) version: Option<String>,
-    pub(crate) git_commit: String,
+    /// The source zipball's commit; `None` for a release zip.
+    pub(crate) git_commit: Option<String>,
+    /// The release whose zip was installed; `None` for the source zipball.
+    pub(crate) release_tag: Option<String>,
     pub(crate) dry_run: bool,
 }
 
@@ -89,7 +95,55 @@ struct GithubRepoMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GithubResolvedRepo {
     metadata: GithubRepoMetadata,
-    head_sha: String,
+    package: GithubPackage,
+}
+
+/// What a GitHub install or update downloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GithubPackage {
+    /// A zip of the repo's latest release, made for the game (see
+    /// `lemonup_core::github_release`).
+    Release { tag: String, asset: ReleaseAsset },
+    /// The source zipball of the default branch's head commit, when no release zip fits.
+    Source { head_sha: String },
+}
+
+impl GithubPackage {
+    /// What a check stores as the remote version: the release tag, or the commit.
+    fn remote_version(&self) -> &str {
+        match self {
+            Self::Release { tag, .. } => tag,
+            Self::Source { head_sha } => head_sha,
+        }
+    }
+
+    fn git_commit(&self) -> Option<&str> {
+        match self {
+            Self::Release { .. } => None,
+            Self::Source { head_sha } => Some(head_sha),
+        }
+    }
+
+    fn release_tag(&self) -> Option<&str> {
+        match self {
+            Self::Release { tag, .. } => Some(tag),
+            Self::Source { .. } => None,
+        }
+    }
+
+    /// Whether `tracked` already has this package: the same release, or (for a source
+    /// install) the same commit. A source install never matches a release, so the next update
+    /// moves it to the release zip even when the tag points at the installed commit.
+    fn is_installed(&self, tracked: &AddonRecord) -> bool {
+        match (self, tracked.installed_release_tag()) {
+            (Self::Release { tag, .. }, Some(installed)) => installed.trim() == tag.trim(),
+            (Self::Release { .. }, None) | (Self::Source { .. }, Some(_)) => false,
+            (Self::Source { head_sha }, None) => commits_match(
+                tracked.git_commit.as_deref().or(tracked.version.as_deref()),
+                Some(head_sha),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -108,6 +162,48 @@ struct GithubRepoResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct GithubCommitResponse {
     sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GithubReleaseResponse {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAssetResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GithubReleaseAssetResponse {
+    name: String,
+    browser_download_url: String,
+}
+
+impl GithubReleaseResponse {
+    /// Drafts and prereleases are never the latest release; skipped all the same.
+    fn is_installable(&self) -> bool {
+        !self.draft && !self.prerelease && !self.tag_name.trim().is_empty()
+    }
+
+    /// The release's files whose download starts on github.com, so the GitHub token is only
+    /// ever sent there (reqwest drops it on the redirect to GitHub's file host).
+    fn assets(&self) -> Vec<ReleaseAsset> {
+        self.assets
+            .iter()
+            .filter(|asset| is_github_download_url(&asset.browser_download_url))
+            .map(|asset| ReleaseAsset {
+                name: asset.name.clone(),
+                download_url: asset.browser_download_url.clone(),
+            })
+            .collect()
+    }
+}
+
+fn is_github_download_url(value: &str) -> bool {
+    Url::parse(value)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("github.com"))
 }
 
 pub(crate) fn parse_github_target(value: &str) -> Result<String, String> {
@@ -152,8 +248,8 @@ pub(crate) async fn install_github_addon_checked(
 ) -> Result<GithubInstallSummary, SourceError> {
     let repo = parse_github_repo_url(target)?;
     let client = build_github_client()?;
-    let resolved = fetch_github_repo(&client, &repo).await?;
-    let bytes = download_github_zipball_bytes(&client, &resolved).await?;
+    let resolved = fetch_github_repo(&client, &repo, GameFlavor::for_addons_dir(addon_dir)).await?;
+    let bytes = download_github_package_bytes(&client, &resolved).await?;
     install_downloaded_github_addon(
         state_database,
         addon_dir,
@@ -164,15 +260,25 @@ pub(crate) async fn install_github_addon_checked(
     )
 }
 
+/// The version an update for `flavor` would install: the latest release's tag when it has a zip
+/// for the game, otherwise the default branch's head commit.
 pub(crate) async fn fetch_github_remote_version(
     addon: &AddonRecord,
+    flavor: GameFlavor,
 ) -> Result<GithubRemoteVersion, SourceError> {
     let repo = resolve_tracked_github_repo(addon)?;
     let client = build_github_client()?;
-    let resolved = fetch_github_repo(&client, &repo).await?;
+    if let Some(package) = fetch_github_release_package(&client, &repo, flavor).await? {
+        return Ok(GithubRemoteVersion {
+            source_url: Some(canonical_github_url(&repo.owner, &repo.repo)),
+            version: Some(package.remote_version().to_string()),
+        });
+    }
+    let metadata = fetch_github_repo_metadata(&client, &repo).await?;
+    let head_sha = fetch_github_head_commit(&client, &metadata).await?;
     Ok(GithubRemoteVersion {
-        source_url: Some(resolved.metadata.html_url),
-        version: Some(resolved.head_sha),
+        source_url: Some(metadata.html_url),
+        version: Some(head_sha),
     })
 }
 
@@ -193,11 +299,10 @@ pub(crate) async fn update_github_addon(
 
     let repo = resolve_tracked_github_repo(tracked)?;
     let client = build_github_client()?;
-    let resolved = fetch_github_repo(&client, &repo).await?;
-    let remote_version = Some(resolved.head_sha.clone());
-    let installed_commit = tracked.git_commit.as_deref().or(tracked.version.as_deref());
+    let resolved = fetch_github_repo(&client, &repo, GameFlavor::for_addons_dir(addon_dir)).await?;
+    let remote_version = Some(resolved.package.remote_version().to_string());
 
-    if !force && commits_match(installed_commit, remote_version.as_deref()) {
+    if !force && resolved.package.is_installed(tracked) {
         crate::update::record_skipped_update_check(
             state_database,
             tracked,
@@ -226,7 +331,7 @@ pub(crate) async fn update_github_addon(
         ));
     }
 
-    let bytes = download_github_zipball_bytes(&client, &resolved).await?;
+    let bytes = download_github_package_bytes(&client, &resolved).await?;
     let summary = update_downloaded_github_addon(
         state_database,
         addon_dir,
@@ -366,13 +471,108 @@ fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
     })
 }
 
+/// The repo and the package to install for `flavor`: a release zip when one fits, otherwise
+/// the source zipball of the head commit.
 async fn fetch_github_repo(
     client: &Client,
     repo: &GithubRepoRef,
+    flavor: GameFlavor,
 ) -> Result<GithubResolvedRepo, SourceError> {
     let metadata = fetch_github_repo_metadata(client, repo).await?;
-    let head_sha = fetch_github_head_commit(client, &metadata).await?;
-    Ok(GithubResolvedRepo { metadata, head_sha })
+    let release_repo = GithubRepoRef {
+        owner: metadata.owner.clone(),
+        repo: metadata.repo.clone(),
+    };
+    let package = match fetch_github_release_package(client, &release_repo, flavor).await? {
+        Some(package) => package,
+        None => GithubPackage::Source {
+            head_sha: fetch_github_head_commit(client, &metadata).await?,
+        },
+    };
+    Ok(GithubResolvedRepo { metadata, package })
+}
+
+/// The latest release's zip for `flavor`, or `None` when the repo has no release (drafts and
+/// prereleases are never the latest) or none of its zips fits the game.
+async fn fetch_github_release_package(
+    client: &Client,
+    repo: &GithubRepoRef,
+    flavor: GameFlavor,
+) -> Result<Option<GithubPackage>, SourceError> {
+    let url = format!(
+        "{API_BASE}/repos/{}/{}/releases/latest",
+        repo.owner, repo.repo
+    );
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(SourceError::from_reqwest)?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let release = ensure_github_success(response)?
+        .json::<GithubReleaseResponse>()
+        .await
+        .map_err(SourceError::from_reqwest)?;
+    if !release.is_installable() {
+        return Ok(None);
+    }
+    let assets = release.assets();
+    let release_json = match release_json_asset(&assets) {
+        Some(asset) => read_release_json(download_github_asset_bytes(client, asset).await)?,
+        None => None,
+    };
+    Ok(release_package(
+        &release,
+        &assets,
+        flavor,
+        release_json.as_ref(),
+    ))
+}
+
+/// The release's `release.json` from its download. A failed download fails the check or update,
+/// so a network error never picks another package (the source zip, say) than the metadata would;
+/// the installed copy stays as it is until the metadata can be read. A file that isn't in the
+/// packager's format counts as none.
+fn read_release_json(
+    download: Result<Vec<u8>, SourceError>,
+) -> Result<Option<ReleaseJson>, SourceError> {
+    Ok(ReleaseJson::parse(&String::from_utf8_lossy(&download?)))
+}
+
+/// The package `release` offers for `flavor`, given its files and its `release.json`.
+fn release_package(
+    release: &GithubReleaseResponse,
+    assets: &[ReleaseAsset],
+    flavor: GameFlavor,
+    release_json: Option<&ReleaseJson>,
+) -> Option<GithubPackage> {
+    if !release.is_installable() {
+        return None;
+    }
+    choose_release_asset(flavor, assets, release_json).map(|asset| GithubPackage::Release {
+        tag: release.tag_name.trim().to_string(),
+        asset: asset.clone(),
+    })
+}
+
+async fn download_github_asset_bytes(
+    client: &Client,
+    asset: &ReleaseAsset,
+) -> Result<Vec<u8>, SourceError> {
+    let response = client
+        .get(&asset.download_url)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .await
+        .map_err(SourceError::from_reqwest)?;
+    ensure_github_success(response)?
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(SourceError::from_reqwest)
 }
 
 async fn fetch_github_repo_metadata(
@@ -442,13 +642,19 @@ async fn fetch_github_head_commit(
     Ok(parsed.sha)
 }
 
-async fn download_github_zipball_bytes(
+async fn download_github_package_bytes(
     client: &Client,
     resolved: &GithubResolvedRepo,
 ) -> Result<Vec<u8>, SourceError> {
+    let head_sha = match &resolved.package {
+        GithubPackage::Release { asset, .. } => {
+            return download_github_asset_bytes(client, asset).await;
+        }
+        GithubPackage::Source { head_sha } => head_sha,
+    };
     let url = format!(
-        "{API_BASE}/repos/{}/{}/zipball/{}",
-        resolved.metadata.owner, resolved.metadata.repo, resolved.head_sha
+        "{API_BASE}/repos/{}/{}/zipball/{head_sha}",
+        resolved.metadata.owner, resolved.metadata.repo
     );
     let response = client
         .get(url)
@@ -500,8 +706,9 @@ fn install_downloaded_github_addon(
                 repo_name: resolved.metadata.repo.clone(),
                 parent_folder,
                 installed_folders: extracted.folders,
-                version: install_version(parent_metadata.version.as_deref(), &resolved.head_sha),
-                git_commit: resolved.head_sha.clone(),
+                version: install_version(parent_metadata.version.as_deref(), &resolved.package),
+                git_commit: resolved.package.git_commit().map(ToOwned::to_owned),
+                release_tag: resolved.package.release_tag().map(ToOwned::to_owned),
                 dry_run: true,
             });
         }
@@ -536,8 +743,9 @@ fn install_downloaded_github_addon(
             repo_name: resolved.metadata.repo.clone(),
             parent_folder,
             installed_folders: extracted.folders,
-            version: install_version(parent_metadata.version.as_deref(), &resolved.head_sha),
-            git_commit: resolved.head_sha.clone(),
+            version: install_version(parent_metadata.version.as_deref(), &resolved.package),
+            git_commit: resolved.package.git_commit().map(ToOwned::to_owned),
+            release_tag: resolved.package.release_tag().map(ToOwned::to_owned),
             dry_run: false,
         })
     })();
@@ -609,7 +817,7 @@ fn update_downloaded_github_addon(
                 installed_folders: extracted.folders,
                 previous_version,
                 previous_commit,
-                remote_version: Some(resolved.head_sha.clone()),
+                remote_version: Some(resolved.package.remote_version().to_string()),
                 updated: !held,
                 dry_run,
                 not_linked: plan.not_linked,
@@ -641,7 +849,7 @@ fn update_downloaded_github_addon(
             installed_folders: extracted.folders,
             previous_version,
             previous_commit,
-            remote_version: Some(resolved.head_sha.clone()),
+            remote_version: Some(resolved.package.remote_version().to_string()),
             updated: true,
             dry_run: false,
             not_linked: Vec::new(),
@@ -682,8 +890,9 @@ fn build_managed_github_record(
     );
     record.kind = parent_metadata.kind;
     record.flavor = parent_metadata.flavor;
-    record.version = install_version(parent_metadata.version.as_deref(), &resolved.head_sha);
-    record.git_commit = Some(resolved.head_sha.clone());
+    record.version = install_version(parent_metadata.version.as_deref(), &resolved.package);
+    record.git_commit = resolved.package.git_commit().map(ToOwned::to_owned);
+    record.release_tag = resolved.package.release_tag().map(ToOwned::to_owned);
     record.author = parent_metadata
         .author
         .clone()
@@ -693,7 +902,7 @@ fn build_managed_github_record(
     record.required_deps = parent_metadata.required_deps.clone();
     record.optional_deps = parent_metadata.optional_deps.clone();
     record.embedded_libs = parent_metadata.embedded_libs.clone();
-    record.remote_version = Some(resolved.head_sha.clone());
+    record.remote_version = Some(resolved.package.remote_version().to_string());
     record.last_checked_at = Some(OffsetDateTime::now_utc());
     record.set_managed_owned_folders(
         installed_folders
@@ -1142,16 +1351,29 @@ fn normalize_folder_like(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn install_version(parent_version: Option<&str>, commit: &str) -> Option<String> {
+/// The TOC version, unless it is a packager placeholder; then the release tag or short commit.
+fn install_version(parent_version: Option<&str>, package: &GithubPackage) -> Option<String> {
     parent_version
         .filter(|value| !is_placeholder_version(value))
         .map(ToOwned::to_owned)
-        .or_else(|| Some(short_commit(commit)))
+        .or_else(|| {
+            Some(match package {
+                GithubPackage::Release { tag, .. } => tag.clone(),
+                GithubPackage::Source { head_sha } => short_commit(head_sha),
+            })
+        })
 }
 
 fn is_placeholder_version(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with('@') && trimmed.ends_with('@')
+}
+
+/// Whether `value` is a commit as a check stores it: GitHub's full 40 hex characters. A shorter
+/// hex string next to it is a release tag that looks like a commit (`20241118`).
+pub(crate) fn is_full_commit(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 40 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 pub(crate) fn commits_match(left: Option<&str>, right: Option<&str>) -> bool {
@@ -1492,7 +1714,9 @@ mod tests {
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
             },
-            head_sha: "abcdef0123456789".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "abcdef0123456789".to_string(),
+            },
         };
         let scanned = ScannedAddon {
             name: "AdiBags".to_string(),
@@ -1535,7 +1759,9 @@ mod tests {
                 html_url: "https://github.com/WeakAuras/WeakAuras2".to_string(),
                 owner_login: "WeakAuras".to_string(),
             },
-            head_sha: "364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string(),
+            },
         };
         let scanned = ScannedAddon {
             name: "WeakAuras".to_string(),
@@ -1625,7 +1851,9 @@ mod tests {
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
             },
-            head_sha: "abcdef0123456789".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "abcdef0123456789".to_string(),
+            },
         };
         let toc = "## Title: AdiBags\n## Version: 1.1.0\n## Interface: 110205\n";
         let bytes = build_zip(&[
@@ -1709,7 +1937,9 @@ mod tests {
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
             },
-            head_sha: "abcdef0123456789".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "abcdef0123456789".to_string(),
+            },
         };
         let toc = "## Title: AdiBags\n## Version: 1.1.0\n## Interface: 110205\n";
         let bytes = build_zip(&[
@@ -1818,7 +2048,9 @@ mod tests {
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
             },
-            head_sha: "abcdef0123456789".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "abcdef0123456789".to_string(),
+            },
         };
         let bytes = build_zip(&[(
             "wrapper/AdiBags/AdiBags.toc",
@@ -1853,7 +2085,9 @@ mod tests {
                 html_url: format!("https://github.com/{owner}/{repo}"),
                 owner_login: owner.to_string(),
             },
-            head_sha: "10808e8123456789".to_string(),
+            package: super::GithubPackage::Source {
+                head_sha: "10808e8123456789".to_string(),
+            },
         }
     }
 
@@ -2805,5 +3039,290 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
+    }
+
+    fn released_repo(owner: &str, repo: &str, tag: &str, asset: &str) -> super::GithubResolvedRepo {
+        super::GithubResolvedRepo {
+            package: super::GithubPackage::Release {
+                tag: tag.to_string(),
+                asset: lemonup_core::github_release::ReleaseAsset {
+                    name: asset.to_string(),
+                    download_url: format!(
+                        "https://github.com/{owner}/{repo}/releases/download/{tag}/{asset}"
+                    ),
+                },
+            },
+            ..resolved_repo(owner, repo)
+        }
+    }
+
+    fn forever_addon_dir(root: &std::path::Path) -> std::path::PathBuf {
+        let addon_dir = root.join("_forever_").join("Interface").join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("addon dir");
+        addon_dir
+    }
+
+    /// The latest release of openmap-world/openmap as the API lists it (v0.8.10), plus a file
+    /// whose download is not on github.com.
+    const OPENMAP_RELEASE: &str = r#"{
+        "tag_name": "v0.8.10",
+        "draft": false,
+        "prerelease": false,
+        "assets": [
+            {"name": "OpenMap-v0.8.10-forever.zip", "browser_download_url": "https://github.com/openmap-world/openmap/releases/download/v0.8.10/OpenMap-v0.8.10-forever.zip"},
+            {"name": "OpenMap-v0.8.10-retail.zip", "browser_download_url": "https://github.com/openmap-world/openmap/releases/download/v0.8.10/OpenMap-v0.8.10-retail.zip"},
+            {"name": "OpenMap-mirror.zip", "browser_download_url": "https://example.com/OpenMap-mirror.zip"}
+        ]
+    }"#;
+
+    #[test]
+    fn a_release_offers_the_zip_for_the_game_and_only_github_downloads() {
+        let release: super::GithubReleaseResponse =
+            serde_json::from_str(OPENMAP_RELEASE).expect("release parses");
+        let assets = release.assets();
+        assert_eq!(assets.len(), 2, "the off-site file is dropped");
+
+        let forever = super::release_package(&release, &assets, GameFlavor::Forever, None)
+            .expect("a zip for Forever");
+        assert_eq!(forever.release_tag(), Some("v0.8.10"));
+        assert_eq!(forever.remote_version(), "v0.8.10");
+        assert_eq!(forever.git_commit(), None);
+        let super::GithubPackage::Release { asset, .. } = forever else {
+            panic!("expected a release package");
+        };
+        assert_eq!(asset.name, "OpenMap-v0.8.10-forever.zip");
+
+        let retail = super::release_package(&release, &assets, GameFlavor::Retail, None)
+            .expect("a zip for Retail");
+        let super::GithubPackage::Release { asset, .. } = retail else {
+            panic!("expected a release package");
+        };
+        assert_eq!(asset.name, "OpenMap-v0.8.10-retail.zip");
+    }
+
+    #[test]
+    fn a_release_json_that_fails_to_download_fails_instead_of_guessing() {
+        let failed = super::read_release_json(Err(crate::source_error::SourceError::new(
+            crate::source_error::SourceErrorKind::Other,
+            "timed out".to_string(),
+        )));
+        assert_eq!(failed.expect_err("propagated").detail, "timed out");
+        assert_eq!(
+            super::read_release_json(Ok(b"<html>not json</html>".to_vec())).expect("read"),
+            None
+        );
+        assert!(
+            super::read_release_json(Ok(br#"{"releases":[]}"#.to_vec()))
+                .expect("read")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn only_https_github_com_downloads_are_used() {
+        assert!(super::is_github_download_url(
+            "https://github.com/o/r/releases/download/v1/Foo.zip"
+        ));
+        for url in [
+            "http://github.com/o/r/releases/download/v1/Foo.zip",
+            "https://api.github.com/o/r/Foo.zip",
+            "https://github.com.example.com/Foo.zip",
+            "https://example.com/Foo.zip",
+            "not a url",
+        ] {
+            assert!(!super::is_github_download_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn drafts_prereleases_and_releases_without_a_fitting_zip_mean_the_source() {
+        let mut release: super::GithubReleaseResponse =
+            serde_json::from_str(OPENMAP_RELEASE).expect("release parses");
+        let assets = release.assets();
+        release.prerelease = true;
+        assert_eq!(
+            super::release_package(&release, &assets, GameFlavor::Retail, None),
+            None
+        );
+        release.prerelease = false;
+        release.draft = true;
+        assert_eq!(
+            super::release_package(&release, &assets, GameFlavor::Retail, None),
+            None
+        );
+        release.draft = false;
+        let classic_only = vec![lemonup_core::github_release::ReleaseAsset {
+            name: "OpenMap-v0.8.10-classic.zip".to_string(),
+            download_url: "https://github.com/openmap-world/openmap/releases/download/v0.8.10/OpenMap-v0.8.10-classic.zip".to_string(),
+        }];
+        assert_eq!(
+            super::release_package(&release, &classic_only, GameFlavor::Retail, None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_source_install_is_never_up_to_date_with_a_release_at_its_commit() {
+        let mut source_install = AddonRecord::new("OpenMap", "OpenMap", SourceKind::GitHub);
+        source_install.git_commit = Some("0f4d2e4b6123456789".to_string());
+        source_install.version = Some("v0.8.10".to_string());
+        let release = released_repo("openmap-world", "openmap", "v0.8.10", "x.zip").package;
+        let source = super::GithubPackage::Source {
+            head_sha: "0f4d2e4b6123456789".to_string(),
+        };
+        assert!(!release.is_installed(&source_install));
+        assert!(source.is_installed(&source_install));
+
+        let mut release_install = source_install.clone();
+        release_install.git_commit = None;
+        release_install.release_tag = Some("v0.8.10".to_string());
+        assert!(release.is_installed(&release_install));
+        assert!(!source.is_installed(&release_install));
+        let newer = released_repo("openmap-world", "openmap", "v0.8.11", "x.zip").package;
+        assert!(!newer.is_installed(&release_install));
+
+        // An older LemonUp updated it from source and left the tag behind.
+        let mut downgraded = release_install.clone();
+        downgraded.git_commit = Some("0f4d2e4b6123456789".to_string());
+        assert!(!release.is_installed(&downgraded));
+        assert!(source.is_installed(&downgraded));
+    }
+
+    const OPENMAP_FOREVER_TOC: &str =
+        "## Interface: 16001\n## Title: OpenMap\n## Version: v0.8.10\nOpenMap.lua\n";
+
+    #[test]
+    fn install_of_a_release_zip_records_the_tag_and_the_zip_s_toc() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = forever_addon_dir(temp.path());
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        // OpenMap-v0.8.10-forever.zip: the folder at the top, no wrapper, only OpenMap.toc.
+        let bytes = build_zip(&[
+            ("OpenMap/OpenMap.toc", OPENMAP_FOREVER_TOC),
+            ("OpenMap/OpenMap.lua", "-- map"),
+        ]);
+
+        let summary = install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &released_repo(
+                "openmap-world",
+                "openmap",
+                "v0.8.10",
+                "OpenMap-v0.8.10-forever.zip",
+            ),
+            &bytes,
+            false,
+            &[],
+        )
+        .expect("install");
+
+        assert_eq!(summary.installed_folders, vec!["OpenMap".to_string()]);
+        assert_eq!(summary.release_tag.as_deref(), Some("v0.8.10"));
+        assert_eq!(summary.git_commit, None);
+        assert_eq!(summary.version.as_deref(), Some("v0.8.10"));
+        let stored = database
+            .get_addon_by_folder("OpenMap")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.installed_release_tag(), Some("v0.8.10"));
+        assert_eq!(stored.git_commit, None);
+        assert_eq!(stored.remote_version.as_deref(), Some("v0.8.10"));
+        assert_eq!(stored.interface.as_deref(), Some("16001"));
+        assert_eq!(
+            crate::update::determine_update_status(&stored).0,
+            lemonup_core::UpdateStatus::UpToDate
+        );
+    }
+
+    #[test]
+    fn update_from_a_source_install_to_the_release_zip_takes_the_packaged_folders() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = forever_addon_dir(temp.path());
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        // A source install of BigWigs: one folder with the modules nested under their repo names.
+        let source = build_zip(&[
+            (
+                "BigWigsMods-BigWigs-c2a8e46/BigWigs.toc",
+                "## Interface: 120105\n## Version: @project-version@\n",
+            ),
+            (
+                "BigWigsMods-BigWigs-c2a8e46/Core/BigWigs_Core.toc",
+                "## Interface: 120105\n",
+            ),
+        ]);
+        let mut source_repo = resolved_repo("BigWigsMods", "BigWigs");
+        source_repo.package = super::GithubPackage::Source {
+            head_sha: "c2a8e4612345678".to_string(),
+        };
+        install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &source_repo,
+            &source,
+            false,
+            &[],
+        )
+        .expect("source install");
+        let tracked = database
+            .get_addon_by_folder("BigWigs")
+            .expect("get")
+            .expect("row");
+        assert_eq!(tracked.installed_release_tag(), None);
+
+        // BigWigs-v427.9.zip: the packager names the modules' folders and lifts them out.
+        let release = build_zip(&[
+            (
+                "BigWigs/BigWigs.toc",
+                "## Interface: 16001, 120105\n## Version: v427.9\n",
+            ),
+            (
+                "BigWigs_Core/BigWigs_Core.toc",
+                "## Interface: 16001, 120105\n",
+            ),
+            (
+                "BigWigs_Options/BigWigs_Options.toc",
+                "## Interface: 16001, 120105\n",
+            ),
+        ]);
+        let summary = update_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &released_repo("BigWigsMods", "BigWigs", "v427.9", "BigWigs-v427.9.zip"),
+            &release,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("update to the release zip");
+
+        assert_eq!(
+            summary.installed_folders,
+            vec![
+                "BigWigs".to_string(),
+                "BigWigs_Core".to_string(),
+                "BigWigs_Options".to_string()
+            ]
+        );
+        assert_eq!(summary.remote_version.as_deref(), Some("v427.9"));
+        assert!(!addon_dir.join("BigWigs").join("Core").exists());
+        assert!(
+            addon_dir
+                .join("BigWigs_Core")
+                .join("BigWigs_Core.toc")
+                .exists()
+        );
+        let stored = database
+            .get_addon_by_folder("BigWigs")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.installed_release_tag(), Some("v427.9"));
+        assert_eq!(stored.version.as_deref(), Some("v427.9"));
+        let owned = stored
+            .owned_folders
+            .iter()
+            .map(|folder| folder.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(owned, vec!["BigWigs_Core", "BigWigs_Options"]);
     }
 }

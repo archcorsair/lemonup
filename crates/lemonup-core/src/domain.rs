@@ -119,6 +119,11 @@ pub struct AddonRecord {
     /// [`source_name`]. Shown instead of the TOC Title; see [`AddonRecord::display_name`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
+    /// The GitHub release tag whose zip is installed, for a GitHub addon installed from a release
+    /// asset (`git_commit` is then unset). `None` for a source zipball install and every other
+    /// source. See [`AddonRecord::installed_release_tag`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
     /// Set only for a row written by a newer LemonUp with values this version does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unrecognized: Option<UnrecognizedValues>,
@@ -151,8 +156,18 @@ impl AddonRecord {
             remote_version: None,
             toc_overrides: BTreeMap::new(),
             source_name: None,
+            release_tag: None,
             unrecognized: None,
         }
+    }
+
+    /// The GitHub release tag the installed copy came from. A release install stores no commit,
+    /// so a row with a commit came from a source zipball, even with a tag left over: an older
+    /// LemonUp, which doesn't know the column, may have updated it from source since.
+    pub fn installed_release_tag(&self) -> Option<&str> {
+        self.release_tag
+            .as_deref()
+            .filter(|tag| !tag.trim().is_empty() && self.git_commit.is_none())
     }
 
     /// The name LemonUp shows for this addon: a Title the user set in the TOC editor, else the

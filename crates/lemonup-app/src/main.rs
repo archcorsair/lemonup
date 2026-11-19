@@ -1622,14 +1622,15 @@ async fn run_install_github(
         .map_err(Box::<dyn std::error::Error>::from)?;
 
     println!(
-        "github install: profile={}, repo_url={}, repo_name={}, parent={}, folders={}, version={}, commit={}, dry_run={}",
+        "github install: profile={}, repo_url={}, repo_name={}, parent={}, folders={}, version={}, commit={}, release={}, dry_run={}",
         runtime.profile_name,
         summary.repo_url,
         summary.repo_name,
         summary.parent_folder,
         summary.installed_folders.join("|"),
         summary.version.as_deref().unwrap_or("<unknown>"),
-        summary.git_commit,
+        summary.git_commit.as_deref().unwrap_or("<none>"),
+        summary.release_tag.as_deref().unwrap_or("<none>"),
         summary.dry_run
     );
 

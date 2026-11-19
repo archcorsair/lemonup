@@ -276,7 +276,12 @@ where
                     }
                 }
             }
-            SourceKind::GitHub => match crate::github::fetch_github_remote_version(&addon).await {
+            SourceKind::GitHub => match crate::github::fetch_github_remote_version(
+                &addon,
+                addon_dir.map_or(addon.flavor, GameFlavor::for_addons_dir),
+            )
+            .await
+            {
                 Ok(remote) => {
                     // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
                     results.extend(record_check(
@@ -905,28 +910,7 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
     }
 
     if addon.source == lemonup_core::SourceKind::GitHub {
-        return match (
-            installed_github_commit(addon),
-            addon
-                .remote_version
-                .as_deref()
-                .filter(|value| is_commit_hash(value)),
-        ) {
-            (Some(installed_commit), Some(remote_commit))
-                if crate::github::commits_match(Some(installed_commit), Some(remote_commit)) =>
-            {
-                (UpdateStatus::UpToDate, None)
-            }
-            (Some(_), Some(_)) => (
-                UpdateStatus::UpdateAvailable,
-                Some("the source has a different commit than the installed one".to_string()),
-            ),
-            (_, None) => (UpdateStatus::Unknown, Some("not checked yet".to_string())),
-            (None, Some(_)) => (
-                UpdateStatus::Unknown,
-                Some("the installed commit is unknown".to_string()),
-            ),
-        };
+        return determine_github_update_status(addon);
     }
 
     match (addon.version.as_deref(), addon.remote_version.as_deref()) {
@@ -951,6 +935,54 @@ pub(crate) fn determine_update_status(addon: &AddonRecord) -> (UpdateStatus, Opt
         (None, Some(_)) => (
             UpdateStatus::Unknown,
             Some("the installed version is unknown".to_string()),
+        ),
+    }
+}
+
+/// GitHub addons compare what is installed with what an update would install: a release tag
+/// when the repo's latest release has a zip for the game (see `github::GithubPackage`), else the
+/// head commit. A source install is never up to date with a release, so it moves to the release
+/// zip even when the tag points at the installed commit.
+fn determine_github_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<String>) {
+    let Some(remote) = addon
+        .remote_version
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return (UpdateStatus::Unknown, Some("not checked yet".to_string()));
+    };
+
+    if let Some(installed_tag) = addon.installed_release_tag() {
+        return if installed_tag.trim() == remote.trim() {
+            (UpdateStatus::UpToDate, None)
+        } else {
+            (
+                UpdateStatus::UpdateAvailable,
+                Some("the source has a different version than the installed one".to_string()),
+            )
+        };
+    }
+
+    // A release tag for a source install, even one whose commit is unknown (v1 rows) or whose
+    // own version equals the tag. Checks store a commit as GitHub's full 40 characters, so a
+    // tag that only looks like one (`20241118`) is still a tag.
+    if !crate::github::is_full_commit(remote) {
+        return (
+            UpdateStatus::UpdateAvailable,
+            Some("the source has a release for this game".to_string()),
+        );
+    }
+    match installed_github_commit(addon) {
+        None => (
+            UpdateStatus::Unknown,
+            Some("the installed commit is unknown".to_string()),
+        ),
+        Some(installed) if crate::github::commits_match(Some(installed), Some(remote)) => {
+            (UpdateStatus::UpToDate, None)
+        }
+        Some(_) => (
+            UpdateStatus::UpdateAvailable,
+            Some("the source has a different commit than the installed one".to_string()),
         ),
     }
 }
@@ -1091,6 +1123,7 @@ pub(crate) fn build_managed_update_record(
         remote_version: existing.remote_version.clone(),
         toc_overrides: existing.toc_overrides.clone(),
         source_name: existing.source_name.clone(),
+        release_tag: existing.release_tag.clone(),
         unrecognized: existing.unrecognized.clone(),
     };
     refreshed.set_managed_owned_folders(existing.owned_folders.clone());
@@ -1844,6 +1877,87 @@ mod tests {
 
         assert_eq!(status, UpdateStatus::UpToDate);
         assert_eq!(message, None);
+    }
+
+    #[test]
+    fn a_github_source_install_is_update_ready_when_the_source_has_a_release() {
+        let mut addon = AddonRecord::new("OpenMap", "OpenMap", SourceKind::GitHub);
+        addon.git_commit = Some("0f4d2e4b6123456789".to_string());
+        addon.version = Some("v0.8.10".to_string());
+        addon.remote_version = Some("v0.8.10".to_string());
+
+        let (status, message) = determine_update_status(&addon);
+
+        assert_eq!(status, UpdateStatus::UpdateAvailable);
+        assert_eq!(
+            message.as_deref(),
+            Some("the source has a release for this game")
+        );
+    }
+
+    #[test]
+    fn a_github_row_without_a_known_commit_is_update_ready_for_a_release() {
+        let mut addon = AddonRecord::new("OpenMap", "OpenMap", SourceKind::GitHub);
+        addon.version = Some("@project-version@".to_string());
+        addon.remote_version = Some("v0.8.10".to_string());
+
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+    }
+
+    #[test]
+    fn a_github_row_without_a_known_commit_is_update_ready_for_a_tag_that_looks_like_one() {
+        let mut addon = AddonRecord::new("Dated", "Dated", SourceKind::GitHub);
+        addon.version = Some("@project-version@".to_string());
+        addon.remote_version = Some("20241118".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+
+        // A full commit still can't be compared with an unknown installed one.
+        addon.remote_version = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
+        assert_eq!(determine_update_status(&addon).0, UpdateStatus::Unknown);
+
+        // The addon's own version equals the tag, and it still came from source.
+        addon.version = Some("20241118".to_string());
+        addon.remote_version = Some("20241118".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+    }
+
+    #[test]
+    fn a_github_release_install_compares_release_tags() {
+        let mut addon = AddonRecord::new("BigWigs", "BigWigs", SourceKind::GitHub);
+        addon.version = Some("v427.9".to_string());
+        addon.release_tag = Some("v427.9".to_string());
+        addon.remote_version = Some("v427.9".to_string());
+        assert_eq!(determine_update_status(&addon).0, UpdateStatus::UpToDate);
+
+        addon.remote_version = Some("v428.0".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+
+        // The release lost its zip for this game, so an update goes back to the source.
+        addon.remote_version = Some("c2a8e4612345678".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+
+        addon.remote_version = None;
+        assert_eq!(determine_update_status(&addon).0, UpdateStatus::Unknown);
+
+        // A tag that looks like a commit is still compared as a tag.
+        addon.release_tag = Some("20241118".to_string());
+        addon.remote_version = Some("20241118".to_string());
+        assert_eq!(determine_update_status(&addon).0, UpdateStatus::UpToDate);
     }
 
     #[test]
