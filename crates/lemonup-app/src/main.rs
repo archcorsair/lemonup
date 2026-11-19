@@ -169,10 +169,13 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             addons,
             force,
             dry_run,
-        } => run_update(paths, runtime, addons, force, dry_run).await?,
-        Commands::UpdateAll { force, dry_run } => {
-            run_update(paths, runtime, Vec::new(), force, dry_run).await?
-        }
+            replace,
+        } => run_update(paths, runtime, addons, force, dry_run, replace).await?,
+        Commands::UpdateAll {
+            force,
+            dry_run,
+            replace,
+        } => run_update(paths, runtime, Vec::new(), force, dry_run, replace).await?,
         // Install commands target a single addon: a failed install is a fatal `Err` (exit 1).
         Commands::InstallWago {
             addon,
@@ -825,6 +828,7 @@ async fn run_update(
     addons: Vec<String>,
     force: bool,
     dry_run: bool,
+    replace: bool,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(&paths.state_db_file)?;
@@ -902,18 +906,21 @@ async fn run_update(
                 api_key.as_deref(),
                 force,
                 dry_run,
+                replace,
                 |_, _, _| {},
             )
             .await?;
+            // Held packages are removed when `run` drops; the CLI never asks.
             let summary = run.summary;
             println!(
-                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, remote_older={}, skipped_manual={}, skipped_no_api_key={}, errors={}, force={}, dry_run={}",
+                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, remote_older={}, held={}, skipped_manual={}, skipped_no_api_key={}, errors={}, force={}, dry_run={}",
                 runtime.profile_name,
                 installed.len(),
                 render_target_list(&addons),
                 summary.updated_addons,
                 summary.up_to_date,
                 summary.remote_older,
+                summary.held,
                 summary.skipped_manual,
                 summary.skipped_no_api_key,
                 summary.errors,
@@ -1299,6 +1306,7 @@ fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) ->
         .filter(|result| {
             result.status == LiveUpdateStatus::Error
                 || result.status == LiveUpdateStatus::RemoteOlder
+                || result.status == LiveUpdateStatus::Held
                 || (result.status == LiveUpdateStatus::Updated && result.message.is_some())
         })
         .map(format_update_result_line)
@@ -1324,8 +1332,13 @@ fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) ->
 }
 
 fn format_update_result_line(result: &LiveUpdateResult) -> String {
+    let held_hint = if result.status == LiveUpdateStatus::Held {
+        "; rerun with --replace to replace them"
+    } else {
+        ""
+    };
     format!(
-        "update result: addon={}, source={}, status={}, previous_version={}, remote_version={}, message={}",
+        "update result: addon={}, source={}, status={}, previous_version={}, remote_version={}, message={}{held_hint}",
         result.addon_name,
         render_source_kind(result.source),
         serialize_live_update_status(result.status),
@@ -1742,6 +1755,7 @@ mod tests {
             Commands::UpdateAll {
                 force: false,
                 dry_run: false,
+                replace: false,
             },
             Commands::ExportAddons { output: None },
         ] {
@@ -1940,6 +1954,27 @@ mod tests {
             CommandOutcome::from_error_count(count_check_errors(&failing)).exit_status(),
             1
         );
+    }
+
+    #[test]
+    fn a_held_update_names_its_folders_and_the_replace_flag() {
+        let mut held = update_result("BigWigs", LiveUpdateStatus::Held, SourceKind::GitHub);
+        held.message = Some(
+            "would replace Not linked folders: BigWigs_Core (has .git, likely a dev copy), \
+             BigWigs_Options"
+                .to_string(),
+        );
+        // Named or all: a held addon is always listed.
+        for addons in [Vec::new(), vec!["BigWigs".to_string()]] {
+            let lines = build_update_detail_lines(&addons, std::slice::from_ref(&held));
+            assert!(
+                lines.iter().any(|line| line.contains("status=held")
+                    && line
+                        .contains("BigWigs_Core (has .git, likely a dev copy), BigWigs_Options")
+                    && line.ends_with("; rerun with --replace to replace them")),
+                "{lines:?}"
+            );
+        }
     }
 
     fn update_result(
@@ -2510,6 +2545,7 @@ mod addon_dir_binding_tests {
             sandbox.paths.clone(),
             runtime(Some(&sandbox.forever)),
             Vec::new(),
+            false,
             false,
             false,
         )

@@ -13,6 +13,37 @@ use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
 
 use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
 
+/// Which "Not linked" folders an update may replace: those the person said yes to, or any
+/// (`lemonup update --replace`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReplaceNotLinked<'a> {
+    Only(&'a [String]),
+    Any,
+}
+
+impl ReplaceNotLinked<'_> {
+    /// Nobody was asked yet.
+    pub(crate) const NONE: ReplaceNotLinked<'static> = ReplaceNotLinked::Only(&[]);
+
+    fn allows(self, folder: &str) -> bool {
+        match self {
+            Self::Only(agreed) => contains_folder(agreed, folder),
+            Self::Any => true,
+        }
+    }
+}
+
+/// What an update of one addon replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateReplacements {
+    /// The folders to move aside: those that exist on disk are moved by the caller (missing ones
+    /// are skipped there).
+    pub(crate) replaced: Vec<String>,
+    /// "Not linked" folders on disk the package would replace that nobody agreed to. While this
+    /// is not empty the update must not touch anything.
+    pub(crate) not_linked: Vec<String>,
+}
+
 /// Plans the folders an update of `tracked` moves aside before copying `package_folders` in.
 ///
 /// - A tracked addon with authoritative (managed) ownership replaces its parent and every owned
@@ -20,22 +51,23 @@ use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
 /// - A tracked addon without authoritative ownership (none or scan-inferred, for example a row
 ///   migrated from v1) replaces only its parent; the rest of the folder set comes from the
 ///   package, exactly as a fresh install would take it.
-/// - A package folder outside that set may be taken over when its existing row is manual
-///   (untracked) or it has no row at all. After the update it becomes an owned folder of the
-///   updated addon, and `record_managed_addon` drops its separate row.
+/// - A package folder that is already the addon's own (its parent, or an owned folder whether the
+///   ownership is managed or scan-inferred) is replaced without asking.
+/// - Any other package folder on disk is "Not linked" (a manual row or no row): it is replaced
+///   only when `agree` allows it, and otherwise listed in `not_linked`. After the update it
+///   becomes an owned folder of the updated addon, and `record_managed_addon` drops its separate
+///   row.
 /// - A package folder that is itself, or is owned by, a different tracked non-manual addon, or
 ///   one a newer LemonUp linked (shown as "Not linked" here), refuses the whole update.
-///
-/// Returns the folders to move aside: those of the replaced set that exist on disk are moved by
-/// the caller (missing ones are skipped there).
 pub(crate) fn plan_update_replacements(
     database: &StateDatabase,
     addon_dir: &Path,
     tracked: &AddonRecord,
     package_folders: &[String],
-) -> Result<Vec<String>, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<UpdateReplacements, String> {
     let rows = database.list_addons().map_err(|error| error.to_string())?;
-    plan_update_replacements_from_rows(&rows, addon_dir, tracked, package_folders)
+    plan_update_replacements_from_rows(&rows, addon_dir, tracked, package_folders, agree)
 }
 
 fn plan_update_replacements_from_rows(
@@ -43,7 +75,8 @@ fn plan_update_replacements_from_rows(
     addon_dir: &Path,
     tracked: &AddonRecord,
     package_folders: &[String],
-) -> Result<Vec<String>, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<UpdateReplacements, String> {
     let mut replaced = vec![tracked.folder.clone()];
     if tracked.has_authoritative_owned_folders() {
         for owned in &tracked.owned_folders {
@@ -54,6 +87,7 @@ fn plan_update_replacements_from_rows(
     }
 
     let mut conflicts = Vec::new();
+    let mut not_linked = Vec::new();
     for folder in package_folders {
         if contains_folder(&replaced, folder) {
             continue;
@@ -71,19 +105,34 @@ fn plan_update_replacements_from_rows(
             });
             continue;
         }
-        if addon_dir.join(folder).exists() {
+        if !addon_dir.join(folder).exists() {
+            continue;
+        }
+        // Scan-inferred ownership (a row migrated from v1) still counts as the addon's own.
+        if tracked.claims_folder(folder) || agree.allows(folder) {
             replaced.push(folder.clone());
+        } else {
+            not_linked.push(folder.clone());
         }
     }
 
     if conflicts.is_empty() {
-        Ok(replaced)
+        Ok(UpdateReplacements {
+            replaced,
+            not_linked,
+        })
     } else {
         Err(format!(
             "update refused because these addon folders are owned by something else on disk: {}",
             conflicts.join(", ")
         ))
     }
+}
+
+/// Whether `folder` in `addon_dir` holds a `.git` entry (a folder or a file), so it is likely a
+/// developer's working copy.
+pub(crate) fn is_dev_copy(addon_dir: &Path, folder: &str) -> bool {
+    std::fs::symlink_metadata(addon_dir.join(folder).join(".git")).is_ok()
 }
 
 /// The linked addon (see `AddonRecord::holds_its_folders`), other than `updating`, that is
@@ -252,7 +301,9 @@ pub(crate) fn linked_folders_error(clash: FolderClash) -> SourceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_install_replacements_from_rows, plan_update_replacements_from_rows};
+    use super::{
+        ReplaceNotLinked, plan_install_replacements_from_rows, plan_update_replacements_from_rows,
+    };
     use crate::source_error::SourceErrorKind;
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, UnrecognizedValues};
     use tempfile::tempdir;
@@ -287,8 +338,10 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["AstralKeys"]),
+            ReplaceNotLinked::NONE,
         )
-        .expect("plan");
+        .expect("plan")
+        .replaced;
 
         assert_eq!(replaced, folders(&["AstralKeys"]));
     }
@@ -305,8 +358,10 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["Pawn", "Pawn_Extra"]),
+            ReplaceNotLinked::NONE,
         )
-        .expect("plan");
+        .expect("plan")
+        .replaced;
 
         assert_eq!(replaced, folders(&["Pawn", "Pawn_Extra"]));
     }
@@ -323,8 +378,10 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["ElvUI", "ElvUI_Options"]),
+            ReplaceNotLinked::NONE,
         )
-        .expect("plan");
+        .expect("plan")
+        .replaced;
 
         assert_eq!(
             replaced,
@@ -332,8 +389,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manual_rows_and_rowless_folders_in_the_package_are_taken_over() {
+    fn dbm_with_not_linked_folders() -> (tempfile::TempDir, AddonRecord, Vec<AddonRecord>) {
         let temp = tempdir().expect("tempdir");
         make_dirs(
             temp.path(),
@@ -344,26 +400,147 @@ mod tests {
         // A manual row's scan-inferred children are untracked as well.
         manual_gui.set_scan_owned_folders(owned(&["DBM-Brawlers"]));
         let rows = vec![tracked.clone(), manual_gui];
+        (temp, tracked, rows)
+    }
 
-        let replaced = plan_update_replacements_from_rows(
+    const DBM_PACKAGE: [&str; 5] = [
+        "DBM-Core",
+        "DBM-GUI",
+        "DBM-Brawlers",
+        "DBM-StatusBarTimers",
+        "DBM-VPVEM",
+    ];
+
+    #[test]
+    fn not_linked_package_folders_need_a_yes_before_an_update_replaces_them() {
+        let (temp, tracked, rows) = dbm_with_not_linked_folders();
+
+        let plan = plan_update_replacements_from_rows(
             &rows,
             temp.path(),
             &tracked,
-            &folders(&[
-                "DBM-Core",
-                "DBM-GUI",
-                "DBM-Brawlers",
-                "DBM-StatusBarTimers",
-                "DBM-VPVEM",
-            ]),
+            &folders(&DBM_PACKAGE),
+            ReplaceNotLinked::NONE,
         )
         .expect("plan");
 
-        // DBM-VPVEM is not on disk, so there is nothing to move aside for it.
+        // DBM-VPVEM is not on disk, so there is nothing to ask about or move aside for it.
+        assert_eq!(plan.replaced, folders(&["DBM-Core"]));
         assert_eq!(
-            replaced,
-            folders(&["DBM-Core", "DBM-GUI", "DBM-Brawlers", "DBM-StatusBarTimers"])
+            plan.not_linked,
+            folders(&["DBM-GUI", "DBM-Brawlers", "DBM-StatusBarTimers"])
         );
+    }
+
+    #[test]
+    fn agreed_not_linked_folders_are_replaced() {
+        let (temp, tracked, rows) = dbm_with_not_linked_folders();
+        let expected = folders(&["DBM-Core", "DBM-GUI", "DBM-Brawlers", "DBM-StatusBarTimers"]);
+
+        let agreed = folders(&["dbm-gui", "DBM-Brawlers", "DBM-StatusBarTimers"]);
+        let plan = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&DBM_PACKAGE),
+            ReplaceNotLinked::Only(&agreed),
+        )
+        .expect("plan");
+        assert_eq!(plan.replaced, expected);
+        assert!(plan.not_linked.is_empty());
+
+        let plan = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&DBM_PACKAGE),
+            ReplaceNotLinked::Any,
+        )
+        .expect("plan");
+        assert_eq!(plan.replaced, expected);
+        assert!(plan.not_linked.is_empty());
+    }
+
+    #[test]
+    fn a_folder_nobody_agreed_to_is_still_asked_about() {
+        let (temp, tracked, rows) = dbm_with_not_linked_folders();
+
+        let agreed = folders(&["DBM-GUI", "DBM-Brawlers"]);
+        let plan = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&DBM_PACKAGE),
+            ReplaceNotLinked::Only(&agreed),
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan.replaced,
+            folders(&["DBM-Core", "DBM-GUI", "DBM-Brawlers"])
+        );
+        assert_eq!(plan.not_linked, folders(&["DBM-StatusBarTimers"]));
+    }
+
+    #[test]
+    fn inferred_owned_folders_of_a_migrated_row_need_no_yes() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["BigWigs", "BigWigs_Core", "BigWigs_Options"]);
+        let mut tracked = AddonRecord::new("BigWigs", "BigWigs", SourceKind::GitHub);
+        tracked.set_scan_owned_folders(owned(&["BigWigs_Core", "BigWigs_Options"]));
+
+        let plan = plan_update_replacements_from_rows(
+            std::slice::from_ref(&tracked),
+            temp.path(),
+            &tracked,
+            &folders(&["BigWigs", "BigWigs_Core", "BigWigs_Options"]),
+            ReplaceNotLinked::NONE,
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan.replaced,
+            folders(&["BigWigs", "BigWigs_Core", "BigWigs_Options"])
+        );
+        assert!(plan.not_linked.is_empty());
+    }
+
+    #[test]
+    fn a_yes_never_takes_a_folder_of_another_linked_addon() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Foo", "Shared_Lib"]);
+        let tracked = AddonRecord::new("Foo", "Foo", SourceKind::GitHub);
+        let mut other = AddonRecord::new("Bar", "Bar", SourceKind::Tukui);
+        other.set_managed_owned_folders(owned(&["Shared_Lib"]));
+        let rows = vec![tracked.clone(), other];
+
+        let error = plan_update_replacements_from_rows(
+            &rows,
+            temp.path(),
+            &tracked,
+            &folders(&["Foo", "Shared_Lib"]),
+            ReplaceNotLinked::Any,
+        )
+        .expect_err("a linked addon's folder is never replaced");
+
+        assert!(
+            error.ends_with("Shared_Lib (owned by tracked addon Bar)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_a_git_entry_is_a_dev_copy() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(
+            temp.path(),
+            &["BigWigs_Core/.git", "BigWigs_Options", "Worktree"],
+        );
+        std::fs::write(temp.path().join("Worktree/.git"), "gitdir: elsewhere").expect("file");
+
+        assert!(super::is_dev_copy(temp.path(), "BigWigs_Core"));
+        assert!(super::is_dev_copy(temp.path(), "Worktree"));
+        assert!(!super::is_dev_copy(temp.path(), "BigWigs_Options"));
     }
 
     #[test]
@@ -379,6 +556,7 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["GatherMate2", "GatherMate2_Data"]),
+            ReplaceNotLinked::NONE,
         )
         .expect_err("tracked folder must not be taken over");
 
@@ -402,6 +580,7 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["Foo", "Shared_Lib"]),
+            ReplaceNotLinked::NONE,
         )
         .expect_err("folder owned by another tracked addon must not be taken over");
 
@@ -428,6 +607,7 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["Foo", "shared", "LIBTHING"]),
+            ReplaceNotLinked::NONE,
         )
         .expect_err("a differently cased folder of another tracked addon must not be taken");
 
@@ -450,8 +630,10 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["elvui", "ELVUI_OPTIONS"]),
+            ReplaceNotLinked::NONE,
         )
-        .expect("own folders in another case");
+        .expect("own folders in another case")
+        .replaced;
 
         assert_eq!(replaced, folders(&["ElvUI", "ElvUI_Options"]));
     }
@@ -649,6 +831,7 @@ mod tests {
             temp.path(),
             &tracked,
             &folders(&["Foo", "pawn", "Pawn_Extra"]),
+            ReplaceNotLinked::NONE,
         )
         .expect_err("folders of an addon a newer version linked must not be taken");
 

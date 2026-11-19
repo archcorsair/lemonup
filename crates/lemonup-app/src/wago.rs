@@ -1,3 +1,5 @@
+use crate::update::HeldPackage;
+use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,28 @@ pub(crate) struct WagoUpdateSummary {
     /// Not updated because the remote version is older than the installed one.
     pub(crate) remote_older: bool,
     pub(crate) dry_run: bool,
+    /// "Not linked" folders the new package would replace that nobody agreed to. While this is
+    /// not empty nothing was updated.
+    pub(crate) not_linked: Vec<String>,
+}
+
+impl WagoUpdateSummary {
+    fn finished(self) -> crate::update::FinishedUpdate {
+        crate::update::FinishedUpdate {
+            previous_version: self.previous_version,
+            remote_version: self.remote_version,
+            not_linked: self.not_linked,
+            warning: None,
+        }
+    }
+
+    pub(crate) fn outcome(self) -> crate::update::ProviderOutcome {
+        crate::update::ProviderOutcome {
+            updated: self.updated,
+            remote_older: self.remote_older,
+            finished: self.finished(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,7 +449,8 @@ pub(crate) async fn update_wago_addon(
     api_key: &str,
     force: bool,
     dry_run: bool,
-) -> Result<WagoUpdateSummary, String> {
+    agree: ReplaceNotLinked<'_>,
+) -> Result<(WagoUpdateSummary, Option<HeldPackage>), String> {
     if tracked.source != SourceKind::Wago {
         return Err(format!("addon '{}' is not linked to Wago", tracked.folder));
     }
@@ -461,35 +486,53 @@ pub(crate) async fn update_wago_addon(
             Some(&resolved.addon.display_name),
             dry_run,
         )?;
-        return Ok(WagoUpdateSummary {
-            addon_id: resolved.addon.id.clone(),
-            addon_name: resolved.addon.display_name.clone(),
-            parent_folder: tracked.folder.clone(),
-            installed_folders: tracked
-                .owned_folders
-                .iter()
-                .map(|owned| owned.name.clone())
-                .chain(std::iter::once(tracked.folder.clone()))
-                .collect(),
-            stability: resolved.stability,
-            previous_version: tracked.version.clone(),
-            remote_version,
-            updated: false,
-            remote_older,
-            dry_run,
-        });
+        return Ok((
+            WagoUpdateSummary {
+                addon_id: resolved.addon.id.clone(),
+                addon_name: resolved.addon.display_name.clone(),
+                parent_folder: tracked.folder.clone(),
+                installed_folders: tracked
+                    .owned_folders
+                    .iter()
+                    .map(|owned| owned.name.clone())
+                    .chain(std::iter::once(tracked.folder.clone()))
+                    .collect(),
+                stability: resolved.stability,
+                previous_version: tracked.version.clone(),
+                remote_version,
+                updated: false,
+                remote_older,
+                dry_run,
+                not_linked: Vec::new(),
+            },
+            None,
+        ));
     }
 
     let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
-    update_downloaded_wago_addon(
+    let summary = update_downloaded_wago_addon(
         state_database,
         addon_dir,
         tracked,
         &resolved.addon,
         &bytes,
         resolved.stability,
+        agree,
         dry_run,
-    )
+    )?;
+    if summary.not_linked.is_empty() || dry_run {
+        return Ok((summary, None));
+    }
+    let package = HeldPackage::keep(&bytes, {
+        let (addon, stability) = (resolved.addon, resolved.stability);
+        move |database, addon_dir, tracked, bytes, agree| {
+            update_downloaded_wago_addon(
+                database, addon_dir, tracked, &addon, bytes, stability, agree, false,
+            )
+            .map(WagoUpdateSummary::finished)
+        }
+    })?;
+    Ok((summary, Some(package)))
 }
 
 fn install_downloaded_wago_addon(
@@ -624,6 +667,7 @@ fn inspect_downloaded_wago_addon(
     })()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_downloaded_wago_addon(
     state_database: &mut StateDatabase,
     addon_dir: &Path,
@@ -631,6 +675,7 @@ fn update_downloaded_wago_addon(
     addon: &WagoAddonSummary,
     archive_bytes: &[u8],
     stability: WagoStability,
+    agree: ReplaceNotLinked<'_>,
     dry_run: bool,
 ) -> Result<WagoUpdateSummary, String> {
     let temp_root = create_temp_work_dir("wago-update")?;
@@ -669,15 +714,19 @@ fn update_downloaded_wago_addon(
             })?;
 
         // Parent plus owned folders (authoritative ownership only) and any package folders
-        // taken over from manual rows; refuses folders of other tracked addons.
-        let managed_folders = crate::update_targets::plan_update_replacements(
+        // agreed to take over from manual rows; refuses folders of other tracked addons.
+        let plan = crate::update_targets::plan_update_replacements(
             state_database,
             addon_dir,
             tracked,
             &extracted.folders,
+            agree,
         )?;
+        let managed_folders = plan.replaced;
+        // A package that would replace "Not linked" folders nobody agreed to changes nothing.
+        let held = !plan.not_linked.is_empty();
 
-        if dry_run {
+        if dry_run || held {
             return Ok(WagoUpdateSummary {
                 addon_id: addon.id.clone(),
                 addon_name: addon.display_name.clone(),
@@ -686,9 +735,10 @@ fn update_downloaded_wago_addon(
                 stability,
                 previous_version,
                 remote_version: release_version(addon, stability),
-                updated: true,
+                updated: !held,
                 remote_older: false,
-                dry_run: true,
+                dry_run,
+                not_linked: plan.not_linked,
             });
         }
 
@@ -722,6 +772,7 @@ fn update_downloaded_wago_addon(
             updated: true,
             remote_older: false,
             dry_run: false,
+            not_linked: Vec::new(),
         })
     })()
 }
@@ -1779,6 +1830,7 @@ mod tests {
             &addon,
             &bytes,
             WagoStability::Stable,
+            crate::update_targets::ReplaceNotLinked::NONE,
             false,
         )
         .expect("update addon");
@@ -1865,6 +1917,8 @@ mod tests {
             &addon,
             &bytes,
             WagoStability::Stable,
+            // The person said yes to replacing the Not linked folders.
+            crate::update_targets::ReplaceNotLinked::Any,
             false,
         )
         .expect("update addon");
@@ -1898,6 +1952,171 @@ mod tests {
                 .is_none(),
             "the taken-over manual row is folded into the updated addon"
         );
+    }
+
+    #[test]
+    fn update_over_a_not_linked_folder_is_held_then_applied_after_a_yes() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        for folder in ["AstralKeys", "AstralKeys_Extra"] {
+            fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            fs::write(addon_dir.join(folder).join("stale.lua"), "old").expect("stale file");
+        }
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut tracked =
+            lemonup_core::AddonRecord::new("AstralKeys", "AstralKeys", SourceKind::Wago);
+        tracked.version = Some("4.10".to_string());
+        tracked.source_url = Some("https://addons.wago.io/addons/astralkeys".to_string());
+        database.upsert_addon(&tracked).expect("seed tracked addon");
+        let manual = lemonup_core::AddonRecord::new(
+            "AstralKeys_Extra",
+            "AstralKeys_Extra",
+            SourceKind::Manual,
+        );
+        database.upsert_addon(&manual).expect("seed manual row");
+        let rows_before = database.list_addons().expect("rows");
+
+        let mut addon = sample_addon();
+        addon.id = "astralkeys".to_string();
+        addon.display_name = "AstralKeys".to_string();
+        addon.releases.stable.as_mut().expect("stable").label = Some("4.11".to_string());
+        let bytes = build_zip(&[
+            (
+                "AstralKeys/AstralKeys.toc",
+                "## Title: AstralKeys\n## Version: 4.11\n## Interface: 110205\n",
+            ),
+            (
+                "AstralKeys_Extra/AstralKeys_Extra.toc",
+                "## Title: AstralKeys Extra\n## Version: 4.11\n## Interface: 110205\n",
+            ),
+        ]);
+
+        // Nobody agreed yet: held, and nothing on disk or in the database changes.
+        let summary = update_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &tracked,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("held update");
+        assert!(!summary.updated);
+        assert_eq!(summary.not_linked, vec!["AstralKeys_Extra".to_string()]);
+        for folder in ["AstralKeys", "AstralKeys_Extra"] {
+            assert!(
+                addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        assert_eq!(database.list_addons().expect("rows"), rows_before);
+
+        // A yes applies it from the kept package, without a download.
+        let package = crate::update::HeldPackage::keep(&bytes, {
+            let addon = addon.clone();
+            move |database, addon_dir, tracked, bytes, agree| {
+                update_downloaded_wago_addon(
+                    database,
+                    addon_dir,
+                    tracked,
+                    &addon,
+                    bytes,
+                    WagoStability::Stable,
+                    agree,
+                    false,
+                )
+                .map(super::WagoUpdateSummary::finished)
+            }
+        })
+        .expect("keep package");
+        let held =
+            crate::update::HeldUpdate::new(&tracked, &addon_dir, &summary.finished(), package);
+        let kept = held.package_path().to_path_buf();
+        assert!(kept.exists());
+        let result = held.apply(&mut database, &addon_dir);
+        assert_eq!(result.status, crate::update::LiveUpdateStatus::Updated);
+        assert!(
+            !kept.exists(),
+            "the kept package is removed after the update"
+        );
+        for folder in ["AstralKeys", "AstralKeys_Extra"] {
+            assert!(
+                !addon_dir.join(folder).join("stale.lua").exists(),
+                "{folder}"
+            );
+        }
+        let stored = database
+            .get_addon_by_folder("AstralKeys")
+            .expect("get addon")
+            .expect("addon exists");
+        assert!(
+            stored
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name == "AstralKeys_Extra")
+        );
+        assert!(
+            database
+                .get_addon_by_folder("AstralKeys_Extra")
+                .expect("get manual")
+                .is_none()
+        );
+
+        // The folder is the addon's own now: the next update does not ask again.
+        let again = update_downloaded_wago_addon(
+            &mut database,
+            &addon_dir,
+            &stored,
+            &addon,
+            &bytes,
+            WagoStability::Stable,
+            crate::update_targets::ReplaceNotLinked::NONE,
+            false,
+        )
+        .expect("second update");
+        assert!(again.updated);
+        assert!(again.not_linked.is_empty());
+    }
+
+    #[test]
+    fn a_skipped_held_update_removes_its_kept_package() {
+        let package = crate::update::HeldPackage::keep(b"zip", |_, _, _, _, _| {
+            Err("never applied".to_string())
+        })
+        .expect("keep package");
+        let tracked = lemonup_core::AddonRecord::new("BigWigs", "BigWigs", SourceKind::GitHub);
+        let finished = crate::update::FinishedUpdate {
+            previous_version: None,
+            remote_version: None,
+            not_linked: vec!["BigWigs_Core".to_string()],
+            warning: None,
+        };
+        let temp = tempdir().expect("tempdir");
+        let held = crate::update::HeldUpdate::new(&tracked, temp.path(), &finished, package);
+        let kept = held.package_path().to_path_buf();
+        assert!(kept.join("package.zip").exists());
+        held.discard();
+        assert!(!kept.exists());
+
+        // Dropping it (LemonUp quitting with the question open) removes it too.
+        let package = crate::update::HeldPackage::keep(b"zip", |_, _, _, _, _| {
+            Err("never applied".to_string())
+        })
+        .expect("keep package");
+        let kept = package.path().to_path_buf();
+        drop(crate::update::HeldUpdate::new(
+            &tracked,
+            temp.path(),
+            &finished,
+            package,
+        ));
+        assert!(!kept.exists());
     }
 
     #[test]
@@ -1952,6 +2171,7 @@ mod tests {
             &addon,
             &bytes,
             WagoStability::Stable,
+            crate::update_targets::ReplaceNotLinked::NONE,
             true,
         )
         .expect("dry-run update");

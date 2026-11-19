@@ -6,9 +6,9 @@ use crate::app::text_input::TextInput;
 use crate::app::{
     BackupPaneState, ConfigPaneState, CurseForgeAction, DashboardJobStep, DashboardJobUiState,
     DashboardSortColumn, DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode,
-    DirectInstallRequest, FindAction, FooterKeyPulse, GamesAction, HelpContext, InstallPaneState,
-    PendingWagoInstallRequest, SearchPaneState, StatusMessage, TocApplyRequest, TocEditPane,
-    WagoInstallConfirmation,
+    DirectInstallRequest, FindAction, FooterKeyPulse, GamesAction, HeldUpdates, HelpContext,
+    InstallPaneState, PendingWagoInstallRequest, SearchPaneState, StatusMessage, TocApplyRequest,
+    TocEditPane, WagoInstallConfirmation,
 };
 use crate::drift::DriftReport;
 use crate::onboarding::OnboardingState;
@@ -27,6 +27,13 @@ pub enum AppAction {
     CancelAddingGame,
     /// Opens or closes the "quit while updating?" question.
     SetQuitQuestion(bool),
+    /// Asks about updates an update run held for "Not linked" folders (nothing when empty).
+    OpenHeldQuestion(HeldUpdates),
+    /// Yes to that question: applies the held updates from their kept packages.
+    StartApplyHeldUpdates,
+    /// No to it: skips them and removes their packages.
+    SkipHeldUpdates,
+    SetHeldQuestionOffset(u16),
     AdvanceMotionTick,
     SetFooterKeyPulse(Option<FooterKeyPulse>),
     SetInspectOverlay(bool),

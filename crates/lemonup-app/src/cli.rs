@@ -50,6 +50,9 @@ pub enum Commands {
         force: bool,
         #[arg(long)]
         dry_run: bool,
+        /// Replace Not linked folders the new version brings, instead of skipping the addon
+        #[arg(long)]
+        replace: bool,
     },
     /// Update all linked addons
     UpdateAll {
@@ -57,6 +60,9 @@ pub enum Commands {
         force: bool,
         #[arg(long)]
         dry_run: bool,
+        /// Replace Not linked folders the new version brings, instead of skipping the addon
+        #[arg(long)]
+        replace: bool,
     },
     /// Install a Wago addon by slug or URL
     InstallWago {
@@ -294,10 +300,12 @@ mod tests {
                 addons,
                 force,
                 dry_run,
+                replace,
             } => {
                 assert_eq!(addons, vec!["WeakAuras", "DBM-Core"]);
                 assert!(!force);
                 assert!(dry_run);
+                assert!(!replace);
             }
             other => panic!("expected update command, got {other:?}"),
         }
@@ -309,11 +317,32 @@ mod tests {
             Cli::try_parse_from(["lemonup", "update-all", "--force"]).expect("parse update-all");
 
         match cli.command.expect("subcommand") {
-            Commands::UpdateAll { force, dry_run } => {
+            Commands::UpdateAll {
+                force,
+                dry_run,
+                replace,
+            } => {
                 assert!(force);
                 assert!(!dry_run);
+                assert!(!replace);
             }
             other => panic!("expected update-all command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_commands_accept_replace() {
+        for args in [
+            &["lemonup", "update", "BigWigs", "--replace"][..],
+            &["lemonup", "update-all", "--replace"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parse --replace");
+            match cli.command.expect("subcommand") {
+                Commands::Update { replace, .. } | Commands::UpdateAll { replace, .. } => {
+                    assert!(replace, "{args:?}");
+                }
+                other => panic!("expected an update command, got {other:?}"),
+            }
         }
     }
 

@@ -9,6 +9,8 @@ use lemonup_core::{
 use lemonup_core::{ScannedAddon, scan_addons_dir};
 use time::OffsetDateTime;
 
+use crate::update_targets::ReplaceNotLinked;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckResult {
     pub(crate) addon_name: String,
@@ -38,6 +40,8 @@ pub(crate) struct LiveUpdateSummary {
     pub(crate) skipped_no_api_key: usize,
     /// Remote version is older than the installed one; not updated without `--force`.
     pub(crate) remote_older: usize,
+    /// Held because the update would replace "Not linked" folders nobody agreed to.
+    pub(crate) held: usize,
     pub(crate) errors: usize,
 }
 
@@ -50,6 +54,7 @@ impl LiveUpdateSummary {
         self.skipped_manual += other.skipped_manual;
         self.skipped_no_api_key += other.skipped_no_api_key;
         self.remote_older += other.remote_older;
+        self.held += other.held;
         self.errors += other.errors;
     }
 }
@@ -61,6 +66,8 @@ pub(crate) enum LiveUpdateStatus {
     SkippedManual,
     SkippedNoApiKey,
     RemoteOlder,
+    /// Not updated yet: it would replace "Not linked" folders nobody agreed to.
+    Held,
     Error,
 }
 
@@ -74,10 +81,12 @@ pub(crate) struct LiveUpdateResult {
     pub(crate) message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct LiveUpdateRun {
     pub(crate) summary: LiveUpdateSummary,
     pub(crate) results: Vec<LiveUpdateResult>,
+    /// Updates held for a yes, with their downloaded packages kept.
+    pub(crate) held: Vec<HeldUpdate>,
 }
 
 pub(crate) fn build_update_checks(
@@ -294,6 +303,10 @@ where
     Ok(results)
 }
 
+/// Updates the selected addons one at a time. An addon whose new package would replace "Not
+/// linked" folders is held (see [`HeldUpdate`]) unless `replace_not_linked` agrees to replace
+/// them; the held updates come back in `LiveUpdateRun::held` with their packages kept.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_live_updates(
     database: &mut StateDatabase,
     addon_dir: &Path,
@@ -301,6 +314,7 @@ pub(crate) async fn apply_live_updates(
     wago_api_key: Option<&str>,
     force: bool,
     dry_run: bool,
+    replace_not_linked: bool,
     mut on_progress: impl FnMut(usize, usize, String),
 ) -> Result<LiveUpdateRun, LemonupError> {
     let installed = database.list_addons()?;
@@ -308,22 +322,23 @@ pub(crate) async fn apply_live_updates(
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
+    let agree = if replace_not_linked {
+        ReplaceNotLinked::Any
+    } else {
+        ReplaceNotLinked::NONE
+    };
 
     let mut summary = LiveUpdateSummary {
         target_addons: selected.len(),
-        updated_addons: 0,
-        up_to_date: 0,
-        skipped_manual: 0,
-        skipped_no_api_key: 0,
-        remote_older: 0,
-        errors: 0,
+        ..LiveUpdateSummary::default()
     };
     let mut results = Vec::with_capacity(selected.len());
+    let mut held = Vec::new();
 
     let total = selected.len();
     for (index, addon) in selected.into_iter().enumerate() {
         on_progress(index + 1, total, addon.folder.clone());
-        match addon.source {
+        let outcome = match addon.source {
             SourceKind::Manual => {
                 summary.skipped_manual += 1;
                 results.push(LiveUpdateResult {
@@ -334,6 +349,7 @@ pub(crate) async fn apply_live_updates(
                     remote_version: addon.remote_version.clone(),
                     message: Some("addons that are not linked cannot be updated yet".to_string()),
                 });
+                continue;
             }
             SourceKind::Wago => {
                 // Tracked addons without authoritative ownership (for example rows migrated
@@ -350,204 +366,374 @@ pub(crate) async fn apply_live_updates(
                     });
                     continue;
                 };
-
-                match crate::wago::update_wago_addon(
-                    database, addon_dir, &addon, api_key, force, dry_run,
+                crate::wago::update_wago_addon(
+                    database, addon_dir, &addon, api_key, force, dry_run, agree,
                 )
                 .await
-                {
-                    Ok(result) if result.remote_older => {
-                        summary.remote_older += 1;
-                        results.push(remote_older_result(
-                            &addon,
-                            result.previous_version,
-                            result.remote_version,
-                        ));
-                    }
-                    Ok(result) if result.updated => {
-                        summary.updated_addons += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Updated,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: None,
-                        });
-                    }
-                    Ok(result) => {
-                        summary.up_to_date += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::UpToDate,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: Some(
-                                "remote package already matches installed version".to_string(),
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        summary.errors += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Error,
-                            previous_version: addon.version.clone(),
-                            remote_version: addon.remote_version.clone(),
-                            message: Some(error),
-                        });
-                    }
-                }
+                .map(|(result, package)| (result.outcome(), package))
             }
             SourceKind::Tukui => {
-                match crate::tukui::update_tukui_addon(database, addon_dir, &addon, force, dry_run)
+                crate::tukui::update_tukui_addon(database, addon_dir, &addon, force, dry_run, agree)
                     .await
-                {
-                    Ok(result) if result.remote_older => {
-                        summary.remote_older += 1;
-                        results.push(remote_older_result(
-                            &addon,
-                            result.previous_version,
-                            result.remote_version,
-                        ));
-                    }
-                    Ok(result) if result.updated => {
-                        summary.updated_addons += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Updated,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: None,
-                        });
-                    }
-                    Ok(result) => {
-                        summary.up_to_date += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::UpToDate,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: Some(
-                                "remote package already matches installed version".to_string(),
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        summary.errors += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Error,
-                            previous_version: addon.version.clone(),
-                            remote_version: addon.remote_version.clone(),
-                            message: Some(error),
-                        });
-                    }
-                }
+                    .map(|(result, package)| (result.outcome(), package))
             }
-            SourceKind::WowInterface => {
-                match crate::wowinterface::update_wowinterface_addon(
-                    database, addon_dir, &addon, force, dry_run,
-                )
-                .await
-                {
-                    Ok(result) if result.remote_older => {
-                        summary.remote_older += 1;
-                        results.push(remote_older_result(
-                            &addon,
-                            result.previous_version,
-                            result.remote_version,
-                        ));
-                    }
-                    Ok(result) if result.updated => {
-                        summary.updated_addons += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Updated,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: result.warning,
-                        });
-                    }
-                    Ok(result) => {
-                        summary.up_to_date += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::UpToDate,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: Some(
-                                "remote package already matches installed version".to_string(),
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        summary.errors += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Error,
-                            previous_version: addon.version.clone(),
-                            remote_version: addon.remote_version.clone(),
-                            message: Some(error),
-                        });
-                    }
-                }
-            }
-            SourceKind::GitHub => {
-                match crate::github::update_github_addon(
-                    database, addon_dir, &addon, force, dry_run,
-                )
-                .await
-                {
-                    Ok(result) if result.updated => {
-                        summary.updated_addons += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Updated,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: None,
-                        });
-                    }
-                    Ok(result) => {
-                        summary.up_to_date += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::UpToDate,
-                            previous_version: result.previous_version,
-                            remote_version: result.remote_version,
-                            message: Some(
-                                "remote package already matches installed version".to_string(),
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        summary.errors += 1;
-                        results.push(LiveUpdateResult {
-                            addon_name: addon.folder.clone(),
-                            source: addon.source,
-                            status: LiveUpdateStatus::Error,
-                            previous_version: addon.version.clone(),
-                            remote_version: addon.remote_version.clone(),
-                            message: Some(error),
-                        });
-                    }
-                }
-            }
+            SourceKind::WowInterface => crate::wowinterface::update_wowinterface_addon(
+                database, addon_dir, &addon, force, dry_run, agree,
+            )
+            .await
+            .map(|(result, package)| (result.outcome(), package)),
+            SourceKind::GitHub => crate::github::update_github_addon(
+                database, addon_dir, &addon, force, dry_run, agree,
+            )
+            .await
+            .map(|(result, package)| (result.outcome(), package)),
+        };
+        record_provider_result(
+            &mut summary,
+            &mut results,
+            &mut held,
+            &addon,
+            addon_dir,
+            outcome,
+        );
+    }
+
+    Ok(LiveUpdateRun {
+        summary,
+        results,
+        held,
+    })
+}
+
+/// What finishing a provider update from a downloaded package did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinishedUpdate {
+    pub(crate) previous_version: Option<String>,
+    pub(crate) remote_version: Option<String>,
+    /// "Not linked" folders the package would replace that nobody agreed to; the update did
+    /// nothing while this is not empty.
+    pub(crate) not_linked: Vec<String>,
+    pub(crate) warning: Option<String>,
+}
+
+type FinishHeld = Box<
+    dyn FnOnce(
+            &mut StateDatabase,
+            &Path,
+            &AddonRecord,
+            &[u8],
+            ReplaceNotLinked<'_>,
+        ) -> Result<FinishedUpdate, String>
+        + Send,
+>;
+
+/// A downloaded package whose update waits for a yes, kept in its own temp folder until the
+/// update finishes or is skipped. Dropping it removes the folder.
+pub(crate) struct HeldPackage {
+    dir: tempfile::TempDir,
+    finish: FinishHeld,
+}
+
+impl std::fmt::Debug for HeldPackage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeldPackage")
+            .field("dir", &self.dir.path())
+            .finish_non_exhaustive()
+    }
+}
+
+const HELD_PACKAGE_FILE: &str = "package.zip";
+
+impl HeldPackage {
+    /// Keeps `bytes` on disk; `finish` runs the provider's update from them later, with the
+    /// provider's resolved data it captured.
+    pub(crate) fn keep(
+        bytes: &[u8],
+        finish: impl FnOnce(
+            &mut StateDatabase,
+            &Path,
+            &AddonRecord,
+            &[u8],
+            ReplaceNotLinked<'_>,
+        ) -> Result<FinishedUpdate, String>
+        + Send
+        + 'static,
+    ) -> Result<Self, String> {
+        let dir = tempfile::Builder::new()
+            .prefix("lemonup-held-update-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        std::fs::write(dir.path().join(HELD_PACKAGE_FILE), bytes)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            dir,
+            finish: Box::new(finish),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// Runs the update from the kept package, then removes it.
+    fn finish(
+        self,
+        database: &mut StateDatabase,
+        addon_dir: &Path,
+        tracked: &AddonRecord,
+        agree: ReplaceNotLinked<'_>,
+    ) -> Result<FinishedUpdate, String> {
+        let Self { dir, finish } = self;
+        let outcome = std::fs::read(dir.path().join(HELD_PACKAGE_FILE))
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| finish(database, addon_dir, tracked, &bytes, agree));
+        let _ = dir.close();
+        outcome
+    }
+
+    /// Removes the kept package now.
+    fn discard(self) {
+        let _ = self.dir.close();
+    }
+}
+
+/// An update held back because its package would replace "Not linked" folders nobody agreed
+/// to. Nothing on disk or in the database changed for it.
+#[derive(Debug)]
+pub(crate) struct HeldUpdate {
+    /// The linked addon's folder, as `LiveUpdateResult::addon_name`.
+    pub(crate) folder: String,
+    /// The name shown for the addon.
+    pub(crate) name: String,
+    pub(crate) source: SourceKind,
+    /// Every "Not linked" folder the update would replace.
+    pub(crate) folders: Vec<String>,
+    /// Those of `folders` that hold a `.git` entry (likely a developer's copy).
+    pub(crate) dev_copies: Vec<String>,
+    previous_version: Option<String>,
+    remote_version: Option<String>,
+    package: HeldPackage,
+}
+
+impl HeldUpdate {
+    pub(crate) fn new(
+        tracked: &AddonRecord,
+        addon_dir: &Path,
+        finished: &FinishedUpdate,
+        package: HeldPackage,
+    ) -> Self {
+        let name = tracked.name.trim();
+        Self {
+            folder: tracked.folder.clone(),
+            name: if name.is_empty() {
+                tracked.folder.clone()
+            } else {
+                name.to_string()
+            },
+            source: tracked.source,
+            dev_copies: dev_copies(addon_dir, &finished.not_linked),
+            folders: finished.not_linked.clone(),
+            previous_version: finished.previous_version.clone(),
+            remote_version: finished.remote_version.clone(),
+            package,
         }
     }
 
-    Ok(LiveUpdateRun { summary, results })
+    #[cfg(test)]
+    pub(crate) fn package_path(&self) -> &Path {
+        self.package.path()
+    }
+
+    /// Finishes the update from the kept package, replacing exactly the folders the person
+    /// agreed to, then removes the package.
+    pub(crate) fn apply(self, database: &mut StateDatabase, addon_dir: &Path) -> LiveUpdateResult {
+        let mut result = LiveUpdateResult {
+            addon_name: self.folder.clone(),
+            source: self.source,
+            status: LiveUpdateStatus::Error,
+            previous_version: self.previous_version.clone(),
+            remote_version: self.remote_version.clone(),
+            message: None,
+        };
+        let tracked = match database.list_addons() {
+            Ok(rows) => rows.into_iter().find(|row| row.folder == self.folder),
+            Err(error) => {
+                self.package.discard();
+                result.message = Some(error.to_string());
+                return result;
+            }
+        };
+        let Some(tracked) = tracked.filter(|row| row.source == self.source) else {
+            self.package.discard();
+            result.message = Some(format!("{} is no longer linked", self.name));
+            return result;
+        };
+        match self.package.finish(
+            database,
+            addon_dir,
+            &tracked,
+            ReplaceNotLinked::Only(&self.folders),
+        ) {
+            Ok(finished) if finished.not_linked.is_empty() => {
+                result.status = LiveUpdateStatus::Updated;
+                result.previous_version = finished.previous_version;
+                result.remote_version = finished.remote_version;
+                result.message = finished.warning;
+            }
+            Ok(finished) => {
+                result.message = Some(format!(
+                    "it would also replace these Not linked folders: {}",
+                    finished.not_linked.join(", ")
+                ));
+            }
+            Err(error) => result.message = Some(error),
+        }
+        result
+    }
+
+    /// Skips the update and removes the kept package.
+    pub(crate) fn discard(self) {
+        self.package.discard();
+    }
+}
+
+fn dev_copies(addon_dir: &Path, folders: &[String]) -> Vec<String> {
+    folders
+        .iter()
+        .filter(|folder| crate::update_targets::is_dev_copy(addon_dir, folder))
+        .cloned()
+        .collect()
+}
+
+/// The CLI and status words for the folders an update would replace: `A, B (has .git, likely a
+/// dev copy)`.
+pub(crate) fn describe_not_linked_folders(folders: &[String], dev_copies: &[String]) -> String {
+    folders
+        .iter()
+        .map(|folder| {
+            if dev_copies.contains(folder) {
+                format!("{folder} (has .git, likely a dev copy)")
+            } else {
+                folder.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Applies updates the person agreed to after they were held, one at a time, from their kept
+/// packages (no download).
+pub(crate) fn apply_held_updates(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    held: Vec<HeldUpdate>,
+) -> LiveUpdateRun {
+    let mut summary = LiveUpdateSummary {
+        target_addons: held.len(),
+        ..LiveUpdateSummary::default()
+    };
+    let mut results = Vec::with_capacity(held.len());
+    for update in held {
+        let result = update.apply(database, addon_dir);
+        match result.status {
+            LiveUpdateStatus::Updated => summary.updated_addons += 1,
+            _ => summary.errors += 1,
+        }
+        results.push(result);
+    }
+    LiveUpdateRun {
+        summary,
+        results,
+        held: Vec::new(),
+    }
+}
+
+/// Records one provider result: held back (with its kept package unless `dry_run`), updated,
+/// already up to date, newer than the source, or failed.
+fn record_provider_result(
+    summary: &mut LiveUpdateSummary,
+    results: &mut Vec<LiveUpdateResult>,
+    held: &mut Vec<HeldUpdate>,
+    addon: &AddonRecord,
+    addon_dir: &Path,
+    outcome: Result<(ProviderOutcome, Option<HeldPackage>), String>,
+) {
+    let base = |status, previous_version, remote_version, message| LiveUpdateResult {
+        addon_name: addon.folder.clone(),
+        source: addon.source,
+        status,
+        previous_version,
+        remote_version,
+        message,
+    };
+    match outcome {
+        Ok((outcome, package)) if !outcome.finished.not_linked.is_empty() => {
+            summary.held += 1;
+            let dev = dev_copies(addon_dir, &outcome.finished.not_linked);
+            results.push(base(
+                LiveUpdateStatus::Held,
+                outcome.finished.previous_version.clone(),
+                outcome.finished.remote_version.clone(),
+                Some(format!(
+                    "would replace Not linked folders: {}",
+                    describe_not_linked_folders(&outcome.finished.not_linked, &dev)
+                )),
+            ));
+            if let Some(package) = package {
+                held.push(HeldUpdate::new(
+                    addon,
+                    addon_dir,
+                    &outcome.finished,
+                    package,
+                ));
+            }
+        }
+        Ok((outcome, _)) if outcome.remote_older => {
+            summary.remote_older += 1;
+            results.push(remote_older_result(
+                addon,
+                outcome.finished.previous_version,
+                outcome.finished.remote_version,
+            ));
+        }
+        Ok((outcome, _)) if outcome.updated => {
+            summary.updated_addons += 1;
+            results.push(base(
+                LiveUpdateStatus::Updated,
+                outcome.finished.previous_version,
+                outcome.finished.remote_version,
+                outcome.finished.warning,
+            ));
+        }
+        Ok((outcome, _)) => {
+            summary.up_to_date += 1;
+            results.push(base(
+                LiveUpdateStatus::UpToDate,
+                outcome.finished.previous_version,
+                outcome.finished.remote_version,
+                Some("remote package already matches installed version".to_string()),
+            ));
+        }
+        Err(error) => {
+            summary.errors += 1;
+            results.push(base(
+                LiveUpdateStatus::Error,
+                addon.version.clone(),
+                addon.remote_version.clone(),
+                Some(error),
+            ));
+        }
+    }
+}
+
+/// A provider update result in the shape every provider shares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderOutcome {
+    pub(crate) updated: bool,
+    pub(crate) remote_older: bool,
+    pub(crate) finished: FinishedUpdate,
 }
 
 fn remote_older_result(
@@ -807,6 +993,7 @@ pub(crate) fn serialize_live_update_status(status: LiveUpdateStatus) -> &'static
         LiveUpdateStatus::SkippedManual => "skipped_manual",
         LiveUpdateStatus::SkippedNoApiKey => "skipped_no_api_key",
         LiveUpdateStatus::RemoteOlder => "remote_older",
+        LiveUpdateStatus::Held => "held",
         LiveUpdateStatus::Error => "error",
     }
 }
@@ -1083,6 +1270,7 @@ mod tests {
             None,
             false,
             true,
+            false,
             |_, _, _| {},
         )
         .await
@@ -1548,6 +1736,7 @@ mod tests {
             Some("unused"),
             false,
             true,
+            false,
             |_, _, _| {},
         )
         .await
@@ -1559,6 +1748,66 @@ mod tests {
         assert_eq!(run.results.len(), 2);
         assert_eq!(run.results[0].status, LiveUpdateStatus::SkippedManual);
         assert_eq!(run.results[1].status, LiveUpdateStatus::Error);
+    }
+
+    #[test]
+    fn an_update_that_would_replace_not_linked_folders_is_held_and_named() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("BigWigs_Core").join(".git")).expect("git");
+        std::fs::create_dir_all(temp.path().join("BigWigs_Options")).expect("folder");
+        let addon = AddonRecord::new("BigWigs", "BigWigs", SourceKind::GitHub);
+        let outcome = super::ProviderOutcome {
+            updated: false,
+            remote_older: false,
+            finished: super::FinishedUpdate {
+                previous_version: Some("1".to_string()),
+                remote_version: Some("2".to_string()),
+                not_linked: vec!["BigWigs_Core".to_string(), "BigWigs_Options".to_string()],
+                warning: None,
+            },
+        };
+        let mut summary = super::LiveUpdateSummary::default();
+        let mut results = Vec::new();
+        let mut held = Vec::new();
+
+        // A dry run keeps no package, but still reports what would be held.
+        super::record_provider_result(
+            &mut summary,
+            &mut results,
+            &mut held,
+            &addon,
+            temp.path(),
+            Ok((outcome.clone(), None)),
+        );
+        assert_eq!(summary.held, 1);
+        assert_eq!(summary.updated_addons, 0);
+        assert!(held.is_empty());
+        assert_eq!(results[0].status, super::LiveUpdateStatus::Held);
+        assert_eq!(
+            results[0].message.as_deref(),
+            Some(
+                "would replace Not linked folders: BigWigs_Core (has .git, likely a dev copy), \
+                 BigWigs_Options"
+            )
+        );
+
+        let package = super::HeldPackage::keep(b"zip", |_, _, _, _, _| Err("unused".to_string()))
+            .expect("keep");
+        super::record_provider_result(
+            &mut summary,
+            &mut results,
+            &mut held,
+            &addon,
+            temp.path(),
+            Ok((outcome, Some(package))),
+        );
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].name, "BigWigs");
+        assert_eq!(held[0].dev_copies, vec!["BigWigs_Core".to_string()]);
+        assert_eq!(
+            super::serialize_live_update_status(super::LiveUpdateStatus::Held),
+            "held"
+        );
     }
 
     #[test]
@@ -1763,6 +2012,7 @@ mod tests {
             Some("unused"),
             false,
             true,
+            false,
             |_, _, _| {},
         )
         .await
@@ -1864,6 +2114,7 @@ mod tests {
             None,
             false,
             false,
+            false,
             |_, _, _| {},
         )
         .await
@@ -1924,6 +2175,7 @@ mod tests {
             Some("unused"),
             false,
             true,
+            false,
             |_, _, _| {},
         )
         .await
