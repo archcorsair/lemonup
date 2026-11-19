@@ -87,6 +87,11 @@ pub(super) enum Question {
         curseforge: Vec<String>,
         offset: u16,
     },
+    /// After a link or install, or `m` in Details: mark `names` Ignored in
+    /// CurseForge, which still manages them.
+    MarkIgnored {
+        names: Vec<String>,
+    },
 }
 
 impl Question {
@@ -111,6 +116,10 @@ impl Question {
                 (links, replaces) => {
                     format!("Link {} and replace {replaces}?", addon_count_label(links))
                 }
+            },
+            Self::MarkIgnored { names } => match names.as_slice() {
+                [one] => format!("Mark {one} Ignored in CurseForge?"),
+                _ => format!("Mark these {} addons Ignored in CurseForge?", names.len()),
             },
         }
     }
@@ -142,6 +151,7 @@ impl Question {
             Self::LinkFound { replaces: 0, .. } => ("link", "skip"),
             Self::LinkFound { links: 0, .. } => ("replace", "skip"),
             Self::LinkFound { .. } => ("link and replace", "skip"),
+            Self::MarkIgnored { .. } => ("mark", "skip"),
         }
     }
 
@@ -186,6 +196,10 @@ impl Question {
             Self::LinkFound { .. } => (
                 AppMessage::Find(FindMessage::ConfirmLink),
                 AppMessage::Find(FindMessage::CancelLink),
+            ),
+            Self::MarkIgnored { .. } => (
+                AppMessage::CurseForge(CurseForgeMessage::Confirm),
+                AppMessage::CurseForge(CurseForgeMessage::Skip),
             ),
         }
     }
@@ -445,6 +459,37 @@ impl Question {
                 )));
                 lines
             }
+            Self::MarkIgnored { names: all } => {
+                let mut lines = Vec::new();
+                let (these, them) = if all.len() == 1 {
+                    ("this addon", "it")
+                } else {
+                    let shown = if all.len() > names {
+                        names.saturating_sub(1).max(1)
+                    } else {
+                        all.len()
+                    };
+                    let mut list = all[..shown].join(", ");
+                    if shown < all.len() {
+                        list.push_str(&format!(" and {} more", all.len() - shown));
+                    }
+                    lines.push(Line::from(Span::styled(list, strong)));
+                    lines.push(Line::from(""));
+                    ("these addons", "them")
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "CurseForge also manages {these}. Once Ignored there, CurseForge \
+                         leaves {them} to LemonUp."
+                    ),
+                    text,
+                )));
+                lines.push(Line::from(Span::styled(
+                    "LemonUp keeps a copy of CurseForge's list next to it first.",
+                    muted,
+                )));
+                lines
+            }
         }
     }
 
@@ -514,6 +559,7 @@ impl Question {
             Self::ReplaceAddon { folders, .. } | Self::ChangeTocFiles { folders, .. } => {
                 folders.len().min(DIALOG_MAX_NAMES)
             }
+            Self::MarkIgnored { names } => names.len().min(DIALOG_MAX_NAMES),
             _ => 0,
         };
         let mut lines = build(names);
@@ -679,19 +725,28 @@ impl App {
         if let Some(question) = self.find_question() {
             return Some(question);
         }
+        if let Some(mark) = &self.curseforge_mark {
+            return Some(Question::MarkIgnored {
+                names: mark.names.clone(),
+            });
+        }
         None
     }
 
     /// Keys while a question is open: `y` yes, `n` `esc` `q` no, and every
     /// other key does nothing. `None` when no question is open.
     ///
-    /// A replace question arrives from a background install, so its `y`
-    /// counts only when read after the question was first drawn: a `y` typed
-    /// while the install ran never answers it.
+    /// A replace question, and the CurseForge one after an install or link,
+    /// arrive from background work, so their `y` counts only when read after
+    /// the question was first drawn: a `y` typed while the work ran never
+    /// answers it.
     pub(super) fn question_messages_for_key(&self, key: KeyEvent) -> Option<Vec<AppMessage>> {
         let question = self.active_question()?;
         if key.code == KeyCode::Char('y')
-            && matches!(question, Question::ReplaceAddon { .. })
+            && matches!(
+                question,
+                Question::ReplaceAddon { .. } | Question::MarkIgnored { .. }
+            )
             && !self.question_seen_before_key(&question)
         {
             return Some(vec![]);

@@ -59,6 +59,7 @@ use crate::wago::{
 };
 use time::{Duration, OffsetDateTime};
 
+mod curseforge_mark;
 mod dialog;
 mod direct_install;
 mod find_sheet;
@@ -77,6 +78,7 @@ mod status;
 pub(crate) mod text_input;
 mod toc_editor;
 
+pub(crate) use self::curseforge_mark::{CurseForgeAction, CurseForgeMark, CurseForgeMessage};
 pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
     DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
@@ -266,6 +268,8 @@ enum FooterHintId {
     SwitchGame,
     /// `F`, find your addons online.
     FindAll,
+    /// `m` in Details, mark the addon Ignored in CurseForge.
+    MarkIgnored,
     /// `1`, `2` and `3` in the Find sheet: a source on or off.
     Sources,
 }
@@ -535,6 +539,7 @@ enum AppMessage {
     TocEdit(TocEditMessage),
     Games(GamesMessage),
     Find(FindMessage),
+    CurseForge(CurseForgeMessage),
     BackgroundTask(AppTaskEvent),
 }
 
@@ -2846,6 +2851,16 @@ pub struct App {
     /// What CurseForge manages in the AddOns folder, as of the last scan or
     /// the last time Details opened. Details reads it; nothing else does.
     curseforge: CurseForgeManaged,
+    /// The question to mark addons Ignored in CurseForge, while it is open.
+    curseforge_mark: Option<CurseForgeMark>,
+    /// LemonUp can change CurseForge's list on this system (Linux).
+    curseforge_can_mark: bool,
+    /// Whether CurseForge may be running; asked before every change.
+    curseforge_running: fn() -> bool,
+    /// What the last mark did, for Details and the Search result to show on
+    /// the addons it was about, as neither has a status line: their folders,
+    /// how it went, and the text. Cleared when Details opens or closes.
+    curseforge_details_note: Option<(Vec<String>, StatusKind, String)>,
     wago_install_in_progress: bool,
     direct_install_in_progress: bool,
     auto_check_in_progress: bool,
@@ -3051,6 +3066,10 @@ impl App {
             pending_wago_install_confirmation: None,
             curseforge_files: lemonup_core::curseforge::record_files(),
             curseforge: CurseForgeManaged::default(),
+            curseforge_mark: None,
+            curseforge_can_mark: cfg!(target_os = "linux"),
+            curseforge_running: lemonup_core::curseforge::is_running,
+            curseforge_details_note: None,
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -3669,6 +3688,14 @@ impl App {
         if docked_details && !self.dashboard.filter_editing() && key.code == KeyCode::Char('e') {
             return vec![AppMessage::TocEdit(TocEditMessage::Open)];
         }
+        // `m` marks the addon Ignored in CurseForge, where that does something.
+        if docked_details
+            && !self.dashboard.filter_editing()
+            && key.code == KeyCode::Char('m')
+            && self.details_curseforge_mark().is_some()
+        {
+            return vec![AppMessage::CurseForge(CurseForgeMessage::MarkFromDetails)];
+        }
 
         if self.shell_ui.overlay.active == Some(OverlayKind::Inspect) && !docked_details {
             return match key.code {
@@ -3695,6 +3722,9 @@ impl App {
                 KeyCode::Char('e') => vec![AppMessage::TocEdit(TocEditMessage::Open)],
                 KeyCode::Char('f') if self.not_linked_current_item().is_some() => {
                     vec![AppMessage::FindOnline]
+                }
+                KeyCode::Char('m') if self.details_curseforge_mark().is_some() => {
+                    vec![AppMessage::CurseForge(CurseForgeMessage::MarkFromDetails)]
                 }
                 KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc => {
                     vec![AppMessage::DashboardCloseOverlay]
@@ -5497,6 +5527,7 @@ impl App {
             AppMessage::TocEdit(message) => self.toc_edit_actions(message),
             AppMessage::Games(message) => self.games_actions(message),
             AppMessage::Find(message) => self.find_actions(message),
+            AppMessage::CurseForge(message) => self.curseforge_actions(message),
             AppMessage::BackgroundTask(event) => match event {
                 AppTaskEvent::Onboarding(event) => self.onboarding_task_actions(event),
                 AppTaskEvent::Find(event) => self.find_actions(FindMessage::Task(event)),
@@ -5836,7 +5867,12 @@ impl App {
                 AppTaskEvent::WagoInstallFinished(Ok(WagoInstallTaskOutcome::Installed(
                     outcome,
                 ))) => {
-                    vec![
+                    let (status, follow_up) = self.with_curseforge_note(
+                        format!("{} is installed", outcome.summary.addon_name),
+                        &outcome.summary.addon_name,
+                        outcome.summary.installed_folders.iter().map(String::as_str),
+                    );
+                    let mut actions = vec![
                         AppAction::SetSearchPaneState(
                             self.search_pane.finish_install(&outcome.summary),
                         ),
@@ -5852,12 +5888,11 @@ impl App {
                         AppAction::SetStatus(self.dashboard_status_for(
                             StatusKind::Done,
                             self.dashboard.detail_mode,
-                            &self.with_curseforge_note(
-                                format!("{} is installed", outcome.summary.addon_name),
-                                outcome.summary.installed_folders.iter().map(String::as_str),
-                            ),
+                            &status,
                         )),
-                    ]
+                    ];
+                    actions.extend(follow_up);
+                    actions
                 }
                 // The install is done and recorded; only the list on screen is
                 // out of date. Never reported as a failed install.
@@ -5917,18 +5952,19 @@ impl App {
                         .into_iter()
                         .flatten()
                         .chain([outcome.parent_folder.as_str()]);
-                    let mut status = self.with_curseforge_note(
+                    let (mut status, follow_up) = self.with_curseforge_note(
                         format!(
                             "{} is installed from {}",
                             outcome.addon_name,
                             request.provider.label()
                         ),
+                        &outcome.addon_name,
                         folders,
                     );
                     if let Some(warning) = &outcome.warning {
                         status.push_str(&format!(" | {warning}"));
                     }
-                    vec![
+                    let mut actions = vec![
                         AppAction::SetSearchPaneState(
                             self.search_pane.finish_direct_install(&request, &outcome),
                         ),
@@ -5944,7 +5980,9 @@ impl App {
                             self.dashboard.detail_mode,
                             &status,
                         )),
-                    ]
+                    ];
+                    actions.extend(follow_up);
+                    actions
                 }
                 // Its folders are already in AddOns (a "Not linked" copy):
                 // ask before replacing them, naming them. A download that
@@ -6031,6 +6069,7 @@ impl App {
             AppAction::SetFooterKeyPulse(pulse) => self.shell_ui.footer_pulse = pulse,
             AppAction::SetInspectOverlay(active) => {
                 self.shell_ui.overlay.active = active.then_some(OverlayKind::Inspect);
+                self.curseforge_details_note = None;
                 if active {
                     self.curseforge = self.curseforge_now();
                 }
@@ -6318,6 +6357,7 @@ impl App {
             AppAction::CancelAddingGame => self.cancel_adding_game(),
             AppAction::Games(action) => self.apply_games(action),
             AppAction::Find(action) => self.apply_find(action),
+            AppAction::CurseForge(action) => self.apply_curseforge(action),
             AppAction::LeaveOnboarding => {
                 // Back to the list as it was: nothing from setup is kept.
                 self.onboarding = self.onboarding.set_quit_question(false);
@@ -7246,16 +7286,31 @@ impl App {
 
     /// `text` with ". CurseForge also manages it. Mark it Ignored there."
     /// when it manages any of `folders`: the short form for the status line.
+    /// Where LemonUp can mark `name` itself, also the question to ask, or
+    /// while CurseForge runs, the sentence that says to quit it.
     fn with_curseforge_note<'a>(
         &self,
         text: String,
+        name: &str,
         folders: impl IntoIterator<Item = &'a str>,
-    ) -> String {
-        if self.curseforge_now().manages_any(folders) {
-            format!("{text}. CurseForge also manages it. Mark it Ignored there.")
-        } else {
-            text
+    ) -> (String, Vec<AppAction>) {
+        let folders = folders.into_iter().map(str::to_string).collect::<Vec<_>>();
+        if !self
+            .curseforge_now()
+            .manages_any(folders.iter().map(String::as_str))
+        {
+            return (text, Vec::new());
         }
+        let mut text = format!("{text}. CurseForge also manages it. Mark it Ignored there.");
+        let (extra, actions) = self.curseforge_follow_up(CurseForgeMark {
+            names: vec![name.to_string()],
+            folders,
+        });
+        if let Some(extra) = extra {
+            text.push(' ');
+            text.push_str(extra);
+        }
+        (text, actions)
     }
 
     fn dashboard_status_for(
@@ -8893,6 +8948,7 @@ mod tests {
         }
     }
 
+    mod curseforge_mark;
     mod find_sheet;
 
     /// A synthetic `_retail_` game folder with a `.curseclient`, and a
@@ -8999,6 +9055,11 @@ mod tests {
             // Tests never read the real CurseForge record.
             curseforge_files: Vec::new(),
             curseforge: lemonup_core::curseforge::CurseForgeManaged::default(),
+            curseforge_mark: None,
+            // As on Windows and macOS, unless a test says otherwise.
+            curseforge_can_mark: false,
+            curseforge_running: || true,
+            curseforge_details_note: None,
             wago_install_in_progress: false,
             direct_install_in_progress: false,
             auto_check_in_progress: false,
@@ -18558,7 +18619,8 @@ mod tests {
                 HelpWhen::HasWagoKey
                 | HelpWhen::NotLinked
                 | HelpWhen::NoJob
-                | HelpWhen::DetailsOverflow => {}
+                | HelpWhen::DetailsOverflow
+                | HelpWhen::CurseForgeManages => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),
@@ -18580,6 +18642,20 @@ mod tests {
                     .position(|row| row.folder == "First")
                     .expect("First row");
                 app.dashboard.list_state.select(Some(index));
+            }
+            // CurseForge manages the addon Details shows, and LemonUp can
+            // mark it. The record is read now; nothing writes it.
+            if when == HelpWhen::CurseForgeManages {
+                let folder = app
+                    .dashboard
+                    .selected_item()
+                    .expect("an addon")
+                    .folder
+                    .clone();
+                let _game = use_curseforge(&mut app, &[folder.as_str()]);
+                app.curseforge = app.curseforge_now();
+                app.curseforge_can_mark = true;
+                app.curseforge_running = || false;
             }
             assert!(app.help_row_applies(when), "{context:?} {title}");
             // As drawn: a question answers keys once it is on screen.

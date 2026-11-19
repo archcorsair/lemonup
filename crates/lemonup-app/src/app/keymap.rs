@@ -176,6 +176,9 @@ pub(super) enum HelpWhen {
     NoJob,
     /// Docked Details does not fit beside the list: PgUp and PgDn scroll it.
     DetailsOverflow,
+    /// CurseForge manages the linked addon Details shows, and LemonUp can
+    /// mark it Ignored there: only on Linux.
+    CurseForgeManages,
 }
 
 /// The left hand side of a Help row.
@@ -273,6 +276,7 @@ const K_ESC: &[KeyEvent] = &[press(KeyCode::Esc)];
 const K_CLOSE: &[KeyEvent] = &[press(KeyCode::Esc), ch('q')];
 const K_HELP: &[KeyEvent] = &[ch('?')];
 const K_FIND: &[KeyEvent] = &[ch('f')];
+const K_MARK_IGNORED: &[KeyEvent] = &[ch('m')];
 const K_FIND_ALL: &[KeyEvent] = &[ch('F')];
 const K_EDIT: &[KeyEvent] = &[ch('e')];
 const K_CTRL_C: &[KeyEvent] = &[KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)];
@@ -429,6 +433,8 @@ static DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find it online", K_FIND).when(HelpWhen::NotLinked),
+                HelpRow::key("m", "mark it Ignored in CurseForge", K_MARK_IGNORED)
+                    .when(HelpWhen::CurseForgeManages),
             ],
         },
         HelpSection {
@@ -470,6 +476,8 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
                 HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find this one online", K_FIND).when(HelpWhen::NotLinked),
+                HelpRow::key("m", "mark this one Ignored in CurseForge", K_MARK_IGNORED)
+                    .when(HelpWhen::CurseForgeManages),
                 HelpRow::key("F", "find your addons online", K_FIND_ALL),
                 HelpRow::key("PgUp PgDn", "scroll Details", K_PAGE).when(HelpWhen::DetailsOverflow),
                 HelpRow::key(
@@ -1047,6 +1055,17 @@ impl App {
         hints.push(
             KeyHint::key(Id::Edit, "e", "edit .toc fields", &[KeyCode::Char('e')]).short("edit"),
         );
+        if self.details_curseforge_mark().is_some() {
+            hints.push(
+                KeyHint::key(
+                    Id::MarkIgnored,
+                    "m",
+                    "mark Ignored in CurseForge",
+                    &[KeyCode::Char('m')],
+                )
+                .short("mark Ignored"),
+            );
+        }
         if docked {
             hints.push(KeyHint::key(Id::Nav, "↑/↓", "move", UP_DOWN));
             if self.docked_details_overflow() {

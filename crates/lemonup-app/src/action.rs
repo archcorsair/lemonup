@@ -4,9 +4,9 @@ use lemonup_core::{AddonRecord, AppConfig, ScanSummary};
 
 use crate::app::text_input::TextInput;
 use crate::app::{
-    BackupPaneState, ConfigPaneState, DashboardJobStep, DashboardJobUiState, DashboardSortColumn,
-    DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode, DirectInstallRequest,
-    FindAction, FooterKeyPulse, GamesAction, HelpContext, InstallPaneState,
+    BackupPaneState, ConfigPaneState, CurseForgeAction, DashboardJobStep, DashboardJobUiState,
+    DashboardSortColumn, DashboardUndoDeleteState, DashboardUpdateRunSummary, DetailMode,
+    DirectInstallRequest, FindAction, FooterKeyPulse, GamesAction, HelpContext, InstallPaneState,
     PendingWagoInstallRequest, SearchPaneState, StatusMessage, TocApplyRequest, TocEditPane,
     WagoInstallConfirmation,
 };
@@ -21,6 +21,8 @@ pub enum AppAction {
     Games(GamesAction),
     /// What the Find your addons online sheet does.
     Find(FindAction),
+    /// The question to mark addons Ignored in CurseForge, and its answer.
+    CurseForge(CurseForgeAction),
     /// Leaves setup that was adding a game, back to the Switch game sheet.
     CancelAddingGame,
     /// Opens or closes the "quit while updating?" question.
