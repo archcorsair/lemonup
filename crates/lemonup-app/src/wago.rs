@@ -849,16 +849,15 @@ pub(crate) fn addon_details_url(addon_id: &str, flavor: GameFlavor) -> String {
     )
 }
 
-/// The search request. Game words like "forever" are left out of the query
-/// when other words remain: Wago.io matches any word, and the request
-/// already names the game.
+/// The search request. It sends the query as typed, game words like
+/// "forever" included: Wago.io finds a glued name such as "ForeverAuras" only
+/// when the word at its start is sent.
 fn addon_search_url(query: &str, flavor: GameFlavor) -> Result<Url, String> {
-    let query =
-        lemonup_core::search_rank::source_query(query, &lemonup_core::search_rank::GAME_WORDS);
+    let query = query.trim();
     Url::parse_with_params(
         &format!("{API_BASE}{EXTERNAL_PATH}/addons/_search"),
         [
-            ("query", query.as_str()),
+            ("query", query),
             ("game_version", wago_game_version(flavor)),
             ("stability", "stable"),
         ],
@@ -1271,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn the_search_request_leaves_out_game_words_when_other_words_remain() {
+    fn the_search_request_sends_the_query_as_typed_with_its_game_words() {
         let query_of = |typed: &str, flavor| {
             addon_search_url(typed, flavor)
                 .expect("search url")
@@ -1281,7 +1280,11 @@ mod tests {
         };
         assert_eq!(
             query_of("Forever Loot Sparkles", GameFlavor::Forever).as_deref(),
-            Some("Loot Sparkles")
+            Some("Forever Loot Sparkles")
+        );
+        assert_eq!(
+            query_of("  forever auras ", GameFlavor::Forever).as_deref(),
+            Some("forever auras")
         );
         assert_eq!(
             query_of("forever", GameFlavor::Forever).as_deref(),

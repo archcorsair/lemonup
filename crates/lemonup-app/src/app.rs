@@ -12295,8 +12295,8 @@ mod tests {
             ],
         );
 
-        // Both full matches first (the one named "Forever ..." ahead of the
-        // other), then the partial matches by words, then downloads.
+        // The name with every word, game word included, first. Then the
+        // names with the other words, then the one with only the game word.
         assert_eq!(result_ids(&app), ["named", "both", "helper", "tools"]);
         assert_eq!(app.search_pane.selected_result, Some(0));
     }
@@ -12362,7 +12362,7 @@ mod tests {
         finish_search_with(
             &mut app,
             "Forever Loot Sparkles",
-            vec![named_result("both", "Loot Sparkles", 10)],
+            vec![named_result("named", "Forever Loot Sparkles", 10)],
         );
         assert_eq!(
             line_text(&app.search_hint_line()),
