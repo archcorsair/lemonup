@@ -333,8 +333,34 @@ pub(crate) async fn search_wago_addons(
     }
 
     let client = build_wago_client()?;
-    let results = fetch_addon_search_results(&client, trimmed, api_key, flavor).await?;
+    let queries =
+        lemonup_core::search_rank::source_queries(trimmed, &lemonup_core::search_rank::GAME_WORDS);
+    let results = match queries.as_slice() {
+        [only] => fetch_addon_search_results(&client, only, api_key, flavor).await?,
+        [without, as_typed, ..] => {
+            let (first, second) = tokio::join!(
+                fetch_addon_search_results(&client, without, api_key, flavor),
+                fetch_addon_search_results(&client, as_typed, api_key, flavor),
+            );
+            merge_search_results(first?, second?)
+        }
+        [] => Vec::new(),
+    };
     Ok(results.into_iter().map(Into::into).collect())
+}
+
+/// `first` followed by the items of `second` whose id is not in `first`.
+/// A repeated id keeps its first place. Ids are compared as written.
+fn merge_search_results(
+    first: Vec<WagoAddonSummary>,
+    second: Vec<WagoAddonSummary>,
+) -> Vec<WagoAddonSummary> {
+    let mut seen = std::collections::HashSet::new();
+    first
+        .into_iter()
+        .chain(second)
+        .filter(|addon| seen.insert(addon.id.clone()))
+        .collect()
 }
 
 pub(crate) async fn inspect_wago_install_target(
@@ -849,9 +875,12 @@ pub(crate) fn addon_details_url(addon_id: &str, flavor: GameFlavor) -> String {
     )
 }
 
-/// The search request. It sends the query as typed, game words like
-/// "forever" included: Wago.io finds a glued name such as "ForeverAuras" only
-/// when the word at its start is sent.
+/// The URL of one search request for `query`, sent as given apart from
+/// trimming. A search with a game word and other words sends two requests,
+/// one without the game word and one as typed (see
+/// `search_rank::source_queries`): Wago.io returns a fixed number of results,
+/// so the game word alone fills them, while a glued name such as
+/// "ForeverAuras" is found only when the game word is sent.
 fn addon_search_url(query: &str, flavor: GameFlavor) -> Result<Url, String> {
     let query = query.trim();
     Url::parse_with_params(
@@ -1203,8 +1232,8 @@ mod tests {
         WagoAddonDetailsResponse, WagoAddonSummary, WagoAddonSummaryRaw, WagoRelease, WagoReleases,
         WagoSearchResult, WagoStability, addon_details_url, addon_search_url,
         determine_parent_folder, discover_extracted_folders, extract_zip_archive,
-        inspect_downloaded_wago_addon, install_downloaded_wago_addon, parse_wago_target,
-        release_version, update_downloaded_wago_addon, versions_match,
+        inspect_downloaded_wago_addon, install_downloaded_wago_addon, merge_search_results,
+        parse_wago_target, release_version, update_downloaded_wago_addon, versions_match,
     };
     use crate::source_error::SourceErrorKind;
     use lemonup_core::{AddonRecord, GameFlavor, OwnedFolder, SourceKind, StateDatabase};
@@ -1231,6 +1260,28 @@ mod tests {
                 alpha: None,
             },
         }
+    }
+
+    #[test]
+    fn merged_search_results_keep_the_first_list_then_the_new_items_of_the_second() {
+        let addon = |id: &str| WagoAddonSummary {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            ..sample_addon()
+        };
+        let ids = |list: &[WagoAddonSummary]| -> Vec<String> {
+            list.iter().map(|addon| addon.id.clone()).collect()
+        };
+        let merged = merge_search_results(
+            vec![addon("auras"), addon("arc"), addon("auras")],
+            vec![addon("forever"), addon("arc"), addon("ARC"), addon("core")],
+        );
+        assert_eq!(ids(&merged), ["auras", "arc", "forever", "ARC", "core"]);
+        assert_eq!(
+            ids(&merge_search_results(Vec::new(), vec![addon("a")])),
+            ["a"]
+        );
+        assert!(merge_search_results(Vec::new(), Vec::new()).is_empty());
     }
 
     fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
@@ -1270,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn the_search_request_sends_the_query_as_typed_with_its_game_words() {
+    fn one_search_request_carries_the_query_it_is_given_game_words_included() {
         let query_of = |typed: &str, flavor| {
             addon_search_url(typed, flavor)
                 .expect("search url")

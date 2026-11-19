@@ -69,6 +69,39 @@ pub fn parse_query(query: &str, game_words: &[&str]) -> ParsedQuery {
     ParsedQuery { words, game }
 }
 
+/// The queries to send to the source for `query`.
+///
+/// Usually one: the trimmed query as typed. When a game word and another
+/// word are both typed, two: first the query without the game words, then
+/// all the words with single spaces. A source that returns a fixed number of
+/// results fills them with names that only have the game word when it is sent, so
+/// the names that have the other words need the request without it. Glued
+/// names such as "ForeverAuras" are found only when the game word is sent.
+pub fn source_queries(query: &str, game_words: &[&str]) -> Vec<String> {
+    let trimmed = query.trim();
+    let is_game = |token: &str| {
+        let words = words_of(token, false);
+        words.len() == 1
+            && game_words
+                .iter()
+                .any(|word| word.eq_ignore_ascii_case(&words[0]))
+    };
+    let others: Vec<&str> = trimmed
+        .split_whitespace()
+        .filter(|token| !is_game(token))
+        .collect();
+    let has_game = trimmed.split_whitespace().any(is_game);
+    let has_other = others
+        .iter()
+        .any(|token| !words_of(token, false).is_empty());
+    if has_game && has_other {
+        let all: Vec<&str> = trimmed.split_whitespace().collect();
+        vec![others.join(" "), all.join(" ")]
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
 /// Orders `items` for `query`: names with every typed word first, then by
 /// how many of the other words the name has, then by how many game words it
 /// has, then downloads (most first). Equal items keep their input order.
@@ -347,6 +380,23 @@ mod tests {
             ranked("Forever Loot Sparkles", &items),
             ["Loot Sparkles", "Forever Loot"]
         );
+    }
+
+    #[test]
+    fn source_queries_ask_with_and_without_the_game_words() {
+        let queries = |typed: &str| source_queries(typed, &GAME_WORDS);
+        assert_eq!(queries("forever auras"), ["auras", "forever auras"]);
+        assert_eq!(queries("questie forever"), ["questie", "questie forever"]);
+        assert_eq!(queries("  forever   auras "), ["auras", "forever auras"]);
+        assert_eq!(
+            queries("Forever Loot CLASSIC, Sparkles"),
+            ["Loot Sparkles", "Forever Loot CLASSIC, Sparkles"]
+        );
+        assert_eq!(queries("Forever"), ["Forever"]);
+        assert_eq!(queries(" forever Classic "), ["forever Classic"]);
+        assert_eq!(queries("rare scanner"), ["rare scanner"]);
+        assert_eq!(queries("Classically Loot"), ["Classically Loot"]);
+        assert_eq!(queries("forever !!!"), ["forever !!!"]);
     }
 
     #[test]
