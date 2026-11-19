@@ -13955,11 +13955,15 @@ mod tests {
         );
 
         // GitHub: the version from the addon's own files, and "new build".
-        let mut github = versioned(SourceKind::GitHub, "5.20.4", Some("b83e51d0aa"));
+        let mut github = versioned(
+            SourceKind::GitHub,
+            "5.20.4",
+            Some("b83e51d0aa4c2f6e8d1b3a5c7e9f0a2b4c6d8e0f"),
+        );
         github.git_commit = Some("4f1c9a7123".to_string());
         assert_eq!(text(github.clone(), true), "5.20.4 → new build");
         assert_eq!(text(github.clone(), false), "5.20.4 → newer");
-        github.remote_version = Some("4f1c9a7123".to_string());
+        github.remote_version = Some("4f1c9a71230000000000000000000000000000ab".to_string());
         assert_eq!(text(github.clone(), true), "5.20.4");
         // Without a usable version of its own, the short commit stands in.
         github.version = Some("@project-version@".to_string());
@@ -14603,7 +14607,11 @@ mod tests {
             let mut app = app_for_tests(ShellMode::Dashboard);
             let mut addons = vec![
                 versioned(SourceKind::Wago, "12.0.8", Some("12.0.10")),
-                versioned(SourceKind::GitHub, "5.20.4", Some("b83e51d0aa")),
+                versioned(
+                    SourceKind::GitHub,
+                    "5.20.4",
+                    Some("b83e51d0aa4c2f6e8d1b3a5c7e9f0a2b4c6d8e0f"),
+                ),
                 AddonRecord::new("Bug Sack", "BugSack", SourceKind::Manual),
             ];
             addons[0].name = "Deadly Boss Mods".to_string();

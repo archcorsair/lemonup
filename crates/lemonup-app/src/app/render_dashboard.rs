@@ -1727,9 +1727,9 @@ fn github_remote(item: &DashboardItem) -> Option<GithubRemote<'_>> {
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let release_install = github_installed_release_tag(item).is_some();
-    // Checks store full 40 character commits, so a shorter hex string next to an installed
-    // release is a tag that happens to look like one (`20241118`).
-    let commit = looks_like_commit_hash(remote) && (remote.len() >= 40 || !release_install);
+    // Checks store full 40 character commits; a shorter hex string is a tag that happens to look
+    // like one (`20241118`).
+    let commit = crate::github::is_full_commit(remote);
     Some(match (commit, release_install) {
         (true, _) => GithubRemote::Commit(remote),
         (false, true) => GithubRemote::Release(remote),

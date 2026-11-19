@@ -963,22 +963,16 @@ fn determine_github_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<
         };
     }
 
-    // A release tag for a source install, even one whose commit is unknown (v1 rows). A tag
-    // that looks like a commit (`20241118`) never matches the installed one, so it is Update
-    // ready below all the same.
-    if !is_commit_hash(remote) {
+    // A release tag for a source install, even one whose commit is unknown (v1 rows) or whose
+    // own version equals the tag. Checks store a commit as GitHub's full 40 characters, so a
+    // tag that only looks like one (`20241118`) is still a tag.
+    if !crate::github::is_full_commit(remote) {
         return (
             UpdateStatus::UpdateAvailable,
             Some("the source has a release for this game".to_string()),
         );
     }
     match installed_github_commit(addon) {
-        // Checks store GitHub's full 40 character commits, so anything shorter is a release tag
-        // that only looks like a commit (`20241118`): a release for this source install.
-        None if remote.trim().len() < 40 => (
-            UpdateStatus::UpdateAvailable,
-            Some("the source has a release for this game".to_string()),
-        ),
         None => (
             UpdateStatus::Unknown,
             Some("the installed commit is unknown".to_string()),
@@ -1926,6 +1920,14 @@ mod tests {
         // A full commit still can't be compared with an unknown installed one.
         addon.remote_version = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
         assert_eq!(determine_update_status(&addon).0, UpdateStatus::Unknown);
+
+        // The addon's own version equals the tag, and it still came from source.
+        addon.version = Some("20241118".to_string());
+        addon.remote_version = Some("20241118".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
     }
 
     #[test]

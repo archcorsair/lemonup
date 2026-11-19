@@ -1369,6 +1369,13 @@ fn is_placeholder_version(value: &str) -> bool {
     trimmed.starts_with('@') && trimmed.ends_with('@')
 }
 
+/// Whether `value` is a commit as a check stores it: GitHub's full 40 hex characters. A shorter
+/// hex string next to it is a release tag that looks like a commit (`20241118`).
+pub(crate) fn is_full_commit(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 40 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 pub(crate) fn commits_match(left: Option<&str>, right: Option<&str>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => {
