@@ -1042,8 +1042,11 @@ impl App {
                                 },
                             ]);
                         }
-                        let (kind, text) = linked_status(&outcome);
+                        let (extra, follow_up) =
+                            self.curseforge_follow_up(linked_folders(&outcome));
+                        let (kind, text) = linked_status(&outcome, extra);
                         actions.push(self.find_note(kind, &text));
+                        actions.extend(follow_up);
                     }
                     // Replacements wait for the links; none runs after a failure.
                     Err(error) => {
@@ -1075,6 +1078,7 @@ impl App {
         };
         if self.find.linking
             || self.pending_wago_install_confirmation.is_some()
+            || self.curseforge_mark.is_some()
             || self.install_busy_status().is_some()
         {
             return vec![];
@@ -2070,8 +2074,25 @@ pub(crate) fn link_found(
     })
 }
 
-/// The status line after linking, from what the database holds.
-pub(crate) fn linked_status(outcome: &FindLinkOutcome) -> (StatusKind, String) {
+/// Every folder of the linked addons CurseForge also manages.
+fn linked_folders(outcome: &FindLinkOutcome) -> Vec<String> {
+    outcome
+        .rows
+        .iter()
+        .filter(|row| outcome.curseforge.contains(&row.name))
+        .flat_map(|row| {
+            std::iter::once(row.folder.clone())
+                .chain(row.owned_folders.iter().map(|owned| owned.name.clone()))
+        })
+        .collect()
+}
+
+/// The status line after linking, from what the database holds. `extra`
+/// follows the CurseForge hint.
+pub(crate) fn linked_status(
+    outcome: &FindLinkOutcome,
+    extra: Option<&str>,
+) -> (StatusKind, String) {
     let mut text = String::new();
     if !outcome.rows.is_empty() {
         let (parts, _) = crate::find::linked_parts(&outcome.rows);
@@ -2086,6 +2107,10 @@ pub(crate) fn linked_status(outcome: &FindLinkOutcome) -> (StatusKind, String) {
             " {}.",
             lemonup_core::curseforge::short_hint_naming(&outcome.curseforge)
         ));
+        if let Some(extra) = extra {
+            text.push(' ');
+            text.push_str(extra);
+        }
     }
     if !outcome.unconfirmed.is_empty() {
         if !text.is_empty() {

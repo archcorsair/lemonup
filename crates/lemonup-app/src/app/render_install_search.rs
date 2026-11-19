@@ -483,6 +483,7 @@ impl App {
             }
             SearchInstallState::Success {
                 addon_name,
+                parent_folder,
                 warning,
                 ..
             } => {
@@ -504,6 +505,15 @@ impl App {
                     lines.push(Line::from(Span::styled(
                         format!("  {warning}"),
                         Style::default().fg(self.ui_theme.roles.amber),
+                    )));
+                }
+                // The sheet has no status line: what marking it Ignored in
+                // CurseForge did shows here.
+                if let Some((kind, note)) = self.curseforge_details_note(parent_folder) {
+                    let color = super::curseforge_mark::note_color(kind, self.ui_theme.roles);
+                    lines.push(Line::from(Span::styled(
+                        format!("  {note}"),
+                        Style::default().fg(color),
                     )));
                 }
                 lines.push(Line::from(""));

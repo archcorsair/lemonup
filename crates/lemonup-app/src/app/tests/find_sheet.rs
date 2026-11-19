@@ -710,7 +710,7 @@ fn the_link_result_line_says_which_linked_addons_curseforge_also_manages() {
     let outcome = link_found(&db, &addons, &links, &[]).expect("linked");
     assert_eq!(outcome.rows.len(), 2);
     assert!(outcome.curseforge.is_empty());
-    let (_, text) = crate::app::find_sheet::linked_status(&outcome);
+    let (_, text) = crate::app::find_sheet::linked_status(&outcome, None);
     assert!(!text.contains("CurseForge"), "{text}");
 }
 

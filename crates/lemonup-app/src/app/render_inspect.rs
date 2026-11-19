@@ -262,18 +262,26 @@ impl App {
                 key("f"),
                 Span::styled(" to find it online.", text),
             ]]
-        } else if linked
-            && self.curseforge.manages_any(
-                std::iter::once(item.folder.as_str())
-                    .chain(item.owned_folders.iter().map(String::as_str)),
-            )
-        {
-            vec![vec![Span::styled(
-                lemonup_core::curseforge::HINT,
-                Style::default().fg(roles.amber),
-            )]]
         } else {
-            Vec::new()
+            // What marking it Ignored in CurseForge just did, then the hint
+            // while CurseForge still manages it.
+            let mut lines = Vec::new();
+            if let Some((kind, note)) = self.curseforge_details_note(&item.folder) {
+                let color = super::curseforge_mark::note_color(kind, roles);
+                lines.push(vec![Span::styled(note, Style::default().fg(color))]);
+            }
+            if linked
+                && self.curseforge.manages_any(
+                    std::iter::once(item.folder.as_str())
+                        .chain(item.owned_folders.iter().map(String::as_str)),
+                )
+            {
+                lines.push(vec![Span::styled(
+                    lemonup_core::curseforge::HINT,
+                    Style::default().fg(roles.amber),
+                )]);
+            }
+            lines
         };
 
         let mut rows = Vec::new();
