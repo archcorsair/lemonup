@@ -520,12 +520,8 @@ async fn fetch_github_release_package(
         return Ok(None);
     }
     let assets = release.assets();
-    // A release.json that can't be downloaded counts as none: the zip names still decide.
     let release_json = match release_json_asset(&assets) {
-        Some(asset) => download_github_asset_bytes(client, asset)
-            .await
-            .ok()
-            .and_then(|bytes| ReleaseJson::parse(&String::from_utf8_lossy(&bytes))),
+        Some(asset) => read_release_json(download_github_asset_bytes(client, asset).await)?,
         None => None,
     };
     Ok(release_package(
@@ -534,6 +530,16 @@ async fn fetch_github_release_package(
         flavor,
         release_json.as_ref(),
     ))
+}
+
+/// The release's `release.json` from its download. A failed download fails the check or update,
+/// so a network error never picks another package (the source zip, say) than the metadata would;
+/// the installed copy stays as it is until the metadata can be read. A file that isn't in the
+/// packager's format counts as none.
+fn read_release_json(
+    download: Result<Vec<u8>, SourceError>,
+) -> Result<Option<ReleaseJson>, SourceError> {
+    Ok(ReleaseJson::parse(&String::from_utf8_lossy(&download?)))
 }
 
 /// The package `release` offers for `flavor`, given its files and its `release.json`.
@@ -3085,6 +3091,24 @@ mod tests {
             panic!("expected a release package");
         };
         assert_eq!(asset.name, "OpenMap-v0.8.10-retail.zip");
+    }
+
+    #[test]
+    fn a_release_json_that_fails_to_download_fails_instead_of_guessing() {
+        let failed = super::read_release_json(Err(crate::source_error::SourceError::new(
+            crate::source_error::SourceErrorKind::Other,
+            "timed out".to_string(),
+        )));
+        assert_eq!(failed.expect_err("propagated").detail, "timed out");
+        assert_eq!(
+            super::read_release_json(Ok(b"<html>not json</html>".to_vec())).expect("read"),
+            None
+        );
+        assert!(
+            super::read_release_json(Ok(br#"{"releases":[]}"#.to_vec()))
+                .expect("read")
+                .is_some()
+        );
     }
 
     #[test]

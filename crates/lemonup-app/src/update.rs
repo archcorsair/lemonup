@@ -973,6 +973,12 @@ fn determine_github_update_status(addon: &AddonRecord) -> (UpdateStatus, Option<
         );
     }
     match installed_github_commit(addon) {
+        // Checks store GitHub's full 40 character commits, so anything shorter is a release tag
+        // that only looks like a commit (`20241118`): a release for this source install.
+        None if remote.trim().len() < 40 => (
+            UpdateStatus::UpdateAvailable,
+            Some("the source has a release for this game".to_string()),
+        ),
         None => (
             UpdateStatus::Unknown,
             Some("the installed commit is unknown".to_string()),
@@ -1905,6 +1911,21 @@ mod tests {
             determine_update_status(&addon).0,
             UpdateStatus::UpdateAvailable
         );
+    }
+
+    #[test]
+    fn a_github_row_without_a_known_commit_is_update_ready_for_a_tag_that_looks_like_one() {
+        let mut addon = AddonRecord::new("Dated", "Dated", SourceKind::GitHub);
+        addon.version = Some("@project-version@".to_string());
+        addon.remote_version = Some("20241118".to_string());
+        assert_eq!(
+            determine_update_status(&addon).0,
+            UpdateStatus::UpdateAvailable
+        );
+
+        // A full commit still can't be compared with an unknown installed one.
+        addon.remote_version = Some("364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string());
+        assert_eq!(determine_update_status(&addon).0, UpdateStatus::Unknown);
     }
 
     #[test]
