@@ -716,7 +716,7 @@ impl App {
                 .dashboard
                 .job_ui()
                 .filter(|job| job.kind == DashboardJobKind::Update)
-                .map(|job| (job.current_index.saturating_sub(1), job.total));
+                .map(|job| (job.finished, job.total));
             return Some(Question::QuitWhileUpdating { progress });
         }
         if let Some(folders) = self.dashboard.pending_delete_folders() {

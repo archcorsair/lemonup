@@ -417,6 +417,7 @@ pub(crate) async fn inspect_wago_install_target(
 }
 
 pub(crate) async fn fetch_wago_remote_version(
+    client: &Client,
     addon: &AddonRecord,
     api_key: &str,
 ) -> Result<WagoRemoteVersion, SourceError> {
@@ -426,8 +427,7 @@ pub(crate) async fn fetch_wago_remote_version(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("linked Wago addon '{}' has no source URL", addon.folder))?;
     let addon_id = parse_wago_target(target)?;
-    let client = build_wago_client()?;
-    let resolved = resolve_wago_release(&client, &addon_id, api_key, addon.flavor, None).await?;
+    let resolved = resolve_wago_release(client, &addon_id, api_key, addon.flavor, None).await?;
 
     Ok(WagoRemoteVersion {
         source_url: Some(

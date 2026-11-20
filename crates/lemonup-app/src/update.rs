@@ -9,6 +9,7 @@ use lemonup_core::{
 use lemonup_core::{ScannedAddon, scan_addons_dir};
 use time::OffsetDateTime;
 
+use crate::source_limits::SourceLimits;
 use crate::update_targets::ReplaceNotLinked;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,24 +147,63 @@ fn record_check(
     }))
 }
 
+/// What a running check reports as it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CheckEvent {
+    /// The request for this addon is going out now.
+    Started { folder: String },
+    /// This addon is done. `result` is `None` when its row changed while the check
+    /// waited, so nothing was recorded for it.
+    Finished {
+        folder: String,
+        result: Option<CheckResult>,
+    },
+}
+
+/// What a source said about one addon, whatever the source.
+struct RemoteCheck {
+    version: Option<String>,
+    source_url: Option<String>,
+    /// The addon's name as the source gives it; `None` keeps the stored one.
+    name: Option<String>,
+}
+
+type RemoteCheckResult = Result<RemoteCheck, crate::source_error::SourceError>;
+
+/// Checks the selected addons online, several at once within [`SourceLimits::standard`], and
+/// records what each check found. The caps hold for this run only, so a check never waits
+/// behind another one. Results come back in selector order.
 pub(crate) async fn refresh_live_update_checks(
     database: &mut StateDatabase,
     selectors: &[String],
     wago_api_key: Option<&str>,
     addon_dir: Option<&Path>,
+    on_event: impl FnMut(CheckEvent),
 ) -> Result<Vec<CheckResult>, LemonupError> {
-    refresh_live_update_checks_with(
+    refresh_live_update_checks_in(
         database,
         selectors,
         wago_api_key,
         addon_dir,
-        |addon, api_key| async move {
-            crate::wago::fetch_wago_remote_version(&addon, &api_key).await
-        },
+        &SourceLimits::standard(),
+        fetch_wago_check,
+        on_event,
     )
     .await
 }
 
+/// The Wago.io request of a live check, as [`refresh_live_update_checks_in`] takes it.
+pub(crate) async fn fetch_wago_check(
+    client: reqwest::Client,
+    addon: AddonRecord,
+    api_key: String,
+) -> Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError> {
+    crate::wago::fetch_wago_remote_version(&client, &addon, &api_key).await
+}
+
+/// [`refresh_live_update_checks_in`] with its own limits and no events, for tests that only
+/// look at the results.
+#[cfg(test)]
 async fn refresh_live_update_checks_with<F, Fut>(
     database: &mut StateDatabase,
     selectors: &[String],
@@ -173,139 +213,314 @@ async fn refresh_live_update_checks_with<F, Fut>(
 ) -> Result<Vec<CheckResult>, LemonupError>
 where
     F: Fn(AddonRecord, String) -> Fut,
-    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError>>,
+    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError>>
+        + Send
+        + 'static,
+{
+    refresh_live_update_checks_in(
+        database,
+        selectors,
+        wago_api_key,
+        addon_dir,
+        &SourceLimits::standard(),
+        |_client, addon, api_key| fetch_wago_remote_version(addon, api_key),
+        |_| {},
+    )
+    .await
+}
+
+/// The check engine. `fetch_wago_remote_version` builds the Wago request for one addon; it
+/// runs here, before the request is handed to its own task, so it may use the database. The
+/// tasks only wait for the network; every database write happens here, one at a time.
+pub(crate) async fn refresh_live_update_checks_in<F, Fut>(
+    database: &mut StateDatabase,
+    selectors: &[String],
+    wago_api_key: Option<&str>,
+    addon_dir: Option<&Path>,
+    limits: &SourceLimits,
+    fetch_wago_remote_version: F,
+    mut on_event: impl FnMut(CheckEvent),
+) -> Result<Vec<CheckResult>, LemonupError>
+where
+    F: Fn(reqwest::Client, AddonRecord, String) -> Fut,
+    Fut: Future<Output = Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError>>
+        + Send
+        + 'static,
 {
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    let mut results = Vec::with_capacity(selected.len());
+    let mut slots: Vec<Option<CheckResult>> = vec![None; selected.len()];
+    let mut pending = vec![false; selected.len()];
 
-    for addon in selected {
-        match addon.source {
+    // Built once for the run, the first time an addon needs one: a client for the sources
+    // that need no token, and the GitHub one. A client that cannot be built fails every
+    // check that needed it.
+    let mut general_client: Option<Result<reqwest::Client, String>> = None;
+    let mut github_client: Option<Result<reqwest::Client, String>> = None;
+
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut join_set = tokio::task::JoinSet::new();
+    // Which addon each task checks, so a task that panics still finishes its own addon.
+    let mut task_index = std::collections::HashMap::new();
+
+    for (index, addon) in selected.iter().enumerate() {
+        let api_key = match addon.source {
             SourceKind::Manual => {
-                let (status, message) = determine_update_status(&addon);
-                results.push(CheckResult {
+                let (status, message) = determine_update_status(addon);
+                let result = CheckResult {
                     addon_name: addon.folder.clone(),
                     status,
                     remote_version: addon.remote_version.clone(),
                     message,
                     error_kind: None,
-                });
+                };
+                finish(&mut slots, &mut on_event, index, addon, Some(result));
+                continue;
             }
             SourceKind::Wago => {
                 let Some(api_key) = wago_api_key else {
-                    results.push(CheckResult {
+                    let result = CheckResult {
                         addon_name: addon.folder.clone(),
                         status: UpdateStatus::Unknown,
                         remote_version: addon.remote_version.clone(),
                         message: Some("Wago API key not configured".to_string()),
                         error_kind: None,
-                    });
+                    };
+                    finish(&mut slots, &mut on_event, index, addon, Some(result));
                     continue;
                 };
+                Some(api_key)
+            }
+            SourceKind::Tukui | SourceKind::WowInterface | SourceKind::GitHub => None,
+        };
 
+        let client = if addon.source == SourceKind::GitHub {
+            github_client.get_or_insert_with(crate::github::build_github_client)
+        } else {
+            general_client.get_or_insert_with(|| {
+                crate::http::client_builder()
+                    .build()
+                    .map_err(|error| error.to_string())
+            })
+        };
+        let client = match client {
+            Ok(client) => client.clone(),
+            Err(detail) => {
+                // No request went out, so there is no `Started`.
+                let error = crate::source_error::SourceError::from(detail.clone());
+                let result = error_result(addon, error.kind, error.detail);
+                finish(&mut slots, &mut on_event, index, addon, Some(result));
+                continue;
+            }
+        };
+
+        let tracked = addon.clone();
+        let task = match (addon.source, api_key) {
+            (SourceKind::Wago, Some(api_key)) => {
                 // Updates query Wago with the AddOns folder's flavor, so checks must too; the
                 // stored record flavor is only a fallback when no AddOns dir is known.
-                let mut query_addon = addon.clone();
+                let mut query_addon = tracked;
                 if let Some(addon_dir) = addon_dir {
                     query_addon.flavor = GameFlavor::for_addons_dir(addon_dir);
                 }
-
-                match fetch_wago_remote_version(query_addon, api_key.to_string()).await {
-                    Ok(remote) => {
-                        results.extend(record_check(
-                            database,
-                            &addon,
-                            remote.version,
-                            remote.source_url,
-                            remote.name,
-                        )?);
-                    }
-                    Err(error) => {
-                        results.push(CheckResult {
-                            addon_name: addon.folder.clone(),
-                            status: UpdateStatus::Error,
-                            remote_version: addon.remote_version.clone(),
-                            error_kind: Some(error.kind),
-                            message: Some(error.detail),
-                        });
-                    }
-                }
+                let fetch = fetch_wago_remote_version(client, query_addon, api_key.to_string());
+                spawn_check(
+                    &mut join_set,
+                    limits,
+                    &started_tx,
+                    index,
+                    addon,
+                    async move {
+                        fetch.await.map(|remote| RemoteCheck {
+                            version: remote.version,
+                            source_url: remote.source_url,
+                            name: remote.name,
+                        })
+                    },
+                )
             }
-            SourceKind::Tukui => match crate::tukui::fetch_tukui_remote_version(&addon).await {
-                Ok(remote) => {
-                    results.extend(record_check(
+            (SourceKind::Tukui, _) => spawn_check(
+                &mut join_set,
+                limits,
+                &started_tx,
+                index,
+                addon,
+                async move {
+                    crate::tukui::fetch_tukui_remote_version(&client, &tracked)
+                        .await
+                        .map(|remote| RemoteCheck {
+                            version: remote.version,
+                            source_url: remote.source_url,
+                            name: remote.name,
+                        })
+                },
+            ),
+            (SourceKind::WowInterface, _) => spawn_check(
+                &mut join_set,
+                limits,
+                &started_tx,
+                index,
+                addon,
+                async move {
+                    crate::wowinterface::fetch_wowinterface_remote_version(&client, &tracked)
+                        .await
+                        .map(|remote| RemoteCheck {
+                            version: remote.version,
+                            source_url: remote.source_url,
+                            name: remote.name,
+                        })
+                },
+            ),
+            (SourceKind::GitHub, _) => {
+                let flavor = addon_dir.map_or(addon.flavor, GameFlavor::for_addons_dir);
+                spawn_check(
+                    &mut join_set,
+                    limits,
+                    &started_tx,
+                    index,
+                    addon,
+                    async move {
+                        crate::github::fetch_github_remote_version(&client, &tracked, flavor)
+                            .await
+                            .map(|remote| RemoteCheck {
+                                version: remote.version,
+                                source_url: remote.source_url,
+                                // GitHub gives only a repository name, so GitHub addons keep
+                                // their TOC Title.
+                                name: None,
+                            })
+                    },
+                )
+            }
+            // Manual rows and Wago rows without a key were finished above.
+            (SourceKind::Manual, _) | (SourceKind::Wago, None) => continue,
+        };
+        task_index.insert(task, index);
+        pending[index] = true;
+    }
+    // Each task holds its own sender, so the channel closes once they are all done.
+    drop(started_tx);
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(folder) = started_rx.recv() => {
+                on_event(CheckEvent::Started { folder });
+            }
+            joined = join_set.join_next_with_id() => {
+                let Some(joined) = joined else {
+                    break;
+                };
+                // A task sends its `Started` before it ends, so it is in the channel by now
+                // and goes out before that addon's `Finished`.
+                while let Ok(folder) = started_rx.try_recv() {
+                    on_event(CheckEvent::Started { folder });
+                }
+                let (index, remote) = match joined {
+                    Ok((_task, (index, remote))) => (index, remote),
+                    // A task that panicked or was canceled finishes its addon now, with an
+                    // error. One that is somehow unknown gets its result after the loop.
+                    Err(error) => {
+                        let Some(&index) = task_index.get(&error.id()) else {
+                            continue;
+                        };
+                        (index, Err(stopped_unexpectedly()))
+                    }
+                };
+                pending[index] = false;
+                let addon = &selected[index];
+                let result = match remote {
+                    Ok(remote) => record_check(
                         database,
-                        &addon,
+                        addon,
                         remote.version,
                         remote.source_url,
                         remote.name,
-                    )?);
-                }
-                Err(error) => {
-                    results.push(CheckResult {
-                        addon_name: addon.folder.clone(),
-                        status: UpdateStatus::Error,
-                        remote_version: addon.remote_version.clone(),
-                        error_kind: Some(error.kind),
-                        message: Some(error.detail),
-                    });
-                }
-            },
-            SourceKind::WowInterface => {
-                match crate::wowinterface::fetch_wowinterface_remote_version(&addon).await {
-                    Ok(remote) => {
-                        results.extend(record_check(
-                            database,
-                            &addon,
-                            remote.version,
-                            remote.source_url,
-                            remote.name,
-                        )?);
-                    }
-                    Err(error) => {
-                        results.push(CheckResult {
-                            addon_name: addon.folder.clone(),
-                            status: UpdateStatus::Error,
-                            remote_version: addon.remote_version.clone(),
-                            error_kind: Some(error.kind),
-                            message: Some(error.detail),
-                        });
-                    }
-                }
+                    )?,
+                    Err(error) => Some(error_result(addon, error.kind, error.detail)),
+                };
+                finish(&mut slots, &mut on_event, index, addon, result);
             }
-            SourceKind::GitHub => match crate::github::fetch_github_remote_version(
-                &addon,
-                addon_dir.map_or(addon.flavor, GameFlavor::for_addons_dir),
-            )
-            .await
-            {
-                Ok(remote) => {
-                    // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
-                    results.extend(record_check(
-                        database,
-                        &addon,
-                        remote.version,
-                        remote.source_url,
-                        None,
-                    )?);
-                }
-                Err(error) => {
-                    results.push(CheckResult {
-                        addon_name: addon.folder.clone(),
-                        status: UpdateStatus::Error,
-                        remote_version: addon.remote_version.clone(),
-                        error_kind: Some(error.kind),
-                        message: Some(error.detail),
-                    });
-                }
-            },
         }
     }
 
-    Ok(results)
+    // A safety net: every addon whose task never reported gets an error result.
+    for (index, addon) in selected.iter().enumerate() {
+        if pending[index] {
+            let error = stopped_unexpectedly();
+            let result = error_result(addon, error.kind, error.detail);
+            finish(&mut slots, &mut on_event, index, addon, Some(result));
+        }
+    }
+
+    Ok(slots.into_iter().flatten().collect())
+}
+
+/// Why a check whose task stopped without a result failed.
+fn stopped_unexpectedly() -> crate::source_error::SourceError {
+    crate::source_error::SourceError::new(
+        crate::source_error::SourceErrorKind::Other,
+        "the check stopped unexpectedly",
+    )
+}
+
+/// The result of a check that failed for `addon`.
+fn error_result(
+    addon: &AddonRecord,
+    kind: crate::source_error::SourceErrorKind,
+    detail: String,
+) -> CheckResult {
+    CheckResult {
+        addon_name: addon.folder.clone(),
+        status: UpdateStatus::Error,
+        remote_version: addon.remote_version.clone(),
+        error_kind: Some(kind),
+        message: Some(detail),
+    }
+}
+
+/// Puts `result` in its slot and tells the caller this addon is done.
+fn finish(
+    slots: &mut [Option<CheckResult>],
+    on_event: &mut impl FnMut(CheckEvent),
+    index: usize,
+    addon: &AddonRecord,
+    result: Option<CheckResult>,
+) {
+    slots[index] = result.clone();
+    on_event(CheckEvent::Finished {
+        folder: addon.folder.clone(),
+        result,
+    });
+}
+
+/// Runs one addon's request in its own task: it waits for its permits, says it started,
+/// then waits for the source. The task does no database work. Returns the task's id.
+fn spawn_check(
+    join_set: &mut tokio::task::JoinSet<(usize, RemoteCheckResult)>,
+    limits: &SourceLimits,
+    started_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    index: usize,
+    addon: &AddonRecord,
+    fetch: impl Future<Output = RemoteCheckResult> + Send + 'static,
+) -> tokio::task::Id {
+    let limits = limits.clone();
+    let started_tx = started_tx.clone();
+    let source = addon.source;
+    let folder = addon.folder.clone();
+    join_set
+        .spawn(async move {
+            let permit = limits.acquire(source).await;
+            // The engine stops listening only when it gave up on the run; the check still ends.
+            let _ = started_tx.send(folder);
+            let remote = fetch.await;
+            drop(permit);
+            (index, remote)
+        })
+        .id()
 }
 
 /// Updates the selected addons one at a time. An addon whose new package would replace "Not
@@ -1222,14 +1437,19 @@ pub(crate) fn normalize_version(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::refresh_live_update_checks_in;
     use super::{
         LiveUpdateStatus, apply_live_updates, compare_release_versions, determine_update_status,
         record_skipped_update_check, refresh_live_update_checks_with, remote_is_older,
         remote_older_result, resolve_selected_addons, serialize_live_update_status,
         serialize_update_status,
     };
+    use crate::source_limits::SourceLimits;
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase, UpdateStatus};
     use std::cmp::Ordering;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     /// `lemonup update`, `lemonup check` and `lemonup toc` select an addon by its shown name
@@ -2306,5 +2526,414 @@ mod tests {
             stored.unrecognized.map(|values| values.source).as_deref(),
             Some("curseforge")
         );
+    }
+
+    /// A Wago check that found `version`.
+    fn wago_version(
+        version: &str,
+    ) -> Result<crate::wago::WagoRemoteVersion, crate::source_error::SourceError> {
+        Ok(crate::wago::WagoRemoteVersion {
+            source_url: None,
+            version: Some(version.to_string()),
+            name: None,
+        })
+    }
+
+    /// A database in `temp` with one Wago addon per folder, each at version 1.0.
+    fn database_with_wago_addons(temp: &tempfile::TempDir, folders: &[&str]) -> StateDatabase {
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        for folder in folders {
+            let mut addon = AddonRecord::new(*folder, *folder, SourceKind::Wago);
+            addon.version = Some("1.0".to_string());
+            database.upsert_addon(&addon).expect("seed addon");
+        }
+        database
+    }
+
+    fn folders_of(database: &StateDatabase) -> Vec<String> {
+        database
+            .list_addons()
+            .expect("list")
+            .into_iter()
+            .map(|addon| addon.folder)
+            .collect()
+    }
+
+    /// Three checks that each wait for the other two: only checks that run at the same time
+    /// get past the barrier.
+    #[tokio::test]
+    async fn checks_run_at_the_same_time() {
+        let temp = tempdir().expect("tempdir");
+        let mut database = database_with_wago_addons(&temp, &["A", "B", "C"]);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let limits = SourceLimits::new(6, 3, 4, 4, 2);
+
+        let run = refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            &limits,
+            move |_client, _addon, _api_key| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    barrier.wait().await;
+                    wago_version("2.0")
+                }
+            },
+            |_| {},
+        );
+        let checks = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the checks wait for each other, so they must overlap")
+            .expect("refresh checks");
+
+        assert_eq!(checks.len(), 3);
+        assert!(
+            checks
+                .iter()
+                .all(|check| check.status == UpdateStatus::UpdateAvailable),
+            "{checks:?}"
+        );
+    }
+
+    /// The most checks that were out at once, checking twelve Wago addons under `limits`.
+    async fn most_checks_out_at_once(limits: SourceLimits) -> usize {
+        let temp = tempdir().expect("tempdir");
+        let folders = (1..=12).map(|n| format!("Addon{n:02}")).collect::<Vec<_>>();
+        let folders = folders.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut database = database_with_wago_addons(&temp, &folders);
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+
+        let fetch = {
+            let in_flight = Arc::clone(&in_flight);
+            let most = Arc::clone(&most);
+            move |_client, _addon, _api_key| {
+                let in_flight = Arc::clone(&in_flight);
+                let most = Arc::clone(&most);
+                async move {
+                    let now = in_flight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    most.fetch_max(now, AtomicOrdering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    in_flight.fetch_sub(1, AtomicOrdering::SeqCst);
+                    wago_version("2.0")
+                }
+            }
+        };
+        let checks = refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            &limits,
+            fetch,
+            |_| {},
+        )
+        .await
+        .expect("refresh checks");
+        assert_eq!(checks.len(), 12);
+        most.load(AtomicOrdering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn the_total_cap_limits_checks_out_at_once() {
+        let most = most_checks_out_at_once(SourceLimits::new(3, 6, 6, 6, 6)).await;
+        assert!(1 < most && most <= 3, "{most}");
+    }
+
+    #[tokio::test]
+    async fn the_source_cap_limits_checks_out_at_once() {
+        let most = most_checks_out_at_once(SourceLimits::new(6, 6, 2, 6, 6)).await;
+        assert!(1 < most && most <= 2, "{most}");
+    }
+
+    /// The last addon's check ends first and each one lets the one before it end, yet the
+    /// results come back in the order the addons were selected.
+    #[tokio::test]
+    async fn results_keep_the_selection_order_when_later_checks_end_first() {
+        const COUNT: usize = 3;
+        let temp = tempdir().expect("tempdir");
+        let mut database = database_with_wago_addons(&temp, &["A", "B", "C"]);
+        let selection = folders_of(&database);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let releases: Arc<std::sync::Mutex<Vec<Option<tokio::sync::oneshot::Sender<()>>>>> =
+            Arc::default();
+        let limits = SourceLimits::new(6, 3, 4, 4, 2);
+        let mut finished = Vec::new();
+
+        let run = refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            &limits,
+            |_client, addon: AddonRecord, _api_key| {
+                let index = calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let (release, released) = tokio::sync::oneshot::channel();
+                releases.lock().expect("releases").push(Some(release));
+                let releases = Arc::clone(&releases);
+                async move {
+                    if index + 1 < COUNT {
+                        released.await.expect("the next check lets this one end");
+                    }
+                    if index > 0 {
+                        let previous = releases.lock().expect("releases")[index - 1].take();
+                        previous.expect("sender").send(()).expect("still waiting");
+                    }
+                    wago_version(&format!("2.0-{}", addon.folder))
+                }
+            },
+            |event| {
+                if let super::CheckEvent::Finished { folder, .. } = event {
+                    finished.push(folder);
+                }
+            },
+        );
+        let checks = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("each check waits for the next, so they must overlap")
+            .expect("refresh checks");
+
+        let mut reversed = selection.clone();
+        reversed.reverse();
+        assert_eq!(finished, reversed, "the checks ended last to first");
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| check.addon_name.clone())
+                .collect::<Vec<_>>(),
+            selection
+        );
+        for check in &checks {
+            assert_eq!(
+                check.remote_version.as_deref(),
+                Some(format!("2.0-{}", check.addon_name).as_str())
+            );
+        }
+    }
+
+    /// Every `Started` comes before its addon's `Finished`; rows that need no network finish
+    /// without starting; a row deleted while its check waited finishes with no result.
+    #[tokio::test]
+    async fn check_events_follow_each_addon() {
+        use super::CheckEvent;
+
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let mut database = database_with_wago_addons(&temp, &["Kept", "Gone"]);
+        database
+            .upsert_addon(&AddonRecord::new("Mine", "Mine", SourceKind::Manual))
+            .expect("seed manual");
+        let limits = SourceLimits::new(6, 3, 4, 4, 2);
+
+        // Without a key nothing goes online.
+        let mut events = Vec::new();
+        refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            None,
+            None,
+            &limits,
+            |_client, _addon, _api_key| async { wago_version("2.0") },
+            |event| events.push(event),
+        )
+        .await
+        .expect("refresh checks");
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(
+            events.iter().all(|event| matches!(
+                event,
+                CheckEvent::Finished {
+                    result: Some(_),
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+
+        let mut events = Vec::new();
+        let checks = refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            &limits,
+            |_client, addon: AddonRecord, _api_key| {
+                if addon.folder == "Gone" {
+                    let other = StateDatabase::open(&path).expect("another LemonUp");
+                    other.remove_addon("Gone").expect("delete");
+                }
+                async { wago_version("2.0") }
+            },
+            |event| events.push(event),
+        )
+        .await
+        .expect("refresh checks");
+
+        let position = |wanted: &CheckEvent| {
+            events
+                .iter()
+                .position(|event| event == wanted)
+                .unwrap_or_else(|| panic!("{wanted:?} in {events:?}"))
+        };
+        let started = |folder: &str| CheckEvent::Started {
+            folder: folder.to_string(),
+        };
+        let kept = checks
+            .iter()
+            .find(|check| check.addon_name == "Kept")
+            .expect("Kept has a result")
+            .clone();
+        assert!(
+            position(&started("Kept"))
+                < position(&CheckEvent::Finished {
+                    folder: "Kept".to_string(),
+                    result: Some(kept),
+                })
+        );
+        assert!(
+            position(&started("Gone"))
+                < position(&CheckEvent::Finished {
+                    folder: "Gone".to_string(),
+                    result: None,
+                })
+        );
+        assert!(
+            !events.contains(&started("Mine")),
+            "a Manual row sends no request: {events:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            CheckEvent::Finished { folder, result: Some(_) } if folder == "Mine"
+        )));
+        assert_eq!(events.len(), 5, "{events:?}");
+        assert!(checks.iter().all(|check| check.addon_name != "Gone"));
+    }
+
+    /// A check that panics gives its addon an error right away, while another check is
+    /// still out, and lets the others finish.
+    #[tokio::test]
+    async fn a_check_that_panics_fails_only_its_own_addon() {
+        use super::CheckEvent;
+
+        let temp = tempdir().expect("tempdir");
+        let mut database = database_with_wago_addons(&temp, &["A", "Broken", "C"]);
+        let limits = SourceLimits::new(6, 3, 4, 4, 2);
+        // `C` stays out until `Broken` has finished.
+        let (gate, gate_released) = tokio::sync::oneshot::channel::<()>();
+        let gate_released = std::sync::Mutex::new(Some(gate_released));
+        let mut gate = Some(gate);
+        let mut finished = Vec::new();
+
+        let run = refresh_live_update_checks_in(
+            &mut database,
+            &[],
+            Some("fake-key"),
+            None,
+            &limits,
+            |_client, addon: AddonRecord, _api_key| {
+                let gate_released = if addon.folder == "C" {
+                    gate_released.lock().expect("gate").take()
+                } else {
+                    None
+                };
+                async move {
+                    if addon.folder == "Broken" {
+                        panic!("this check breaks");
+                    }
+                    if let Some(gate_released) = gate_released {
+                        gate_released.await.expect("the gate opens");
+                    }
+                    wago_version("2.0")
+                }
+            },
+            |event| {
+                let CheckEvent::Finished { folder, result } = event else {
+                    return;
+                };
+                if folder == "Broken" {
+                    let result = result.expect("Broken has a result");
+                    assert_eq!(result.status, UpdateStatus::Error);
+                    assert_eq!(
+                        result.message.as_deref(),
+                        Some("the check stopped unexpectedly")
+                    );
+                    if let Some(gate) = gate.take() {
+                        gate.send(()).expect("C still waits");
+                    }
+                }
+                finished.push(folder);
+            },
+        );
+        let checks = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("Broken finishes while C is still out, which lets C end")
+            .expect("the run goes on");
+
+        assert_eq!(finished.len(), 3, "{finished:?}");
+        assert_eq!(finished.last().map(String::as_str), Some("C"));
+        assert_eq!(checks.len(), 3);
+        for check in &checks {
+            if check.addon_name == "Broken" {
+                assert_eq!(check.status, UpdateStatus::Error);
+                assert_eq!(
+                    check.error_kind,
+                    Some(crate::source_error::SourceErrorKind::Other)
+                );
+                assert_eq!(
+                    check.message.as_deref(),
+                    Some("the check stopped unexpectedly")
+                );
+            } else {
+                assert_eq!(check.status, UpdateStatus::UpdateAvailable, "{check:?}");
+            }
+        }
+    }
+
+    /// On a runtime with several threads, each addon's `Started` still reaches the caller
+    /// before its `Finished`, however fast the checks end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn started_comes_before_finished_on_several_threads() {
+        use super::CheckEvent;
+
+        let temp = tempdir().expect("tempdir");
+        let folders = (1..=300)
+            .map(|n| format!("Addon{n:03}"))
+            .collect::<Vec<_>>();
+        let folder_refs = folders.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut database = database_with_wago_addons(&temp, &folder_refs);
+
+        for round in 0..5 {
+            let limits = SourceLimits::new(64, 64, 64, 64, 64);
+            let mut events = Vec::new();
+            refresh_live_update_checks_in(
+                &mut database,
+                &[],
+                Some("fake-key"),
+                None,
+                &limits,
+                |_client, _addon, _api_key| async { wago_version("2.0") },
+                |event| events.push(event),
+            )
+            .await
+            .expect("refresh checks");
+
+            let mut started = std::collections::HashSet::new();
+            for event in &events {
+                match event {
+                    CheckEvent::Started { folder } => {
+                        started.insert(folder.clone());
+                    }
+                    CheckEvent::Finished { folder, .. } => {
+                        assert!(
+                            started.contains(folder),
+                            "round {round}: {folder} finished before it started"
+                        );
+                    }
+                }
+            }
+            assert_eq!(started.len(), folders.len(), "round {round}");
+        }
     }
 }

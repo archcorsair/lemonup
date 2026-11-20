@@ -43,14 +43,16 @@ use crate::onboarding::{
 };
 use crate::shimmer::working_text_spans;
 use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
+use crate::source_limits::SourceLimits;
 use crate::theme::{DisplayEnv, UiTheme, cycle_theme, effective_theme, theme_name};
 use crate::transfer::{
     TransferInstallSummary, collect_existing_import_folders, install_transfer_addons,
 };
 use crate::tui::Backend;
 use crate::update::{
-    CheckResult, HeldUpdate, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary,
-    apply_held_updates, apply_live_updates, build_update_checks, refresh_live_update_checks,
+    CheckEvent, CheckResult, HeldUpdate, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary,
+    apply_held_updates, apply_live_updates, build_update_checks, fetch_wago_check,
+    refresh_live_update_checks_in,
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
@@ -748,9 +750,27 @@ enum UpdateJobRowState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DashboardJobUiState {
     kind: DashboardJobKind,
-    current_index: usize,
+    /// How many of this phase's addons are done.
+    finished: usize,
     total: usize,
-    current_addon: String,
+    /// The addons with a request out right now, in the order they started.
+    active: Vec<String>,
+}
+
+impl DashboardJobUiState {
+    /// What the status line says, `Checking 2 of 4`, and the folder of the one addon with a
+    /// request out when exactly one has. With none or several out it names no addon.
+    fn progress_text(&self) -> (String, Option<&str>) {
+        let shown = (self.finished + 1).min(self.total);
+        let only_active = match self.active.as_slice() {
+            [folder] => Some(folder.as_str()),
+            _ => None,
+        };
+        (
+            format!("{} {shown} of {}", self.kind.label(), self.total),
+            only_active,
+        )
+    }
 }
 
 /// Why the last check of an addon failed. The row keeps "Check failed"
@@ -767,6 +787,10 @@ pub(crate) struct CheckFailure {
 pub(crate) enum DashboardJobStep {
     /// The addons a check is about to look at, in order.
     CheckTargets(Vec<String>),
+    /// Work on one addon began.
+    Started { folder: String },
+    /// One addon is done, whatever came back.
+    Finished { folder: String },
     /// One addon's check came back: the version the source lists, or why
     /// it failed.
     Checked {
@@ -1454,6 +1478,9 @@ struct DashboardState {
     /// reached so far, so each row can show Waiting, Updating or Updated.
     job_targets: Vec<String>,
     job_reached: Vec<String>,
+    /// Folders the running phase (a check, an update's preflight check or its update) has
+    /// finished, so a late `Started` cannot bring a row back.
+    job_finished: Vec<String>,
     /// Folders the running update held for a yes: their rows keep saying Update ready.
     job_held: Vec<String>,
     /// What the last update run reported per folder, kept until the next
@@ -1531,6 +1558,7 @@ impl DashboardState {
             job_ui: None,
             job_targets: Vec::new(),
             job_reached: Vec::new(),
+            job_finished: Vec::new(),
             job_held: Vec::new(),
             updated_folders: Vec::new(),
             failed_folders: Vec::new(),
@@ -1956,16 +1984,16 @@ impl DashboardState {
                     self.updated_folders.clear();
                     self.failed_folders.clear();
                 }
-                // Only the update phase counts in an update; its preflight
-                // check reports progress too.
-                let counts = job.kind == DashboardJobKind::Update || !self.job_is_update;
-                if counts && !self.job_reached.contains(&job.current_addon) {
-                    self.job_reached.push(job.current_addon.clone());
+                // A new phase: nothing in it is finished yet.
+                self.job_finished.clear();
+                for folder in &job.active {
+                    self.mark_job_reached(job.kind, folder);
                 }
             }
             None => {
                 self.job_targets.clear();
                 self.job_reached.clear();
+                self.job_finished.clear();
                 self.job_held.clear();
                 self.job_results.clear();
                 self.job_note = None;
@@ -1974,6 +2002,38 @@ impl DashboardState {
             }
         }
         self.job_ui = job_ui;
+    }
+
+    /// Notes that the job got to `folder`. Only the update phase counts in an update; its
+    /// preflight check reports progress too.
+    fn mark_job_reached(&mut self, kind: DashboardJobKind, folder: &str) {
+        let counts = kind == DashboardJobKind::Update || !self.job_is_update;
+        if counts && !self.job_reached.iter().any(|reached| reached == folder) {
+            self.job_reached.push(folder.to_string());
+        }
+    }
+
+    /// The running job's progress once `step` is applied: `Started` adds the addon to the
+    /// ones with a request out (unless this phase already finished it), `Finished` takes it
+    /// out and counts it once.
+    fn job_progress_after(&self, step: &DashboardJobStep) -> Option<DashboardJobUiState> {
+        let mut job = self.job_ui.clone()?;
+        let finished_before = |folder: &str| self.job_finished.iter().any(|done| done == folder);
+        match step {
+            DashboardJobStep::Started { folder } => {
+                if !finished_before(folder) && !job.active.contains(folder) {
+                    job.active.push(folder.clone());
+                }
+            }
+            DashboardJobStep::Finished { folder } => {
+                job.active.retain(|active| active != folder);
+                if !finished_before(folder) {
+                    job.finished = (job.finished + 1).min(job.total);
+                }
+            }
+            _ => {}
+        }
+        Some(job)
     }
 
     fn begin_update_targets(&mut self, folders: &[String]) {
@@ -2024,6 +2084,25 @@ impl DashboardState {
                     self.job_targets = targets;
                     self.job_reached.clear();
                 }
+            }
+            DashboardJobStep::Started { ref folder } => {
+                let Some(job) = self.job_progress_after(&step) else {
+                    return;
+                };
+                if job.active.contains(folder) {
+                    self.mark_job_reached(job.kind, folder);
+                }
+                self.job_ui = Some(job);
+            }
+            DashboardJobStep::Finished { ref folder } => {
+                let Some(job) = self.job_progress_after(&step) else {
+                    return;
+                };
+                self.mark_job_reached(job.kind, folder);
+                if !self.job_finished.contains(folder) {
+                    self.job_finished.push(folder.clone());
+                }
+                self.job_ui = Some(job);
             }
             DashboardJobStep::Checked { folder, result } => match result {
                 Ok(remote_version) => {
@@ -2090,8 +2169,8 @@ impl DashboardState {
         if job.kind != DashboardJobKind::Update {
             if self.job_is_update {
                 // An update's preflight check: its targets are still
-                // waiting, except the one being checked.
-                let waiting = job.current_addon != folder
+                // waiting, except the ones being checked.
+                let waiting = !job.active.iter().any(|active| active == folder)
                     && self.job_targets.iter().any(|target| target == folder);
                 return waiting.then_some(UpdateJobRowState::Waiting);
             }
@@ -2104,7 +2183,7 @@ impl DashboardState {
         if let Some(state) = self.job_results.get(folder) {
             return Some(*state);
         }
-        if job.current_addon == folder {
+        if job.active.iter().any(|active| active == folder) {
             return Some(UpdateJobRowState::Updating);
         }
         if self.job_reached.iter().any(|reached| reached == folder) {
@@ -5818,20 +5897,18 @@ impl App {
                 ],
                 AppTaskEvent::DashboardJobProgress(progress) => vec![
                     AppAction::SetDashboardJobUi(Some(progress.clone())),
-                    AppAction::SetStatus(self.dashboard_status_for(
-                        StatusKind::Working,
-                        self.dashboard.detail_mode,
-                        &format!(
-                            "{} {} of {} · {}",
-                            progress.kind.label().to_ascii_lowercase(),
-                            progress.current_index,
-                            progress.total,
-                            progress.current_addon
-                        ),
-                    )),
+                    AppAction::SetStatus(self.dashboard_job_status(&progress)),
                 ],
                 AppTaskEvent::DashboardJobStep(step) => {
                     let mut actions = vec![AppAction::ApplyDashboardJobStep(step.clone())];
+                    // Which addons are out and how many are done changed: so does the status.
+                    if matches!(
+                        step,
+                        DashboardJobStep::Started { .. } | DashboardJobStep::Finished { .. }
+                    ) && let Some(progress) = self.dashboard.job_progress_after(&step)
+                    {
+                        actions.push(AppAction::SetStatus(self.dashboard_job_status(&progress)));
+                    }
                     // The automatic backup made (and pruned) archives.
                     if matches!(step, DashboardJobStep::BackedUp(_)) {
                         actions.push(AppAction::ReloadBackups);
@@ -7604,6 +7681,18 @@ impl App {
         )
     }
 
+    /// The status of a running job, in the words of its status line: `checking 2 of 4`, with
+    /// the folder after a `·` while exactly one addon has a request out.
+    fn dashboard_job_status(&self, job: &DashboardJobUiState) -> StatusMessage {
+        let (text, folder) = job.progress_text();
+        let text = text.to_ascii_lowercase();
+        let message = match folder {
+            Some(folder) => format!("{text} · {folder}"),
+            None => text,
+        };
+        self.dashboard_status_for(StatusKind::Working, self.dashboard.detail_mode, &message)
+    }
+
     fn active_detail_status_message(&self, detail_mode: DetailMode) -> Option<String> {
         if self.status_line.is_empty() || !self.status_line.kind.is_shown() {
             return None;
@@ -8311,12 +8400,17 @@ async fn run_dashboard_update_task(
     // One addon at a time, so each row shows its result as it comes in.
     let total = folders.len();
     let mut run = LiveUpdateRun::default();
-    for (index, folder) in folders.iter().enumerate() {
+    if total > 0 {
         on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
             kind: DashboardJobKind::Update,
-            current_index: index + 1,
+            finished: 0,
             total,
-            current_addon: folder.clone(),
+            active: Vec::new(),
+        }));
+    }
+    for folder in folders {
+        on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Started {
+            folder: folder.clone(),
         }));
         let one = apply_live_updates(
             &mut database,
@@ -8336,6 +8430,9 @@ async fn run_dashboard_update_task(
                 status: result.status,
             }));
         }
+        on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Finished {
+            folder: folder.clone(),
+        }));
         run.summary.add(&one.summary);
         run.results.extend(one.results);
         run.held.extend(one.held);
@@ -8546,8 +8643,9 @@ async fn preflight_stale_update_checks(
     Ok(())
 }
 
-/// Checks `folders` one at a time, reporting each as it starts and what
-/// came back. Returns why each failed check failed.
+/// Checks `folders` together, reporting each addon as its request goes out and what came
+/// back. Returns why each failed check failed, in the order of `folders`. The request caps
+/// hold for this run only.
 async fn check_folders_live(
     database: &mut StateDatabase,
     addon_dir: Option<&Path>,
@@ -8555,43 +8653,90 @@ async fn check_folders_live(
     wago_api_key: Option<&str>,
     on_event: &mut impl FnMut(AppTaskEvent),
 ) -> std::result::Result<Vec<CheckFailure>, String> {
+    check_folders_live_in(
+        database,
+        addon_dir,
+        folders,
+        wago_api_key,
+        &SourceLimits::standard(),
+        fetch_wago_check,
+        on_event,
+    )
+    .await
+}
+
+/// [`check_folders_live`] with the limits and the Wago.io request given.
+async fn check_folders_live_in<F, Fut>(
+    database: &mut StateDatabase,
+    addon_dir: Option<&Path>,
+    folders: &[String],
+    wago_api_key: Option<&str>,
+    limits: &SourceLimits,
+    fetch_wago: F,
+    on_event: &mut impl FnMut(AppTaskEvent),
+) -> std::result::Result<Vec<CheckFailure>, String>
+where
+    F: Fn(reqwest::Client, AddonRecord, String) -> Fut,
+    Fut: Future<Output = std::result::Result<crate::wago::WagoRemoteVersion, SourceError>>
+        + Send
+        + 'static,
+{
+    // No selectors would mean every addon.
+    if folders.is_empty() {
+        return Ok(Vec::new());
+    }
     let sources: HashMap<String, SourceKind> = database
         .list_addons()
         .map_err(|error| error.to_string())?
         .into_iter()
         .map(|addon| (addon.folder, addon.source))
         .collect();
-    let mut failures = Vec::new();
-    for (index, folder) in folders.iter().enumerate() {
-        on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
-            kind: DashboardJobKind::Check,
-            current_index: index + 1,
-            total: folders.len(),
-            current_addon: folder.clone(),
-        }));
-        let results = refresh_live_update_checks(
-            database,
-            std::slice::from_ref(folder),
-            wago_api_key,
-            addon_dir,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        for result in results {
-            let Some(step) = check_step_for_result(&result, &sources) else {
-                continue;
-            };
-            if let DashboardJobStep::Checked {
+    on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+        kind: DashboardJobKind::Check,
+        finished: 0,
+        total: folders.len(),
+        active: Vec::new(),
+    }));
+    let results = refresh_live_update_checks_in(
+        database,
+        folders,
+        wago_api_key,
+        addon_dir,
+        limits,
+        fetch_wago,
+        |event| match event {
+            CheckEvent::Started { folder } => {
+                on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Started {
+                    folder,
+                }));
+            }
+            CheckEvent::Finished { folder, result } => {
+                if let Some(step) = result
+                    .as_ref()
+                    .and_then(|result| check_step_for_result(result, &sources))
+                {
+                    on_event(AppTaskEvent::DashboardJobStep(step));
+                }
+                on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Finished {
+                    folder,
+                }));
+            }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    // From the results, which are in the order of `folders`, so the cause shown does not
+    // depend on which check came back first.
+    Ok(results
+        .iter()
+        .filter_map(|result| match check_step_for_result(result, &sources) {
+            Some(DashboardJobStep::Checked {
                 result: Err(failure),
                 ..
-            } = &step
-            {
-                failures.push(failure.clone());
-            }
-            on_event(AppTaskEvent::DashboardJobStep(step));
-        }
-    }
-    Ok(failures)
+            }) => Some(failure),
+            _ => None,
+        })
+        .collect())
 }
 
 /// What one live check result means for its row: a version came back, the
@@ -13722,9 +13867,9 @@ mod tests {
         let actions = app.update(AppMessage::BackgroundTask(
             AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
                 kind: DashboardJobKind::Update,
-                current_index: 2,
+                finished: 1,
                 total: 3,
-                current_addon: "Second".to_string(),
+                active: vec!["Second".to_string()],
             }),
         ));
 
@@ -13737,9 +13882,9 @@ mod tests {
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.dashboard.set_job_ui(Some(DashboardJobUiState {
             kind: DashboardJobKind::Update,
-            current_index: 1,
+            finished: 0,
             total: 2,
-            current_addon: "Second".to_string(),
+            active: vec!["Second".to_string()],
         }));
         let row = app
             .dashboard
@@ -14447,6 +14592,7 @@ mod tests {
 
     #[test]
     fn running_update_claims_success_only_when_the_run_reports_it() {
+        use super::DashboardJobStep;
         use super::render_dashboard::RowStatus;
         let mut app = app_for_tests(ShellMode::Dashboard);
         let folders = [
@@ -14455,11 +14601,27 @@ mod tests {
             "Third".to_string(),
         ];
         app.dashboard.begin_update_targets(&folders);
-        let job = |kind: DashboardJobKind, index: usize, folder: &str| DashboardJobUiState {
-            kind,
-            current_index: index,
-            total: 3,
-            current_addon: folder.to_string(),
+        let begin = |app: &mut App, kind: DashboardJobKind| {
+            app.apply(AppAction::SetDashboardJobUi(Some(DashboardJobUiState {
+                kind,
+                finished: 0,
+                total: 3,
+                active: Vec::new(),
+            })));
+        };
+        let started = |app: &mut App, folder: &str| {
+            app.apply(AppAction::ApplyDashboardJobStep(
+                DashboardJobStep::Started {
+                    folder: folder.to_string(),
+                },
+            ));
+        };
+        let finished = |app: &mut App, folder: &str| {
+            app.apply(AppAction::ApplyDashboardJobStep(
+                DashboardJobStep::Finished {
+                    folder: folder.to_string(),
+                },
+            ));
         };
         let status = |app: &App, folder: &str| {
             let item = app
@@ -14471,16 +14633,17 @@ mod tests {
             app.dashboard_row_status(item)
         };
         // The preflight check reports progress too; it does not count as done.
-        app.dashboard
-            .set_job_ui(Some(job(DashboardJobKind::Check, 1, "First")));
+        begin(&mut app, DashboardJobKind::Check);
+        started(&mut app, "First");
         assert_eq!(status(&app, "First"), RowStatus::Checking);
-        app.dashboard
-            .set_job_ui(Some(job(DashboardJobKind::Check, 2, "Second")));
+        finished(&mut app, "First");
+        started(&mut app, "Second");
         assert_eq!(status(&app, "First"), RowStatus::Waiting);
-        app.dashboard
-            .set_job_ui(Some(job(DashboardJobKind::Update, 1, "First")));
-        app.dashboard
-            .set_job_ui(Some(job(DashboardJobKind::Update, 2, "Second")));
+        finished(&mut app, "Second");
+        begin(&mut app, DashboardJobKind::Update);
+        started(&mut app, "First");
+        finished(&mut app, "First");
+        started(&mut app, "Second");
         // Moved past, result unknown: a neutral "Done", never "Updated".
         assert_eq!(status(&app, "First"), RowStatus::Done);
         assert_eq!(RowStatus::Done.label("⠋"), "· Done");
@@ -14509,8 +14672,8 @@ mod tests {
         assert_ne!(status(&app, "Third"), RowStatus::Done);
 
         // The next job clears the last run's results.
-        app.dashboard
-            .set_job_ui(Some(job(DashboardJobKind::Check, 1, "Third")));
+        begin(&mut app, DashboardJobKind::Check);
+        started(&mut app, "Third");
         assert_ne!(status(&app, "First"), RowStatus::Updated);
         assert_ne!(status(&app, "Second"), RowStatus::UpdateFailed);
     }
@@ -20729,9 +20892,9 @@ mod tests {
             app.apply(AppAction::SetDashboardUpdateInProgress(true));
             app.apply(AppAction::SetDashboardJobUi(Some(DashboardJobUiState {
                 kind: DashboardJobKind::Update,
-                current_index: 3,
+                finished: 2,
                 total: 4,
-                current_addon: app.dashboard.items[0].folder.clone(),
+                active: vec![app.dashboard.items[0].folder.clone()],
             })));
 
             press_key(&mut app, KeyCode::Char('q'));
@@ -20845,17 +21008,25 @@ mod tests {
             apply_all(app, AppMessage::BackgroundTask(event));
         }
 
-        fn progress(
-            kind: DashboardJobKind,
-            index: usize,
-            total: usize,
-            folder: &str,
-        ) -> AppTaskEvent {
+        /// A phase of `total` addons begins.
+        fn begin(kind: DashboardJobKind, total: usize) -> AppTaskEvent {
             AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
                 kind,
-                current_index: index,
+                finished: 0,
                 total,
-                current_addon: folder.to_string(),
+                active: Vec::new(),
+            })
+        }
+
+        fn started(folder: &str) -> AppTaskEvent {
+            step(DashboardJobStep::Started {
+                folder: folder.to_string(),
+            })
+        }
+
+        fn finished(folder: &str) -> AppTaskEvent {
+            step(DashboardJobStep::Finished {
+                folder: folder.to_string(),
             })
         }
 
@@ -20907,7 +21078,8 @@ mod tests {
             let mut app = app_for_tests(ShellMode::Dashboard);
             let targets = vec!["Third".to_string(), "Second".to_string()];
             send(&mut app, step(DashboardJobStep::CheckTargets(targets)));
-            send(&mut app, progress(DashboardJobKind::Check, 1, 2, "Third"));
+            send(&mut app, begin(DashboardJobKind::Check, 2));
+            send(&mut app, started("Third"));
             assert_eq!(status(&app, "Third"), RowStatus::Checking);
             assert_eq!(status(&app, "Second"), RowStatus::Waiting);
             // Not part of the check: its own status.
@@ -20920,12 +21092,17 @@ mod tests {
                     result: Ok(Some("3.1.0".to_string())),
                 }),
             );
-            send(&mut app, progress(DashboardJobKind::Check, 2, 2, "Second"));
+            send(&mut app, finished("Third"));
+            send(&mut app, started("Second"));
             assert_eq!(status(&app, "Third"), RowStatus::UpdateReady);
             assert_eq!(status(&app, "Second"), RowStatus::Checking);
             let line = line_text(&app.dashboard_status_line(120));
             assert!(line.contains("Checking 2 of 2 · Second"), "{line}");
-            assert!(line.contains(&"█".repeat(28)), "{line}");
+            // One of two is done: the bar is half full.
+            assert!(
+                line.contains(&format!("{}{}", "█".repeat(14), "░".repeat(14))),
+                "{line}"
+            );
 
             send(
                 &mut app,
@@ -20934,6 +21111,9 @@ mod tests {
                     result: Err(failure(SourceErrorKind::NoConnection)),
                 }),
             );
+            send(&mut app, finished("Second"));
+            let line = line_text(&app.dashboard_status_line(120));
+            assert!(line.contains(&"█".repeat(28)), "{line}");
             apply_all(
                 &mut app,
                 AppMessage::BackgroundTask(AppTaskEvent::DashboardCheckFinished(Ok(
@@ -20949,6 +21129,205 @@ mod tests {
                 ))),
             );
             assert!(app.dashboard.job_ui().is_none());
+        }
+
+        #[test]
+        fn several_rows_check_at_once_and_each_shows_its_own_result() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let targets = vec!["Second".to_string(), "Third".to_string()];
+            send(&mut app, step(DashboardJobStep::CheckTargets(targets)));
+            send(&mut app, begin(DashboardJobKind::Check, 2));
+            send(&mut app, started("Second"));
+            send(&mut app, started("Third"));
+            assert_eq!(status(&app, "Second"), RowStatus::Checking);
+            assert_eq!(status(&app, "Third"), RowStatus::Checking);
+
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Third".to_string(),
+                    result: Ok(Some("3.1.0".to_string())),
+                }),
+            );
+            send(&mut app, finished("Third"));
+            assert_eq!(status(&app, "Second"), RowStatus::Checking);
+            assert_eq!(status(&app, "Third"), RowStatus::UpdateReady);
+            let job = app.dashboard.job_ui().expect("job");
+            assert_eq!(job.finished, 1);
+            assert_eq!(job.active, vec!["Second".to_string()]);
+        }
+
+        #[test]
+        fn a_started_after_its_finished_does_not_bring_the_row_back() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let targets = vec!["Second".to_string(), "Third".to_string()];
+            send(&mut app, step(DashboardJobStep::CheckTargets(targets)));
+            send(&mut app, begin(DashboardJobKind::Check, 2));
+            send(&mut app, started("Third"));
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Third".to_string(),
+                    result: Ok(Some("3.1.0".to_string())),
+                }),
+            );
+            send(&mut app, finished("Third"));
+            send(&mut app, started("Third"));
+            assert_eq!(status(&app, "Third"), RowStatus::UpdateReady);
+            let job = app.dashboard.job_ui().expect("job");
+            assert!(job.active.is_empty(), "{job:?}");
+            assert_eq!(job.finished, 1);
+            // A second Finished for it does not count twice either.
+            send(&mut app, finished("Third"));
+            assert_eq!(app.dashboard.job_ui().expect("job").finished, 1);
+        }
+
+        /// The status line and the status message name the addon only while exactly one
+        /// has a request out.
+        #[test]
+        fn the_job_status_names_the_addon_only_while_one_is_out() {
+            for (kind, label) in [
+                (DashboardJobKind::Check, "Checking"),
+                (DashboardJobKind::Update, "Updating"),
+            ] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                let detail_mode = app.dashboard.detail_mode;
+                send(&mut app, begin(kind, 4));
+                send(&mut app, started("Second"));
+                send(&mut app, started("Third"));
+                let line = line_text(&app.dashboard_status_line(120));
+                assert!(line.contains(&format!("{label} 1 of 4")), "{line}");
+                assert!(!line.contains('·'), "{line}");
+                assert_eq!(
+                    app.active_detail_status_message(detail_mode).as_deref(),
+                    Some(format!("{} 1 of 4", label.to_ascii_lowercase()).as_str())
+                );
+
+                for folder in ["Third", "First", "Gone"] {
+                    send(&mut app, started(folder));
+                    send(&mut app, finished(folder));
+                }
+                let line = line_text(&app.dashboard_status_line(120));
+                assert!(line.contains(&format!("{label} 4 of 4 · Second")), "{line}");
+                assert_eq!(
+                    app.active_detail_status_message(detail_mode).as_deref(),
+                    Some(format!("{} 4 of 4 · Second", label.to_ascii_lowercase()).as_str())
+                );
+
+                // Nothing out at all: no name either.
+                send(&mut app, finished("Second"));
+                let line = line_text(&app.dashboard_status_line(120));
+                assert!(line.contains(&format!("{label} 4 of 4")), "{line}");
+                assert!(!line.contains('·'), "{line}");
+                assert_eq!(
+                    app.active_detail_status_message(detail_mode).as_deref(),
+                    Some(format!("{} 4 of 4", label.to_ascii_lowercase()).as_str())
+                );
+            }
+        }
+
+        #[test]
+        fn the_status_line_with_several_checks_out_fits_at_80x24() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            let targets = vec![
+                "First".to_string(),
+                "Second".to_string(),
+                "Third".to_string(),
+            ];
+            send(&mut app, step(DashboardJobStep::CheckTargets(targets)));
+            send(&mut app, begin(DashboardJobKind::Check, 3));
+            for folder in ["First", "Second", "Third"] {
+                send(&mut app, started(folder));
+            }
+            let rows = render_rows(&mut app, 80, 24);
+            assert_eq!(rows.len(), 24);
+            assert!(rows.iter().all(|row| row.chars().count() <= 80));
+            let status_row = rows
+                .iter()
+                .find(|row| row.contains("Checking 1 of 3"))
+                .expect("status row");
+            assert!(!status_row.contains('·'), "{status_row}");
+        }
+
+        #[test]
+        fn the_bar_fills_by_the_addons_done_not_the_ones_out() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            send(&mut app, begin(DashboardJobKind::Update, 2));
+            send(&mut app, started("Second"));
+            let line = line_text(&app.dashboard_status_line(120));
+            assert!(line.contains(&"░".repeat(28)), "{line}");
+            assert!(!line.contains('█'), "{line}");
+        }
+
+        /// A later addon's check fails first, yet the failures come back in the order of
+        /// the targets, so the cause in the status does not depend on timing.
+        #[tokio::test]
+        async fn check_failures_come_back_in_target_order() {
+            use crate::source_error::SourceError;
+            use crate::source_limits::SourceLimits;
+
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut database =
+                StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+            for folder in ["Early", "Late"] {
+                let mut addon = AddonRecord::new(folder, folder, SourceKind::Wago);
+                addon.version = Some("1.0".to_string());
+                database.upsert_addon(&addon).expect("seed addon");
+            }
+            let folders = vec!["Early".to_string(), "Late".to_string()];
+            let release = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let (early_tx, early_rx) = tokio::sync::oneshot::channel::<()>();
+            *release.lock().expect("release") = Some(early_tx);
+            let early_rx = std::sync::Arc::new(std::sync::Mutex::new(Some(early_rx)));
+            let mut checked = Vec::new();
+            let mut on_event = |event| {
+                if let AppTaskEvent::DashboardJobStep(DashboardJobStep::Checked {
+                    folder, ..
+                }) = event
+                {
+                    checked.push(folder);
+                }
+            };
+
+            let limits = SourceLimits::new(6, 3, 4, 4, 2);
+            let run = crate::app::check_folders_live_in(
+                &mut database,
+                None,
+                &folders,
+                Some("fake-key"),
+                &limits,
+                |_client, addon: AddonRecord, _api_key| {
+                    let release = std::sync::Arc::clone(&release);
+                    let early_rx = early_rx.lock().expect("early").take();
+                    async move {
+                        if addon.folder == "Early" {
+                            early_rx.expect("early waits").await.expect("released");
+                            Err(SourceError::new(SourceErrorKind::NotFound, "early"))
+                        } else {
+                            let early = release.lock().expect("release").take();
+                            early.expect("sender").send(()).expect("early waits");
+                            Err(SourceError::new(SourceErrorKind::NoConnection, "late"))
+                        }
+                    }
+                },
+                &mut on_event,
+            );
+            let failures = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+                .await
+                .expect("Late lets Early end, so the checks must overlap")
+                .expect("check");
+
+            assert_eq!(checked, vec!["Late".to_string(), "Early".to_string()]);
+            assert_eq!(
+                failures
+                    .iter()
+                    .map(|failure| (failure.kind, failure.detail.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (SourceErrorKind::NotFound, "early"),
+                    (SourceErrorKind::NoConnection, "late"),
+                ]
+            );
         }
 
         #[test]
@@ -20971,7 +21350,8 @@ mod tests {
                 &mut app,
                 step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
             );
-            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(&mut app, begin(DashboardJobKind::Check, 1));
+            send(&mut app, started("Second"));
             send(
                 &mut app,
                 step(DashboardJobStep::Checked {
@@ -20993,7 +21373,8 @@ mod tests {
                 &mut app,
                 step(DashboardJobStep::CheckTargets(vec!["Third".to_string()])),
             );
-            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Third"));
+            send(&mut app, begin(DashboardJobKind::Check, 1));
+            send(&mut app, started("Third"));
             send(
                 &mut app,
                 step(DashboardJobStep::Checked {
@@ -21023,7 +21404,8 @@ mod tests {
                 &mut app,
                 step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
             );
-            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(&mut app, begin(DashboardJobKind::Check, 1));
+            send(&mut app, started("Second"));
             send(
                 &mut app,
                 step(DashboardJobStep::Checked {
@@ -21132,7 +21514,8 @@ mod tests {
                 &mut app,
                 step(DashboardJobStep::CheckTargets(vec!["Second".to_string()])),
             );
-            send(&mut app, progress(DashboardJobKind::Check, 1, 1, "Second"));
+            send(&mut app, begin(DashboardJobKind::Check, 1));
+            send(&mut app, started("Second"));
             send(
                 &mut app,
                 step(DashboardJobStep::Checked {
@@ -21202,7 +21585,8 @@ mod tests {
             let folders = ["Second".to_string(), "Third".to_string()];
             app.apply(AppAction::SetDashboardUpdateInProgress(true));
             app.dashboard.begin_update_targets(&folders);
-            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
+            send(&mut app, begin(DashboardJobKind::Update, 2));
+            send(&mut app, started("Second"));
             assert_eq!(status(&app, "Second"), RowStatus::Updating);
             assert_eq!(status(&app, "Third"), RowStatus::Waiting);
             send(
@@ -21216,12 +21600,18 @@ mod tests {
                     status: LiveUpdateStatus::Updated,
                 }),
             );
-            send(&mut app, progress(DashboardJobKind::Update, 2, 2, "Third"));
+            send(&mut app, finished("Second"));
+            send(&mut app, started("Third"));
             assert_eq!(status(&app, "Second"), RowStatus::Updated);
             assert_eq!(status(&app, "Third"), RowStatus::Updating);
             let line = line_text(&app.dashboard_status_line(120));
             assert!(line.contains("Updating 2 of 2 · Third"), "{line}");
             assert!(line.contains("settings backed up"), "{line}");
+            // Half way through, the bar is half full.
+            assert!(
+                line.contains(&format!("{}{}", "█".repeat(14), "░".repeat(14))),
+                "{line}"
+            );
             send(
                 &mut app,
                 step(DashboardJobStep::Updated {
@@ -21229,15 +21619,10 @@ mod tests {
                     status: LiveUpdateStatus::UpToDate,
                 }),
             );
+            send(&mut app, finished("Third"));
             assert_eq!(status(&app, "Third"), RowStatus::UpToDate);
-
-            // Half way through, the bar is half full.
-            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
             let line = line_text(&app.dashboard_status_line(120));
-            assert!(
-                line.contains(&format!("{}{}", "█".repeat(14), "░".repeat(14))),
-                "{line}"
-            );
+            assert!(line.contains(&"█".repeat(28)), "{line}");
         }
 
         #[test]
@@ -21245,12 +21630,15 @@ mod tests {
             let mut app = app_for_tests(ShellMode::Dashboard);
             app.dashboard
                 .begin_update_targets(&["Second".to_string(), "Third".to_string()]);
-            send(&mut app, progress(DashboardJobKind::Update, 1, 2, "Second"));
+            send(&mut app, begin(DashboardJobKind::Update, 2));
+            send(&mut app, started("Second"));
+            send(&mut app, finished("Second"));
+            send(&mut app, started("Third"));
             app.ui_theme.symbols = Symbols::SIMPLE;
             let rows = render_rows(&mut app, 120, 30);
             let status_row = &rows[28];
             assert!(status_row.contains(&"#".repeat(14)), "{status_row}");
-            assert!(status_row.contains("Updating 1 of 2"), "{status_row}");
+            assert!(status_row.contains("Updating 2 of 2"), "{status_row}");
             assert!(rows.iter().all(|row| row.is_ascii()), "{}", rows.join("\n"));
 
             app.ui_theme.symbols = Symbols::FANCY;
@@ -21259,7 +21647,7 @@ mod tests {
             app.shell_ui.motion.tick_count += 1;
             let second = line_text(&app.dashboard_status_line(120));
             assert_eq!(first, second);
-            assert!(first.starts_with(" … Updating 1 of 2"), "{first}");
+            assert!(first.starts_with(" … Updating 2 of 2"), "{first}");
             assert_eq!(RowStatus::Updating.symbol(app.spinner_frame(), "✓"), "…");
         }
 
@@ -21268,7 +21656,8 @@ mod tests {
             let mut app = app_for_tests(ShellMode::Dashboard);
             app.apply(AppAction::SetDashboardUpdateInProgress(true));
             app.dashboard.begin_update_targets(&["Second".to_string()]);
-            send(&mut app, progress(DashboardJobKind::Update, 1, 1, "Second"));
+            send(&mut app, begin(DashboardJobKind::Update, 1));
+            send(&mut app, started("Second"));
             assert_eq!(
                 app.messages_for_key(KeyEvent::from(KeyCode::Down)),
                 vec![AppMessage::DashboardSelectionNext]
@@ -21636,7 +22025,8 @@ mod tests {
                     app.apply(AppAction::SetDashboardUpdateInProgress(true));
                     app.dashboard.begin_update_targets(&["Second".to_string()]);
                 }
-                send(&mut app, progress(kind, 1, 1, "Second"));
+                send(&mut app, begin(kind, 1));
+                send(&mut app, started("Second"));
                 let expected = match kind {
                     DashboardJobKind::Check => "A check is already running",
                     DashboardJobKind::Update => "An update is already running",
@@ -23274,9 +23664,9 @@ mod tests {
             app.apply(AppAction::SetDashboardJobUi(Some(
                 crate::app::DashboardJobUiState {
                     kind: DashboardJobKind::Check,
-                    current_index: 1,
+                    finished: 0,
                     total: 2,
-                    current_addon: "Second".to_string(),
+                    active: vec!["Second".to_string()],
                 },
             )));
             let actions = app.update(AppMessage::HeldUpdatesConfirm);
@@ -23333,15 +23723,28 @@ mod tests {
                 .expect("third")
                 .remote_version = Some("9.9.9".to_string());
             assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
-            let progress = |index: usize, folder: &str| {
+            let begin = || {
                 AppMessage::BackgroundTask(AppTaskEvent::DashboardJobProgress(
                     DashboardJobUiState {
                         kind: DashboardJobKind::Update,
-                        current_index: index,
+                        finished: 0,
                         total: 2,
-                        current_addon: folder.to_string(),
+                        active: Vec::new(),
                     },
                 ))
+            };
+            let job_step = |step: DashboardJobStep| {
+                AppMessage::BackgroundTask(AppTaskEvent::DashboardJobStep(step))
+            };
+            let started = |folder: &str| {
+                job_step(DashboardJobStep::Started {
+                    folder: folder.to_string(),
+                })
+            };
+            let finished = |folder: &str| {
+                job_step(DashboardJobStep::Finished {
+                    folder: folder.to_string(),
+                })
             };
             let updated = |folder: &str, status: LiveUpdateStatus| {
                 AppMessage::BackgroundTask(AppTaskEvent::DashboardJobStep(
@@ -23354,12 +23757,15 @@ mod tests {
             app.apply(AppAction::SetDashboardUpdateInProgress(true));
             app.dashboard
                 .begin_update_targets(&["Third".to_string(), "Second".to_string()]);
-            apply_all(&mut app, progress(1, "Third"));
+            apply_all(&mut app, begin());
+            apply_all(&mut app, started("Third"));
             apply_all(&mut app, updated("Third", LiveUpdateStatus::Held));
+            apply_all(&mut app, finished("Third"));
             assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
-            apply_all(&mut app, progress(2, "Second"));
+            apply_all(&mut app, started("Second"));
             assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
             apply_all(&mut app, updated("Second", LiveUpdateStatus::Updated));
+            apply_all(&mut app, finished("Second"));
             assert_eq!(row_status(&app, "Second"), RowStatus::Updated);
             assert_eq!(row_status(&app, "Third"), RowStatus::UpdateReady);
 

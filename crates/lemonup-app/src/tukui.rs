@@ -3,7 +3,7 @@ use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use lemonup_core::{
@@ -163,7 +163,7 @@ struct TukuiFeedCache {
     addons: Vec<TukuiAddon>,
 }
 
-static TUKUI_CACHE: OnceLock<Mutex<Option<TukuiFeedCache>>> = OnceLock::new();
+static TUKUI_CACHE: OnceLock<tokio::sync::Mutex<Option<TukuiFeedCache>>> = OnceLock::new();
 
 pub(crate) fn parse_tukui_target(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
@@ -235,11 +235,11 @@ pub(crate) async fn install_tukui_addon_checked(
 }
 
 pub(crate) async fn fetch_tukui_remote_version(
+    client: &Client,
     addon: &AddonRecord,
 ) -> Result<TukuiRemoteVersion, SourceError> {
     let slug = resolve_tracked_tukui_target(addon)?;
-    let client = build_tukui_client()?;
-    let entry = resolve_tukui_addon(&client, &slug, false).await?;
+    let entry = resolve_tukui_addon(client, &slug, false).await?;
     Ok(TukuiRemoteVersion {
         source_url: Some(entry.web_url.clone()),
         version: Some(entry.version.clone()),
@@ -398,35 +398,45 @@ async fn fetch_tukui_addons(
     client: &Client,
     force_refresh: bool,
 ) -> Result<Vec<TukuiAddon>, SourceError> {
-    let cache = TUKUI_CACHE.get_or_init(|| Mutex::new(None));
-    if !force_refresh {
-        let guard = cache
-            .lock()
-            .map_err(|_| "TukUI cache lock poisoned".to_string())?;
-        if let Some(existing) = guard.as_ref()
-            && existing.fetched_at.elapsed() < CACHE_TTL
-        {
-            return Ok(existing.addons.clone());
-        }
+    let cache = TUKUI_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    cached_feed(cache, force_refresh, || async {
+        let response = client
+            .get(API_URL)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(SourceError::from_keyless_reqwest)?
+            .error_for_status()
+            .map_err(SourceError::from_keyless_reqwest)?;
+
+        response
+            .json::<Vec<TukuiAddon>>()
+            .await
+            .map_err(SourceError::from_keyless_reqwest)
+    })
+    .await
+}
+
+/// The feed from `cache` while it is fresh, otherwise from `fetch`, which is then stored.
+/// The lock is held while `fetch` runs, so checks that start together on a cold cache wait
+/// for one download instead of each sending their own. `force_refresh` always fetches.
+async fn cached_feed<Fut>(
+    cache: &tokio::sync::Mutex<Option<TukuiFeedCache>>,
+    force_refresh: bool,
+    fetch: impl FnOnce() -> Fut,
+) -> Result<Vec<TukuiAddon>, SourceError>
+where
+    Fut: Future<Output = Result<Vec<TukuiAddon>, SourceError>>,
+{
+    let mut guard = cache.lock().await;
+    if !force_refresh
+        && let Some(existing) = guard.as_ref()
+        && existing.fetched_at.elapsed() < CACHE_TTL
+    {
+        return Ok(existing.addons.clone());
     }
 
-    let response = client
-        .get(API_URL)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(SourceError::from_keyless_reqwest)?
-        .error_for_status()
-        .map_err(SourceError::from_keyless_reqwest)?;
-
-    let addons = response
-        .json::<Vec<TukuiAddon>>()
-        .await
-        .map_err(SourceError::from_keyless_reqwest)?;
-
-    let mut guard = cache
-        .lock()
-        .map_err(|_| "TukUI cache lock poisoned".to_string())?;
+    let addons = fetch().await?;
     *guard = Some(TukuiFeedCache {
         fetched_at: Instant::now(),
         addons: addons.clone(),
@@ -855,6 +865,91 @@ mod tests {
     };
     use lemonup_core::{AddonRecord, OwnedFolder, SourceKind, StateDatabase};
     use tempfile::tempdir;
+
+    /// Checks of ElvUI and Tukui that start together on a cold cache download the feed once;
+    /// a forced refresh downloads it again.
+    #[tokio::test]
+    async fn checks_that_start_together_share_one_feed_download() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = tokio::sync::Mutex::new(None);
+        let fetches = AtomicUsize::new(0);
+        let fetch = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok(Vec::<TukuiAddon>::new())
+        };
+
+        let (first, second) = tokio::join!(
+            super::cached_feed(&cache, false, fetch),
+            super::cached_feed(&cache, false, fetch),
+        );
+        first.expect("first");
+        second.expect("second");
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        super::cached_feed(&cache, true, fetch)
+            .await
+            .expect("forced");
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        super::cached_feed(&cache, false, fetch)
+            .await
+            .expect("cached");
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failed download is not kept: the next call downloads again, and a failed forced
+    /// refresh leaves the last good feed in place.
+    #[tokio::test]
+    async fn a_failed_feed_download_is_not_cached() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let elvui = TukuiAddon {
+            slug: "elvui".to_string(),
+            author: "Elv".to_string(),
+            name: "ElvUI".to_string(),
+            url: "https://api.tukui.org/v1/download/elvui".to_string(),
+            version: "13.80".to_string(),
+            web_url: "https://tukui.org/elvui".to_string(),
+            directories: vec!["ElvUI".to_string()],
+            patch: Vec::new(),
+        };
+        let cache = tokio::sync::Mutex::new(None);
+        let fetches = AtomicUsize::new(0);
+        let failing = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Err(crate::source_error::SourceError::new(
+                crate::source_error::SourceErrorKind::NoConnection,
+                "offline",
+            ))
+        };
+        let working = || async {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![elvui.clone()])
+        };
+        let slugs =
+            |feed: Vec<TukuiAddon>| feed.into_iter().map(|addon| addon.slug).collect::<Vec<_>>();
+
+        super::cached_feed(&cache, false, failing)
+            .await
+            .expect_err("offline");
+        assert!(cache.lock().await.is_none());
+        let feed = super::cached_feed(&cache, false, working)
+            .await
+            .expect("online");
+        assert_eq!(slugs(feed), ["elvui"]);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+        super::cached_feed(&cache, true, failing)
+            .await
+            .expect_err("forced and offline");
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+        let feed = super::cached_feed(&cache, false, failing)
+            .await
+            .expect("the good feed is still cached");
+        assert_eq!(slugs(feed), ["elvui"]);
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    }
 
     fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
         let mut cursor = std::io::Cursor::new(Vec::new());
