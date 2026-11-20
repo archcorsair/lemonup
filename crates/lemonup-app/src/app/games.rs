@@ -15,6 +15,7 @@ use lemonup_core::profiles::{
 use super::render_dashboard::fit_spans;
 use super::sheet::{SheetBody, SheetRoom, text_height};
 use super::*;
+use crate::update::refresh_live_update_checks;
 
 /// The "Game" column of the sheet, at most.
 const NAME_WIDTH_MAX: usize = 28;
@@ -189,7 +190,7 @@ pub(crate) async fn check_other_game(
         return Err(mismatch.to_string());
     }
     let key = wago_api_key_in_use(config.wago_api_key.clone(), wago_env_key);
-    refresh_live_update_checks(&mut database, &[], key.as_deref(), Some(&addon_dir))
+    refresh_live_update_checks(&mut database, &[], key.as_deref(), Some(&addon_dir), |_| {})
         .await
         .map_err(|error| error.to_string())?;
     Ok(())

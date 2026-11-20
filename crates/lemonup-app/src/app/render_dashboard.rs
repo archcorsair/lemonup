@@ -1329,7 +1329,7 @@ impl App {
             };
         }
         if self.dashboard.job_ui().is_some_and(|job| {
-            job.kind == DashboardJobKind::Check && job.current_addon == item.folder
+            job.kind == DashboardJobKind::Check && job.active.contains(&item.folder)
         }) {
             return RowStatus::Checking;
         }
@@ -1485,32 +1485,34 @@ impl App {
         Line::from(spans)
     }
 
-    /// `⠋ Updating 2 of 4 · Deadly Boss Mods   ██████░░░░`.
+    /// `⠋ Updating 2 of 4 · Deadly Boss Mods   ██████░░░░`, with the name only while exactly
+    /// one addon has a request out.
     fn dashboard_job_status_spans(&self, width: usize) -> Option<Vec<Span<'static>>> {
         let roles = self.ui_theme.roles;
         let job = self.dashboard.job_ui()?;
-        let name = self
-            .dashboard
-            .items
-            .iter()
-            .find(|item| item.folder == job.current_addon)
-            .map_or_else(|| job.current_addon.clone(), |item| item.name.clone());
+        let (text, folder) = job.progress_text();
         let mut spans = vec![
             Span::styled(self.spinner_frame(), Style::default().fg(roles.lemon)),
             Span::styled(
-                format!(
-                    " {} {} of {}",
-                    job.kind.label(),
-                    job.current_index,
-                    job.total
-                ),
+                format!(" {text}"),
                 Style::default().fg(roles.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" · ", Style::default().fg(roles.dim)),
-            Span::styled(truncate_text(&name, 40), Style::default().fg(roles.text)),
         ];
+        if let Some(folder) = folder {
+            let name = self
+                .dashboard
+                .items
+                .iter()
+                .find(|item| item.folder == folder)
+                .map_or_else(|| folder.to_string(), |item| item.name.clone());
+            spans.push(Span::styled(" · ", Style::default().fg(roles.dim)));
+            spans.push(Span::styled(
+                truncate_text(&name, 40),
+                Style::default().fg(roles.text),
+            ));
+        }
         if width >= usize::from(WIDE_FRAME_MIN_WIDTH) && job.total > 0 {
-            let filled = (job.current_index.min(job.total) * JOB_BAR_WIDTH) / job.total;
+            let filled = (job.finished.min(job.total) * JOB_BAR_WIDTH) / job.total;
             spans.push(Span::raw("   "));
             spans.push(Span::styled(
                 "█".repeat(filled),

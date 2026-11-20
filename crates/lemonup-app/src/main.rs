@@ -11,6 +11,7 @@ mod http;
 mod onboarding;
 mod shimmer;
 mod source_error;
+mod source_limits;
 mod theme;
 mod transfer;
 mod tui;
@@ -764,6 +765,7 @@ async fn run_check(
         &addons,
         api_key.as_deref(),
         effective_addon_dir.as_deref(),
+        |_| {},
     )
     .await
     .map_err(Box::<dyn std::error::Error>::from)?;

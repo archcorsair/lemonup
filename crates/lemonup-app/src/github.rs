@@ -263,19 +263,19 @@ pub(crate) async fn install_github_addon_checked(
 /// The version an update for `flavor` would install: the latest release's tag when it has a zip
 /// for the game, otherwise the default branch's head commit.
 pub(crate) async fn fetch_github_remote_version(
+    client: &Client,
     addon: &AddonRecord,
     flavor: GameFlavor,
 ) -> Result<GithubRemoteVersion, SourceError> {
     let repo = resolve_tracked_github_repo(addon)?;
-    let client = build_github_client()?;
-    if let Some(package) = fetch_github_release_package(&client, &repo, flavor).await? {
+    if let Some(package) = fetch_github_release_package(client, &repo, flavor).await? {
         return Ok(GithubRemoteVersion {
             source_url: Some(canonical_github_url(&repo.owner, &repo.repo)),
             version: Some(package.remote_version().to_string()),
         });
     }
-    let metadata = fetch_github_repo_metadata(&client, &repo).await?;
-    let head_sha = fetch_github_head_commit(&client, &metadata).await?;
+    let metadata = fetch_github_repo_metadata(client, &repo).await?;
+    let head_sha = fetch_github_head_commit(client, &metadata).await?;
     Ok(GithubRemoteVersion {
         source_url: Some(metadata.html_url),
         version: Some(head_sha),
@@ -367,7 +367,7 @@ fn github_token_from_env() -> Option<String> {
     resolve_github_token(|name| std::env::var(name).ok())
 }
 
-fn build_github_client() -> Result<Client, String> {
+pub(crate) fn build_github_client() -> Result<Client, String> {
     build_github_client_with_token(github_token_from_env().as_deref())
 }
 
