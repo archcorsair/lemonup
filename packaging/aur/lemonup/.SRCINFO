@@ -1,6 +1,6 @@
 pkgbase = lemonup
 	pkgdesc = Terminal addon manager for World of Warcraft (Retail and WoW Forever)
-	pkgver = 2.5.0
+	pkgver = 2.6.0
 	pkgrel = 1
 	url = https://github.com/archcorsair/lemonup
 	arch = x86_64
@@ -11,7 +11,7 @@ pkgbase = lemonup
 	depends = gcc-libs
 	conflicts = lemonup-bin
 	options = !lto
-	source = lemonup-2.5.0.tar.gz::https://github.com/archcorsair/lemonup/archive/refs/tags/v2.5.0.tar.gz
-	sha256sums = 8ea92c1c92b514c84796b157976497b07fdeeb80ea5f5aec64dc5d9880bb5d4c
+	source = lemonup-2.6.0.tar.gz::https://github.com/archcorsair/lemonup/archive/refs/tags/v2.6.0.tar.gz
+	sha256sums = b3198dffb108ea7eb1f3ce19ffef60d2991571d1067a39505a672e4ba16be471
 
 pkgname = lemonup
