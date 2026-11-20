@@ -1,4 +1,4 @@
-use crate::update::HeldPackage;
+use crate::update::PreparedUpdate;
 use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
@@ -247,58 +247,41 @@ pub(crate) async fn fetch_tukui_remote_version(
     })
 }
 
-pub(crate) async fn update_tukui_addon(
-    state_database: &mut StateDatabase,
-    addon_dir: &Path,
-    tracked: &AddonRecord,
+/// The network part of a TukUI update: what the feed lists, then the package unless nothing
+/// needs installing or the addon does not support the AddOns folder's `flavor`. Touches
+/// neither the database nor the AddOns folder.
+pub(crate) async fn prepare_tukui_update(
+    client: Client,
+    tracked: AddonRecord,
+    flavor: GameFlavor,
     force: bool,
     dry_run: bool,
-    agree: ReplaceNotLinked<'_>,
-) -> Result<(TukuiUpdateSummary, Option<HeldPackage>), String> {
+) -> Result<PreparedUpdate, String> {
     if tracked.source != SourceKind::Tukui {
         return Err(format!("addon '{}' is not linked to TukUI", tracked.folder));
     }
 
-    let slug = resolve_tracked_tukui_target(tracked)?;
-    let client = build_tukui_client()?;
+    let slug = resolve_tracked_tukui_target(&tracked)?;
     let addon = resolve_tukui_addon(&client, &slug, false).await?;
-    let plan = plan_tukui_update(
-        tracked,
-        &addon,
-        GameFlavor::for_addons_dir(addon_dir),
-        force,
-        dry_run,
-    )?;
+    let plan = plan_tukui_update(&tracked, &addon, flavor, force, dry_run)?;
     if let TukuiUpdatePlan::UpToDate(summary) = plan {
-        crate::update::record_skipped_update_check(
-            state_database,
-            tracked,
-            summary.remote_version.as_deref(),
-            Some(addon.web_url.clone()),
-            Some(&addon.name),
-            dry_run,
-        )?;
-        return Ok((summary, None));
+        return Ok(PreparedUpdate::Skipped {
+            outcome: summary.outcome(),
+            source_url: Some(addon.web_url),
+            source_name: Some(addon.name),
+        });
     }
 
     let bytes = download_tukui_release_bytes(&client, &addon).await?;
-    let summary = update_downloaded_tukui_addon(
-        state_database,
-        addon_dir,
-        tracked,
-        &addon,
-        &bytes,
-        agree,
-        dry_run,
-    )?;
-    if summary.not_linked.is_empty() || dry_run {
-        return Ok((summary, None));
-    }
-    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
-        update_downloaded_tukui_addon(database, addon_dir, tracked, &addon, bytes, agree, false)
-            .map(TukuiUpdateSummary::finished)
-    })?;
-    Ok((summary, Some(package)))
+    Ok(PreparedUpdate::downloaded(
+        bytes,
+        move |database, addon_dir, tracked, bytes, agree, dry_run| {
+            update_downloaded_tukui_addon(
+                database, addon_dir, tracked, &addon, bytes, agree, dry_run,
+            )
+            .map(TukuiUpdateSummary::outcome)
+        },
+    ))
 }
 
 enum TukuiUpdatePlan {

@@ -1,4 +1,4 @@
-use crate::update::HeldPackage;
+use crate::update::PreparedUpdate;
 use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
@@ -185,14 +185,14 @@ pub(crate) async fn fetch_wowinterface_remote_version(
     })
 }
 
-pub(crate) async fn update_wowinterface_addon(
-    state_database: &mut StateDatabase,
-    addon_dir: &Path,
-    tracked: &AddonRecord,
+/// The network part of a WoWInterface update: what WoWInterface lists, then the package
+/// unless nothing needs installing. Touches neither the database nor the AddOns folder.
+pub(crate) async fn prepare_wowinterface_update(
+    client: Client,
+    tracked: AddonRecord,
     force: bool,
     dry_run: bool,
-    agree: ReplaceNotLinked<'_>,
-) -> Result<(WowinterfaceUpdateSummary, Option<HeldPackage>), String> {
+) -> Result<PreparedUpdate, String> {
     if tracked.source != SourceKind::WowInterface {
         return Err(format!(
             "addon '{}' is not linked to WoWInterface",
@@ -200,8 +200,7 @@ pub(crate) async fn update_wowinterface_addon(
         ));
     }
 
-    let addon_id = resolve_tracked_wowinterface_id(tracked)?;
-    let client = build_wowinterface_client()?;
+    let addon_id = resolve_tracked_wowinterface_id(&tracked)?;
     let remote = fetch_wowinterface_addon(&client, &addon_id).await?;
     let remote_version = Some(remote.ui_version.clone());
 
@@ -210,54 +209,62 @@ pub(crate) async fn update_wowinterface_addon(
     if remote_older
         || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
     {
-        crate::update::record_skipped_update_check(
-            state_database,
-            tracked,
-            remote_version.as_deref(),
-            Some(canonical_source_url(&remote.uid)),
-            Some(&remote.ui_name),
+        let summary = WowinterfaceUpdateSummary {
+            addon_id: remote.uid.clone(),
+            addon_name: remote.ui_name.clone(),
+            parent_folder: tracked.folder.clone(),
+            installed_folders: std::iter::once(tracked.folder.clone())
+                .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
+                .collect(),
+            previous_version: tracked.version.clone(),
+            remote_version,
+            updated: false,
+            remote_older,
             dry_run,
-        )?;
-        return Ok((
-            WowinterfaceUpdateSummary {
-                addon_id: remote.uid.clone(),
-                addon_name: remote.ui_name.clone(),
-                parent_folder: tracked.folder.clone(),
-                installed_folders: std::iter::once(tracked.folder.clone())
-                    .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-                    .collect(),
-                previous_version: tracked.version.clone(),
-                remote_version,
-                updated: false,
-                remote_older,
-                dry_run,
-                not_linked: Vec::new(),
-                warning: None,
-            },
-            None,
-        ));
+            not_linked: Vec::new(),
+            warning: None,
+        };
+        return Ok(PreparedUpdate::Skipped {
+            outcome: summary.outcome(),
+            source_url: Some(canonical_source_url(&remote.uid)),
+            source_name: Some(remote.ui_name),
+        });
     }
 
     let bytes = download_wowinterface_release_bytes(&client, &remote).await?;
-    let summary = update_downloaded_wowinterface_addon(
-        state_database,
-        addon_dir,
-        tracked,
-        &remote,
-        &bytes,
-        agree,
-        dry_run,
-    )?;
-    if summary.not_linked.is_empty() || dry_run {
-        return Ok((summary, None));
-    }
-    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
-        update_downloaded_wowinterface_addon(
-            database, addon_dir, tracked, &remote, bytes, agree, false,
-        )
-        .map(WowinterfaceUpdateSummary::finished)
-    })?;
-    Ok((summary, Some(package)))
+    Ok(downloaded_wowinterface_update(remote, bytes))
+}
+
+/// A downloaded WoWInterface package, installed by `update_downloaded_wowinterface_addon`.
+fn downloaded_wowinterface_update(remote: WowinterfaceAddon, bytes: Vec<u8>) -> PreparedUpdate {
+    PreparedUpdate::downloaded(
+        bytes,
+        move |database, addon_dir, tracked, bytes, agree, dry_run| {
+            update_downloaded_wowinterface_addon(
+                database, addon_dir, tracked, &remote, bytes, agree, dry_run,
+            )
+            .map(WowinterfaceUpdateSummary::outcome)
+        },
+    )
+}
+
+/// A downloaded package for the WoWInterface addon `ui_name` (its zip named `ui_name.zip`)
+/// at `version`, built from `entries`, as the real download would bring it.
+#[cfg(test)]
+pub(crate) fn test_downloaded_update(
+    ui_name: &str,
+    version: &str,
+    entries: &[(&str, &str)],
+) -> PreparedUpdate {
+    let remote = WowinterfaceAddon {
+        uid: "1".to_string(),
+        ui_name: ui_name.to_string(),
+        ui_version: version.to_string(),
+        ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=1".to_string(),
+        ui_author_name: "author".to_string(),
+        ui_file_name: format!("{ui_name}.zip"),
+    };
+    downloaded_wowinterface_update(remote, tests::build_zip(entries))
 }
 
 fn build_wowinterface_client() -> Result<Client, String> {
@@ -842,7 +849,7 @@ mod tests {
     use lemonup_core::{AddonRecord, SourceKind, StateDatabase};
     use tempfile::tempdir;
 
-    fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+    pub(super) fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
         let mut cursor = std::io::Cursor::new(Vec::new());
         {
             let mut zip = zip::ZipWriter::new(&mut cursor);

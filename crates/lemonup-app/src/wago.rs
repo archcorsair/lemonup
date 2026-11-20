@@ -1,4 +1,4 @@
-use crate::update::HeldPackage;
+use crate::update::PreparedUpdate;
 use crate::update_targets::ReplaceNotLinked;
 use std::fs::{self, File};
 use std::io;
@@ -442,15 +442,17 @@ pub(crate) async fn fetch_wago_remote_version(
     })
 }
 
-pub(crate) async fn update_wago_addon(
-    state_database: &mut StateDatabase,
-    addon_dir: &Path,
-    tracked: &AddonRecord,
-    api_key: &str,
+/// The network part of a Wago.io update: what Wago.io lists for the AddOns folder's
+/// `flavor`, then the package unless nothing needs installing. Touches neither the database
+/// nor the AddOns folder.
+pub(crate) async fn prepare_wago_update(
+    client: Client,
+    tracked: AddonRecord,
+    api_key: String,
+    flavor: GameFlavor,
     force: bool,
     dry_run: bool,
-    agree: ReplaceNotLinked<'_>,
-) -> Result<(WagoUpdateSummary, Option<HeldPackage>), String> {
+) -> Result<PreparedUpdate, String> {
     if tracked.source != SourceKind::Wago {
         return Err(format!("addon '{}' is not linked to Wago", tracked.folder));
     }
@@ -464,9 +466,7 @@ pub(crate) async fn update_wago_addon(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("linked Wago addon '{}' has no source URL", tracked.folder))?;
     let addon_id = parse_wago_target(target)?;
-    let client = build_wago_client()?;
-    let flavor = GameFlavor::for_addons_dir(addon_dir);
-    let resolved = resolve_wago_release(&client, &addon_id, api_key, flavor, None).await?;
+    let resolved = resolve_wago_release(&client, &addon_id, &api_key, flavor, None).await?;
     let remote_version = resolved.version.clone();
 
     let remote_older = !force
@@ -474,65 +474,48 @@ pub(crate) async fn update_wago_addon(
     if remote_older
         || (!force && versions_match(tracked.version.as_deref(), remote_version.as_deref()))
     {
-        crate::update::record_skipped_update_check(
-            state_database,
-            tracked,
-            remote_version.as_deref(),
+        let source_url =
             Some(
                 resolved.addon.website_url.clone().unwrap_or_else(|| {
                     format!("https://addons.wago.io/addons/{}", resolved.addon.id)
                 }),
-            ),
-            Some(&resolved.addon.display_name),
+            );
+        let summary = WagoUpdateSummary {
+            addon_id: resolved.addon.id.clone(),
+            addon_name: resolved.addon.display_name.clone(),
+            parent_folder: tracked.folder.clone(),
+            installed_folders: tracked
+                .owned_folders
+                .iter()
+                .map(|owned| owned.name.clone())
+                .chain(std::iter::once(tracked.folder.clone()))
+                .collect(),
+            stability: resolved.stability,
+            previous_version: tracked.version.clone(),
+            remote_version,
+            updated: false,
+            remote_older,
             dry_run,
-        )?;
-        return Ok((
-            WagoUpdateSummary {
-                addon_id: resolved.addon.id.clone(),
-                addon_name: resolved.addon.display_name.clone(),
-                parent_folder: tracked.folder.clone(),
-                installed_folders: tracked
-                    .owned_folders
-                    .iter()
-                    .map(|owned| owned.name.clone())
-                    .chain(std::iter::once(tracked.folder.clone()))
-                    .collect(),
-                stability: resolved.stability,
-                previous_version: tracked.version.clone(),
-                remote_version,
-                updated: false,
-                remote_older,
-                dry_run,
-                not_linked: Vec::new(),
-            },
-            None,
-        ));
+            not_linked: Vec::new(),
+        };
+        return Ok(PreparedUpdate::Skipped {
+            outcome: summary.outcome(),
+            source_url,
+            source_name: Some(resolved.addon.display_name),
+        });
     }
 
-    let bytes = download_wago_release_bytes(&client, &resolved.download_url, api_key).await?;
-    let summary = update_downloaded_wago_addon(
-        state_database,
-        addon_dir,
-        tracked,
-        &resolved.addon,
-        &bytes,
-        resolved.stability,
-        agree,
-        dry_run,
-    )?;
-    if summary.not_linked.is_empty() || dry_run {
-        return Ok((summary, None));
-    }
-    let package = HeldPackage::keep(&bytes, {
-        let (addon, stability) = (resolved.addon, resolved.stability);
-        move |database, addon_dir, tracked, bytes, agree| {
+    let bytes = download_wago_release_bytes(&client, &resolved.download_url, &api_key).await?;
+    let (addon, stability) = (resolved.addon, resolved.stability);
+    Ok(PreparedUpdate::downloaded(
+        bytes,
+        move |database, addon_dir, tracked, bytes, agree, dry_run| {
             update_downloaded_wago_addon(
-                database, addon_dir, tracked, &addon, bytes, stability, agree, false,
+                database, addon_dir, tracked, &addon, bytes, stability, agree, dry_run,
             )
-            .map(WagoUpdateSummary::finished)
-        }
-    })?;
-    Ok((summary, Some(package)))
+            .map(WagoUpdateSummary::outcome)
+        },
+    ))
 }
 
 fn install_downloaded_wago_addon(

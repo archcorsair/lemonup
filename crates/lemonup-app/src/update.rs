@@ -46,20 +46,6 @@ pub(crate) struct LiveUpdateSummary {
     pub(crate) errors: usize,
 }
 
-impl LiveUpdateSummary {
-    /// Adds the counts of another run, as if both ran together.
-    pub(crate) fn add(&mut self, other: &Self) {
-        self.target_addons += other.target_addons;
-        self.updated_addons += other.updated_addons;
-        self.up_to_date += other.up_to_date;
-        self.skipped_manual += other.skipped_manual;
-        self.skipped_no_api_key += other.skipped_no_api_key;
-        self.remote_older += other.remote_older;
-        self.held += other.held;
-        self.errors += other.errors;
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveUpdateStatus {
     Updated,
@@ -523,7 +509,89 @@ fn spawn_check(
         .id()
 }
 
-/// Updates the selected addons one at a time. An addon whose new package would replace "Not
+/// What the network part of one addon's update produced.
+pub(crate) enum PreparedUpdate {
+    /// Nothing to install: already current, or the source lists an older version.
+    Skipped {
+        outcome: ProviderOutcome,
+        /// What the source said, to record the way a check does.
+        source_url: Option<String>,
+        source_name: Option<String>,
+    },
+    /// The package is downloaded and waits for its turn to be applied.
+    Downloaded {
+        bytes: Vec<u8>,
+        apply: ApplyDownloaded,
+    },
+}
+
+/// Applies a downloaded package: plan, folder swap and database write, or only the plan for
+/// a dry run. May be called again later for a held update.
+pub(crate) type ApplyDownloaded = Box<
+    dyn Fn(
+            &mut StateDatabase,
+            &Path,
+            &AddonRecord,
+            &[u8],
+            ReplaceNotLinked<'_>,
+            bool,
+        ) -> Result<ProviderOutcome, String>
+        + Send,
+>;
+
+impl PreparedUpdate {
+    /// A downloaded package that `apply` installs; its last argument is `dry_run`.
+    pub(crate) fn downloaded(
+        bytes: Vec<u8>,
+        apply: impl Fn(
+            &mut StateDatabase,
+            &Path,
+            &AddonRecord,
+            &[u8],
+            ReplaceNotLinked<'_>,
+            bool,
+        ) -> Result<ProviderOutcome, String>
+        + Send
+        + 'static,
+    ) -> Self {
+        Self::Downloaded {
+            bytes,
+            apply: Box::new(apply),
+        }
+    }
+}
+
+/// What the network part of one addon's update gets to work with.
+pub(crate) struct PrepareRequest {
+    /// The addon as it was listed when the run began.
+    pub(crate) addon: AddonRecord,
+    pub(crate) client: reqwest::Client,
+    /// The flavor of the AddOns folder being updated.
+    pub(crate) flavor: GameFlavor,
+    pub(crate) wago_api_key: Option<String>,
+    pub(crate) force: bool,
+    pub(crate) dry_run: bool,
+}
+
+/// What a running update reports as it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpdateEvent {
+    /// The request for this addon is going out now.
+    Started { folder: String },
+    /// This addon is done: applied, held, skipped or failed.
+    Finished {
+        folder: String,
+        result: LiveUpdateResult,
+    },
+}
+
+/// At most this many addons are downloading, or downloaded and waiting for their turn, at
+/// once, so the packages that wait in memory stay few.
+const UPDATE_WINDOW: usize = 6;
+
+/// Updates the selected addons. Downloads run several at once within
+/// [`SourceLimits::standard`], but each addon's folders and database row change one addon at
+/// a time, in the order of the selection. An addon whose new package would replace "Not
 /// linked" folders is held (see [`HeldUpdate`]) unless `replace_not_linked` agrees to replace
 /// them; the held updates come back in `LiveUpdateRun::held` with their packages kept.
 #[allow(clippy::too_many_arguments)]
@@ -535,8 +603,81 @@ pub(crate) async fn apply_live_updates(
     force: bool,
     dry_run: bool,
     replace_not_linked: bool,
-    mut on_progress: impl FnMut(usize, usize, String),
+    on_event: impl FnMut(UpdateEvent),
 ) -> Result<LiveUpdateRun, LemonupError> {
+    apply_live_updates_in(
+        database,
+        addon_dir,
+        selectors,
+        wago_api_key,
+        force,
+        dry_run,
+        replace_not_linked,
+        &SourceLimits::standard(),
+        prepare_update,
+        on_event,
+    )
+    .await
+}
+
+/// The network part of one addon's update, from the addon's own source.
+pub(crate) async fn prepare_update(request: PrepareRequest) -> Result<PreparedUpdate, String> {
+    let PrepareRequest {
+        addon,
+        client,
+        flavor,
+        wago_api_key,
+        force,
+        dry_run,
+    } = request;
+    match addon.source {
+        SourceKind::Wago => {
+            let api_key = wago_api_key.ok_or_else(|| "Wago API key not configured".to_string())?;
+            crate::wago::prepare_wago_update(client, addon, api_key, flavor, force, dry_run).await
+        }
+        SourceKind::Tukui => {
+            crate::tukui::prepare_tukui_update(client, addon, flavor, force, dry_run).await
+        }
+        SourceKind::WowInterface => {
+            crate::wowinterface::prepare_wowinterface_update(client, addon, force, dry_run).await
+        }
+        SourceKind::GitHub => {
+            crate::github::prepare_github_update(client, addon, flavor, force, dry_run).await
+        }
+        SourceKind::Manual => Err("addons that are not linked cannot be updated yet".to_string()),
+    }
+}
+
+/// Where one addon stands before its turn: nothing to ask the source, or what its download
+/// brought.
+enum UpdateTurn {
+    Manual,
+    NoApiKey,
+    Prepared(Result<PreparedUpdate, String>),
+}
+
+/// The update engine. `prepare` builds the network part of one addon's update; it runs here,
+/// before that part is handed to its own task, so it may use the database. The tasks only
+/// wait for the network. Every folder change and database write happens here, one addon at a
+/// time and in the order of the selection: an addon whose download ended early waits for the
+/// addons before it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_live_updates_in<F, Fut>(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    selectors: &[String],
+    wago_api_key: Option<&str>,
+    force: bool,
+    dry_run: bool,
+    replace_not_linked: bool,
+    limits: &SourceLimits,
+    mut prepare: F,
+    mut on_event: impl FnMut(UpdateEvent),
+) -> Result<LiveUpdateRun, LemonupError>
+where
+    F: FnMut(PrepareRequest) -> Fut,
+    Fut: Future<Output = Result<PreparedUpdate, String>> + Send + 'static,
+{
     let installed = database.list_addons()?;
     let selected = resolve_selected_addons(&installed, selectors)?
         .into_iter()
@@ -547,6 +688,7 @@ pub(crate) async fn apply_live_updates(
     } else {
         ReplaceNotLinked::NONE
     };
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
 
     let mut summary = LiveUpdateSummary {
         target_addons: selected.len(),
@@ -555,26 +697,98 @@ pub(crate) async fn apply_live_updates(
     let mut results = Vec::with_capacity(selected.len());
     let mut held = Vec::new();
 
-    let total = selected.len();
-    for (index, addon) in selected.into_iter().enumerate() {
-        on_progress(index + 1, total, addon.folder.clone());
-        let outcome = match addon.source {
-            SourceKind::Manual => {
-                summary.skipped_manual += 1;
-                results.push(LiveUpdateResult {
-                    addon_name: addon.folder.clone(),
-                    source: addon.source,
-                    status: LiveUpdateStatus::SkippedManual,
-                    previous_version: addon.version.clone(),
-                    remote_version: addon.remote_version.clone(),
-                    message: Some("addons that are not linked cannot be updated yet".to_string()),
-                });
-                continue;
-            }
-            SourceKind::Wago => {
+    // Built once for the run, the first time an addon needs one, as for checks.
+    let mut general_client: Option<Result<reqwest::Client, String>> = None;
+    let mut github_client: Option<Result<reqwest::Client, String>> = None;
+
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut join_set = tokio::task::JoinSet::new();
+    // Which addon each task prepares, so a task that panics still finishes its own addon.
+    let mut task_index = std::collections::HashMap::new();
+    let mut turns: Vec<Option<UpdateTurn>> = selected.iter().map(|_| None).collect();
+    let mut spawned = vec![false; selected.len()];
+    // Spawned and not yet applied.
+    let mut out = 0;
+    let mut next_spawn = 0;
+    let mut next_apply = 0;
+
+    loop {
+        // Downloads start in list order while the window has room. Rows that need no network
+        // do not count against it.
+        while next_spawn < selected.len() && out < UPDATE_WINDOW {
+            let index = next_spawn;
+            next_spawn += 1;
+            let addon = &selected[index];
+            let api_key = match addon.source {
+                SourceKind::Manual => {
+                    turns[index] = Some(UpdateTurn::Manual);
+                    continue;
+                }
                 // Tracked addons without authoritative ownership (for example rows migrated
                 // from v1) are updated too: the provider takes the folder set from the package.
-                let Some(api_key) = wago_api_key else {
+                SourceKind::Wago => match wago_api_key {
+                    Some(api_key) => Some(api_key.to_string()),
+                    None => {
+                        turns[index] = Some(UpdateTurn::NoApiKey);
+                        continue;
+                    }
+                },
+                SourceKind::Tukui | SourceKind::WowInterface | SourceKind::GitHub => None,
+            };
+            let client = if addon.source == SourceKind::GitHub {
+                github_client.get_or_insert_with(crate::github::build_github_client)
+            } else {
+                general_client.get_or_insert_with(|| {
+                    crate::http::client_builder()
+                        .build()
+                        .map_err(|error| error.to_string())
+                })
+            };
+            let client = match client {
+                Ok(client) => client.clone(),
+                Err(detail) => {
+                    // No request goes out, so there is no `Started`.
+                    turns[index] = Some(UpdateTurn::Prepared(Err(detail.clone())));
+                    continue;
+                }
+            };
+            let prepared = prepare(PrepareRequest {
+                addon: addon.clone(),
+                client,
+                flavor,
+                wago_api_key: api_key,
+                force,
+                dry_run,
+            });
+            let task = spawn_prepare(&mut join_set, limits, &started_tx, index, addon, prepared);
+            task_index.insert(task, index);
+            spawned[index] = true;
+            out += 1;
+        }
+
+        // Each addon whose turn has come and whose download is done is applied now.
+        let mut applied = false;
+        while let Some(turn) = turns.get_mut(next_apply).and_then(Option::take) {
+            // Its task sent `Started` before it ended, so that goes out first.
+            while let Ok(folder) = started_rx.try_recv() {
+                on_event(UpdateEvent::Started { folder });
+            }
+            let addon = &selected[next_apply];
+            match turn {
+                UpdateTurn::Manual => {
+                    summary.skipped_manual += 1;
+                    results.push(LiveUpdateResult {
+                        addon_name: addon.folder.clone(),
+                        source: addon.source,
+                        status: LiveUpdateStatus::SkippedManual,
+                        previous_version: addon.version.clone(),
+                        remote_version: addon.remote_version.clone(),
+                        message: Some(
+                            "addons that are not linked cannot be updated yet".to_string(),
+                        ),
+                    });
+                }
+                UpdateTurn::NoApiKey => {
                     summary.skipped_no_api_key += 1;
                     results.push(LiveUpdateResult {
                         addon_name: addon.folder.clone(),
@@ -584,38 +798,71 @@ pub(crate) async fn apply_live_updates(
                         remote_version: addon.remote_version.clone(),
                         message: Some("Wago API key not configured".to_string()),
                     });
+                }
+                UpdateTurn::Prepared(prepared) => {
+                    let outcome =
+                        apply_prepared(database, addon_dir, addon, prepared, agree, dry_run);
+                    record_provider_result(
+                        &mut summary,
+                        &mut results,
+                        &mut held,
+                        addon,
+                        addon_dir,
+                        outcome,
+                    );
+                }
+            }
+            if spawned[next_apply] {
+                out -= 1;
+            }
+            if let Some(result) = results.last() {
+                on_event(UpdateEvent::Finished {
+                    folder: addon.folder.clone(),
+                    result: result.clone(),
+                });
+            }
+            next_apply += 1;
+            applied = true;
+        }
+        if next_apply == selected.len() {
+            break;
+        }
+        if applied {
+            // The window may have room again.
+            continue;
+        }
+
+        tokio::select! {
+            biased;
+            Some(folder) = started_rx.recv() => {
+                on_event(UpdateEvent::Started { folder });
+            }
+            joined = join_set.join_next_with_id() => {
+                let Some(joined) = joined else {
+                    // A safety net: every addon whose task never reported fails.
+                    for index in next_apply..selected.len() {
+                        if spawned[index] && turns[index].is_none() {
+                            turns[index] = Some(UpdateTurn::Prepared(Err(
+                                update_stopped_unexpectedly(),
+                            )));
+                        }
+                    }
                     continue;
                 };
-                crate::wago::update_wago_addon(
-                    database, addon_dir, &addon, api_key, force, dry_run, agree,
-                )
-                .await
-                .map(|(result, package)| (result.outcome(), package))
+                let (index, prepared) = match joined {
+                    Ok((_task, (index, prepared))) => (index, prepared),
+                    // A task that panicked or was canceled fails its own addon. One that is
+                    // somehow unknown is caught by the safety net.
+                    Err(error) => {
+                        let Some(&index) = task_index.get(&error.id()) else {
+                            continue;
+                        };
+                        (index, Err(update_stopped_unexpectedly()))
+                    }
+                };
+                turns[index] = Some(UpdateTurn::Prepared(prepared));
             }
-            SourceKind::Tukui => {
-                crate::tukui::update_tukui_addon(database, addon_dir, &addon, force, dry_run, agree)
-                    .await
-                    .map(|(result, package)| (result.outcome(), package))
-            }
-            SourceKind::WowInterface => crate::wowinterface::update_wowinterface_addon(
-                database, addon_dir, &addon, force, dry_run, agree,
-            )
-            .await
-            .map(|(result, package)| (result.outcome(), package)),
-            SourceKind::GitHub => crate::github::update_github_addon(
-                database, addon_dir, &addon, force, dry_run, agree,
-            )
-            .await
-            .map(|(result, package)| (result.outcome(), package)),
-        };
-        record_provider_result(
-            &mut summary,
-            &mut results,
-            &mut held,
-            &addon,
-            addon_dir,
-            outcome,
-        );
+        }
     }
 
     Ok(LiveUpdateRun {
@@ -623,6 +870,113 @@ pub(crate) async fn apply_live_updates(
         results,
         held,
     })
+}
+
+/// Why an update whose task stopped without a result failed.
+fn update_stopped_unexpectedly() -> String {
+    "the update stopped unexpectedly".to_string()
+}
+
+/// The name an update shows for `addon`: its name, else its folder.
+fn shown_name(addon: &AddonRecord) -> String {
+    let name = addon.name.trim();
+    if name.is_empty() {
+        addon.folder.clone()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Applies what one addon's download brought to its row as it is stored now, compared with
+/// the row as the run listed it. A row that was deleted or linked to another source meanwhile
+/// is not touched, and neither is one whose source URL changed (linked to another project on
+/// the same source). A downloaded package is also not applied when the installed `version`,
+/// `git_commit` or `release_tag` changed, since something else installed the addon meanwhile.
+fn apply_prepared(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    snapshot: &AddonRecord,
+    prepared: Result<PreparedUpdate, String>,
+    agree: ReplaceNotLinked<'_>,
+    dry_run: bool,
+) -> Result<(ProviderOutcome, Option<HeldPackage>), String> {
+    let prepared = prepared?;
+    let fresh = database
+        .get_addon_by_folder(&snapshot.folder)
+        .map_err(|error| error.to_string())?
+        .filter(|row| row.source == snapshot.source)
+        .ok_or_else(|| format!("{} is no longer linked", shown_name(snapshot)))?;
+    let changed = || {
+        format!(
+            "{} changed during the update; update it again",
+            shown_name(snapshot)
+        )
+    };
+    if fresh.source_url != snapshot.source_url {
+        return Err(changed());
+    }
+    match prepared {
+        PreparedUpdate::Skipped {
+            outcome,
+            source_url,
+            source_name,
+        } => {
+            record_skipped_update_check(
+                database,
+                snapshot,
+                outcome.finished.remote_version.as_deref(),
+                source_url,
+                source_name.as_deref(),
+                dry_run,
+            )?;
+            Ok((outcome, None))
+        }
+        PreparedUpdate::Downloaded { bytes, apply } => {
+            if fresh.version != snapshot.version
+                || fresh.git_commit != snapshot.git_commit
+                || fresh.release_tag != snapshot.release_tag
+            {
+                return Err(changed());
+            }
+            let outcome = apply(database, addon_dir, &fresh, &bytes, agree, dry_run)?;
+            if outcome.finished.not_linked.is_empty() || dry_run {
+                return Ok((outcome, None));
+            }
+            let package =
+                HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
+                    apply(database, addon_dir, tracked, bytes, agree, false)
+                        .map(|outcome| outcome.finished)
+                })?;
+            Ok((outcome, Some(package)))
+        }
+    }
+}
+
+/// Runs one addon's download in its own task: it waits for its permits, says it started,
+/// then waits for the source, and gives the permits back before it ends. The task does no
+/// database work. Returns the task's id.
+fn spawn_prepare(
+    join_set: &mut tokio::task::JoinSet<(usize, Result<PreparedUpdate, String>)>,
+    limits: &SourceLimits,
+    started_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    index: usize,
+    addon: &AddonRecord,
+    prepared: impl Future<Output = Result<PreparedUpdate, String>> + Send + 'static,
+) -> tokio::task::Id {
+    let limits = limits.clone();
+    let started_tx = started_tx.clone();
+    let source = addon.source;
+    let folder = addon.folder.clone();
+    join_set
+        .spawn(async move {
+            let permit = limits.acquire(source).await;
+            // The engine stops listening only when it gave up on the run; the task still ends.
+            let _ = started_tx.send(folder);
+            let prepared = prepared.await;
+            drop(permit);
+            (index, prepared)
+        })
+        .id()
 }
 
 /// What finishing a provider update from a downloaded package did.
@@ -1524,7 +1878,7 @@ mod tests {
             false,
             true,
             false,
-            |_, _, _| {},
+            |_| {},
         )
         .await
         .expect_err("update");
@@ -1990,7 +2344,7 @@ mod tests {
             false,
             true,
             false,
-            |_, _, _| {},
+            |_| {},
         )
         .await
         .expect("apply live updates");
@@ -2347,7 +2701,7 @@ mod tests {
             false,
             true,
             false,
-            |_, _, _| {},
+            |_| {},
         )
         .await
         .expect("apply live updates");
@@ -2449,7 +2803,7 @@ mod tests {
             false,
             false,
             false,
-            |_, _, _| {},
+            |_| {},
         )
         .await
         .expect("apply live updates");
@@ -2510,7 +2864,7 @@ mod tests {
             false,
             true,
             false,
-            |_, _, _| {},
+            |_| {},
         )
         .await
         .expect("apply live updates");
@@ -2935,5 +3289,1006 @@ mod tests {
             }
             assert_eq!(started.len(), folders.len(), "round {round}");
         }
+    }
+
+    type PrepareFuture = std::pin::Pin<
+        Box<dyn Future<Output = Result<super::PreparedUpdate, String>> + Send + 'static>,
+    >;
+
+    /// An update that found the addon at 1.0, as the source lists it.
+    fn up_to_date() -> super::PreparedUpdate {
+        super::PreparedUpdate::Skipped {
+            outcome: super::ProviderOutcome {
+                updated: false,
+                remote_older: false,
+                finished: super::FinishedUpdate {
+                    previous_version: Some("1.0".to_string()),
+                    remote_version: Some("1.0".to_string()),
+                    not_linked: Vec::new(),
+                    warning: None,
+                },
+            },
+            source_url: None,
+            source_name: None,
+        }
+    }
+
+    /// A downloaded package whose apply only notes, in `applied`, which addon it was
+    /// applied to.
+    fn noted_package(applied: &Arc<std::sync::Mutex<Vec<String>>>) -> super::PreparedUpdate {
+        let applied = Arc::clone(applied);
+        super::PreparedUpdate::downloaded(Vec::new(), move |_, _, tracked, _, _, _| {
+            applied
+                .lock()
+                .expect("applied")
+                .push(tracked.folder.clone());
+            Ok(super::ProviderOutcome {
+                updated: true,
+                remote_older: false,
+                finished: super::FinishedUpdate {
+                    previous_version: tracked.version.clone(),
+                    remote_version: Some("2.0".to_string()),
+                    not_linked: Vec::new(),
+                    warning: None,
+                },
+            })
+        })
+    }
+
+    fn toc(title: &str, version: &str) -> String {
+        format!("## Title: {title}\n## Version: {version}\n## Interface: 110205\n")
+    }
+
+    /// A retail AddOns folder in `temp` with one folder per WoWInterface addon at 1.0, each
+    /// with an old file, and the database that links them. `not_linked` folders are on disk
+    /// too, as Not linked rows.
+    fn linked_addons(
+        temp: &tempfile::TempDir,
+        linked: &[&str],
+        not_linked: &[&str],
+    ) -> (std::path::PathBuf, StateDatabase) {
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        let database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        for (folder, source) in linked
+            .iter()
+            .map(|folder| (folder, SourceKind::WowInterface))
+            .chain(not_linked.iter().map(|folder| (folder, SourceKind::Manual)))
+        {
+            std::fs::create_dir_all(addon_dir.join(folder)).expect("create folder");
+            std::fs::write(
+                addon_dir.join(folder).join(format!("{folder}.toc")),
+                toc(folder, "1.0"),
+            )
+            .expect("write toc");
+            std::fs::write(addon_dir.join(folder).join("old.lua"), "old").expect("old file");
+            let mut addon = AddonRecord::new(*folder, *folder, source);
+            addon.version = Some("1.0".to_string());
+            database.upsert_addon(&addon).expect("seed addon");
+        }
+        (addon_dir, database)
+    }
+
+    /// The real WoWInterface package of `folder` at 2.0, with `extra` folders beside it.
+    fn package(folder: &str, extra: &[(&str, String)]) -> super::PreparedUpdate {
+        let mut entries = vec![(format!("{folder}/{folder}.toc"), toc(folder, "2.0"))];
+        entries.extend(
+            extra
+                .iter()
+                .map(|(extra, body)| (format!("{extra}/{extra}.toc"), body.clone())),
+        );
+        let entries = entries
+            .iter()
+            .map(|(path, body)| (path.as_str(), body.as_str()))
+            .collect::<Vec<_>>();
+        crate::wowinterface::test_downloaded_update(folder, "2.0", &entries)
+    }
+
+    /// Prepares each addon with its entry in `packages`. For each `(waiter, waited)` pair,
+    /// the waiter's download ends only after the waited one's. Each folder is noted in
+    /// `ended` as its download ends.
+    fn prepare_from(
+        packages: Vec<(&str, super::PreparedUpdate)>,
+        waits: &[(&str, &str)],
+        ended: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl FnMut(super::PrepareRequest) -> PrepareFuture + use<> {
+        let mut packages = packages
+            .into_iter()
+            .map(|(folder, package)| (folder.to_string(), package))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut waiting = std::collections::HashMap::new();
+        let mut releases = std::collections::HashMap::new();
+        for (waiter, waited) in waits {
+            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            waiting.insert(waiter.to_string(), released);
+            releases.insert(waited.to_string(), release);
+        }
+        let ended = Arc::clone(ended);
+        move |request: super::PrepareRequest| {
+            let folder = request.addon.folder.clone();
+            let package = packages.remove(&folder);
+            let wait = waiting.remove(&folder);
+            let release = releases.remove(&folder);
+            let ended = Arc::clone(&ended);
+            Box::pin(async move {
+                if let Some(wait) = wait {
+                    wait.await.expect("the addon it waits for ends");
+                }
+                ended.lock().expect("ended").push(folder.clone());
+                if let Some(release) = release {
+                    let _ = release.send(());
+                }
+                package.ok_or_else(|| format!("no package for {folder}"))
+            })
+        }
+    }
+
+    /// Updates `selectors` (every addon when empty) with the standard limits and no Wago.io
+    /// key, noting every event.
+    async fn update_with<F, Fut>(
+        database: &mut StateDatabase,
+        addon_dir: &std::path::Path,
+        selectors: &[&str],
+        dry_run: bool,
+        prepare: F,
+        events: &mut Vec<super::UpdateEvent>,
+    ) -> super::LiveUpdateRun
+    where
+        F: FnMut(super::PrepareRequest) -> Fut,
+        Fut: Future<Output = Result<super::PreparedUpdate, String>> + Send + 'static,
+    {
+        let selectors = selectors
+            .iter()
+            .map(|selector| selector.to_string())
+            .collect::<Vec<_>>();
+        let limits = SourceLimits::standard();
+        let run = super::apply_live_updates_in(
+            database,
+            addon_dir,
+            &selectors,
+            None,
+            false,
+            dry_run,
+            false,
+            &limits,
+            prepare,
+            |event| events.push(event),
+        );
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the run ends")
+            .expect("the run")
+    }
+
+    fn statuses(run: &super::LiveUpdateRun) -> Vec<(String, LiveUpdateStatus)> {
+        run.results
+            .iter()
+            .map(|result| (result.addon_name.clone(), result.status))
+            .collect()
+    }
+
+    fn stored(database: &StateDatabase, folder: &str) -> Option<AddonRecord> {
+        database.get_addon_by_folder(folder).expect("get addon")
+    }
+
+    /// Three downloads that each wait for the other two: only downloads that run at the
+    /// same time get past the barrier.
+    #[tokio::test]
+    async fn update_downloads_run_at_the_same_time() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["A", "B", "C"], &[]);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &[],
+            false,
+            |_request| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    barrier.wait().await;
+                    Ok(up_to_date())
+                }
+            },
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(
+            statuses(&run),
+            ["A", "B", "C"].map(|folder| (folder.to_string(), LiveUpdateStatus::UpToDate))
+        );
+    }
+
+    /// With the first download held back, no more than six addons are ever out or waiting
+    /// for their turn; once it ends, all twelve finish.
+    #[tokio::test]
+    async fn no_more_than_six_updates_wait_at_once() {
+        let temp = tempdir().expect("tempdir");
+        let folders = (1..=12).map(|n| format!("Addon{n:02}")).collect::<Vec<_>>();
+        let folder_refs = folders.iter().map(String::as_str).collect::<Vec<_>>();
+        let (addon_dir, mut database) = linked_addons(&temp, &folder_refs, &[]);
+        // Room for every request, so only the window holds them back.
+        let limits = SourceLimits::new(64, 64, 64, 64, 64);
+        let started = AtomicUsize::new(0);
+        let (gate, gate_opened) = tokio::sync::oneshot::channel::<()>();
+        let gate_opened = std::sync::Mutex::new(Some(gate_opened));
+
+        let run = super::apply_live_updates_in(
+            &mut database,
+            &addon_dir,
+            &[],
+            None,
+            false,
+            false,
+            false,
+            &limits,
+            |request: super::PrepareRequest| {
+                started.fetch_add(1, AtomicOrdering::SeqCst);
+                let gate_opened = (request.addon.folder == "Addon01")
+                    .then(|| gate_opened.lock().expect("gate").take())
+                    .flatten();
+                async move {
+                    if let Some(gate_opened) = gate_opened {
+                        gate_opened.await.expect("the gate opens");
+                    }
+                    Ok(up_to_date())
+                }
+            },
+            |_| {},
+        );
+        let started = &started;
+        let control = async move {
+            while started.load(AtomicOrdering::SeqCst) < 6 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Time for more to start, if anything let them.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let before = started.load(AtomicOrdering::SeqCst);
+            gate.send(()).expect("the first download still waits");
+            before
+        };
+        let (run, before) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(run, control)
+        })
+        .await
+        .expect("the run ends once the first download does");
+        let run = run.expect("the run");
+
+        assert_eq!(before, 6);
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 12);
+        assert_eq!(
+            statuses(&run),
+            folders
+                .iter()
+                .map(|folder| (folder.clone(), LiveUpdateStatus::UpToDate))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The last download ends first and each one lets the one before it end, yet the
+    /// packages are applied, finished and returned in list order.
+    #[tokio::test]
+    async fn updates_are_applied_in_list_order_whatever_order_downloads_end() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["A", "B", "C"], &[]);
+        let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare = prepare_from(
+            vec![
+                ("A", noted_package(&applied)),
+                ("B", noted_package(&applied)),
+                ("C", noted_package(&applied)),
+            ],
+            &[("A", "B"), ("B", "C")],
+            &ended,
+        );
+        let mut events = Vec::new();
+
+        let run = update_with(&mut database, &addon_dir, &[], false, prepare, &mut events).await;
+
+        let in_order = ["A", "B", "C"].map(str::to_string).to_vec();
+        assert_eq!(*ended.lock().expect("ended"), ["C", "B", "A"]);
+        assert_eq!(*applied.lock().expect("applied"), in_order);
+        let finished = events
+            .iter()
+            .filter_map(|event| match event {
+                super::UpdateEvent::Finished { folder, .. } => Some(folder.clone()),
+                super::UpdateEvent::Started { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finished, in_order);
+        assert_eq!(
+            statuses(&run),
+            in_order
+                .iter()
+                .map(|folder| (folder.clone(), LiveUpdateStatus::Updated))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Both addons ship a new `Shared` folder; the second in the list ends its download
+    /// first, yet the first in the list gets the folder and the other is refused.
+    async fn a_new_folder_goes_to_the_first_in_the_list(first: &str, second: &str) {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Alpha", "Bravo"], &[]);
+        let shared = |owner: &str| toc(&format!("Shared from {owner}"), "2.0");
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare = prepare_from(
+            vec![
+                ("Alpha", package("Alpha", &[("Shared", shared("Alpha"))])),
+                ("Bravo", package("Bravo", &[("Shared", shared("Bravo"))])),
+            ],
+            &[(first, second)],
+            &ended,
+        );
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &[first, second],
+            false,
+            prepare,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(*ended.lock().expect("ended"), [second, first]);
+        assert_eq!(
+            run.results
+                .iter()
+                .map(|result| result.addon_name.as_str())
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Updated);
+        assert_eq!(run.results[1].status, LiveUpdateStatus::Error);
+        let message = run.results[1].message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("owned by something else on disk: Shared"),
+            "{message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(addon_dir.join("Shared").join("Shared.toc")).expect("toc"),
+            shared(first)
+        );
+        let winner = stored(&database, first).expect("first row");
+        assert_eq!(winner.version.as_deref(), Some("2.0"));
+        assert!(
+            winner
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name == "Shared")
+        );
+        let refused = stored(&database, second).expect("second row");
+        assert_eq!(refused.version.as_deref(), Some("1.0"));
+        assert!(addon_dir.join(second).join("old.lua").exists());
+    }
+
+    #[tokio::test]
+    async fn a_new_folder_two_updates_ship_goes_to_the_first_in_the_list() {
+        a_new_folder_goes_to_the_first_in_the_list("Alpha", "Bravo").await;
+        a_new_folder_goes_to_the_first_in_the_list("Bravo", "Alpha").await;
+    }
+
+    /// Two updates that would replace Not linked folders, ending in reverse order: both are
+    /// held in list order, nothing changes, and the kept packages can still be skipped or
+    /// applied.
+    #[tokio::test]
+    async fn updates_over_not_linked_folders_are_held_in_list_order() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) =
+            linked_addons(&temp, &["Alpha", "Bravo"], &["LibAlpha", "LibBravo"]);
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare = prepare_from(
+            vec![
+                (
+                    "Alpha",
+                    package("Alpha", &[("LibAlpha", toc("LibAlpha", "2.0"))]),
+                ),
+                (
+                    "Bravo",
+                    package("Bravo", &[("LibBravo", toc("LibBravo", "2.0"))]),
+                ),
+            ],
+            &[("Alpha", "Bravo")],
+            &ended,
+        );
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &["Alpha", "Bravo"],
+            false,
+            prepare,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(*ended.lock().expect("ended"), ["Bravo", "Alpha"]);
+        assert_eq!(
+            statuses(&run),
+            [
+                ("Alpha".to_string(), LiveUpdateStatus::Held),
+                ("Bravo".to_string(), LiveUpdateStatus::Held)
+            ]
+        );
+        assert_eq!(run.summary.held, 2);
+        assert_eq!(
+            run.held
+                .iter()
+                .map(|held| (held.folder.as_str(), held.folders.clone()))
+                .collect::<Vec<_>>(),
+            [
+                ("Alpha", vec!["LibAlpha".to_string()]),
+                ("Bravo", vec!["LibBravo".to_string()])
+            ]
+        );
+        for folder in ["Alpha", "Bravo", "LibAlpha", "LibBravo"] {
+            assert!(addon_dir.join(folder).join("old.lua").exists(), "{folder}");
+            assert_eq!(
+                stored(&database, folder).expect("row").version.as_deref(),
+                Some("1.0")
+            );
+        }
+        assert_eq!(
+            stored(&database, "LibBravo").expect("row").source,
+            SourceKind::Manual
+        );
+
+        let mut held = run.held;
+        let bravo = held.pop().expect("Bravo held");
+        let alpha = held.pop().expect("Alpha held");
+        let alpha_package = alpha.package_path().to_path_buf();
+        let bravo_package = bravo.package_path().to_path_buf();
+        assert!(alpha_package.exists() && bravo_package.exists());
+
+        alpha.discard();
+        assert!(!alpha_package.exists());
+        assert!(addon_dir.join("LibAlpha").join("old.lua").exists());
+
+        let result = bravo.apply(&mut database, &addon_dir);
+        assert_eq!(result.status, LiveUpdateStatus::Updated, "{result:?}");
+        assert!(!bravo_package.exists());
+        assert!(!addon_dir.join("Bravo").join("old.lua").exists());
+        assert!(!addon_dir.join("LibBravo").join("old.lua").exists());
+        assert_eq!(
+            stored(&database, "Bravo").expect("row").version.as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(stored(&database, "LibBravo"), None);
+    }
+
+    /// Updates while `meanwhile` changes the row of `folder` from another LemonUp, after the
+    /// run listed the addons and before the package is applied.
+    async fn update_while(
+        temp: &tempfile::TempDir,
+        folders: &[&str],
+        changed: &str,
+        meanwhile: impl Fn(&StateDatabase),
+    ) -> (std::path::PathBuf, StateDatabase, super::LiveUpdateRun) {
+        let (addon_dir, mut database) = linked_addons(temp, folders, &[]);
+        let path = temp.path().join("state.sqlite");
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut prepare = prepare_from(
+            folders
+                .iter()
+                .map(|folder| (*folder, package(folder, &[])))
+                .collect(),
+            &[],
+            &ended,
+        );
+        let changed = changed.to_string();
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &[],
+            false,
+            |request: super::PrepareRequest| {
+                if request.addon.folder == changed {
+                    let other = StateDatabase::open(&path).expect("another LemonUp");
+                    meanwhile(&other);
+                }
+                prepare(request)
+            },
+            &mut Vec::new(),
+        )
+        .await;
+        (addon_dir, database, run)
+    }
+
+    #[tokio::test]
+    async fn an_addon_unlinked_while_its_download_waited_is_left_alone() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, database, run) =
+            update_while(&temp, &["Alpha", "Bravo"], "Alpha", |other| {
+                other.remove_addon("Alpha").expect("delete");
+            })
+            .await;
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Error);
+        assert_eq!(
+            run.results[0].message.as_deref(),
+            Some("Alpha is no longer linked")
+        );
+        assert!(addon_dir.join("Alpha").join("old.lua").exists());
+        assert_eq!(stored(&database, "Alpha"), None);
+        assert_eq!(run.results[1].status, LiveUpdateStatus::Updated);
+        assert_eq!(
+            stored(&database, "Bravo").expect("row").version.as_deref(),
+            Some("2.0")
+        );
+
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, database, run) =
+            update_while(&temp, &["Alpha", "Bravo"], "Bravo", |other| {
+                let mut relinked = other
+                    .get_addon_by_folder("Bravo")
+                    .expect("get")
+                    .expect("row");
+                relinked.source = SourceKind::Wago;
+                other.upsert_addon(&relinked).expect("relink");
+            })
+            .await;
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Updated);
+        assert_eq!(run.results[1].status, LiveUpdateStatus::Error);
+        assert_eq!(
+            run.results[1].message.as_deref(),
+            Some("Bravo is no longer linked")
+        );
+        assert!(addon_dir.join("Bravo").join("old.lua").exists());
+        let bravo = stored(&database, "Bravo").expect("row");
+        assert_eq!(bravo.source, SourceKind::Wago);
+        assert_eq!(bravo.version.as_deref(), Some("1.0"));
+        assert_eq!(run.summary.updated_addons, 1);
+        assert_eq!(run.summary.errors, 1);
+    }
+
+    #[tokio::test]
+    async fn an_addon_changed_while_its_download_waited_is_left_alone() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, database, run) = update_while(&temp, &["Alpha"], "Alpha", |other| {
+            let mut changed = other
+                .get_addon_by_folder("Alpha")
+                .expect("get")
+                .expect("row");
+            changed.version = Some("1.5".to_string());
+            other.upsert_addon(&changed).expect("change");
+        })
+        .await;
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Error);
+        assert_eq!(
+            run.results[0].message.as_deref(),
+            Some("Alpha changed during the update; update it again")
+        );
+        assert!(addon_dir.join("Alpha").join("old.lua").exists());
+        assert_eq!(
+            stored(&database, "Alpha").expect("row").version.as_deref(),
+            Some("1.5")
+        );
+    }
+
+    /// Another LemonUp installed another commit or release meanwhile, with the same TOC
+    /// version: the package downloaded for the old state is not applied over it.
+    #[tokio::test]
+    async fn an_addon_installed_at_another_commit_or_release_meanwhile_is_left_alone() {
+        for commit in [true, false] {
+            let temp = tempdir().expect("tempdir");
+            let (addon_dir, database, run) = update_while(&temp, &["Alpha"], "Alpha", |other| {
+                let mut changed = other
+                    .get_addon_by_folder("Alpha")
+                    .expect("get")
+                    .expect("row");
+                if commit {
+                    changed.git_commit = Some("c3c3c3c3".to_string());
+                } else {
+                    changed.release_tag = Some("v3".to_string());
+                }
+                other.upsert_addon(&changed).expect("change");
+            })
+            .await;
+            assert_eq!(run.results[0].status, LiveUpdateStatus::Error, "{commit}");
+            assert_eq!(
+                run.results[0].message.as_deref(),
+                Some("Alpha changed during the update; update it again")
+            );
+            assert!(addon_dir.join("Alpha").join("old.lua").exists());
+            let alpha = stored(&database, "Alpha").expect("row");
+            assert_eq!(alpha.version.as_deref(), Some("1.0"));
+            if commit {
+                assert_eq!(alpha.git_commit.as_deref(), Some("c3c3c3c3"));
+            } else {
+                assert_eq!(alpha.release_tag.as_deref(), Some("v3"));
+            }
+            assert!(alpha.owned_folders.is_empty());
+        }
+    }
+
+    const RELINKED_URL: &str = "https://www.wowinterface.com/downloads/info2.html";
+
+    /// Linked to another project on the same source meanwhile: the package for the old
+    /// project is not applied.
+    #[tokio::test]
+    async fn an_addon_relinked_on_the_same_source_meanwhile_gets_no_package() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, database, run) = update_while(&temp, &["Alpha"], "Alpha", |other| {
+            let mut relinked = other
+                .get_addon_by_folder("Alpha")
+                .expect("get")
+                .expect("row");
+            relinked.source_url = Some(RELINKED_URL.to_string());
+            other.upsert_addon(&relinked).expect("relink");
+        })
+        .await;
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Error);
+        assert_eq!(
+            run.results[0].message.as_deref(),
+            Some("Alpha changed during the update; update it again")
+        );
+        assert!(addon_dir.join("Alpha").join("old.lua").exists());
+        let alpha = stored(&database, "Alpha").expect("row");
+        assert_eq!(alpha.version.as_deref(), Some("1.0"));
+        assert_eq!(alpha.source_url.as_deref(), Some(RELINKED_URL));
+        assert!(alpha.owned_folders.is_empty());
+    }
+
+    /// Linked to another project on the same source meanwhile: what the old project's
+    /// source said is not recorded on the row.
+    #[tokio::test]
+    async fn a_skip_for_an_addon_relinked_meanwhile_records_nothing() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Alpha"], &[]);
+        let path = temp.path().join("state.sqlite");
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &[],
+            false,
+            |_request| {
+                let other = StateDatabase::open(&path).expect("another LemonUp");
+                let mut relinked = other
+                    .get_addon_by_folder("Alpha")
+                    .expect("get")
+                    .expect("row");
+                relinked.source_url = Some(RELINKED_URL.to_string());
+                relinked.remote_version = Some("5.0".to_string());
+                other.upsert_addon(&relinked).expect("relink");
+                async {
+                    Ok(super::PreparedUpdate::Skipped {
+                        outcome: super::ProviderOutcome {
+                            updated: false,
+                            remote_older: true,
+                            finished: super::FinishedUpdate {
+                                previous_version: Some("1.0".to_string()),
+                                remote_version: Some("0.9".to_string()),
+                                not_linked: Vec::new(),
+                                warning: None,
+                            },
+                        },
+                        source_url: Some("https://example.com/old-project".to_string()),
+                        source_name: Some("Old project".to_string()),
+                    })
+                }
+            },
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(run.results[0].status, LiveUpdateStatus::Error);
+        assert_eq!(
+            run.results[0].message.as_deref(),
+            Some("Alpha changed during the update; update it again")
+        );
+        let alpha = stored(&database, "Alpha").expect("row");
+        assert_eq!(alpha.remote_version.as_deref(), Some("5.0"));
+        assert_eq!(alpha.source_url.as_deref(), Some(RELINKED_URL));
+        assert_eq!(alpha.source_name, None);
+        assert_eq!(alpha.last_checked_at, None);
+    }
+
+    /// With a yes to replacing Not linked folders, the update replaces them right away.
+    #[tokio::test]
+    async fn a_yes_to_not_linked_folders_updates_without_holding() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Alpha"], &["LibAlpha"]);
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare = prepare_from(
+            vec![(
+                "Alpha",
+                package("Alpha", &[("LibAlpha", toc("LibAlpha", "2.0"))]),
+            )],
+            &[],
+            &ended,
+        );
+        let limits = SourceLimits::standard();
+        let selectors = ["Alpha".to_string()];
+
+        let run = super::apply_live_updates_in(
+            &mut database,
+            &addon_dir,
+            &selectors,
+            None,
+            false,
+            false,
+            true,
+            &limits,
+            prepare,
+            |_| {},
+        );
+        let run = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the run ends")
+            .expect("the run");
+
+        assert_eq!(
+            statuses(&run),
+            [("Alpha".to_string(), LiveUpdateStatus::Updated)]
+        );
+        assert!(run.held.is_empty());
+        assert_eq!(run.summary.held, 0);
+        assert!(!addon_dir.join("LibAlpha").join("old.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(addon_dir.join("LibAlpha").join("LibAlpha.toc")).expect("toc"),
+            toc("LibAlpha", "2.0")
+        );
+        assert_eq!(stored(&database, "LibAlpha"), None);
+        let alpha = stored(&database, "Alpha").expect("row");
+        assert_eq!(alpha.version.as_deref(), Some("2.0"));
+        assert!(
+            alpha
+                .owned_folders
+                .iter()
+                .any(|owned| owned.name == "LibAlpha")
+        );
+    }
+
+    /// The network part of each update gets the run's `force` and `dry_run`, and the
+    /// flavor of the AddOns folder being updated.
+    #[tokio::test]
+    async fn a_prepare_request_carries_the_run_settings_and_the_folder_flavor() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_forever_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = AddonRecord::new("Alpha", "Alpha", SourceKind::WowInterface);
+        addon.version = Some("1.0".to_string());
+        database.upsert_addon(&addon).expect("seed addon");
+        let limits = SourceLimits::standard();
+        let mut seen = Vec::new();
+
+        for (force, dry_run) in [(true, false), (false, true)] {
+            let run = super::apply_live_updates_in(
+                &mut database,
+                &addon_dir,
+                &[],
+                None,
+                force,
+                dry_run,
+                false,
+                &limits,
+                |request: super::PrepareRequest| {
+                    seen.push((request.force, request.dry_run, request.flavor));
+                    async { Ok(up_to_date()) }
+                },
+                |_| {},
+            );
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .expect("the run ends")
+                .expect("the run");
+        }
+
+        assert_eq!(
+            seen,
+            [
+                (true, false, lemonup_core::GameFlavor::Forever),
+                (false, true, lemonup_core::GameFlavor::Forever)
+            ]
+        );
+    }
+
+    /// A dry run downloads, but changes nothing and keeps no package, even for an update
+    /// that would be held.
+    #[tokio::test]
+    async fn a_dry_run_with_downloaded_packages_changes_nothing() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Alpha", "Bravo"], &["LibBravo"]);
+        let ended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare = prepare_from(
+            vec![
+                ("Alpha", package("Alpha", &[])),
+                (
+                    "Bravo",
+                    package("Bravo", &[("LibBravo", toc("LibBravo", "2.0"))]),
+                ),
+            ],
+            &[],
+            &ended,
+        );
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &["Alpha", "Bravo"],
+            true,
+            prepare,
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(
+            statuses(&run),
+            [
+                ("Alpha".to_string(), LiveUpdateStatus::Updated),
+                ("Bravo".to_string(), LiveUpdateStatus::Held)
+            ]
+        );
+        assert!(run.held.is_empty());
+        for folder in ["Alpha", "Bravo", "LibBravo"] {
+            assert!(addon_dir.join(folder).join("old.lua").exists(), "{folder}");
+            assert_eq!(
+                stored(&database, folder).expect("row").version.as_deref(),
+                Some("1.0")
+            );
+        }
+        assert_eq!(
+            stored(&database, "LibBravo").expect("row").source,
+            SourceKind::Manual
+        );
+    }
+
+    /// An update that installed nothing records what the source said, as a check does; a
+    /// dry run records nothing.
+    #[tokio::test]
+    async fn a_skipped_update_records_what_the_source_said() {
+        for dry_run in [false, true] {
+            let temp = tempdir().expect("tempdir");
+            let (addon_dir, mut database) = linked_addons(&temp, &["Alpha"], &[]);
+            let run = update_with(
+                &mut database,
+                &addon_dir,
+                &[],
+                dry_run,
+                |_request| async {
+                    Ok(super::PreparedUpdate::Skipped {
+                        outcome: super::ProviderOutcome {
+                            updated: false,
+                            remote_older: true,
+                            finished: super::FinishedUpdate {
+                                previous_version: Some("1.0".to_string()),
+                                remote_version: Some("0.9".to_string()),
+                                not_linked: Vec::new(),
+                                warning: None,
+                            },
+                        },
+                        source_url: Some("https://example.com/alpha".to_string()),
+                        source_name: Some("Alpha at the source".to_string()),
+                    })
+                },
+                &mut Vec::new(),
+            )
+            .await;
+
+            assert_eq!(run.results[0].status, LiveUpdateStatus::RemoteOlder);
+            assert_eq!(run.summary.remote_older, 1);
+            let alpha = stored(&database, "Alpha").expect("row");
+            if dry_run {
+                assert_eq!(alpha.remote_version, None);
+                assert_eq!(alpha.source_url, None);
+                assert_eq!(alpha.source_name, None);
+                assert_eq!(alpha.last_checked_at, None);
+            } else {
+                assert_eq!(alpha.remote_version.as_deref(), Some("0.9"));
+                assert_eq!(
+                    alpha.source_url.as_deref(),
+                    Some("https://example.com/alpha")
+                );
+                assert_eq!(alpha.source_name.as_deref(), Some("Alpha at the source"));
+                assert!(alpha.last_checked_at.is_some());
+            }
+            assert_eq!(alpha.version.as_deref(), Some("1.0"));
+        }
+    }
+
+    /// A download that panics fails only its own addon; the addons after it are still
+    /// applied.
+    #[tokio::test]
+    async fn an_update_that_panics_fails_only_its_own_addon() {
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Alpha", "Broken", "Charlie"], &[]);
+        let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &[],
+            false,
+            |request: super::PrepareRequest| {
+                let package = noted_package(&applied);
+                async move {
+                    if request.addon.folder == "Broken" {
+                        panic!("this download breaks");
+                    }
+                    Ok(package)
+                }
+            },
+            &mut Vec::new(),
+        )
+        .await;
+
+        assert_eq!(
+            statuses(&run),
+            [
+                ("Alpha".to_string(), LiveUpdateStatus::Updated),
+                ("Broken".to_string(), LiveUpdateStatus::Error),
+                ("Charlie".to_string(), LiveUpdateStatus::Updated)
+            ]
+        );
+        assert_eq!(
+            run.results[1].message.as_deref(),
+            Some("the update stopped unexpectedly")
+        );
+        assert_eq!(*applied.lock().expect("applied"), ["Alpha", "Charlie"]);
+    }
+
+    /// Every `Started` comes before its addon's `Finished`; rows that need no network
+    /// finish without starting.
+    #[tokio::test]
+    async fn update_events_follow_each_addon() {
+        use super::UpdateEvent;
+
+        let temp = tempdir().expect("tempdir");
+        let (addon_dir, mut database) = linked_addons(&temp, &["Net"], &["Mine"]);
+        let mut keyless = AddonRecord::new("Keyless", "Keyless", SourceKind::Wago);
+        keyless.version = Some("1.0".to_string());
+        database.upsert_addon(&keyless).expect("seed wago");
+        let mut events = Vec::new();
+
+        let run = update_with(
+            &mut database,
+            &addon_dir,
+            &["Net", "Mine", "Keyless"],
+            false,
+            |_request| async { Ok(up_to_date()) },
+            &mut events,
+        )
+        .await;
+
+        let finished = |folder: &str| UpdateEvent::Finished {
+            folder: folder.to_string(),
+            result: run
+                .results
+                .iter()
+                .find(|result| result.addon_name == folder)
+                .expect("result")
+                .clone(),
+        };
+        assert_eq!(
+            events,
+            [
+                UpdateEvent::Started {
+                    folder: "Net".to_string()
+                },
+                finished("Net"),
+                finished("Mine"),
+                finished("Keyless"),
+            ]
+        );
+        assert_eq!(
+            statuses(&run),
+            [
+                ("Net".to_string(), LiveUpdateStatus::UpToDate),
+                ("Mine".to_string(), LiveUpdateStatus::SkippedManual),
+                ("Keyless".to_string(), LiveUpdateStatus::SkippedNoApiKey)
+            ]
+        );
     }
 }

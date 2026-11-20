@@ -51,8 +51,8 @@ use crate::transfer::{
 use crate::tui::Backend;
 use crate::update::{
     CheckEvent, CheckResult, HeldUpdate, LiveUpdateRun, LiveUpdateStatus, LiveUpdateSummary,
-    apply_held_updates, apply_live_updates, build_update_checks, fetch_wago_check,
-    refresh_live_update_checks_in,
+    PrepareRequest, PreparedUpdate, UpdateEvent, apply_held_updates, apply_live_updates_in,
+    build_update_checks, fetch_wago_check, prepare_update, refresh_live_update_checks_in,
 };
 use crate::wago::{
     WagoInstallInspection, WagoInstallSummary, WagoSearchResult, WagoStability,
@@ -8397,46 +8397,16 @@ async fn run_dashboard_update_task(
             note.clone(),
         )));
     }
-    // One addon at a time, so each row shows its result as it comes in.
-    let total = folders.len();
-    let mut run = LiveUpdateRun::default();
-    if total > 0 {
-        on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
-            kind: DashboardJobKind::Update,
-            finished: 0,
-            total,
-            active: Vec::new(),
-        }));
-    }
-    for folder in folders {
-        on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Started {
-            folder: folder.clone(),
-        }));
-        let one = apply_live_updates(
-            &mut database,
-            addon_dir,
-            std::slice::from_ref(folder),
-            wago_api_key.as_deref(),
-            false,
-            false,
-            false,
-            |_, _, _| {},
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        for result in &one.results {
-            on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Updated {
-                folder: result.addon_name.clone(),
-                status: result.status,
-            }));
-        }
-        on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Finished {
-            folder: folder.clone(),
-        }));
-        run.summary.add(&one.summary);
-        run.results.extend(one.results);
-        run.held.extend(one.held);
-    }
+    // Downloads run together and each addon is applied in turn, so each row shows its result
+    // as it comes in.
+    let mut run = update_folders_live(
+        &mut database,
+        addon_dir,
+        folders,
+        wago_api_key.as_deref(),
+        &mut on_event,
+    )
+    .await?;
     let held = HeldUpdates::new(std::mem::take(&mut run.held));
     let updated_addon_name = if run.summary.updated_addons == 1 {
         run.results
@@ -8476,6 +8446,83 @@ async fn run_dashboard_update_task(
         sync,
         held,
     })
+}
+
+/// Updates `folders`: several downloads at once, then each addon applied one at a time in the
+/// order of `folders`. Reports each addon as its request goes out, its result, and when it is
+/// done. The request caps hold for this run only.
+async fn update_folders_live(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    folders: &[String],
+    wago_api_key: Option<&str>,
+    on_event: &mut impl FnMut(AppTaskEvent),
+) -> std::result::Result<LiveUpdateRun, String> {
+    update_folders_live_in(
+        database,
+        addon_dir,
+        folders,
+        wago_api_key,
+        &SourceLimits::standard(),
+        prepare_update,
+        on_event,
+    )
+    .await
+}
+
+/// [`update_folders_live`] with the limits and the network part of each update given.
+async fn update_folders_live_in<F, Fut>(
+    database: &mut StateDatabase,
+    addon_dir: &Path,
+    folders: &[String],
+    wago_api_key: Option<&str>,
+    limits: &SourceLimits,
+    prepare: F,
+    on_event: &mut impl FnMut(AppTaskEvent),
+) -> std::result::Result<LiveUpdateRun, String>
+where
+    F: FnMut(PrepareRequest) -> Fut,
+    Fut: Future<Output = std::result::Result<PreparedUpdate, String>> + Send + 'static,
+{
+    // No selectors would mean every addon.
+    if folders.is_empty() {
+        return Ok(LiveUpdateRun::default());
+    }
+    on_event(AppTaskEvent::DashboardJobProgress(DashboardJobUiState {
+        kind: DashboardJobKind::Update,
+        finished: 0,
+        total: folders.len(),
+        active: Vec::new(),
+    }));
+    apply_live_updates_in(
+        database,
+        addon_dir,
+        folders,
+        wago_api_key,
+        false,
+        false,
+        false,
+        limits,
+        prepare,
+        |event| match event {
+            UpdateEvent::Started { folder } => {
+                on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Started {
+                    folder,
+                }));
+            }
+            UpdateEvent::Finished { folder, result } => {
+                on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Updated {
+                    folder: folder.clone(),
+                    status: result.status,
+                }));
+                on_event(AppTaskEvent::DashboardJobStep(DashboardJobStep::Finished {
+                    folder,
+                }));
+            }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Applies the held updates the person said yes to, from their kept packages.
@@ -21328,6 +21375,154 @@ mod tests {
                     (SourceErrorKind::NoConnection, "late"),
                 ]
             );
+        }
+
+        /// An update that found the addon current, as the network part of an update gives it.
+        fn up_to_date_update() -> crate::update::PreparedUpdate {
+            crate::update::PreparedUpdate::Skipped {
+                outcome: crate::update::ProviderOutcome {
+                    updated: false,
+                    remote_older: false,
+                    finished: crate::update::FinishedUpdate {
+                        previous_version: Some("1.0".to_string()),
+                        remote_version: Some("1.0".to_string()),
+                        not_linked: Vec::new(),
+                        warning: None,
+                    },
+                },
+                source_url: None,
+                source_name: None,
+            }
+        }
+
+        /// Downloads run together: every addon out shows Updating, so does one whose
+        /// download ended but whose turn has not come, and the results come in list order.
+        #[tokio::test]
+        async fn updates_out_together_show_updating_and_finish_in_list_order() {
+            use crate::source_limits::SourceLimits;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut database =
+                StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+            let folders = ["First", "Second", "Third"].map(str::to_string).to_vec();
+            for folder in &folders {
+                let mut addon = AddonRecord::new(folder, folder, SourceKind::WowInterface);
+                addon.version = Some("1.0".to_string());
+                database.upsert_addon(&addon).expect("seed addon");
+            }
+            let app = std::cell::RefCell::new(app_for_tests(ShellMode::Dashboard));
+            {
+                let mut app = app.borrow_mut();
+                app.apply(AppAction::SetDashboardUpdateInProgress(true));
+                app.dashboard.begin_update_targets(&folders);
+            }
+            let updated = std::cell::RefCell::new(Vec::new());
+            let mut on_event = |event: AppTaskEvent| {
+                if let AppTaskEvent::DashboardJobStep(DashboardJobStep::Updated {
+                    folder, ..
+                }) = &event
+                {
+                    updated.borrow_mut().push(folder.clone());
+                }
+                send(&mut app.borrow_mut(), event);
+            };
+            // First's download waits for the gate; the others end right away.
+            let ended = std::sync::Arc::new(AtomicUsize::new(0));
+            let (gate, gate_opened) = tokio::sync::oneshot::channel::<()>();
+            let gate_opened = std::sync::Mutex::new(Some(gate_opened));
+            let limits = SourceLimits::new(6, 3, 4, 4, 2);
+
+            let run = crate::app::update_folders_live_in(
+                &mut database,
+                temp.path(),
+                &folders,
+                None,
+                &limits,
+                |request: crate::update::PrepareRequest| {
+                    let gate_opened = (request.addon.folder == "First")
+                        .then(|| gate_opened.lock().expect("gate").take())
+                        .flatten();
+                    let ended = std::sync::Arc::clone(&ended);
+                    async move {
+                        if let Some(gate_opened) = gate_opened {
+                            gate_opened.await.expect("the gate opens");
+                        }
+                        ended.fetch_add(1, Ordering::SeqCst);
+                        Ok(up_to_date_update())
+                    }
+                },
+                &mut on_event,
+            );
+            let control = async {
+                while ended.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                // Time for the run to hear that both ended.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                {
+                    let app = app.borrow();
+                    for folder in &folders {
+                        assert_eq!(status(&app, folder), RowStatus::Updating, "{folder}");
+                    }
+                    let line = line_text(&app.dashboard_status_line(120));
+                    assert!(line.contains("Updating 1 of 3"), "{line}");
+                    assert!(!line.contains('·'), "{line}");
+                }
+                assert!(updated.borrow().is_empty(), "{:?}", updated.borrow());
+                gate.send(()).expect("First still waits");
+            };
+            let (run, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(run, control)
+            })
+            .await
+            .expect("the run ends once First's download does");
+            let run = run.expect("update");
+
+            assert_eq!(*updated.borrow(), folders);
+            assert_eq!(run.results.len(), 3);
+            let app = app.borrow();
+            for folder in &folders {
+                assert_eq!(status(&app, folder), RowStatus::UpToDate, "{folder}");
+            }
+        }
+
+        /// No folders means nothing to update, not every addon.
+        #[tokio::test]
+        async fn an_update_of_no_folders_starts_no_run() {
+            use crate::source_limits::SourceLimits;
+
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut database =
+                StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+            database
+                .upsert_addon(&AddonRecord::new(
+                    "First",
+                    "First",
+                    SourceKind::WowInterface,
+                ))
+                .expect("seed addon");
+            let calls = std::cell::Cell::new(0);
+            let mut events = Vec::new();
+
+            let run = crate::app::update_folders_live_in(
+                &mut database,
+                temp.path(),
+                &[],
+                None,
+                &SourceLimits::new(6, 3, 4, 4, 2),
+                |_request: crate::update::PrepareRequest| {
+                    calls.set(calls.get() + 1);
+                    async { Ok(up_to_date_update()) }
+                },
+                &mut |event| events.push(event),
+            )
+            .await
+            .expect("update");
+
+            assert!(run.results.is_empty());
+            assert_eq!(calls.get(), 0);
+            assert!(events.is_empty());
         }
 
         #[test]
