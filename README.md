@@ -48,8 +48,17 @@ inputs.lemonup.url = "github:archcorsair/lemonup";
 
 Nix downloads LemonUp prebuilt from the `lemonup` Cachix cache; it asks once whether to trust it.
 
-**Arch Linux:** AUR packages (`lemonup` and `lemonup-bin`) are coming soon. Until then, build
-the package from this repo with `makepkg -si` in `packaging/aur/lemonup-bin`.
+**Arch Linux:** LemonUp isn't on the AUR. Build the package from this repo with `makepkg -si`,
+in `packaging/aur/lemonup-bin` for the release binary or in `packaging/aur/lemonup` to build from
+source:
+
+```sh
+git clone https://github.com/archcorsair/lemonup.git
+cd lemonup/packaging/aur/lemonup-bin
+makepkg -si
+```
+
+To update, run `git pull` and `makepkg -si` again.
 
 **Or download a binary** from [Releases](https://github.com/archcorsair/lemonup/releases) and put
 it on your `PATH`.
