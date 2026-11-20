@@ -909,7 +909,7 @@ async fn run_update(
                 force,
                 dry_run,
                 replace,
-                |_, _, _| {},
+                |_| {},
             )
             .await?;
             // Held packages are removed when `run` drops; the CLI never asks.

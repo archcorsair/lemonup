@@ -1,4 +1,4 @@
-use crate::update::HeldPackage;
+use crate::update::PreparedUpdate;
 use crate::update_targets::ReplaceNotLinked;
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -282,14 +282,16 @@ pub(crate) async fn fetch_github_remote_version(
     })
 }
 
-pub(crate) async fn update_github_addon(
-    state_database: &mut StateDatabase,
-    addon_dir: &Path,
-    tracked: &AddonRecord,
+/// The network part of a GitHub update: what the repo offers for the AddOns folder's
+/// `flavor`, then the package unless it is already installed. Touches neither the database
+/// nor the AddOns folder.
+pub(crate) async fn prepare_github_update(
+    client: Client,
+    tracked: AddonRecord,
+    flavor: GameFlavor,
     force: bool,
     dry_run: bool,
-    agree: ReplaceNotLinked<'_>,
-) -> Result<(GithubUpdateSummary, Option<HeldPackage>), String> {
+) -> Result<PreparedUpdate, String> {
     if tracked.source != SourceKind::GitHub {
         return Err(format!(
             "addon '{}' is not linked to GitHub",
@@ -297,58 +299,43 @@ pub(crate) async fn update_github_addon(
         ));
     }
 
-    let repo = resolve_tracked_github_repo(tracked)?;
-    let client = build_github_client()?;
-    let resolved = fetch_github_repo(&client, &repo, GameFlavor::for_addons_dir(addon_dir)).await?;
+    let repo = resolve_tracked_github_repo(&tracked)?;
+    let resolved = fetch_github_repo(&client, &repo, flavor).await?;
     let remote_version = Some(resolved.package.remote_version().to_string());
 
-    if !force && resolved.package.is_installed(tracked) {
-        crate::update::record_skipped_update_check(
-            state_database,
-            tracked,
-            remote_version.as_deref(),
-            Some(resolved.metadata.html_url.clone()),
-            // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
-            None,
+    if !force && resolved.package.is_installed(&tracked) {
+        let summary = GithubUpdateSummary {
+            repo_url: resolved.metadata.html_url.clone(),
+            repo_name: resolved.metadata.repo.clone(),
+            parent_folder: tracked.folder.clone(),
+            installed_folders: std::iter::once(tracked.folder.clone())
+                .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
+                .collect(),
+            previous_version: tracked.version.clone(),
+            previous_commit: tracked.git_commit.clone(),
+            remote_version,
+            updated: false,
             dry_run,
-        )?;
-        return Ok((
-            GithubUpdateSummary {
-                repo_url: resolved.metadata.html_url.clone(),
-                repo_name: resolved.metadata.repo.clone(),
-                parent_folder: tracked.folder.clone(),
-                installed_folders: std::iter::once(tracked.folder.clone())
-                    .chain(tracked.owned_folders.iter().map(|owned| owned.name.clone()))
-                    .collect(),
-                previous_version: tracked.version.clone(),
-                previous_commit: tracked.git_commit.clone(),
-                remote_version,
-                updated: false,
-                dry_run,
-                not_linked: Vec::new(),
-            },
-            None,
-        ));
+            not_linked: Vec::new(),
+        };
+        return Ok(PreparedUpdate::Skipped {
+            outcome: summary.outcome(),
+            source_url: Some(resolved.metadata.html_url),
+            // GitHub gives only a repository name, so GitHub addons keep their TOC Title.
+            source_name: None,
+        });
     }
 
     let bytes = download_github_package_bytes(&client, &resolved).await?;
-    let summary = update_downloaded_github_addon(
-        state_database,
-        addon_dir,
-        tracked,
-        &resolved,
-        &bytes,
-        agree,
-        dry_run,
-    )?;
-    if summary.not_linked.is_empty() || dry_run {
-        return Ok((summary, None));
-    }
-    let package = HeldPackage::keep(&bytes, move |database, addon_dir, tracked, bytes, agree| {
-        update_downloaded_github_addon(database, addon_dir, tracked, &resolved, bytes, agree, false)
-            .map(GithubUpdateSummary::finished)
-    })?;
-    Ok((summary, Some(package)))
+    Ok(PreparedUpdate::downloaded(
+        bytes,
+        move |database, addon_dir, tracked, bytes, agree, dry_run| {
+            update_downloaded_github_addon(
+                database, addon_dir, tracked, &resolved, bytes, agree, dry_run,
+            )
+            .map(GithubUpdateSummary::outcome)
+        },
+    ))
 }
 
 const GITHUB_TOKEN_ENV_VARS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
