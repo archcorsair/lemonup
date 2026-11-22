@@ -22646,7 +22646,7 @@ games = ["forever"]
             assert_eq!(
                 wrong,
                 vec![(
-                    "The repository may have a new owner. LemonUp won't install it until its list is updated."
+                    "The repository may have a new owner. LemonUp won't update it until its list is updated."
                         .to_string(),
                     false
                 )]

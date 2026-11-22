@@ -979,6 +979,20 @@ fn resolve_tracked_github_repo(addon: &AddonRecord) -> Result<GithubRepoRef, Str
         .and_then(parse_github_repo_url)
 }
 
+/// `repo` without any `.git` ending, in any case: GitHub ignores case in repository names, so
+/// `Foo.GIT` is the repository `Foo` and must meet the known addons check like `Foo` does.
+fn strip_git_suffix(mut repo: &str) -> &str {
+    while let Some(rest) = repo
+        .len()
+        .checked_sub(4)
+        .filter(|&at| repo.is_char_boundary(at) && repo[at..].eq_ignore_ascii_case(".git"))
+        .map(|at| &repo[..at])
+    {
+        repo = rest;
+    }
+    repo
+}
+
 fn parse_github_repo_url(value: &str) -> Result<GithubRepoRef, String> {
     let url = Url::parse(value)
         .map_err(|_| "GitHub install currently requires a full repo URL".to_string())?;
@@ -1003,7 +1017,7 @@ fn parse_github_repo_url(value: &str) -> Result<GithubRepoRef, String> {
         return Err("GitHub URL must look like https://github.com/<owner>/<repo>".to_string());
     }
     let owner = segments[0].trim();
-    let repo = segments[1].trim_end_matches(".git").trim();
+    let repo = strip_git_suffix(segments[1]).trim();
     if !is_valid_github_path_part(owner) || !is_valid_github_path_part(repo) {
         return Err("GitHub URL contains an invalid owner or repo name".to_string());
     }
@@ -1737,6 +1751,27 @@ mod tests {
             parse_github_repo_url("https://github.com/AdiAddons/AdiBags").expect("github repo");
         assert_eq!(parsed.owner, "AdiAddons");
         assert_eq!(parsed.repo, "AdiBags");
+    }
+
+    #[test]
+    fn parse_github_repo_url_drops_a_git_ending_in_any_case() {
+        for url in [
+            "https://github.com/svengabr/ForeverLootSparkles.git",
+            "https://github.com/svengabr/ForeverLootSparkles.GIT",
+            "https://github.com/svengabr/ForeverLootSparkles.Git",
+        ] {
+            let parsed = parse_github_repo_url(url).expect("github repo");
+            assert_eq!(parsed.repo, "ForeverLootSparkles", "{url}");
+        }
+        // The ending is dropped, so the listed repository is still checked.
+        let list = known_list();
+        let parsed = parse_github_repo_url("https://github.com/svengabr/ForeverLootSparkles.GIT")
+            .expect("github repo");
+        assert!(needs_known_repository_check(
+            &list,
+            &parsed.owner,
+            &parsed.repo
+        ));
     }
 
     #[test]

@@ -61,8 +61,8 @@ Start with `README.md`, then `docs/manual-testing.md` for testing against a sand
 - Source failures return a `SourceError` with a `SourceErrorKind`. Code decides what to show from
   the kind, never by matching error text.
 - Never log, print or show API keys or tokens; key boxes are masked.
-- A GitHub repository on the known addons list installs or updates only when GitHub reports the
-  listed repository id.
+- A GitHub repository on the known addons list installs, updates or checks only when GitHub
+  reports the listed repository id and the listed owner.
 
 ### TUI
 

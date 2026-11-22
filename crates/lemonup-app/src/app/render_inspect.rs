@@ -691,7 +691,8 @@ pub(super) fn check_failed_sentence(
         ),
         // Pressing c would fail the same way, so the sentence names no key.
         Some(SourceErrorKind::WrongRepository) => vec![(
-            super::render_install_search::source_error_advice(SourceErrorKind::WrongRepository, name),
+            "The repository may have a new owner. LemonUp won't update it until its list is updated."
+                .to_string(),
             false,
         )],
         Some(
