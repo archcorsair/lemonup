@@ -335,6 +335,7 @@ fn problem_name(kind: SourceErrorKind) -> &'static str {
         SourceErrorKind::SlowDown => "slow_down",
         SourceErrorKind::FoldersInTheWay
         | SourceErrorKind::FoldersOfLinkedAddon
+        | SourceErrorKind::WrongRepository
         | SourceErrorKind::Other => "other",
     }
 }

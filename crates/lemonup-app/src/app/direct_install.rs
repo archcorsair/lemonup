@@ -9,7 +9,8 @@ use std::path::Path;
 
 use lemonup_core::StateDatabase;
 
-use lemonup_core::SourceKind;
+use lemonup_core::known_addons::{KnownAddon, KnownSource, matching_known_addons};
+use lemonup_core::{GameFlavor, SourceKind};
 
 use super::{
     AddonScanOutcome, App, AppAction, DashboardItem, DetailMode, PendingWagoInstallRequest,
@@ -160,6 +161,18 @@ pub(super) fn classify_search_input(input: &str) -> SearchInputIntent {
     SearchInputIntent::InvalidUrl(host_error.unwrap_or_else(|| UNSUPPORTED_URL_MESSAGE.to_string()))
 }
 
+/// The request a pasted link to a known addon's repository gives. `None`
+/// for a CurseForge-only entry, which has nothing to install.
+pub(super) fn known_direct_request(addon: &KnownAddon) -> Option<DirectInstallRequest> {
+    let KnownSource::GitHub { owner, repo, .. } = &addon.source else {
+        return None;
+    };
+    match classify_search_input(&format!("https://github.com/{owner}/{repo}")) {
+        SearchInputIntent::Direct(request) => Some(request),
+        _ => None,
+    }
+}
+
 fn looks_like_url(value: &str) -> bool {
     let lowered = value.to_ascii_lowercase();
     lowered.contains("://")
@@ -249,6 +262,24 @@ impl App {
             SearchInputIntent::Direct(request) => {
                 self.request_direct_install_actions(pane, request)
             }
+            // Known addons that match show without a key; the key box opens
+            // when none does, or on enter again with the same name.
+            SearchInputIntent::WagoSearch(query)
+                if api_key.is_none()
+                    && !pane.shows_known_rows_for(&query)
+                    && !self.matching_known_rows(&query).is_empty() =>
+            {
+                let known = self.matching_known_rows(&query);
+                let message = super::known_rows_need_key_message(known.len());
+                vec![
+                    AppAction::SetSearchPaneState(pane.show_known_rows(query, known)),
+                    AppAction::SetStatus(self.dashboard_status_for(
+                        StatusKind::Note,
+                        DetailMode::Search,
+                        &message,
+                    )),
+                ]
+            }
             intent if intent.needs_wago_key() && api_key.is_none() => {
                 vec![AppAction::SetSearchPaneState(pane.open_key_box())]
             }
@@ -313,28 +344,81 @@ impl App {
         pane: SearchPaneState,
         request: DirectInstallRequest,
     ) -> Vec<AppAction> {
+        if let Some(blocked) = self.direct_install_blocked(&pane) {
+            return blocked;
+        }
+        vec![AppAction::SetSearchPaneState(
+            pane.request_direct_install(request),
+        )]
+    }
+
+    /// Why the install question can't open now: the delete question is
+    /// open, or the AddOns folder isn't known yet.
+    fn direct_install_blocked(&self, pane: &SearchPaneState) -> Option<Vec<AppAction>> {
         if self.dashboard.pending_delete_folders().is_some() {
-            return vec![
-                AppAction::SetSearchPaneState(pane),
+            return Some(vec![
+                AppAction::SetSearchPaneState(pane.clone()),
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Note,
                     DetailMode::Search,
                     "Answer the delete question first",
                 )),
-            ];
+            ]);
         }
         if self.effective_addon_dir.is_none() {
-            return vec![
-                AppAction::SetSearchPaneState(pane),
+            return Some(vec![
+                AppAction::SetSearchPaneState(pane.clone()),
                 AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Search,
                     "LemonUp doesn't know your AddOns folder yet",
                 )),
-            ];
+            ]);
+        }
+        None
+    }
+
+    /// The game a name search is for: the AddOns folder's, Retail when it
+    /// is not known yet.
+    pub(super) fn search_flavor(&self) -> GameFlavor {
+        self.effective_addon_dir
+            .as_deref()
+            .map_or(GameFlavor::Retail, GameFlavor::for_addons_dir)
+    }
+
+    /// The known addons for this game whose name has every word of `query`.
+    pub(super) fn matching_known_rows(&self, query: &str) -> Vec<KnownAddon> {
+        matching_known_addons(&self.known_addons, query, self.search_flavor())
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Enter on a known addon's row: the question a pasted link to its
+    /// repository asks, with the results kept behind it. A row LemonUp
+    /// can't install does nothing, and so does any row while a search or an
+    /// install runs.
+    pub(super) fn install_known_actions(&self, addon: &KnownAddon) -> Vec<AppAction> {
+        if !self.known_addon_installable(addon) || self.search_pane.busy() || self.install_running()
+        {
+            return vec![];
+        }
+        let Some(request) = known_direct_request(addon) else {
+            return vec![];
+        };
+        if let Some(busy) = self.install_busy_status() {
+            return vec![AppAction::SetStatus(self.dashboard_status_for(
+                StatusKind::Note,
+                DetailMode::Search,
+                busy,
+            ))];
+        }
+        let pane = self.search_pane.clone();
+        if let Some(blocked) = self.direct_install_blocked(&pane) {
+            return blocked;
         }
         vec![AppAction::SetSearchPaneState(
-            pane.request_direct_install(request),
+            pane.request_known_install(request),
         )]
     }
 

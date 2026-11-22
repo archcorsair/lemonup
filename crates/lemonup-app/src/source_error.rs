@@ -23,6 +23,10 @@ pub(crate) enum SourceErrorKind {
     /// A folder the package installs belongs to an addon LemonUp already
     /// keeps updated: LemonUp won't replace it (`SourceError::clash`).
     FoldersOfLinkedAddon,
+    /// A GitHub repository on the known addons list is not the one LemonUp
+    /// vetted (GitHub reports another repository id): it may have changed
+    /// owners, so LemonUp won't install or update from it.
+    WrongRepository,
     /// Anything else.
     Other,
 }

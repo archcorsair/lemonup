@@ -9,6 +9,7 @@ use crate::source_error::{SourceError, SourceErrorKind};
 use lemonup_core::github_release::{
     ReleaseAsset, ReleaseJson, choose_release_asset, release_json_asset,
 };
+use lemonup_core::known_addons::{KnownAddon, KnownSource, find_known_github_repo, known_addons};
 use lemonup_core::{
     AddonRecord, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, scan_addons_dir,
 };
@@ -90,6 +91,8 @@ struct GithubRepoMetadata {
     default_branch: String,
     html_url: String,
     owner_login: String,
+    /// GitHub's numeric id for the repository.
+    id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +156,7 @@ struct GithubOwnerResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct GithubRepoResponse {
+    id: u64,
     name: String,
     default_branch: String,
     html_url: String,
@@ -268,13 +272,31 @@ pub(crate) async fn fetch_github_remote_version(
     flavor: GameFlavor,
 ) -> Result<GithubRemoteVersion, SourceError> {
     let repo = resolve_tracked_github_repo(addon)?;
+    // A listed repository is checked before its version counts, so the list
+    // never says Update ready for one the update would refuse.
+    let checked = if needs_known_repository_check(known_addons(), &repo.owner, &repo.repo) {
+        let metadata = fetch_github_repo_metadata(client, &repo).await?;
+        check_known_repository(
+            known_addons(),
+            &repo.owner,
+            &repo.repo,
+            metadata.id,
+            &metadata.owner_login,
+        )?;
+        Some(metadata)
+    } else {
+        None
+    };
     if let Some(package) = fetch_github_release_package(client, &repo, flavor).await? {
         return Ok(GithubRemoteVersion {
             source_url: Some(canonical_github_url(&repo.owner, &repo.repo)),
             version: Some(package.remote_version().to_string()),
         });
     }
-    let metadata = fetch_github_repo_metadata(client, &repo).await?;
+    let metadata = match checked {
+        Some(metadata) => metadata,
+        None => fetch_github_repo_metadata(client, &repo).await?,
+    };
     let head_sha = fetch_github_head_commit(client, &metadata).await?;
     Ok(GithubRemoteVersion {
         source_url: Some(metadata.html_url),
@@ -466,6 +488,13 @@ async fn fetch_github_repo(
     flavor: GameFlavor,
 ) -> Result<GithubResolvedRepo, SourceError> {
     let metadata = fetch_github_repo_metadata(client, repo).await?;
+    check_known_repository(
+        known_addons(),
+        &repo.owner,
+        &repo.repo,
+        metadata.id,
+        &metadata.owner_login,
+    )?;
     let release_repo = GithubRepoRef {
         owner: metadata.owner.clone(),
         repo: metadata.repo.clone(),
@@ -477,6 +506,45 @@ async fn fetch_github_repo(
         },
     };
     Ok(GithubResolvedRepo { metadata, package })
+}
+
+/// Whether `owner/repo` is on the known addons list, so GitHub's metadata for it has to be read
+/// and checked before anything else about it counts.
+fn needs_known_repository_check(list: &[KnownAddon], owner: &str, repo: &str) -> bool {
+    find_known_github_repo(list, owner, repo).is_some()
+}
+
+/// Refuses a repository the known addons list names unless GitHub reports the listed repository
+/// id for it and the listed owner (ignoring case), so a repository that changed owners is not
+/// installed or updated: a transferred repository keeps its id, and GitHub sends the old path to
+/// the new owner. `owner` and `repo` are the ones asked for, `owner_login` the owner GitHub
+/// reports. A repository the list does not name passes.
+fn check_known_repository(
+    list: &[KnownAddon],
+    owner: &str,
+    repo: &str,
+    id: u64,
+    owner_login: &str,
+) -> Result<(), SourceError> {
+    let Some(known) = find_known_github_repo(list, owner, repo) else {
+        return Ok(());
+    };
+    match &known.source {
+        KnownSource::GitHub {
+            id: known_id,
+            owner: known_owner,
+            ..
+        } if *known_id != id || !known_owner.eq_ignore_ascii_case(owner_login) => {
+            Err(SourceError::new(
+                SourceErrorKind::WrongRepository,
+                format!(
+                    "github.com/{owner}/{repo} is not the repository LemonUp lists for {}",
+                    known.name
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The latest release's zip for `flavor`, or `None` when the repo has no release (drafts and
@@ -593,6 +661,7 @@ async fn fetch_github_repo_metadata(
         default_branch: parsed.default_branch,
         html_url: canonical_github_url(&repo.owner, &repo.repo),
         owner_login: parsed.owner.login,
+        id: parsed.id,
     })
 }
 
@@ -1429,10 +1498,10 @@ fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::{
         GithubRepoResponse, build_github_client_with_token, build_managed_github_record,
-        classify_rate_limit, classify_rejected_token, commits_match, determine_parent_folder,
-        discover_extracted_folders, extract_zip_archive, install_downloaded_github_addon,
-        parse_github_repo_url, parse_github_target, resolve_github_token,
-        update_downloaded_github_addon,
+        check_known_repository, classify_rate_limit, classify_rejected_token, commits_match,
+        determine_parent_folder, discover_extracted_folders, extract_zip_archive,
+        install_downloaded_github_addon, needs_known_repository_check, parse_github_repo_url,
+        parse_github_target, resolve_github_token, update_downloaded_github_addon,
     };
     use lemonup_core::{
         AddonKind, AddonRecord, GameFlavor, ScannedAddon, SourceKind, StateDatabase,
@@ -1673,13 +1742,174 @@ mod tests {
     #[test]
     fn github_repo_response_deserializes() {
         let parsed = serde_json::from_str::<GithubRepoResponse>(
-                            r#"{"name":"AdiBags","default_branch":"main","html_url":"https://github.com/AdiAddons/AdiBags","owner":{"login":"AdiAddons"}}"#,
+                            r#"{"name":"AdiBags","default_branch":"main","html_url":"https://github.com/AdiAddons/AdiBags","owner":{"login":"AdiAddons"},"id":42}"#,
                                     )
                                             .expect("repo response");
+        assert_eq!(parsed.id, 42);
         assert_eq!(parsed.name, "AdiBags");
         assert_eq!(parsed.default_branch, "main");
         assert_eq!(parsed.owner.login, "AdiAddons");
         assert_eq!(parsed.html_url, "https://github.com/AdiAddons/AdiBags");
+    }
+
+    fn known_list() -> Vec<lemonup_core::known_addons::KnownAddon> {
+        lemonup_core::known_addons::parse_known_addons(
+            r#"
+[[addon]]
+name = "Forever Loot Sparkles"
+github = "svengabr/ForeverLootSparkles"
+github_id = 20
+games = ["forever"]
+
+[[addon]]
+name = "Leatrix Plus"
+curseforge_only = true
+games = ["forever"]
+"#,
+        )
+        .expect("test list parses")
+    }
+
+    #[test]
+    fn a_listed_repository_with_the_listed_id_passes() {
+        assert!(
+            check_known_repository(
+                &known_list(),
+                "svengabr",
+                "ForeverLootSparkles",
+                20,
+                "svengabr"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_listed_repository_with_another_id_is_refused() {
+        let error = check_known_repository(
+            &known_list(),
+            "svengabr",
+            "ForeverLootSparkles",
+            21,
+            "svengabr",
+        )
+        .expect_err("another id");
+        assert_eq!(
+            error.kind,
+            crate::source_error::SourceErrorKind::WrongRepository
+        );
+        assert_eq!(
+            error.detail,
+            "github.com/svengabr/ForeverLootSparkles is not the repository LemonUp lists for \
+             Forever Loot Sparkles"
+        );
+    }
+
+    #[test]
+    fn the_listed_repository_is_found_whatever_the_case() {
+        let list = known_list();
+        assert!(
+            check_known_repository(&list, "SvenGabr", "foreverlootsparkles", 20, "SVENGABR")
+                .is_ok()
+        );
+        let error =
+            check_known_repository(&list, "SVENGABR", "FOREVERLOOTSPARKLES", 99, "svengabr")
+                .expect_err("another id");
+        assert_eq!(
+            error.kind,
+            crate::source_error::SourceErrorKind::WrongRepository
+        );
+        assert!(
+            error
+                .detail
+                .starts_with("github.com/SVENGABR/FOREVERLOOTSPARKLES ")
+        );
+    }
+
+    #[test]
+    fn a_repository_the_list_does_not_name_passes_with_any_id() {
+        let list = known_list();
+        assert!(check_known_repository(&list, "AdiAddons", "AdiBags", 1, "AdiAddons").is_ok());
+        assert!(check_known_repository(&list, "AdiAddons", "AdiBags", u64::MAX, "someone").is_ok());
+    }
+
+    #[test]
+    fn a_listed_repository_with_the_listed_id_and_another_owner_is_refused() {
+        // A transferred repository keeps its id; GitHub reports the new owner.
+        let error = check_known_repository(
+            &known_list(),
+            "svengabr",
+            "ForeverLootSparkles",
+            20,
+            "someone-else",
+        )
+        .expect_err("another owner");
+        assert_eq!(
+            error.kind,
+            crate::source_error::SourceErrorKind::WrongRepository
+        );
+        assert_eq!(
+            error.detail,
+            "github.com/svengabr/ForeverLootSparkles is not the repository LemonUp lists for \
+             Forever Loot Sparkles"
+        );
+    }
+
+    #[test]
+    fn only_a_listed_repository_needs_the_metadata_check_first() {
+        let list = known_list();
+        assert!(needs_known_repository_check(
+            &list,
+            "svengabr",
+            "ForeverLootSparkles"
+        ));
+        assert!(needs_known_repository_check(
+            &list,
+            "SVENGABR",
+            "foreverlootsparkles"
+        ));
+        assert!(!needs_known_repository_check(&list, "AdiAddons", "AdiBags"));
+        // A CurseForge-only entry has no repository to check.
+        assert!(!needs_known_repository_check(
+            &list,
+            "leatrix",
+            "Leatrix Plus"
+        ));
+    }
+
+    #[test]
+    fn every_github_entry_on_the_real_known_addons_list_parses_and_is_found_again() {
+        // The one app test that reads the shipped list.
+        let list = lemonup_core::known_addons::known_addons();
+        let mut github_entries = 0;
+        for addon in list {
+            let lemonup_core::known_addons::KnownSource::GitHub { owner, repo, .. } = &addon.source
+            else {
+                continue;
+            };
+            github_entries += 1;
+            let link = format!("https://github.com/{owner}/{repo}");
+            let target = parse_github_target(&link).expect("the link parses");
+            let parsed = parse_github_repo_url(&target).expect("the target parses");
+            let found = lemonup_core::known_addons::find_known_github_repo(
+                list,
+                &parsed.owner,
+                &parsed.repo,
+            )
+            .expect("found again");
+            assert_eq!(found, addon, "{link}");
+        }
+        assert!(github_entries > 0);
+    }
+
+    #[test]
+    fn a_curseforge_only_entry_never_blocks_a_repository() {
+        assert!(
+            check_known_repository(&known_list(), "someone", "Leatrix Plus", 5, "someone").is_ok()
+        );
+        assert!(
+            check_known_repository(&known_list(), "leatrix", "leatrix-plus", 5, "leatrix").is_ok()
+        );
     }
 
     #[test]
@@ -1700,6 +1930,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "abcdef0123456789".to_string(),
@@ -1745,6 +1976,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: "https://github.com/WeakAuras/WeakAuras2".to_string(),
                 owner_login: "WeakAuras".to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "364f625cf8c4f2f1c0785ab12da2121e880ec560".to_string(),
@@ -1837,6 +2069,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "abcdef0123456789".to_string(),
@@ -1923,6 +2156,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "abcdef0123456789".to_string(),
@@ -2034,6 +2268,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: "https://github.com/AdiAddons/AdiBags".to_string(),
                 owner_login: "AdiAddons".to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "abcdef0123456789".to_string(),
@@ -2071,6 +2306,7 @@ mod tests {
                 default_branch: "main".to_string(),
                 html_url: format!("https://github.com/{owner}/{repo}"),
                 owner_login: owner.to_string(),
+                id: 1,
             },
             package: super::GithubPackage::Source {
                 head_sha: "10808e8123456789".to_string(),
