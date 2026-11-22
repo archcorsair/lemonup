@@ -6,10 +6,16 @@
 //! `OpenMap_Mainline.toc` for Retail). The repo's source zipball has neither, so LemonUp
 //! installs a release zip whenever one fits the game, in this order:
 //!
-//! 1. The release has `release.json` (the BigWigs packager format): the zip whose metadata lists
-//!    the game's flavor, preferring a zip with its libraries (`nolib: false`).
-//! 2. The zip whose name ends in the game's flavor (`-forever`, `-retail`, `-mainline`, ...).
-//! 3. The only zip left once `-nolib` zips and zips whose name says another game are set aside.
+//! 1. For each flavor tier the game accepts (for WoW Forever, `forever`/`camelot` before
+//!    `mainline`/`retail`):
+//!    - First, a zip listed in `release.json` (the BigWigs packager format) for that tier,
+//!      preferring a zip with its libraries (`nolib: false`).
+//!    - Otherwise, the single zip with its libraries whose name ends in that tier's flavor
+//!      (`-forever`, `-retail`, `-mainline`, ...), skipping zips `release.json` already
+//!      describes for another game. This handles releases whose `release.json` omits an
+//!      attached `-forever` zip (for example Decursive).
+//! 2. When no `release.json` applies, the only zip left once `-nolib` zips and zips whose name
+//!    says another game are set aside.
 //!
 //! Otherwise, or with several zips and none of them for this game, the caller installs the
 //! source zipball as before.
@@ -83,11 +89,20 @@ pub fn choose_release_asset<'a>(
         return None;
     }
 
-    if let Some(release_json) = release_json
-        && let Some(choice) = choose_by_release_json(flavor, &zips, release_json)
-    {
-        return choice;
-    }
+    let listed = release_json
+        .map(|json| {
+            json.releases
+                .iter()
+                .filter_map(|entry| {
+                    zips.iter()
+                        .copied()
+                        .find(|asset| asset.name == entry.filename)
+                        .map(|asset| (entry, asset))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_listed = !listed.is_empty();
 
     let packaged = zips
         .iter()
@@ -95,14 +110,28 @@ pub fn choose_release_asset<'a>(
         .filter(|asset| !is_nolib(&asset.name))
         .collect::<Vec<_>>();
 
-    for names in flavor_family(flavor).iter().map(|tier| tier.names) {
-        let mut matching = packaged
-            .iter()
-            .copied()
-            .filter(|asset| names.contains(&name_flavor_suffix(&asset.name).unwrap_or("")));
+    for tier in flavor_family(flavor) {
+        if let Some(asset) = choose_tier_by_release_json(tier, &listed) {
+            return Some(asset);
+        }
+        // Check unlisted zips by filename suffix before falling back to a lower tier (such as
+        // mainline for Forever): some packager setups attach a `-forever.zip` without listing
+        // it in `release.json`. Zips listed in `release.json` keep their metadata flavor.
+        let mut matching = packaged.iter().copied().filter(|asset| {
+            !listed
+                .iter()
+                .any(|(_, described)| described.name == asset.name)
+                && tier
+                    .names
+                    .contains(&name_flavor_suffix(&asset.name).unwrap_or(""))
+        });
         if let (Some(only), None) = (matching.next(), matching.next()) {
             return Some(only);
         }
+    }
+
+    if has_listed {
+        return None;
     }
 
     // Zips whose name says another game are set aside too, so the unsuffixed Mainline zip
@@ -120,44 +149,23 @@ pub fn choose_release_asset<'a>(
     }
 }
 
-/// Rule 1. `None` when `release.json` names none of the release's zips (so it says nothing
-/// about them); `Some(None)` when it does but none is for this game.
-fn choose_by_release_json<'a>(
-    flavor: GameFlavor,
-    zips: &[&'a ReleaseAsset],
-    release_json: &ReleaseJson,
-) -> Option<Option<&'a ReleaseAsset>> {
-    let listed = release_json
-        .releases
+/// The best zip in `listed` matching `tier`, preferring a zip with its libraries (`nolib: false`).
+fn choose_tier_by_release_json<'a>(
+    tier: &FlavorTier,
+    listed: &[(&ReleaseJsonEntry, &'a ReleaseAsset)],
+) -> Option<&'a ReleaseAsset> {
+    let mut supported = listed
         .iter()
-        .filter_map(|entry| {
-            zips.iter()
-                .copied()
-                .find(|asset| asset.name == entry.filename)
-                .map(|asset| (entry, asset))
+        .filter(|(entry, _)| {
+            entry.metadata.iter().any(|metadata| {
+                tier.release_json
+                    .iter()
+                    .any(|name| metadata.flavor.eq_ignore_ascii_case(name))
+            })
         })
         .collect::<Vec<_>>();
-    if listed.is_empty() {
-        return None;
-    }
-
-    for tier in flavor_family(flavor) {
-        let mut supported = listed
-            .iter()
-            .filter(|(entry, _)| {
-                entry.metadata.iter().any(|metadata| {
-                    tier.release_json
-                        .iter()
-                        .any(|name| metadata.flavor.eq_ignore_ascii_case(name))
-                })
-            })
-            .collect::<Vec<_>>();
-        supported.sort_by_key(|(entry, _)| entry.nolib);
-        if let Some((_, asset)) = supported.first() {
-            return Some(Some(asset));
-        }
-    }
-    Some(None)
+    supported.sort_by_key(|(entry, _)| entry.nolib);
+    supported.first().map(|(_, asset)| *asset)
 }
 
 /// The flavor names one game accepts, best first.
@@ -229,8 +237,20 @@ fn zip_stem(name: &str) -> Option<&str> {
         .and_then(|_| name.get(..end))
 }
 
+/// Whether the zip is a `-nolib` package (`Foo-1.0-nolib.zip`, `Foo-1.0-nolib-forever.zip`,
+/// or `Foo-1.0-forever-nolib.zip`).
 fn is_nolib(name: &str) -> bool {
-    zip_stem(name).is_some_and(|stem| ends_with_token(stem, "nolib"))
+    let Some(stem) = zip_stem(name) else {
+        return false;
+    };
+    if ends_with_token(stem, "nolib") {
+        return true;
+    }
+    let Some(suffix) = name_flavor_suffix(name) else {
+        return false;
+    };
+    let without_suffix = &stem[..stem.len() - suffix.len() - 1];
+    ends_with_token(without_suffix, "nolib")
 }
 
 /// The flavor a zip's name ends in (`OpenMap-v0.8.10-forever.zip` is `forever`), lowercase.
@@ -519,6 +539,85 @@ mod tests {
         assert_eq!(
             chosen(GameFlavor::Retail, &["Foo-1.0.tar.gz", "notes.txt"], None),
             None
+        );
+    }
+
+    #[test]
+    fn forever_picks_unlisted_forever_zip_over_mainline_release_json_entry() {
+        // 2072/Decursive 2.9.0-RC4: attaches `-forever.zip` and `-nolib-forever.zip`,
+        // but `release.json` only lists the `mainline` and `titan` zips.
+        let json = release_json(
+            r#"{"releases":[
+                {"name":"Decursive  -Ace3-","version":"2.9.0-RC4","filename":"Decursive-2.9.0-RC4-nolib-titan.zip","nolib":true,"metadata":[{"flavor":"titan","interface":38002}]},
+                {"name":"Decursive  -Ace3-","version":"2.9.0-RC4","filename":"Decursive-2.9.0-RC4-nolib.zip","nolib":true,"metadata":[{"flavor":"mainline","interface":120105}]},
+                {"name":"Decursive  -Ace3-","version":"2.9.0-RC4","filename":"Decursive-2.9.0-RC4-titan.zip","nolib":false,"metadata":[{"flavor":"titan","interface":38002}]},
+                {"name":"Decursive  -Ace3-","version":"2.9.0-RC4","filename":"Decursive-2.9.0-RC4.zip","nolib":false,"metadata":[{"flavor":"mainline","interface":120105}]}
+            ]}"#,
+        );
+        let names = [
+            "Decursive-2.9.0-RC4-forever.zip",
+            "Decursive-2.9.0-RC4-nolib-forever.zip",
+            "Decursive-2.9.0-RC4-nolib-titan.zip",
+            "Decursive-2.9.0-RC4-nolib.zip",
+            "Decursive-2.9.0-RC4-titan.zip",
+            "Decursive-2.9.0-RC4.zip",
+            "release.json",
+        ];
+        assert_eq!(
+            chosen(GameFlavor::Forever, &names, Some(&json)).as_deref(),
+            Some("Decursive-2.9.0-RC4-forever.zip")
+        );
+        assert_eq!(
+            chosen(GameFlavor::Retail, &names, Some(&json)).as_deref(),
+            Some("Decursive-2.9.0-RC4.zip")
+        );
+    }
+
+    #[test]
+    fn release_json_stays_authoritative_for_assets_it_describes() {
+        // Even though the filename ends in `-forever`, `release.json` explicitly tags it
+        // `classic`, so Forever falls back to the `mainline` entry rather than taking it.
+        let json = release_json(
+            r#"{"releases":[
+                {"filename":"Foo-1.0-forever.zip","nolib":false,"metadata":[{"flavor":"classic"}]},
+                {"filename":"Foo-1.0.zip","nolib":false,"metadata":[{"flavor":"mainline"}]}
+            ]}"#,
+        );
+        assert_eq!(
+            chosen(
+                GameFlavor::Forever,
+                &["Foo-1.0-forever.zip", "Foo-1.0.zip", "release.json"],
+                Some(&json)
+            )
+            .as_deref(),
+            Some("Foo-1.0.zip")
+        );
+    }
+
+    #[test]
+    fn nolib_before_flavor_suffix_is_set_aside() {
+        assert_eq!(
+            chosen(
+                GameFlavor::Forever,
+                &["Foo-1.0-forever.zip", "Foo-1.0-nolib-forever.zip"],
+                None
+            )
+            .as_deref(),
+            Some("Foo-1.0-forever.zip")
+        );
+        assert_eq!(
+            chosen(
+                GameFlavor::Forever,
+                &["Foo-1.0_forever.zip", "Foo-1.0_nolib_forever.zip"],
+                None
+            )
+            .as_deref(),
+            Some("Foo-1.0_forever.zip")
+        );
+        // An addon whose own name starts with `NoLib` is not treated as a nolib zip.
+        assert_eq!(
+            chosen(GameFlavor::Forever, &["NoLib-1.0-forever.zip"], None).as_deref(),
+            Some("NoLib-1.0-forever.zip")
         );
     }
 
