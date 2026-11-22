@@ -8,6 +8,7 @@ mod event;
 mod find;
 mod github;
 mod http;
+mod lemonup_release;
 mod onboarding;
 mod shimmer;
 mod source_error;

@@ -45,6 +45,8 @@ pub struct AppConfig {
     pub reduce_motion: bool,
     /// How often the games that aren't open are checked. Shared by all games.
     pub check_other_games: OtherGamesCheck,
+    /// The TUI looks on GitHub once a day for a newer LemonUp. Shared by all games.
+    pub check_lemonup_updates: bool,
     /// The sources the Find sheet looks at in this game: `wago`, `wowinterface`, `tukui`.
     /// Missing means all of them. Only this game's `config.toml` holds it. A value that isn't
     /// a list of names reads as missing, and names LemonUp doesn't know are ignored, so a
@@ -112,6 +114,7 @@ impl fmt::Debug for AppConfig {
             .field("simple_symbols", &self.simple_symbols)
             .field("reduce_motion", &self.reduce_motion)
             .field("check_other_games", &self.check_other_games)
+            .field("check_lemonup_updates", &self.check_lemonup_updates)
             .field("find_sources", &self.find_sources)
             .finish()
     }
@@ -137,6 +140,7 @@ impl AppConfig {
             simple_symbols: false,
             reduce_motion: false,
             check_other_games: OtherGamesCheck::default(),
+            check_lemonup_updates: true,
             find_sources: None,
         }
     }

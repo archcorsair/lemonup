@@ -434,7 +434,7 @@ static DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check for updates", &[ch('c')]).when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
-                HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
+                HelpRow::key("e", "open the .toc editor: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find it online", K_FIND).when(HelpWhen::NotLinked),
                 HelpRow::key("m", "mark it Ignored in CurseForge", K_MARK_IGNORED)
                     .when(HelpWhen::CurseForgeManages),
@@ -477,7 +477,7 @@ static DOCKED_DETAILS_HELP: HelpPage = HelpPage {
                 HelpRow::key("c", "check, or the selected ones", &[ch('c')]).when(HelpWhen::NoJob),
                 HelpRow::key("x", "delete, or the selected ones", &[ch('x')]),
                 HelpRow::key("space", "select or unselect", &[ch(' ')]),
-                HelpRow::key("e", "edit its .toc fields: Title, Notes, Category", K_EDIT),
+                HelpRow::key("e", "open the .toc editor: Title, Notes, Category", K_EDIT),
                 HelpRow::key("f", "find this one online", K_FIND).when(HelpWhen::NotLinked),
                 HelpRow::key("m", "mark this one Ignored in CurseForge", K_MARK_IGNORED)
                     .when(HelpWhen::CurseForgeManages),
@@ -702,10 +702,10 @@ static BACKUPS_HELP: HelpPage = HelpPage {
 };
 
 static TOC_EDIT_HELP: HelpPage = HelpPage {
-    title: "Help: Edit .toc fields",
+    title: "Help: .toc editor",
     left: &[
         HelpSection {
-            title: "Edit .toc fields",
+            title: ".toc editor",
             rows: &[
                 HelpRow::key("↑ ↓  or  j k", "choose Title, Notes or Category", K_MOVE),
                 HelpRow::key("enter", "edit", K_ENTER),
@@ -1056,9 +1056,7 @@ impl App {
             select_label,
             &[KeyCode::Char(' ')],
         ));
-        hints.push(
-            KeyHint::key(Id::Edit, "e", "edit .toc fields", &[KeyCode::Char('e')]).short("edit"),
-        );
+        hints.push(KeyHint::key(Id::Edit, "e", ".toc editor", &[KeyCode::Char('e')]).short("edit"));
         if self.details_curseforge_mark().is_some() {
             hints.push(
                 KeyHint::key(

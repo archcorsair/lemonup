@@ -2,9 +2,10 @@
 //!
 //! Each profile (one per game) keeps its own `config.toml` for what belongs to that game: its
 //! AddOns folder, backups of game settings and how many to keep, show libraries and the
-//! welcome card. The Wago.io key, the look (theme, symbols, motion) and how checks run are
-//! the same for every game, so they live once in `shared.toml` next to the default profile's
-//! config, and they win over the copies in each profile's config.
+//! welcome card. The Wago.io key, the look (theme, symbols, motion), how checks run and
+//! whether LemonUp looks for a newer LemonUp are the same for every game, so they live once in
+//! `shared.toml` next to the default profile's config, and they win over the copies in each
+//! profile's config.
 //!
 //! Migration: the first time a profile's settings are read or written and `shared.toml` does
 //! not exist, it is created from the configs of every game. Each value comes from the default
@@ -118,6 +119,8 @@ pub struct SharedFields {
     pub check_interval_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_other_games: Option<OtherGamesCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_lemonup_updates: Option<bool>,
 }
 
 impl SharedFields {
@@ -139,6 +142,7 @@ impl SharedFields {
             auto_check_interval_secs: Some(settings.auto_check_interval_secs),
             check_interval_secs: Some(settings.check_interval_secs),
             check_other_games: Some(settings.check_other_games),
+            check_lemonup_updates: Some(settings.check_lemonup_updates),
         }
     }
 
@@ -160,6 +164,10 @@ impl SharedFields {
         );
         fill(&mut self.check_interval_secs, &other.check_interval_secs);
         fill(&mut self.check_other_games, &other.check_other_games);
+        fill(
+            &mut self.check_lemonup_updates,
+            &other.check_lemonup_updates,
+        );
     }
 
     /// The values `self` has that differ from `written`. A value `self` doesn't have is not
@@ -181,6 +189,10 @@ impl SharedFields {
             ),
             check_interval_secs: changed(&self.check_interval_secs, &written.check_interval_secs),
             check_other_games: changed(&self.check_other_games, &written.check_other_games),
+            check_lemonup_updates: changed(
+                &self.check_lemonup_updates,
+                &written.check_lemonup_updates,
+            ),
         }
     }
 
@@ -210,6 +222,9 @@ impl SharedFields {
         if let Some(value) = self.check_other_games {
             settings.check_other_games = value;
         }
+        if let Some(value) = self.check_lemonup_updates {
+            settings.check_lemonup_updates = value;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -233,6 +248,7 @@ impl fmt::Debug for SharedFields {
             .field("auto_check_interval_secs", &self.auto_check_interval_secs)
             .field("check_interval_secs", &self.check_interval_secs)
             .field("check_other_games", &self.check_other_games)
+            .field("check_lemonup_updates", &self.check_lemonup_updates)
             .finish()
     }
 }
@@ -251,6 +267,8 @@ pub struct SharedSettings {
     /// How long a check result counts as fresh before an addon is checked again.
     pub check_interval_secs: u64,
     pub check_other_games: OtherGamesCheck,
+    /// The TUI looks on GitHub once a day for a newer LemonUp.
+    pub check_lemonup_updates: bool,
     /// The profile the TUI opened last; plain `lemonup` opens it again.
     pub last_used_profile: Option<String>,
     /// Per profile, the shared values LemonUp last wrote into its `config.toml`. Values
@@ -281,6 +299,7 @@ impl SharedSettings {
             auto_check_interval_secs: config.auto_check_interval_secs,
             check_interval_secs: config.check_interval_secs,
             check_other_games: config.check_other_games,
+            check_lemonup_updates: config.check_lemonup_updates,
             last_used_profile: None,
             profile_copies: BTreeMap::new(),
             wago_hash_notice_shown: false,
@@ -319,6 +338,9 @@ impl SharedSettings {
         if changed(|seen, config| seen.check_other_games != config.check_other_games) {
             self.check_other_games = config.check_other_games;
         }
+        if changed(|seen, config| seen.check_lemonup_updates != config.check_lemonup_updates) {
+            self.check_lemonup_updates = config.check_lemonup_updates;
+        }
     }
 
     /// Puts the shared values into a profile's `config`.
@@ -331,6 +353,7 @@ impl SharedSettings {
         config.auto_check_interval_secs = self.auto_check_interval_secs;
         config.check_interval_secs = self.check_interval_secs;
         config.check_other_games = self.check_other_games;
+        config.check_lemonup_updates = self.check_lemonup_updates;
     }
 }
 
@@ -357,6 +380,7 @@ impl fmt::Debug for SharedSettings {
             .field("auto_check_interval_secs", &self.auto_check_interval_secs)
             .field("check_interval_secs", &self.check_interval_secs)
             .field("check_other_games", &self.check_other_games)
+            .field("check_lemonup_updates", &self.check_lemonup_updates)
             .field("last_used_profile", &self.last_used_profile)
             .field("profile_copies", &self.profile_copies)
             .field("wago_hash_notice_shown", &self.wago_hash_notice_shown)
@@ -928,6 +952,7 @@ mod tests {
         config.auto_check_interval_secs = 7200;
         config.check_interval_secs = 900;
         config.check_other_games = OtherGamesCheck::ThreeHours;
+        config.check_lemonup_updates = false;
         config.addon_dir = Some("/games/_retail_/Interface/AddOns".into());
         config.backup_retention = 9;
         config
@@ -963,6 +988,7 @@ mod tests {
         assert_eq!(settings.auto_check_interval_secs, 7200);
         assert_eq!(settings.check_interval_secs, 900);
         assert_eq!(settings.check_other_games, OtherGamesCheck::ThreeHours);
+        assert!(!settings.check_lemonup_updates);
         assert!(store.read().expect("reread") == Some(expected));
         // The default profile's config is left exactly as it was.
         assert_eq!(fs::read(roots.default_config_file()).expect("read"), before);
@@ -1199,6 +1225,19 @@ mod tests {
         forever.wago_api_key = None;
         forever_store.write_config(&forever).expect("remove key");
         assert!(loaded(&retail_store).wago_api_key.is_none());
+    }
+
+    /// Files written before 2.8 have no `check_lemonup_updates`; it reads as on.
+    #[test]
+    fn files_from_before_the_lemonup_check_read_it_as_on() {
+        let shared = toml::from_str::<SharedSettings>("schema_version = 1\ntheme = \"light\"\n")
+            .expect("shared.toml");
+        assert!(shared.check_lemonup_updates);
+        let config =
+            toml::from_str::<AppConfig>("schema_version = 1\ntheme = \"light\"\n").expect("config");
+        assert!(config.check_lemonup_updates);
+        let fields = toml::from_str::<SharedFields>("theme = \"light\"\n").expect("fields");
+        assert_eq!(fields.check_lemonup_updates, None);
     }
 
     /// Reviewer's scenario D: LemonUp 2.2 changed the key in the profile's own file.
@@ -1464,6 +1503,7 @@ mod tests {
         assert!(loaded.wago_api_key.as_deref() == Some(SECRET));
         assert_eq!(loaded.theme, ThemeMode::Terminal);
         assert_eq!(loaded.check_other_games, OtherGamesCheck::ThreeHours);
+        assert!(!loaded.check_lemonup_updates);
         // Its own values stay its own.
         assert_eq!(loaded.addon_dir, own.addon_dir);
         assert_eq!(loaded.backup_retention, 2);

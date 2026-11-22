@@ -484,6 +484,7 @@ impl App {
         next.games.checking = self.games.checking.take();
         std::mem::swap(&mut next.games_tx, &mut self.games_tx);
         std::mem::swap(&mut next.games_rx, &mut self.games_rx);
+        self.keep_newer_lemonup(&mut next);
         next.last_frame_width = self.last_frame_width;
         if let Err(error) = remember_last_used(&self.roots, profile) {
             tracing::warn!(%error, "couldn't remember the last used game");

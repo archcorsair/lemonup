@@ -10,6 +10,9 @@ pub const DEFAULT_PROFILE: &str = "default";
 /// Settings every game shares (Wago.io key, look, auto-check), next to the default
 /// profile's `config.toml`.
 pub const SHARED_SETTINGS_FILE: &str = "shared.toml";
+/// The newest LemonUp release GitHub named, shared by all games, in the default profile's data
+/// folder.
+pub const LATEST_RELEASE_FILE: &str = "latest-release.json";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_DB_FILE: &str = "state.sqlite";
 const PROFILES_DIR: &str = "profiles";
@@ -64,6 +67,11 @@ impl ProfileRoots {
 
     pub fn shared_settings_file(&self) -> PathBuf {
         self.config_dir.join(SHARED_SETTINGS_FILE)
+    }
+
+    /// Where the newest LemonUp release GitHub named is kept, for every game.
+    pub fn latest_release_file(&self) -> PathBuf {
+        self.data_dir.join(LATEST_RELEASE_FILE)
     }
 
     pub fn default_config_file(&self) -> PathBuf {
@@ -203,6 +211,19 @@ mod tests {
         assert_eq!(
             scoped_dir(base, "dev"),
             PathBuf::from("/tmp/lemonup/profiles/dev")
+        );
+    }
+
+    #[test]
+    fn the_newest_release_is_kept_once_for_every_game_in_the_data_folder() {
+        let roots = super::ProfileRoots::new(
+            PathBuf::from("/c"),
+            PathBuf::from("/d"),
+            PathBuf::from("/x"),
+        );
+        assert_eq!(
+            roots.latest_release_file(),
+            PathBuf::from("/d/latest-release.json")
         );
     }
 

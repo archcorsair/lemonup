@@ -8,6 +8,7 @@ pub mod find;
 pub mod fingerprint;
 pub mod github_release;
 pub mod known_addons;
+pub mod lemonup_release;
 pub mod marquee;
 pub mod paths;
 pub mod profiles;

@@ -17,6 +17,7 @@ const CONFIG_SECTIONS: [(ConfigGroup, &[ConfigField]); 2] = [
             ConfigField::AutoCheckInterval,
             ConfigField::CheckInterval,
             ConfigField::CheckOtherGames,
+            ConfigField::CheckLemonupUpdates,
         ],
     ),
     (
@@ -319,6 +320,9 @@ impl App {
                 ConfigField::CheckOtherGames => {
                     "how often your other games are checked while LemonUp is open".to_string()
                 }
+                ConfigField::CheckLemonupUpdates => "looks on GitHub once a day for a newer \
+                     LemonUp and shows it at the top of the addon list"
+                    .to_string(),
                 ConfigField::BackupWtf => {
                     "copies your keybinds, macros and addon setups before updates".to_string()
                 }
@@ -411,6 +415,10 @@ impl App {
             ConfigField::CheckOtherGames => plain(
                 "While LemonUp is open, it also checks your other games for updates this \
                  often, one at a time. It only checks: it never updates or changes them.",
+            ),
+            ConfigField::CheckLemonupUpdates => plain(
+                "Looks on GitHub once a day for a newer LemonUp and shows it at the top of the \
+                 addon list.",
             ),
             ConfigField::BackupWtf => plain(
                 "Before updates, LemonUp saves a copy of your game settings: your keybinds, \

@@ -461,7 +461,7 @@ fn classify_rejected_token(status: StatusCode, token_sent: bool) -> Option<Strin
 }
 
 /// Maps a non-success response to an error, with a dedicated message for rate limits.
-fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
+pub(crate) fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
     if let Some(message) =
         classify_rejected_token(response.status(), github_token_from_env().is_some())
     {
