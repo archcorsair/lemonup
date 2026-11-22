@@ -9269,6 +9269,12 @@ fn check_failure_cause(failures: &[CheckFailure]) -> Option<String> {
         (SourceErrorKind::SlowDown, Some(name)) => {
             Some(format!("{name} asked LemonUp to slow down"))
         }
+        (SourceErrorKind::WrongRepository, _) if failures.len() == 1 => {
+            Some("its repository may have a new owner".to_string())
+        }
+        (SourceErrorKind::WrongRepository, _) => {
+            Some("their repositories may have new owners".to_string())
+        }
         _ => None,
     }
 }
@@ -21103,6 +21109,23 @@ games = ["forever"]
         }
 
         #[test]
+        fn a_known_addon_linked_by_an_older_form_of_its_link_counts_as_linked() {
+            for url in [
+                "https://www.github.com/RaidOwner/KnownRaidTools",
+                "https://github.com/raidowner/knownraidtools.git",
+                "https://github.com/RaidOwner/KnownRaidTools/",
+            ] {
+                let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+                let mut linked =
+                    AddonRecord::new("KnownRaidTools", "Known Raid Tools", SourceKind::GitHub);
+                linked.source_url = Some(url.to_string());
+                app.dashboard = DashboardState::from_addons(vec![linked]);
+                app.dashboard.detail_mode = DetailMode::Search;
+                assert!(!key_line_has(&app, "enter", "install"), "{url}");
+            }
+        }
+
+        #[test]
         fn enter_on_a_known_addon_while_a_search_or_install_runs_does_nothing() {
             let mut app = known_rows_app(Some("key"), "Known Raid Tools");
             // A new search starts; the old rows are still there.
@@ -23296,6 +23319,18 @@ games = ["forever"]
             assert_eq!(
                 check_failure_cause(&[gone.clone(), gone]),
                 Some("TukUI doesn't list them anymore".to_string())
+            );
+            // A listed repository that fails its check says why on the list too.
+            let moved = fail(SourceErrorKind::WrongRepository, SourceKind::GitHub);
+            let sparkles =
+                dashboard_check_status_message(&["Forever Loot Sparkles".to_string()], 1, 0, 0, 1);
+            assert_eq!(
+                dashboard_check_status_with_cause(sparkles, std::slice::from_ref(&moved)),
+                "Couldn't check Forever Loot Sparkles: its repository may have a new owner"
+            );
+            assert_eq!(
+                check_failure_cause(&[moved.clone(), moved]),
+                Some("their repositories may have new owners".to_string())
             );
 
             // Different causes, or none known: the wording stays as it was.

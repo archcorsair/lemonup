@@ -143,12 +143,10 @@ pub(super) fn install_error_advice(
     }
 }
 
-/// Whether `url` is the GitHub link of `owner/repo`, ignoring ASCII case and
-/// a trailing slash.
+/// Whether `url` is the GitHub link of `owner/repo`, read the way updates read
+/// it, so a link kept from 1.x (`www.`, `.git`) still counts.
 fn github_url_names_repo(url: &str, owner: &str, repo: &str) -> bool {
-    url.trim()
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(&format!("https://github.com/{owner}/{repo}"))
+    crate::github::github_url_is_repo(url, owner, repo)
 }
 
 /// Columns before the text of "  Technical detail: ".

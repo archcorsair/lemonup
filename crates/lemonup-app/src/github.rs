@@ -993,6 +993,14 @@ fn strip_git_suffix(mut repo: &str) -> &str {
     repo
 }
 
+/// Whether `url` is a GitHub link to `owner/repo`, read the way updates read a linked addon's
+/// link (`www.`, a `.git` ending and a trailing slash allowed), ignoring ASCII case.
+pub(crate) fn github_url_is_repo(url: &str, owner: &str, repo: &str) -> bool {
+    parse_github_repo_url(url.trim()).is_ok_and(|parsed| {
+        parsed.owner.eq_ignore_ascii_case(owner) && parsed.repo.eq_ignore_ascii_case(repo)
+    })
+}
+
 fn parse_github_repo_url(value: &str) -> Result<GithubRepoRef, String> {
     let url = Url::parse(value)
         .map_err(|_| "GitHub install currently requires a full repo URL".to_string())?;

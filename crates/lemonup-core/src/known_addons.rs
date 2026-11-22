@@ -87,6 +87,18 @@ pub fn parse_known_addons(text: &str) -> Result<Vec<KnownAddon>, String> {
                 other.name, entry.name
             ));
         }
+        // One id is one repository, so a second entry with it names that
+        // repository under an old or new path.
+        if let KnownSource::GitHub { id, .. } = &entry.source
+            && let Some(other) = list.iter().find(|other| {
+                matches!(&other.source, KnownSource::GitHub { id: other_id, .. } if other_id == id)
+            })
+        {
+            return Err(format!(
+                "known addons list: '{}' and '{}' have the same github_id {id}",
+                other.name, entry.name
+            ));
+        }
         list.push(entry);
     }
     Ok(list)
@@ -386,6 +398,15 @@ games = ["forever", "retail"]
              [[addon]]\nname = \"B\"\ngithub = \"owner/repo\"\ngithub_id = 1\ngames = [\"forever\"]\n",
         );
         assert!(error.contains("same repository"), "{error}");
+    }
+
+    #[test]
+    fn two_entries_cannot_share_a_github_id() {
+        let error = error_of(
+            "[[addon]]\nname = \"A\"\ngithub = \"owner/old-name\"\ngithub_id = 7\ngames = [\"forever\"]\n\n\
+             [[addon]]\nname = \"B\"\ngithub = \"owner/new-name\"\ngithub_id = 7\ngames = [\"forever\"]\n",
+        );
+        assert!(error.contains("same github_id 7"), "{error}");
     }
 
     #[test]
