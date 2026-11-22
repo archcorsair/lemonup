@@ -42,6 +42,7 @@ impl App {
             HelpWhen::FirstRunCard => self.first_run_card_visible(),
             HelpWhen::NoJob => self.dashboard_job_running().is_none(),
             HelpWhen::CurseForgeManages => self.details_curseforge_mark().is_some(),
+            HelpWhen::InstallableResult => !self.known_row_cannot_install(),
             // Help opened from docked Details keeps the panel's saved scroll
             // state, so the row shows there too.
             HelpWhen::DetailsOverflow => {

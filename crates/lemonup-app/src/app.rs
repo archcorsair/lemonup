@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding, rebind_addon_dir};
 use lemonup_core::curseforge::CurseForgeManaged;
+use lemonup_core::known_addons::{KnownAddon, KnownSource};
 use lemonup_core::{
     AddonKind, AddonRecord, AppConfig, AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE,
     GameFlavor, ImportAnalysis, ScanSummary, SourceKind, StateDatabase, ThemeMode, UpdateStatus,
@@ -83,7 +84,8 @@ mod toc_editor;
 pub(crate) use self::curseforge_mark::{CurseForgeAction, CurseForgeMark, CurseForgeMessage};
 pub use self::direct_install::DirectInstallRequest;
 use self::direct_install::{
-    DirectInstallOutcome, SearchInputIntent, classify_search_input, run_direct_install_task,
+    DirectInstallOutcome, SearchInputIntent, classify_search_input, known_direct_request,
+    run_direct_install_task,
 };
 pub(crate) use self::find_sheet::{FindAction, FindMessage, FindState, FindTaskEvent};
 pub(crate) use self::games::{GamesAction, GamesMessage, GamesState, OtherGameChecked};
@@ -111,6 +113,9 @@ const LOGO_FULL: [&str; 2] = [
 /// every word that was typed.
 pub(crate) const NO_ADDON_HAS_EVERY_WORD: &str =
     "No addon has all of those words. Closest matches first.";
+/// The start of a known addon row's id. A Wago.io id is one segment of a
+/// URL path, so it never has a `/` and never looks like one of these.
+const KNOWN_ROW_ID_PREFIX: &str = "known/";
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
 /// How long a cut version holds at its start and its end before it moves
@@ -2461,6 +2466,12 @@ pub struct SearchPaneState {
     selected_result: Option<usize>,
     last_query: Option<String>,
     install_state: SearchInstallState,
+    /// The known addons among `results`, each shown as a row whose id
+    /// starts with `KNOWN_ROW_ID_PREFIX`.
+    known_rows: Vec<KnownAddon>,
+    /// The results are only known addons, shown without a Wago.io search
+    /// because no Wago.io key is saved.
+    known_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2526,7 +2537,43 @@ impl Default for SearchPaneState {
             selected_result: None,
             last_query: None,
             install_state: SearchInstallState::Idle,
+            known_rows: Vec::new(),
+            known_only: false,
         }
+    }
+}
+
+/// The row id of a known addon. Names are unique on the list.
+fn known_row_id(addon: &KnownAddon) -> String {
+    format!("{KNOWN_ROW_ID_PREFIX}{}", addon.name)
+}
+
+/// A known addon as a results row: its name, the repository owner as the
+/// author, no downloads, and where it comes from as the version.
+fn known_row(addon: &KnownAddon) -> WagoSearchResult {
+    let (owner, version) = match &addon.source {
+        KnownSource::GitHub { owner, .. } => (Some(owner.clone()), "GitHub"),
+        KnownSource::CurseForgeOnly => (None, "CurseForge"),
+    };
+    WagoSearchResult {
+        id: known_row_id(addon),
+        display_name: addon.name.clone(),
+        summary: None,
+        owner,
+        authors: Vec::new(),
+        website_url: None,
+        download_count: None,
+        version: Some(version.to_string()),
+    }
+}
+
+/// What the Install sheet says when known addons match a name and no
+/// Wago.io key is saved.
+fn known_rows_need_key_message(count: usize) -> String {
+    if count == 1 {
+        "1 known addon matches. Wago.io needs your key.".to_string()
+    } else {
+        format!("{count} known addons match. Wago.io needs your key.")
     }
 }
 
@@ -2647,9 +2694,19 @@ impl SearchPaneState {
         next
     }
 
-    fn finish_search(&self, query: String, mut results: Vec<WagoSearchResult>) -> Self {
+    /// The search's results with the known addons that match it, ranked
+    /// together.
+    fn finish_search(
+        &self,
+        query: String,
+        mut results: Vec<WagoSearchResult>,
+        known: Vec<KnownAddon>,
+    ) -> Self {
         let mut next = self.clone();
         next.in_progress = false;
+        results.extend(known.iter().map(known_row));
+        next.known_rows = known;
+        next.known_only = false;
         rank_search_results(&query, &mut results);
         next.last_query = Some(query);
         next.results = results;
@@ -2663,6 +2720,57 @@ impl SearchPaneState {
             next.focus = SearchFocus::Box;
         }
         next
+    }
+
+    /// No Wago.io key is saved: the known addons that match `query` are the
+    /// results, placed as a finished search places them.
+    fn show_known_rows(&self, query: String, known: Vec<KnownAddon>) -> Self {
+        let mut next = self.start_search().finish_search(query, Vec::new(), known);
+        next.known_only = true;
+        next
+    }
+
+    /// The known addon a row shows, if it is one.
+    fn known_entry(&self, result: &WagoSearchResult) -> Option<&KnownAddon> {
+        if !result.id.starts_with(KNOWN_ROW_ID_PREFIX) {
+            return None;
+        }
+        self.known_rows
+            .iter()
+            .find(|addon| known_row_id(addon) == result.id)
+    }
+
+    /// Whether a known addon is among the results.
+    fn has_known_rows(&self) -> bool {
+        self.results
+            .iter()
+            .any(|result| self.known_entry(result).is_some())
+    }
+
+    /// The known addon the cursor is on, while the results have focus.
+    fn selected_known_entry(&self) -> Option<&KnownAddon> {
+        self.results_focused()
+            .then(|| self.selected_result())
+            .flatten()
+            .and_then(|result| self.known_entry(result))
+    }
+
+    /// Whether the rows on screen are the known addons for `query`, shown
+    /// without a Wago.io search because no key is saved.
+    fn shows_known_rows_for(&self, query: &str) -> bool {
+        self.known_only && !self.results.is_empty() && self.last_query.as_deref() == Some(query)
+    }
+
+    /// Whether the failure on screen is one trying again can't fix: a
+    /// repository that isn't the one the known addons list names.
+    fn retry_refused(&self) -> bool {
+        matches!(
+            self.install_state,
+            SearchInstallState::Error {
+                kind: SourceErrorKind::WrongRepository,
+                ..
+            }
+        )
     }
 
     /// Whether some result has every word of the search. Wago.io matches
@@ -2687,6 +2795,8 @@ impl SearchPaneState {
         let mut next = self.clone();
         next.in_progress = false;
         next.results.clear();
+        next.known_rows.clear();
+        next.known_only = false;
         next.selected_result = None;
         next.focus = SearchFocus::Box;
         next.install_state = SearchInstallState::Error {
@@ -2741,7 +2851,14 @@ impl SearchPaneState {
             addon_id: Some(addon_id),
             ..
         } = &self.install_state
-            && let Some(failed) = self.results.iter().find(|result| &result.id == addon_id)
+            && let Some(failed) = self.results.iter().find(|result| {
+                match self.known_entry(result) {
+                    // A known addon's install is a GitHub one, by its link.
+                    Some(addon) => known_direct_request(addon)
+                        .is_some_and(|request| &request.target == addon_id),
+                    None => &result.id == addon_id,
+                }
+            })
         {
             return Some(failed);
         }
@@ -2795,6 +2912,8 @@ impl SearchPaneState {
         let mut next = self.clone();
         next.query = TextInput::default();
         next.results.clear();
+        next.known_rows.clear();
+        next.known_only = false;
         next.selected_result = None;
         next.last_query = None;
         next.focus = SearchFocus::Box;
@@ -2818,8 +2937,19 @@ impl SearchPaneState {
         next.key_box = None;
         next.focus = SearchFocus::Box;
         next.results.clear();
+        next.known_rows.clear();
+        next.known_only = false;
         next.selected_result = None;
         next.last_query = None;
+        next.install_state = SearchInstallState::ConfirmDirect { request };
+        next
+    }
+
+    /// The same question for the known addon the cursor is on. The results
+    /// stay, so `esc` goes back to them with the same row selected.
+    fn request_known_install(&self, request: DirectInstallRequest) -> Self {
+        let mut next = self.clone();
+        next.key_box = None;
         next.install_state = SearchInstallState::ConfirmDirect { request };
         next
     }
@@ -3031,6 +3161,9 @@ pub struct App {
     dashboard: DashboardState,
     install_pane: InstallPaneState,
     search_pane: SearchPaneState,
+    /// The addons Install search shows from the known addons list. Tests
+    /// replace it with their own entries.
+    known_addons: Vec<KnownAddon>,
     pending_wago_install_confirmation: Option<WagoInstallConfirmation>,
     /// Where CurseForge's record may be; read only, once per action.
     curseforge_files: Vec<PathBuf>,
@@ -3254,6 +3387,7 @@ impl App {
             dashboard: DashboardState::from_addons(addons),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
+            known_addons: lemonup_core::known_addons::known_addons().to_vec(),
             pending_wago_install_confirmation: None,
             curseforge_files: lemonup_core::curseforge::record_files(),
             curseforge: CurseForgeManaged::default(),
@@ -4259,6 +4393,8 @@ impl App {
         // tries the same addon again.
         if matches!(pane.install_state, SearchInstallState::Error { .. }) {
             return Some(match key.code {
+                // Trying again would fail the same way until the list is updated.
+                KeyCode::Enter if pane.retry_refused() => vec![],
                 KeyCode::Enter if pane.results_focused() => {
                     vec![AppMessage::SearchInstallSelected]
                 }
@@ -4275,6 +4411,8 @@ impl App {
             return Some(match key.code {
                 KeyCode::Down => vec![AppMessage::SearchResultNext],
                 KeyCode::Up => vec![AppMessage::SearchResultPrevious],
+                // LemonUp can't install a CurseForge-only addon.
+                KeyCode::Enter if self.known_row_cannot_install() => vec![],
                 KeyCode::Enter => vec![AppMessage::SearchInstallSelected],
                 KeyCode::Esc => vec![AppMessage::DashboardCloseOverlay],
                 KeyCode::Char('?') => vec![AppMessage::DashboardOpenHelp],
@@ -5211,7 +5349,14 @@ impl App {
                 )]
             }
             AppMessage::SearchInstallSelected => {
-                if let Some(busy) = self.install_busy_status() {
+                let known = self
+                    .search_pane
+                    .install_target()
+                    .and_then(|result| self.search_pane.known_entry(result))
+                    .cloned();
+                if let Some(addon) = known {
+                    self.install_known_actions(&addon)
+                } else if let Some(busy) = self.install_busy_status() {
                     vec![AppAction::SetStatus(self.dashboard_status_for(
                         StatusKind::Note,
                         DetailMode::Search,
@@ -6097,10 +6242,19 @@ impl App {
                     ]
                 }
                 AppTaskEvent::WagoSearchFinished(Ok(outcome)) => {
-                    let pane = self
-                        .search_pane
-                        .finish_search(outcome.query.clone(), outcome.results.clone());
-                    let message = if pane.results.is_empty() || pane.some_result_has_every_word() {
+                    let pane = self.search_pane.finish_search(
+                        outcome.query.clone(),
+                        outcome.results.clone(),
+                        self.matching_known_rows(&outcome.query),
+                    );
+                    // Known addons are not on Wago.io, so the count doesn't say so.
+                    let message = if pane.has_known_rows() {
+                        format!(
+                            "Found {} addon{}",
+                            pane.results.len(),
+                            plural_suffix(pane.results.len())
+                        )
+                    } else if pane.results.is_empty() || pane.some_result_has_every_word() {
                         format!(
                             "Found {} addon{} on Wago.io",
                             outcome.results.len(),
@@ -7100,10 +7254,7 @@ impl App {
             }
             AppAction::StartWagoSearch { query, api_key } => {
                 let sender = self.task_events_tx.clone();
-                let flavor = self
-                    .effective_addon_dir
-                    .as_deref()
-                    .map_or(GameFlavor::Retail, GameFlavor::for_addons_dir);
+                let flavor = self.search_flavor();
                 tokio::spawn(async move {
                     let result = search_wago_addons(&query, &api_key, flavor)
                         .await
@@ -9118,6 +9269,12 @@ fn check_failure_cause(failures: &[CheckFailure]) -> Option<String> {
         (SourceErrorKind::SlowDown, Some(name)) => {
             Some(format!("{name} asked LemonUp to slow down"))
         }
+        (SourceErrorKind::WrongRepository, _) if failures.len() == 1 => {
+            Some("its repository may have a new owner".to_string())
+        }
+        (SourceErrorKind::WrongRepository, _) => {
+            Some("their repositories may have new owners".to_string())
+        }
         _ => None,
     }
 }
@@ -9597,6 +9754,7 @@ mod tests {
             dashboard: DashboardState::from_addons(vec![first, second, third]),
             install_pane: InstallPaneState::default(),
             search_pane: SearchPaneState::default(),
+            known_addons: Vec::new(),
             pending_wago_install_confirmation: None,
             // Tests never read the real CurseForge record.
             curseforge_files: Vec::new(),
@@ -11038,6 +11196,10 @@ mod tests {
         );
         assert!(source_error_advice(SourceErrorKind::SlowDown, "GitHub").contains("slow down"));
         assert!(source_error_advice(SourceErrorKind::Other, "GitHub").contains("technical detail"));
+        assert_eq!(
+            source_error_advice(SourceErrorKind::WrongRepository, "GitHub"),
+            "The repository may have a new owner. LemonUp won't install it until its list is updated."
+        );
 
         let mut app = app_for_tests(ShellMode::Dashboard);
         app.apply(AppAction::SetDetailMode(DetailMode::Search));
@@ -11762,6 +11924,8 @@ mod tests {
             selected_result: Some(0),
             last_query: Some("aura".to_string()),
             install_state: SearchInstallState::Idle,
+            known_rows: Vec::new(),
+            known_only: false,
         };
         let checking = app
             .search_pane
@@ -11834,6 +11998,8 @@ mod tests {
             selected_result: Some(0),
             last_query: Some("WeakAuras".to_string()),
             install_state: SearchInstallState::Idle,
+            known_rows: Vec::new(),
+            known_only: false,
         };
 
         let actions = app.update(AppMessage::SearchInstallSelected);
@@ -12866,6 +13032,213 @@ mod tests {
         }
     }
 
+    /// A known addons list for tests, so no test depends on the real one: a
+    /// GitHub addon and a CurseForge-only one for Retail and Forever, and a
+    /// GitHub addon for Forever only.
+    fn test_known_addons() -> Vec<lemonup_core::known_addons::KnownAddon> {
+        lemonup_core::known_addons::parse_known_addons(
+            r#"
+[[addon]]
+name = "Known Raid Tools"
+github = "RaidOwner/KnownRaidTools"
+github_id = 101
+games = ["retail", "forever"]
+
+[[addon]]
+name = "Known Bags"
+curseforge_only = true
+games = ["retail", "forever"]
+
+[[addon]]
+name = "Known Forever Maps"
+github = "MapOwner/KnownForeverMaps"
+github_id = 102
+games = ["forever"]
+"#,
+        )
+        .expect("test list parses")
+    }
+
+    #[test]
+    fn a_finished_search_ranks_matching_known_addons_with_the_wago_results() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.known_addons = test_known_addons();
+        let actions = {
+            app.dashboard.detail_mode = DetailMode::Search;
+            app.update(AppMessage::BackgroundTask(
+                AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                    query: "known raid".to_string(),
+                    results: vec![named_result("frames", "Raid Frames", 900_000)],
+                })),
+            ))
+        };
+        // Every row is counted, and none is said to be on Wago.io.
+        assert_eq!(
+            actions[1],
+            AppAction::SetStatus(app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Found 2 addons"
+            ))
+        );
+        apply_actions(&mut app, actions);
+        // The name with every word first, though it has no downloads.
+        assert_eq!(result_ids(&app), ["known/Known Raid Tools", "frames"]);
+        assert_eq!(app.search_pane.selected_result, Some(0));
+        app.search_pane.query = "known raid".into();
+        assert_eq!(
+            line_text(&app.search_hint_line()),
+            "2 addons match \"known raid\""
+        );
+
+        // One row: the singular the Wago.io line uses.
+        finish_search_with(&mut app, "known raid", Vec::new());
+        assert_eq!(result_ids(&app), ["known/Known Raid Tools"]);
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(StatusKind::Done, DetailMode::Search, "Found 1 addon")
+                .text
+        );
+        assert_eq!(
+            line_text(&app.search_hint_line()),
+            "1 addon matches \"known raid\""
+        );
+    }
+
+    #[test]
+    fn a_finished_search_with_no_known_addon_says_wago_io_as_before() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.known_addons = test_known_addons();
+        finish_search_with(
+            &mut app,
+            "frames",
+            vec![named_result("frames", "Raid Frames", 900_000)],
+        );
+        assert_eq!(result_ids(&app), ["frames"]);
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Search,
+                "Found 1 addon on Wago.io"
+            )
+            .text
+        );
+        app.search_pane.query = "frames".into();
+        assert_eq!(
+            line_text(&app.search_hint_line()),
+            "1 addon on Wago.io matches \"frames\""
+        );
+    }
+
+    #[test]
+    fn a_failed_search_shows_no_known_addons() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.known_addons = test_known_addons();
+        app.dashboard.detail_mode = DetailMode::Search;
+        app.search_pane.query = "known raid".into();
+        app.search_pane.in_progress = true;
+        let actions = app.update(AppMessage::BackgroundTask(
+            AppTaskEvent::WagoSearchFinished(Err(SourceError::from("down".to_string()))),
+        ));
+        apply_actions(&mut app, actions);
+        assert!(app.search_pane.results.is_empty());
+        assert!(matches!(
+            app.search_pane.install_state,
+            SearchInstallState::Error {
+                addon_name: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn without_a_key_enter_shows_the_known_addons_that_match() {
+        for (query, ids, message) in [
+            (
+                "known",
+                &["known/Known Bags", "known/Known Raid Tools"][..],
+                "2 known addons match. Wago.io needs your key.",
+            ),
+            (
+                "known bags",
+                &["known/Known Bags"][..],
+                "1 known addon matches. Wago.io needs your key.",
+            ),
+        ] {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.known_addons = test_known_addons();
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.wago_api_key = None;
+            app.search_pane.query = query.into();
+
+            let actions = app.update(AppMessage::SearchSubmit);
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, AppAction::StartWagoSearch { .. }))
+            );
+            apply_actions(&mut app, actions);
+
+            assert!(app.search_pane.key_box.is_none(), "{query}");
+            assert_eq!(result_ids(&app), ids, "{query}");
+            // Where a finished search puts it: the box, the first row chosen.
+            assert_eq!(app.search_pane.focus, SearchFocus::Box);
+            assert_eq!(app.search_pane.selected_result, Some(0));
+            assert!(!app.search_pane.in_progress);
+            assert_eq!(line_text(&app.search_hint_line()), message);
+            assert_eq!(
+                app.status_line.text,
+                app.dashboard_status_for(StatusKind::Note, DetailMode::Search, message)
+                    .text
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_key_a_name_no_known_addon_has_opens_the_key_box() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.known_addons = test_known_addons();
+        app.apply(AppAction::SetDetailMode(DetailMode::Search));
+        app.wago_api_key = None;
+        app.search_pane.query = "WeakAuras".into();
+        apply_all(&mut app, AppMessage::SearchSubmit);
+        assert!(app.search_pane.key_box.is_some());
+        assert!(app.search_pane.results.is_empty());
+    }
+
+    #[test]
+    fn a_known_addon_for_another_game_does_not_show() {
+        let maps = "known maps";
+        let search = |dir: &str, key: Option<&str>| {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.known_addons = test_known_addons();
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.effective_addon_dir = Some(PathBuf::from(dir));
+            app.wago_api_key = key.map(str::to_string);
+            app.search_pane.query = maps.into();
+            app
+        };
+        let retail = "/sandbox/World of Warcraft/_retail_/Interface/AddOns";
+        let forever = "/sandbox/World of Warcraft/_forever_/Interface/AddOns";
+
+        // Without a key: nothing for Retail, so the key box opens.
+        let mut app = search(retail, None);
+        apply_all(&mut app, AppMessage::SearchSubmit);
+        assert!(app.search_pane.key_box.is_some());
+        let mut app = search(forever, None);
+        apply_all(&mut app, AppMessage::SearchSubmit);
+        assert_eq!(result_ids(&app), ["known/Known Forever Maps"]);
+
+        // With a key: the finished search for Retail has no list row.
+        let mut app = search(retail, Some("key"));
+        finish_search_with(&mut app, maps, Vec::new());
+        assert!(app.search_pane.results.is_empty());
+        let mut app = search(forever, Some("key"));
+        finish_search_with(&mut app, maps, Vec::new());
+        assert_eq!(result_ids(&app), ["known/Known Forever Maps"]);
+    }
+
     fn finish_search_with(app: &mut App, query: &str, results: Vec<WagoSearchResult>) {
         app.dashboard.detail_mode = DetailMode::Search;
         app.search_pane.in_progress = true;
@@ -12974,7 +13347,7 @@ mod tests {
         );
         assert_eq!(
             line_text(&app.search_hint_line()),
-            "1 addon on Wago.io match \"Forever Loot Sparkles\""
+            "1 addon on Wago.io matches \"Forever Loot Sparkles\""
         );
     }
 
@@ -17080,6 +17453,82 @@ mod tests {
             app.search_pane.last_query = Some("result".to_string());
         }
 
+        /// Install after a search found the test list's two Retail addons
+        /// and a Wago.io one, the cursor on the GitHub addon. A linked copy
+        /// of it is in the addon list.
+        fn open_install_known_rows(app: &mut App) {
+            let mut linked =
+                AddonRecord::new("KnownRaidTools", "Known Raid Tools", SourceKind::GitHub);
+            linked.source_url = Some("https://github.com/raidowner/knownraidtools/".to_string());
+            app.dashboard = DashboardState::from_addons(vec![linked]);
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.known_addons = test_known_addons();
+            app.search_pane.query = "known".into();
+            app.search_pane.in_progress = true;
+            let actions = app.update(AppMessage::BackgroundTask(
+                AppTaskEvent::WagoSearchFinished(Ok(WagoSearchOutcome {
+                    query: "known".to_string(),
+                    results: wago_results(1),
+                })),
+            ));
+            for action in actions {
+                app.apply(action);
+            }
+            app.search_pane.focus = SearchFocus::Results;
+            app.search_pane.selected_result = app
+                .search_pane
+                .results
+                .iter()
+                .position(|result| result.display_name == "Known Raid Tools");
+        }
+
+        /// Enter on a name the test list has, with no Wago.io key saved.
+        fn open_install_known_without_key(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.known_addons = test_known_addons();
+            app.wago_api_key = None;
+            app.search_pane.query = "known".into();
+            apply_all(app, AppMessage::SearchSubmit);
+        }
+
+        /// Enter on the known GitHub addon: the install question.
+        fn open_install_known_question(app: &mut App) {
+            open_install_known_rows(app);
+            // Not linked yet, so it can be installed.
+            app.dashboard = DashboardState::from_addons(Vec::new());
+            app.dashboard.detail_mode = DetailMode::Search;
+            app.effective_addon_dir = Some(PathBuf::from(
+                "/sandbox/World of Warcraft/_retail_/Interface/AddOns",
+            ));
+            apply_all(app, AppMessage::SearchInstallSelected);
+        }
+
+        /// A GitHub install refused because the repository isn't the one the
+        /// list names, the box empty.
+        fn open_install_wrong_repository(app: &mut App) {
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.search_pane.install_state = SearchInstallState::Error {
+                addon_id: Some("https://github.com/RaidOwner/KnownRaidTools".to_string()),
+                addon_name: Some("KnownRaidTools".to_string()),
+                provider: "GitHub",
+                kind: SourceErrorKind::WrongRepository,
+                detail: "github.com/RaidOwner/KnownRaidTools is not the repository LemonUp \
+                         lists for Known Raid Tools"
+                    .to_string(),
+                clash: None,
+            };
+        }
+
+        /// The same, the cursor on the CurseForge-only addon.
+        fn open_install_curseforge_row(app: &mut App) {
+            open_install_known_rows(app);
+            app.search_pane.selected_result = app
+                .search_pane
+                .results
+                .iter()
+                .position(|result| result.display_name == "Known Bags");
+        }
+
         const LONG_VERSION: &str = "v1.6.0-forever-extra-long";
 
         /// Results whose first two versions are long.
@@ -17403,6 +17852,94 @@ mod tests {
         }
 
         #[test]
+        fn known_addon_rows_show_where_they_come_from_at_every_size() {
+            for (width, height) in SIZES {
+                let context = format!("{width}x{height}");
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_install_known_rows(&mut app);
+                let rows = render_rows(&mut app, width, height);
+                let screen = rows.join("\n");
+                let raid = row_of(&rows, "Known Raid Tools");
+                assert!(raid.contains("GitHub"), "{context}:\n{screen}");
+                // The linked copy of its repository.
+                assert!(raid.contains("Installed"), "{context}:\n{screen}");
+                // No downloads.
+                assert!(
+                    !raid.chars().any(|character| character.is_ascii_digit()),
+                    "{context}:\n{screen}"
+                );
+                if screen.contains("Author") {
+                    assert!(raid.contains("RaidOwner"), "{context}:\n{screen}");
+                }
+                // Its install would be refused, so enter is not offered.
+                let key_line = rows.last().expect("key line");
+                assert!(!key_line.contains("enter"), "{context}: {key_line}");
+                let bags = row_of(&rows, "Known Bags");
+                assert!(bags.contains("CurseForge"), "{context}:\n{screen}");
+                assert!(!bags.contains("Installed"), "{context}:\n{screen}");
+                let preview: Vec<String> = app
+                    .search_selected_preview_lines(width)
+                    .iter()
+                    .map(line_text)
+                    .skip(2)
+                    .collect();
+                // The linked copy gets no line: a GitHub install won't
+                // replace a linked addon's folders.
+                assert_eq!(
+                    preview,
+                    ["Known Raid Tools", "github.com/RaidOwner/KnownRaidTools"],
+                    "{context}"
+                );
+
+                open_install_curseforge_row(&mut app);
+                let rows = render_rows(&mut app, width, height);
+                let preview: Vec<String> = app
+                    .search_selected_preview_lines(width)
+                    .iter()
+                    .map(line_text)
+                    .skip(2)
+                    .collect();
+                assert_eq!(
+                    preview,
+                    [
+                        "Known Bags",
+                        "Only on CurseForge. LemonUp can't install it."
+                    ],
+                    "{context}"
+                );
+                let key_line = rows.last().expect("key line");
+                assert!(!key_line.contains("enter"), "{context}: {key_line}");
+                assert!(key_line.contains("↑/↓ choose"), "{context}: {key_line}");
+            }
+        }
+
+        #[test]
+        fn a_known_addon_with_a_not_linked_copy_says_enter_replaces_it() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_install_known_rows(&mut app);
+            app.dashboard = DashboardState::from_addons(vec![AddonRecord::new(
+                "KnownRaidTools",
+                "Known Raid Tools",
+                SourceKind::Manual,
+            )]);
+            app.dashboard.detail_mode = DetailMode::Search;
+            for (width, height) in SIZES {
+                let rows = render_rows(&mut app, width, height);
+                let screen = rows.join("\n");
+                assert!(
+                    !row_of(&rows, "Known Raid Tools").contains("Installed"),
+                    "{width}x{height}:\n{screen}"
+                );
+                assert!(
+                    screen.contains(
+                        "You have a copy that isn't linked. Enter replaces it with this one."
+                    ),
+                    "{width}x{height}:\n{screen}"
+                );
+            }
+        }
+
+        #[test]
         fn the_install_sheet_keeps_its_size_and_place_in_every_state() {
             let idle = |app: &mut App| {
                 app.search_pane.install_state = SearchInstallState::Idle;
@@ -17457,6 +17994,35 @@ mod tests {
                             parent_folder: "ResultAddon0".to_string(),
                             warning: None,
                         };
+                    }),
+                    ("github.com/RaidOwner/KnownRaidTools", &|app| {
+                        idle(app);
+                        app.known_addons = test_known_addons();
+                        let known = app.matching_known_rows("known");
+                        app.search_pane = app.search_pane.start_search().finish_search(
+                            "known".to_string(),
+                            wago_results(1),
+                            known,
+                        );
+                        app.search_pane.focus = SearchFocus::Results;
+                        app.search_pane.selected_result = Some(1);
+                    }),
+                    ("Only on CurseForge. LemonUp can't install it.", &|app| {
+                        app.search_pane.selected_result = Some(0);
+                    }),
+                    ("Install KnownRaidTools from GitHub?", &|app| {
+                        app.search_pane.selected_result = Some(1);
+                        let request =
+                            crate::app::direct_install::known_direct_request(&app.known_addons[0])
+                                .expect("a GitHub addon");
+                        app.search_pane = app.search_pane.request_known_install(request);
+                    }),
+                    ("2 known addons match. Wago.io needs your key.", &|app| {
+                        idle(app);
+                        app.search_pane.query = "known".into();
+                        let known = app.matching_known_rows("known");
+                        app.search_pane =
+                            app.search_pane.show_known_rows("known".to_string(), known);
                     }),
                 ],
             );
@@ -18071,6 +18637,49 @@ mod tests {
                         "Summary for result 0",
                     ]),
                     keys: &["↑/↓ choose", "enter install", "esc close"],
+                },
+                Case {
+                    name: "install with known addons",
+                    open: open_install_known_rows,
+                    labels: strings(&[
+                        "Known Raid Tools",
+                        "Known Bags",
+                        "GitHub",
+                        "CurseForge",
+                        "Installed",
+                        "Result Addon 0",
+                        "github.com/RaidOwner/KnownRaidTools",
+                    ]),
+                    keys: &["↑/↓ choose", "esc close"],
+                },
+                Case {
+                    name: "install on a CurseForge-only addon",
+                    open: open_install_curseforge_row,
+                    labels: strings(&[
+                        "Known Bags",
+                        "CurseForge",
+                        "Only on CurseForge. LemonUp can't install it.",
+                    ]),
+                    keys: &["↑/↓ choose", "esc close"],
+                },
+                Case {
+                    name: "install known addons without a key",
+                    open: open_install_known_without_key,
+                    labels: strings(&[
+                        "2 known addons match. Wago.io needs your key.",
+                        "Known Raid Tools",
+                        "Known Bags",
+                    ]),
+                    keys: &["↓ results", "esc close"],
+                },
+                Case {
+                    name: "install a known addon's question",
+                    open: open_install_known_question,
+                    labels: strings(&[
+                        "Install KnownRaidTools from GitHub?",
+                        "github.com/RaidOwner/KnownRaidTools",
+                    ]),
+                    keys: &["enter install", "esc not now"],
                 },
                 Case {
                     name: "config",
@@ -19206,6 +19815,38 @@ mod tests {
             HelpContext::Find,
         ];
 
+        /// A Help group and a state to check its keys in.
+        type HelpState = (HelpContext, &'static str, fn(&mut App));
+
+        /// States a Help group's keys are also checked in, besides the one
+        /// `help_state` gives it: the results with the cursor on a
+        /// CurseForge-only addon or on a linked one, where enter does
+        /// nothing, and a failure trying again can't fix.
+        const MORE_HELP_STATES: [HelpState; 3] = [
+            (
+                HelpContext::InstallSearch,
+                "Results",
+                open_install_curseforge_row,
+            ),
+            (
+                HelpContext::InstallSearch,
+                "Results",
+                open_install_known_rows,
+            ),
+            (
+                HelpContext::InstallSearch,
+                "Everywhere",
+                open_install_wrong_repository,
+            ),
+        ];
+
+        fn more_help_state_app(open: fn(&mut App)) -> App {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open(&mut app);
+            app.note_question_shown(Instant::now());
+            app
+        }
+
         fn help_test_app(context: HelpContext, title: &str, when: HelpWhen) -> App {
             let mut app = app_for_tests(ShellMode::Dashboard);
             match when {
@@ -19215,7 +19856,8 @@ mod tests {
                 | HelpWhen::NotLinked
                 | HelpWhen::NoJob
                 | HelpWhen::DetailsOverflow
-                | HelpWhen::CurseForgeManages => {}
+                | HelpWhen::CurseForgeManages
+                | HelpWhen::InstallableResult => {}
                 HelpWhen::FirstRunCard => {
                     app.dashboard = DashboardState::from_addons(vec![
                         AddonRecord::new("First", "First", SourceKind::Manual),
@@ -19287,6 +19929,26 @@ mod tests {
                     }
                 }
             }
+            // In the other states, every key the group lists there works.
+            for (context, title, open) in MORE_HELP_STATES {
+                let section = help_page(context)
+                    .sections()
+                    .find(|section| section.title == title)
+                    .expect("a Help group");
+                for row in section.rows {
+                    let app = more_help_state_app(open);
+                    if !app.help_row_applies(row.when) {
+                        continue;
+                    }
+                    for key in row.keys {
+                        assert!(
+                            !app.messages_for_key(*key).is_empty(),
+                            "{context:?} / {title} (more): {} ({key:?}) does nothing",
+                            row.text
+                        );
+                    }
+                }
+            }
         }
 
         #[test]
@@ -19318,6 +19980,28 @@ mod tests {
                 }
                 // `?` opens this page from the context's own state.
                 let mut app = help_test_app(context, "", HelpWhen::Always);
+                press(&mut app, KeyCode::Char('?'));
+                assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
+                assert_eq!(app.shell_ui.help_context, context);
+            }
+            for (context, title, open) in MORE_HELP_STATES {
+                let listed: Vec<KeyEvent> = help_page(context)
+                    .sections()
+                    .flat_map(|section| section.rows.iter())
+                    .filter(|row| more_help_state_app(open).help_row_applies(row.when))
+                    .flat_map(|row| row.keys.iter().copied())
+                    .collect();
+                let mut app = more_help_state_app(open);
+                for hint in app.key_table(u16::MAX) {
+                    for code in hint.codes {
+                        assert!(
+                            listed.contains(&KeyEvent::from(*code)),
+                            "{context:?} / {title} (more): key line {} {} ({code:?}) is not in Help",
+                            hint.key,
+                            hint.label
+                        );
+                    }
+                }
                 press(&mut app, KeyCode::Char('?'));
                 assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Help));
                 assert_eq!(app.shell_ui.help_context, context);
@@ -20278,6 +20962,296 @@ mod tests {
                     ))
                 ]
             );
+        }
+
+        /// A finished search showing the test list's Retail addons, the
+        /// cursor on `name`.
+        fn known_rows_app(key: Option<&str>, name: &str) -> App {
+            let mut app = search_app("known");
+            app.known_addons = test_known_addons();
+            app.wago_api_key = key.map(str::to_string);
+            let known = app.matching_known_rows("known");
+            app.search_pane = app.search_pane.start_search().finish_search(
+                "known".to_string(),
+                Vec::new(),
+                known,
+            );
+            app.search_pane.focus = SearchFocus::Results;
+            app.search_pane.selected_result = app
+                .search_pane
+                .results
+                .iter()
+                .position(|result| result.display_name == name);
+            assert!(app.search_pane.selected_result.is_some());
+            app
+        }
+
+        /// What a pasted link to the known GitHub addon's repository asks.
+        fn pasted_link_request() -> DirectInstallRequest {
+            use crate::app::direct_install::{SearchInputIntent, classify_search_input};
+            match classify_search_input("https://github.com/RaidOwner/KnownRaidTools") {
+                SearchInputIntent::Direct(request) => request,
+                other => panic!("not a link: {other:?}"),
+            }
+        }
+
+        fn key_line_has(app: &App, key: &str, label: &str) -> bool {
+            app.key_table(u16::MAX)
+                .iter()
+                .any(|hint| hint.key == key && hint.label == label)
+        }
+
+        #[test]
+        fn enter_on_a_known_github_addon_asks_what_a_pasted_link_asks() {
+            for key in [Some("key"), None] {
+                let mut app = known_rows_app(key, "Known Raid Tools");
+                assert_eq!(
+                    app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                    vec![AppMessage::SearchInstallSelected]
+                );
+                run(&mut app, AppMessage::SearchInstallSelected);
+                assert_eq!(
+                    app.search_pane.pending_direct_install(),
+                    Some(&pasted_link_request()),
+                    "{key:?}"
+                );
+                assert!(app.search_pane.key_box.is_none(), "{key:?}");
+
+                let actions = run(&mut app, AppMessage::SearchConfirmDirectInstall);
+                assert_eq!(
+                    start_install_request(&actions),
+                    Some(&pasted_link_request()),
+                    "{key:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn esc_on_a_known_addons_question_goes_back_to_the_same_row() {
+            let mut app = known_rows_app(None, "Known Raid Tools");
+            let row = app.search_pane.selected_result;
+            run(&mut app, AppMessage::SearchInstallSelected);
+            assert!(key_line_has(&app, "esc", "not now"));
+            for message in app.messages_for_key(KeyEvent::from(KeyCode::Esc)) {
+                run(&mut app, message);
+            }
+            assert!(app.search_pane.pending_direct_install().is_none());
+            assert!(app.search_pane.results_focused());
+            assert_eq!(app.search_pane.selected_result, row);
+            // The key line is true: enter asks again, the arrows move.
+            assert!(key_line_has(&app, "enter", "install"));
+            assert!(key_line_has(&app, "↑/↓", "choose"));
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![AppMessage::SearchInstallSelected]
+            );
+            run(&mut app, AppMessage::SearchInstallSelected);
+            assert_eq!(
+                app.search_pane.pending_direct_install(),
+                Some(&pasted_link_request())
+            );
+        }
+
+        #[test]
+        fn trying_a_failed_known_addon_again_installs_it_again() {
+            let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+            run(&mut app, AppMessage::SearchInstallSelected);
+            run(&mut app, AppMessage::SearchConfirmDirectInstall);
+            run(
+                &mut app,
+                AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                    request: pasted_link_request(),
+                    result: Err(SourceError::from("connection reset".to_string())),
+                }),
+            );
+            assert!(matches!(
+                app.search_pane.install_state,
+                SearchInstallState::Error { .. }
+            ));
+            assert!(key_line_has(&app, "enter", "try again"));
+
+            let mut actions = Vec::new();
+            for message in app.messages_for_key(KeyEvent::from(KeyCode::Enter)) {
+                actions.extend(run(&mut app, message));
+            }
+            // Not a name search for the text in the box.
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, AppAction::StartWagoSearch { .. }))
+            );
+            assert_eq!(
+                app.search_pane.pending_direct_install(),
+                Some(&pasted_link_request())
+            );
+            let actions = run(&mut app, AppMessage::SearchConfirmDirectInstall);
+            assert_eq!(
+                start_install_request(&actions),
+                Some(&pasted_link_request())
+            );
+        }
+
+        #[test]
+        fn enter_on_a_known_addon_already_linked_does_nothing() {
+            let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+            let mut linked =
+                AddonRecord::new("KnownRaidTools", "Known Raid Tools", SourceKind::GitHub);
+            linked.source_url = Some("https://github.com/RaidOwner/KnownRaidTools".to_string());
+            app.dashboard = DashboardState::from_addons(vec![linked]);
+            app.dashboard.detail_mode = DetailMode::Search;
+            let before = app.search_pane.clone();
+            assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+            assert_eq!(run(&mut app, AppMessage::SearchInstallSelected), vec![]);
+            assert_eq!(app.search_pane, before);
+            assert!(!key_line_has(&app, "enter", "install"));
+            assert!(key_line_has(&app, "↑/↓", "choose"));
+            assert!(!app.help_row_applies(crate::app::keymap::HelpWhen::InstallableResult));
+        }
+
+        #[test]
+        fn a_known_addon_linked_by_an_older_form_of_its_link_counts_as_linked() {
+            for url in [
+                "https://www.github.com/RaidOwner/KnownRaidTools",
+                "https://github.com/raidowner/knownraidtools.git",
+                "https://github.com/RaidOwner/KnownRaidTools/",
+            ] {
+                let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+                let mut linked =
+                    AddonRecord::new("KnownRaidTools", "Known Raid Tools", SourceKind::GitHub);
+                linked.source_url = Some(url.to_string());
+                app.dashboard = DashboardState::from_addons(vec![linked]);
+                app.dashboard.detail_mode = DetailMode::Search;
+                assert!(!key_line_has(&app, "enter", "install"), "{url}");
+            }
+        }
+
+        #[test]
+        fn enter_on_a_known_addon_while_a_search_or_install_runs_does_nothing() {
+            let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+            // A new search starts; the old rows are still there.
+            app.search_pane.query = "raid".into();
+            for action in app.update(AppMessage::SearchSubmit) {
+                // The search itself needs a runtime.
+                if !matches!(action, AppAction::StartWagoSearch { .. }) {
+                    app.apply(action);
+                }
+            }
+            assert!(app.search_pane.in_progress);
+            for message in app.messages_for_key(KeyEvent::from(KeyCode::Down)) {
+                run(&mut app, message);
+            }
+            let before = app.search_pane.clone();
+            for message in app.messages_for_key(KeyEvent::from(KeyCode::Enter)) {
+                assert_eq!(run(&mut app, message), vec![]);
+            }
+            assert_eq!(run(&mut app, AppMessage::SearchInstallSelected), vec![]);
+            assert_eq!(app.search_pane, before);
+
+            let mut app = known_rows_app(Some("key"), "Known Raid Tools");
+            app.direct_install_in_progress = true;
+            assert_eq!(run(&mut app, AppMessage::SearchInstallSelected), vec![]);
+            assert!(app.search_pane.pending_direct_install().is_none());
+        }
+
+        #[test]
+        fn a_wrong_repository_failure_offers_no_try_again() {
+            let wrong = || {
+                crate::source_error::SourceError::new(
+                    SourceErrorKind::WrongRepository,
+                    "github.com/RaidOwner/KnownRaidTools is not the repository LemonUp lists \
+                     for Known Raid Tools",
+                )
+            };
+            // From a list row, and from a pasted link.
+            let mut from_row = known_rows_app(Some("key"), "Known Raid Tools");
+            run(&mut from_row, AppMessage::SearchInstallSelected);
+            let mut from_link = search_app("https://github.com/RaidOwner/KnownRaidTools");
+            run(&mut from_link, AppMessage::SearchSubmit);
+            for mut app in [from_row, from_link] {
+                run(&mut app, AppMessage::SearchConfirmDirectInstall);
+                run(
+                    &mut app,
+                    AppMessage::BackgroundTask(AppTaskEvent::DirectInstallFinished {
+                        request: pasted_link_request(),
+                        result: Err(wrong()),
+                    }),
+                );
+                assert!(app.search_pane.retry_refused());
+                assert!(!key_line_has(&app, "enter", "try again"));
+                assert!(key_line_has(&app, "esc", "close"));
+                assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+                let body = app
+                    .search_state_lines(80)
+                    .expect("the failure")
+                    .iter()
+                    .map(line_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(body.contains("Couldn't install KnownRaidTools."), "{body}");
+                assert!(!body.contains("try again"), "{body}");
+            }
+        }
+
+        #[test]
+        fn enter_again_on_the_known_addons_name_opens_the_key_box() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut app = search_app("known");
+            app.config_store = ConfigStore::new(temp.path().join("config.toml"));
+            app.known_addons = test_known_addons();
+            app.wago_api_key = None;
+            run(&mut app, AppMessage::SearchSubmit);
+            assert_eq!(app.search_pane.results.len(), 2);
+            assert!(app.search_pane.key_box.is_none());
+
+            // The same name again: the key box, as for a name no list entry has.
+            assert_eq!(
+                app.messages_for_key(KeyEvent::from(KeyCode::Enter)),
+                vec![AppMessage::SearchSubmit]
+            );
+            run(&mut app, AppMessage::SearchSubmit);
+            assert!(app.search_pane.key_box.is_some());
+
+            // Saving a key runs the search.
+            run(&mut app, AppMessage::Paste("test-key-123".to_string()));
+            let actions = app.update(AppMessage::SearchSaveKey);
+            assert!(actions.contains(&AppAction::StartWagoSearch {
+                query: "known".to_string(),
+                api_key: "test-key-123".to_string(),
+            }));
+        }
+
+        #[test]
+        fn a_changed_name_without_a_key_shows_its_known_addons() {
+            let mut app = search_app("known");
+            app.known_addons = test_known_addons();
+            app.wago_api_key = None;
+            run(&mut app, AppMessage::SearchSubmit);
+            app.search_pane.query = "known bags".into();
+            run(&mut app, AppMessage::SearchSubmit);
+            assert!(app.search_pane.key_box.is_none());
+            assert_eq!(app.search_pane.results.len(), 1);
+            assert_eq!(app.search_pane.results[0].display_name, "Known Bags");
+            assert_eq!(
+                line_text(&app.search_hint_line()),
+                "1 known addon matches. Wago.io needs your key."
+            );
+        }
+
+        #[test]
+        fn enter_on_a_curseforge_only_addon_does_nothing() {
+            for key in [Some("key"), None] {
+                let mut app = known_rows_app(key, "Known Bags");
+                let before = app.search_pane.clone();
+                let status = app.status_line.text.clone();
+                assert_eq!(app.messages_for_key(KeyEvent::from(KeyCode::Enter)), vec![]);
+                assert_eq!(run(&mut app, AppMessage::SearchInstallSelected), vec![]);
+                assert_eq!(app.search_pane, before);
+                assert_eq!(app.status_line.text, status);
+                // The key line and Help don't offer enter there.
+                assert!(!key_line_has(&app, "enter", "install"), "{key:?}");
+                assert!(key_line_has(&app, "↑/↓", "choose"), "{key:?}");
+                assert!(!app.help_row_applies(crate::app::keymap::HelpWhen::InstallableResult));
+            }
         }
 
         #[test]
@@ -21689,6 +22663,17 @@ mod tests {
                 generic
             );
             assert_eq!(text(None, SourceKind::GitHub), generic);
+            // A wrong repository fails the same way again, so no key is offered.
+            let wrong =
+                check_failed_sentence(Some(SourceErrorKind::WrongRepository), SourceKind::GitHub);
+            assert_eq!(
+                wrong,
+                vec![(
+                    "The repository may have a new owner. LemonUp won't update it until its list is updated."
+                        .to_string(),
+                    false
+                )]
+            );
             // `c` is drawn as a key, and no sentence uses a dash.
             for kind in [
                 SourceErrorKind::NoConnection,
@@ -22334,6 +23319,18 @@ mod tests {
             assert_eq!(
                 check_failure_cause(&[gone.clone(), gone]),
                 Some("TukUI doesn't list them anymore".to_string())
+            );
+            // A listed repository that fails its check says why on the list too.
+            let moved = fail(SourceErrorKind::WrongRepository, SourceKind::GitHub);
+            let sparkles =
+                dashboard_check_status_message(&["Forever Loot Sparkles".to_string()], 1, 0, 0, 1);
+            assert_eq!(
+                dashboard_check_status_with_cause(sparkles, std::slice::from_ref(&moved)),
+                "Couldn't check Forever Loot Sparkles: its repository may have a new owner"
+            );
+            assert_eq!(
+                check_failure_cause(&[moved.clone(), moved]),
+                Some("their repositories may have new owners".to_string())
             );
 
             // Different causes, or none known: the wording stays as it was.

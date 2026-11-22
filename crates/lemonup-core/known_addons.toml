@@ -1,0 +1,25 @@
+# Addons LemonUp knows by name, vetted by hand. See AGENTS.md before adding one.
+# A GitHub entry installs from that repository. `github_id` is GitHub's numeric repository id.
+# A CurseForge-only entry is shown in Install search but cannot be installed.
+
+[[addon]]
+name = "OpenMap"
+github = "openmap-world/openmap"
+github_id = 1442012554
+games = ["forever", "retail"]
+
+[[addon]]
+name = "Forever Loot Sparkles"
+github = "svengabr/ForeverLootSparkles"
+github_id = 1406354078
+games = ["forever"]
+
+[[addon]]
+name = "Leatrix Plus"
+curseforge_only = true
+games = ["forever", "retail"]
+
+[[addon]]
+name = "Leatrix Sounds"
+curseforge_only = true
+games = ["forever", "retail"]

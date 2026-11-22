@@ -689,6 +689,12 @@ pub(super) fn check_failed_sentence(
             format!("{name} asked LemonUp to slow down. Wait a few minutes, then press "),
             " to try again.",
         ),
+        // Pressing c would fail the same way, so the sentence names no key.
+        Some(SourceErrorKind::WrongRepository) => vec![(
+            "The repository may have a new owner. LemonUp won't update it until its list is updated."
+                .to_string(),
+            false,
+        )],
         Some(
             SourceErrorKind::Other
             | SourceErrorKind::FoldersInTheWay

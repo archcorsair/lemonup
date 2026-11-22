@@ -7,6 +7,7 @@ pub mod events;
 pub mod find;
 pub mod fingerprint;
 pub mod github_release;
+pub mod known_addons;
 pub mod marquee;
 pub mod paths;
 pub mod profiles;
