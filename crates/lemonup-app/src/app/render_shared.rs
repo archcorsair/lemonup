@@ -23,7 +23,7 @@ impl App {
             OverlayKind::Update => "Update".to_string(),
             OverlayKind::Config => "Settings".to_string(),
             OverlayKind::Backup => "Backups of your game settings".to_string(),
-            OverlayKind::TocEdit => "Edit .toc fields".to_string(),
+            OverlayKind::TocEdit => ".toc editor".to_string(),
             OverlayKind::Confirm => "Confirm".to_string(),
             OverlayKind::Games => "Switch game".to_string(),
             OverlayKind::Find => "Find your addons online".to_string(),

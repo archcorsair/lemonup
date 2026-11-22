@@ -9393,7 +9393,7 @@ fn detail_mode_label(detail_mode: DetailMode) -> &'static str {
         DetailMode::Update => "Update",
         DetailMode::Config => "Settings",
         DetailMode::Backup => "Backups",
-        DetailMode::TocEdit => "Edit .toc fields",
+        DetailMode::TocEdit => ".toc editor",
         DetailMode::Games => "Switch game",
         DetailMode::Find => "Find your addons online",
     }
@@ -19619,7 +19619,7 @@ mod tests {
                 assert!(
                     app.key_table(160)
                         .iter()
-                        .any(|hint| hint.key == "e" && hint.label == "edit .toc fields")
+                        .any(|hint| hint.key == "e" && hint.label == ".toc editor")
                 );
                 press(&mut app, KeyCode::Char('e'));
                 assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::TocEdit));
@@ -19643,7 +19643,7 @@ mod tests {
                 for (width, height) in [(80, 24), (120, 36)] {
                     let rows = render_rows(&mut app, width, height);
                     let text = rows.join("\n");
-                    assert!(text.contains("Edit .toc fields"), "{text}");
+                    assert!(text.contains(".toc editor"), "{text}");
                     let row = |label: &str| {
                         rows.iter()
                             .find(|row| row.contains(&format!("{label}  ")) && row.contains("  "))
@@ -19676,7 +19676,7 @@ mod tests {
             fn editor_places(rows: &[String]) -> [usize; 4] {
                 let title = rows
                     .iter()
-                    .position(|row| row.contains("Edit .toc fields") && row.contains("esc close"))
+                    .position(|row| row.contains(".toc editor") && row.contains("esc close"))
                     .unwrap_or_else(|| panic!("no editor title:\n{}", rows.join("\n")));
                 let bottom = match rows[title].chars().position(|c| c == '╭') {
                     Some(column) => (title + 1..rows.len())
