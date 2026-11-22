@@ -97,6 +97,9 @@ pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> Stri
                                                   already keeps updated, so LemonUp won't \
                                                   replace them."
             .to_string(),
+        SourceErrorKind::WrongRepository => "The repository may have a new owner. LemonUp won't \
+                                             install it until its list is updated."
+            .to_string(),
         SourceErrorKind::Other => "Something went wrong on the way. Try again; if it keeps \
                                    happening, the technical detail helps with a bug report."
             .to_string(),
@@ -138,6 +141,17 @@ pub(super) fn install_error_advice(
         }
         _ => source_error_advice(kind, provider),
     }
+}
+
+/// "matches" for one addon, "match" for any other count.
+fn match_verb(count: usize) -> &'static str {
+    if count == 1 { "matches" } else { "match" }
+}
+
+/// Whether `url` is the GitHub link of `owner/repo`, read the way updates read
+/// it, so a link kept from 1.x (`www.`, `.git`) still counts.
+fn github_url_names_repo(url: &str, owner: &str, repo: &str) -> bool {
+    crate::github::github_url_is_repo(url, owner, repo)
 }
 
 /// Columns before the text of "  Technical detail: ".
@@ -326,12 +340,22 @@ impl App {
             SearchInputIntent::WagoSearch(query) => {
                 let count = pane.results.len();
                 let shown = count > 0 && pane.last_query.as_deref() == Some(query.as_str());
-                let text = if shown && !pane.some_result_has_every_word() {
+                let text = if shown && pane.known_only {
+                    known_rows_need_key_message(count)
+                } else if shown && !pane.some_result_has_every_word() {
                     NO_ADDON_HAS_EVERY_WORD.to_string()
+                } else if shown && pane.has_known_rows() {
+                    // Known addons are not on Wago.io.
+                    format!(
+                        "{count} addon{} {} \"{query}\"",
+                        plural_suffix(count),
+                        match_verb(count)
+                    )
                 } else if shown {
                     format!(
-                        "{count} addon{} on Wago.io match \"{query}\"",
-                        plural_suffix(count)
+                        "{count} addon{} on Wago.io {} \"{query}\"",
+                        plural_suffix(count),
+                        match_verb(count)
                     )
                 } else {
                     format!("Search Wago.io for \"{query}\"")
@@ -537,8 +561,11 @@ impl App {
                     Some(name) => format!("! Couldn't install {name}."),
                     None => format!("! Couldn't search {provider}."),
                 };
-                let mut keys =
-                    self.body_keys_line(&[("enter", "try again", true), ("esc", "close", false)]);
+                let mut keys = if pane.retry_refused() {
+                    self.body_keys_line(&[("esc", "close", false)])
+                } else {
+                    self.body_keys_line(&[("enter", "try again", true), ("esc", "close", false)])
+                };
                 keys.spans.insert(0, Span::raw("  "));
                 let mut lines = vec![
                     Line::from(Span::styled(
@@ -752,7 +779,11 @@ impl App {
                 ),
                 muted,
             )));
-            cells.push(Cell::from(if self.installed_copy(result).is_some() {
+            let installed = match pane.known_entry(result) {
+                Some(addon) => self.linked_known_addon(addon),
+                None => self.installed_copy(result).is_some(),
+            };
+            cells.push(Cell::from(if installed {
                 Line::from(vec![
                     Span::styled(
                         format!("{} ", self.ui_theme.symbols.done),
@@ -847,6 +878,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
         ];
+        if let Some(addon) = self.search_pane.known_entry(result) {
+            lines.extend(self.known_preview_lines(addon));
+            return lines;
+        }
         if let Some(summary) = result.summary.as_deref().filter(|text| !text.is_empty()) {
             lines.push(Line::from(summary.to_string()));
         }
@@ -870,15 +905,69 @@ impl App {
         if self.tracked_wago_result_folder(result).is_some() {
             return Some(InstalledCopy { linked: true });
         }
-        self.dashboard
-            .items
-            .iter()
-            .any(|item| {
-                item.source == SourceKind::Manual
-                    && (item.name.eq_ignore_ascii_case(&result.display_name)
-                        || item.folder.eq_ignore_ascii_case(&result.display_name))
-            })
+        self.not_linked_named(&result.display_name)
             .then_some(InstalledCopy { linked: false })
+    }
+
+    /// Under a known addon's name: its repository, and the line about a
+    /// copy that isn't linked when one has its name. A linked copy gets no
+    /// line, because a GitHub install won't replace a linked addon's folders.
+    fn known_preview_lines(&self, addon: &KnownAddon) -> Vec<Line<'static>> {
+        let muted = self.ui_theme.roles.muted;
+        let KnownSource::GitHub { owner, repo, .. } = &addon.source else {
+            return vec![Line::from(Span::styled(
+                "Only on CurseForge. LemonUp can't install it.",
+                muted,
+            ))];
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            format!("github.com/{owner}/{repo}"),
+            muted,
+        ))];
+        if !self.linked_known_addon(addon) && self.not_linked_named(&addon.name) {
+            lines.push(Line::from(Span::styled(
+                "You have a copy that isn't linked. Enter replaces it with this one.",
+                muted,
+            )));
+        }
+        lines
+    }
+
+    /// Whether the cursor is on a known addon LemonUp can't install: a
+    /// CurseForge-only one, or one whose repository is already linked, since
+    /// a GitHub install won't replace a linked addon's folders. Enter does
+    /// nothing there.
+    pub(super) fn known_row_cannot_install(&self) -> bool {
+        self.search_pane
+            .selected_known_entry()
+            .is_some_and(|addon| !self.known_addon_installable(addon))
+    }
+
+    pub(super) fn known_addon_installable(&self, addon: &KnownAddon) -> bool {
+        addon.source != KnownSource::CurseForgeOnly && !self.linked_known_addon(addon)
+    }
+
+    /// Whether an addon in the list is linked to the known addon's GitHub
+    /// repository.
+    pub(super) fn linked_known_addon(&self, addon: &KnownAddon) -> bool {
+        let KnownSource::GitHub { owner, repo, .. } = &addon.source else {
+            return false;
+        };
+        self.dashboard.items.iter().any(|item| {
+            item.source == SourceKind::GitHub
+                && item
+                    .source_url
+                    .as_deref()
+                    .is_some_and(|url| github_url_names_repo(url, owner, repo))
+        })
+    }
+
+    /// Whether a "Not linked" addon has `name` as its name or folder.
+    fn not_linked_named(&self, name: &str) -> bool {
+        self.dashboard.items.iter().any(|item| {
+            item.source == SourceKind::Manual
+                && (item.name.eq_ignore_ascii_case(name) || item.folder.eq_ignore_ascii_case(name))
+        })
     }
 
     pub(super) fn tracked_wago_result_folder(&self, result: &WagoSearchResult) -> Option<String> {

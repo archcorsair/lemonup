@@ -179,6 +179,9 @@ pub(super) enum HelpWhen {
     /// CurseForge manages the linked addon Details shows, and LemonUp can
     /// mark it Ignored there: only on Linux.
     CurseForgeManages,
+    /// The Install result the cursor is on can be installed: it is not a
+    /// CurseForge-only addon or one whose repository is already linked.
+    InstallableResult,
 }
 
 /// The left hand side of a Help row.
@@ -597,7 +600,8 @@ static INSTALL_HELP: HelpPage = HelpPage {
                     &[press(KeyCode::Down)],
                 ),
                 HelpRow::key("↑ ↓", "move; ↑ on the first goes back to the box", K_ARROWS),
-                HelpRow::key("enter", "install the one you are on", K_ENTER),
+                HelpRow::key("enter", "install the one you are on", K_ENTER)
+                    .when(HelpWhen::InstallableResult),
                 HelpRow::key("letters", "go back to the box and type", &[ch('w')]),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
                 HelpRow::key("Home End", "top, bottom", K_ENDS),
@@ -1383,9 +1387,11 @@ impl App {
             let mut hints = vec![
                 KeyHint::text("type to change the search"),
                 KeyHint::key(Id::Results, "↑/↓", "choose", ARROWS),
-                KeyHint::key(Id::Install, "enter", "install", ENTER).main(),
-                close("close"),
             ];
+            if !self.known_row_cannot_install() {
+                hints.push(KeyHint::key(Id::Install, "enter", "install", ENTER).main());
+            }
+            hints.push(close("close"));
             hints.extend(self.sheet_scroll_hint(false));
             hints.push(self.help_hint());
             return hints;
@@ -1400,10 +1406,11 @@ impl App {
                 ];
             }
             SearchInstallState::Error { .. } => {
-                let mut hints = vec![
-                    KeyHint::key(Id::Install, "enter", "try again", ENTER).main(),
-                    close("close"),
-                ];
+                let mut hints = Vec::new();
+                if !pane.retry_refused() {
+                    hints.push(KeyHint::key(Id::Install, "enter", "try again", ENTER).main());
+                }
+                hints.push(close("close"));
                 if empty {
                     hints.push(self.help_hint());
                 }

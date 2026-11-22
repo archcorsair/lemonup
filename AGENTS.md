@@ -11,8 +11,8 @@ git history; all product work targets Rust.
 
 - `crates/lemonup-core`: everything that needs no network. Domain types, `config.toml`, per-profile
   paths, the SQLite state (`storage`), AddOns scanning, WoW install detection and validation
-  (`wow`), the profile to AddOns folder binding (`binding`), v1 migration, and addon list
-  import and export.
+  (`wow`), the profile to AddOns folder binding (`binding`), v1 migration, addon list
+  import and export, and the list of addons LemonUp knows by name (`known_addons.toml`).
 - `crates/lemonup-app`: the `lemonup` binary.
   - `cli.rs`: the CLI commands. `tui.rs`, `app.rs` and `app/`: the TUI.
   - `github.rs`, `wago.rs`, `tukui.rs`, `wowinterface.rs`: one client per addon source.
@@ -61,6 +61,8 @@ Start with `README.md`, then `docs/manual-testing.md` for testing against a sand
 - Source failures return a `SourceError` with a `SourceErrorKind`. Code decides what to show from
   the kind, never by matching error text.
 - Never log, print or show API keys or tokens; key boxes are masked.
+- A GitHub repository on the known addons list installs, updates or checks only when GitHub
+  reports the listed repository id and the listed owner.
 
 ### TUI
 
@@ -83,6 +85,9 @@ Start with `README.md`, then `docs/manual-testing.md` for testing against a sand
 - Every behavior change comes with a test that fails without it.
 - Don't add dependencies without discussing it first.
 - Put logic that needs no network in `lemonup-core`.
+- Add an addon to `known_addons.toml` only after checking that the repository is the author's own
+  and that its latest release has a zip for each listed game. Take `github_id` from the GitHub
+  API: `gh api repos/OWNER/REPO --jq .id`.
 
 ## Writing
 
