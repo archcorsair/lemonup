@@ -67,6 +67,7 @@ mod direct_install;
 mod find_sheet;
 mod games;
 mod keymap;
+mod newer_lemonup;
 mod render_backup;
 mod render_config;
 mod render_dashboard;
@@ -816,6 +817,8 @@ enum ConfigField {
     CheckInterval,
     /// How often the other games are checked in the background.
     CheckOtherGames,
+    /// Whether LemonUp looks on GitHub once a day for a newer LemonUp.
+    CheckLemonupUpdates,
     BackupWtf,
     BackupRetention,
     Theme,
@@ -847,7 +850,7 @@ const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 4
 impl ConfigField {
     /// Every row in the order Settings shows them: first the ones all
     /// games share, then the ones of the game in use.
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::WagoApiKey,
         Self::Theme,
         Self::SimpleSymbols,
@@ -856,6 +859,7 @@ impl ConfigField {
         Self::AutoCheckInterval,
         Self::CheckInterval,
         Self::CheckOtherGames,
+        Self::CheckLemonupUpdates,
         Self::BackupWtf,
         Self::BackupRetention,
         Self::ShowLibs,
@@ -871,6 +875,7 @@ impl ConfigField {
             Self::AutoCheckInterval => "Check every",
             Self::CheckInterval => "Don't re-check an addon for",
             Self::CheckOtherGames => "Check other games",
+            Self::CheckLemonupUpdates => "Check for LemonUp updates",
             Self::BackupWtf => "Back up my game settings before updates",
             Self::BackupRetention => "Backups to keep",
             Self::Theme => "Theme",
@@ -887,6 +892,7 @@ impl ConfigField {
         match self {
             Self::WagoApiKey => ConfigRowKind::Text,
             Self::AutoCheckEnabled
+            | Self::CheckLemonupUpdates
             | Self::BackupWtf
             | Self::Theme
             | Self::SimpleSymbols
@@ -1095,6 +1101,9 @@ impl ConfigPaneState {
             }
             ConfigField::CheckOtherGames => {
                 draft.check_other_games = step_other_games_check(draft.check_other_games, delta);
+            }
+            ConfigField::CheckLemonupUpdates => {
+                draft.check_lemonup_updates = !draft.check_lemonup_updates;
             }
             ConfigField::BackupWtf => {
                 draft.backup_wtf = !draft.backup_wtf;
@@ -3102,6 +3111,8 @@ pub struct App {
     games_rx: mpsc::UnboundedReceiver<OtherGameChecked>,
     /// Find your addons online: the sheet, its lookup and the linking.
     find: FindState,
+    /// A newer LemonUp on GitHub, and this launch's look for one.
+    newer_lemonup: newer_lemonup::NewerLemonupState,
 }
 
 impl App {
@@ -3211,6 +3222,7 @@ impl App {
         let (task_events_tx, task_events_rx) = mpsc::unbounded_channel();
         let (games_tx, games_rx) = mpsc::unbounded_channel();
         let roots = paths.roots.clone();
+        let newer_lemonup = newer_lemonup::NewerLemonupState::read(&roots);
         let games = GamesState {
             games: games::read_games(&roots, &runtime.profile_name).unwrap_or_default(),
             ..GamesState::default()
@@ -3293,6 +3305,7 @@ impl App {
             games_tx,
             games_rx,
             find: FindState::default(),
+            newer_lemonup,
         };
         app.status_line = app.initial_status_line();
         if let Some(notice) = binding_notice {
@@ -3335,6 +3348,7 @@ impl App {
         mut events: EventHandler,
     ) -> Result<(), Box<dyn std::error::Error>> {
         while !self.quit_requested {
+            self.start_newer_lemonup_check(OffsetDateTime::now_utc());
             self.process_background_events();
             events.set_tick_rate(self.desired_tick_rate());
             terminal.draw(|frame| self.draw(frame))?;
@@ -3378,6 +3392,10 @@ impl App {
         }
 
         if self.shell_mode == ShellMode::Onboarding && self.onboarding.phase.is_searching() {
+            return true;
+        }
+
+        if self.newer_lemonup_shimmers() {
             return true;
         }
 
@@ -3699,6 +3717,7 @@ impl App {
         for action in self.find_replacement_actions() {
             self.apply(action);
         }
+        self.take_newer_lemonup_answer();
     }
 
     fn messages_for_event(&self, event: &TerminalEvent) -> Vec<AppMessage> {
@@ -9207,6 +9226,7 @@ fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
         ConfigField::AutoCheckEnabled => on_off(draft.auto_check_enabled).to_string(),
         ConfigField::AutoCheckInterval => human_duration(draft.auto_check_interval_secs),
         ConfigField::CheckOtherGames => draft.check_other_games.label().to_string(),
+        ConfigField::CheckLemonupUpdates => on_off(draft.check_lemonup_updates).to_string(),
         ConfigField::BackupWtf => on_off(draft.backup_wtf).to_string(),
         ConfigField::BackupRetention => draft.backup_retention.to_string(),
         ConfigField::Theme => theme_name(draft.theme).to_string(),
@@ -9491,6 +9511,7 @@ mod tests {
 
     mod curseforge_mark;
     mod find_sheet;
+    mod newer_lemonup;
 
     /// A synthetic `_retail_` game folder with a `.curseclient`, and a
     /// CurseForge record next to it whose instance has that GUID and
@@ -9642,6 +9663,7 @@ mod tests {
             games_tx: mpsc::unbounded_channel().0,
             games_rx: mpsc::unbounded_channel().1,
             find: crate::app::FindState::default(),
+            newer_lemonup: crate::app::newer_lemonup::NewerLemonupState::with(None),
         }
     }
 
@@ -18355,14 +18377,20 @@ mod tests {
 
         #[test]
         fn the_key_line_fits_80_columns_by_tightening_then_dropping_by_priority() {
-            // Settings on a setting that steps fits at 80.
+            // Settings on a setting that steps fits at 80, and scrolls at 24 rows.
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_config(&mut app);
             press_key(&mut app, KeyCode::Down);
             let line = key_line_at(&mut app, 80);
             assert_eq!(
                 entries(&line),
-                ["↑/↓ choose", "←/→ change", "esc close", "? help"],
+                [
+                    "↑/↓ choose",
+                    "←/→ change",
+                    "esc close",
+                    "pgup/pgdn scroll",
+                    "? help"
+                ],
                 "{line}"
             );
             // Tighter: the rest goes from the end; the main key, esc and ? stay.
@@ -23251,11 +23279,13 @@ mod tests {
             // Settings, for all games and for this game.
             let before = shared_now(&games);
             change_setting(&mut retail, ConfigField::CheckOtherGames);
+            change_setting(&mut retail, ConfigField::CheckLemonupUpdates);
             change_setting(&mut retail, ConfigField::Theme);
             change_setting(&mut retail, ConfigField::ShowLibs);
             let after = shared_now(&games);
             assert!(after.wago_api_key.as_deref() == Some(KEY));
             assert_ne!(after.check_other_games, before.check_other_games);
+            assert!(before.check_lemonup_updates && !after.check_lemonup_updates);
             assert_ne!(after.theme, before.theme);
             assert!(retail.config_pane.persisted.show_libs);
 
@@ -23264,6 +23294,7 @@ mod tests {
             let last = shared_now(&games);
             assert_eq!(last.theme, after.theme);
             assert_eq!(last.check_other_games, after.check_other_games);
+            assert!(!last.check_lemonup_updates);
             assert!(last.wago_api_key.as_deref() == Some(KEY));
 
             // Switching games in one window reads the shared settings again.
@@ -23288,7 +23319,13 @@ mod tests {
             let all = shown.find("For all games").expect("For all games");
             let this = shown.find("For WoW Forever").expect("For WoW Forever");
             assert!(all < this, "{shown}");
-            for shared in ["Wago.io key", "Theme", "Reduce motion", "Check other games"] {
+            for shared in [
+                "Wago.io key",
+                "Theme",
+                "Reduce motion",
+                "Check other games",
+                "Check for LemonUp updates",
+            ] {
                 let at = shown.find(shared).unwrap_or_else(|| panic!("{shared}"));
                 assert!(all < at && at < this, "{shared}:\n{shown}");
             }

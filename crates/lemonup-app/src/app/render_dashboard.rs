@@ -11,6 +11,8 @@ pub(super) const WIDE_FRAME_MIN_WIDTH: u16 = 110;
 const GUTTER_WIDTH: u16 = 5;
 /// Width of the progress bar on the status line while a job runs.
 const JOB_BAR_WIDTH: usize = 28;
+/// Beside the newer LemonUp badge, the folder shows only when this much of it fits.
+const MIN_HEADER_PATH_WIDTH: usize = 8;
 
 /// The rows of the dashboard frame, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -664,12 +666,26 @@ impl App {
         // Another game with updates shows next to this one; the folder
         // gets what room is left.
         first.extend(self.other_games_badge(wide));
-        let used = spans_width(&first) + 3;
+        // A newer LemonUp sits at the right end. The folder shrinks first to make room, and
+        // the badge goes when even the game name would not fit beside it.
+        let mut badge = self.newer_lemonup_badge(now);
+        let badge_width = spans_width(&badge);
+        if !badge.is_empty() && spans_width(&first) + 2 + badge_width > usize::from(width) {
+            badge.clear();
+        }
+        // Two spaces before the badge, or one blank column at the end.
+        let reserved = if badge.is_empty() { 1 } else { 2 + badge_width };
+        let used = spans_width(&first) + 2 + reserved;
         let path = self.friendly_addon_dir();
-        if !path.is_empty() {
-            let room = usize::from(width).saturating_sub(used);
+        let room = usize::from(width).saturating_sub(used);
+        if !path.is_empty() && (badge.is_empty() || room >= MIN_HEADER_PATH_WIDTH) {
             first.push(Span::raw("  "));
             first.push(Span::styled(shorten_path_middle(&path, room), roles.muted));
+        }
+        if !badge.is_empty() {
+            let pad = usize::from(width).saturating_sub(spans_width(&first) + badge_width);
+            first.push(Span::raw(" ".repeat(pad)));
+            first.extend(badge);
         }
         second.extend(self.dashboard_answer_spans(now));
         if let Some(warning) = self.profile_warning() {
