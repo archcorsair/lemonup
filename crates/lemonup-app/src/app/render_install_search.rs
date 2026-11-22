@@ -143,6 +143,11 @@ pub(super) fn install_error_advice(
     }
 }
 
+/// "matches" for one addon, "match" for any other count.
+fn match_verb(count: usize) -> &'static str {
+    if count == 1 { "matches" } else { "match" }
+}
+
 /// Whether `url` is the GitHub link of `owner/repo`, read the way updates read
 /// it, so a link kept from 1.x (`www.`, `.git`) still counts.
 fn github_url_names_repo(url: &str, owner: &str, repo: &str) -> bool {
@@ -341,11 +346,16 @@ impl App {
                     NO_ADDON_HAS_EVERY_WORD.to_string()
                 } else if shown && pane.has_known_rows() {
                     // Known addons are not on Wago.io.
-                    format!("{count} addon{} match \"{query}\"", plural_suffix(count))
+                    format!(
+                        "{count} addon{} {} \"{query}\"",
+                        plural_suffix(count),
+                        match_verb(count)
+                    )
                 } else if shown {
                     format!(
-                        "{count} addon{} on Wago.io match \"{query}\"",
-                        plural_suffix(count)
+                        "{count} addon{} on Wago.io {} \"{query}\"",
+                        plural_suffix(count),
+                        match_verb(count)
                     )
                 } else {
                     format!("Search Wago.io for \"{query}\"")

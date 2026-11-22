@@ -13101,7 +13101,7 @@ games = ["forever"]
         );
         assert_eq!(
             line_text(&app.search_hint_line()),
-            "1 addon match \"known raid\""
+            "1 addon matches \"known raid\""
         );
     }
 
@@ -13127,7 +13127,7 @@ games = ["forever"]
         app.search_pane.query = "frames".into();
         assert_eq!(
             line_text(&app.search_hint_line()),
-            "1 addon on Wago.io match \"frames\""
+            "1 addon on Wago.io matches \"frames\""
         );
     }
 
@@ -13347,7 +13347,7 @@ games = ["forever"]
         );
         assert_eq!(
             line_text(&app.search_hint_line()),
-            "1 addon on Wago.io match \"Forever Loot Sparkles\""
+            "1 addon on Wago.io matches \"Forever Loot Sparkles\""
         );
     }
 
