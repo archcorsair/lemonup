@@ -682,6 +682,7 @@ impl App {
             first.push(Span::raw("  "));
             first.push(Span::styled(shorten_path_middle(&path, room), roles.muted));
         }
+        self.newer_lemonup.badge_drawn.set(!badge.is_empty());
         if !badge.is_empty() {
             let pad = usize::from(width).saturating_sub(spans_width(&first) + badge_width);
             first.push(Span::raw(" ".repeat(pad)));

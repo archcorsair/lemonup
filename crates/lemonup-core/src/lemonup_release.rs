@@ -4,7 +4,8 @@
 //! The file (`latest-release.json` in the default profile's data folder) holds the newest
 //! release's version, when it was published and when LemonUp last looked. It is only an
 //! answer to show: a file that is missing or can't be read or parsed means no answer yet, and
-//! a failed look never replaces it.
+//! a failed look never replaces it. A failed look only moves `checked_at`, so the next look
+//! waits a day too.
 
 use std::fmt;
 use std::fs;
@@ -97,14 +98,23 @@ impl LatestRelease {
     pub fn newer_than(&self, current: &str, now: OffsetDateTime) -> Option<ReleaseVersion> {
         let latest = ReleaseVersion::parse(&self.version)?;
         let current = ReleaseVersion::parse(current)?;
-        (latest > current && now >= self.published_at + SHOW_AFTER).then_some(latest)
+        // A date too far out to add to (a damaged file) never shows.
+        let shown_from = self.published_at.checked_add(SHOW_AFTER)?;
+        (latest > current && now >= shown_from).then_some(latest)
     }
 }
 
 /// Whether LemonUp should look for a newer release at `now`: there is no answer yet, the last
-/// one is [`CHECK_EVERY`] old, or it says it is from the future (the clock was wrong).
+/// one is [`CHECK_EVERY`] old, or it says it is from the future (the clock was wrong, or the
+/// file is damaged).
 pub fn check_due(cached: Option<&LatestRelease>, now: OffsetDateTime) -> bool {
-    cached.is_none_or(|cached| now >= cached.checked_at + CHECK_EVERY || now < cached.checked_at)
+    cached.is_none_or(|cached| {
+        now < cached.checked_at
+            || cached
+                .checked_at
+                .checked_add(CHECK_EVERY)
+                .is_none_or(|due| now >= due)
+    })
 }
 
 /// The answer in `path`, or `None` when the file is missing or can't be read or parsed.
@@ -120,15 +130,28 @@ pub fn write_latest_release(path: &Path, release: &LatestRelease) -> Result<()> 
     write_private_file(path, &json)
 }
 
-/// Keeps the outcome of a look at `now`: an answer replaces the file in `path` and is returned;
-/// a failure leaves the file as it is and is returned as it came. A file that can't be written
-/// still gives the answer, for this run.
+/// Keeps the outcome of a look at `now`: an answer replaces the file in `path` and is returned.
+/// A failure keeps the answer in the file and only moves its `checked_at` to `now`, so the next
+/// look waits a day too; it is returned as it came. A file that can't be written still gives
+/// the answer, for this run.
 pub fn record_check<E>(
     path: &Path,
     fetched: std::result::Result<FetchedRelease, E>,
     now: OffsetDateTime,
 ) -> std::result::Result<LatestRelease, E> {
-    let release = LatestRelease::from_fetched(&fetched?, now);
+    let fetched = match fetched {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            if let Some(mut kept) = read_latest_release(path) {
+                kept.checked_at = now;
+                if let Err(error) = write_latest_release(path, &kept) {
+                    tracing::debug!(%error, "couldn't save when LemonUp last looked");
+                }
+            }
+            return Err(error);
+        }
+    };
+    let release = LatestRelease::from_fetched(&fetched, now);
     if let Err(error) = write_latest_release(path, &release) {
         tracing::debug!(%error, "couldn't save the newest LemonUp release");
     }
@@ -287,19 +310,45 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_check_keeps_the_old_answer() {
+    fn dates_too_far_out_never_panic() {
+        let far = OffsetDateTime::parse(
+            "9999-12-31T23:59:59Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("far");
+        let damaged = LatestRelease {
+            version: "9.9.9".to_string(),
+            published_at: far,
+            checked_at: far,
+        };
+        let now = at(1_900_000_000);
+        assert_eq!(damaged.newer_than("2.7.0", now), None);
+        // From the future: due, so the next look replaces it.
+        assert!(check_due(Some(&damaged), now));
+        assert!(check_due(Some(&damaged), far));
+    }
+
+    #[test]
+    fn a_failed_check_keeps_the_old_answer_and_waits_a_day() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("latest-release.json");
         let old = release("2.8.0", at(1_800_000_000));
         write_latest_release(&path, &old).expect("write");
-        let before = fs::read(&path).expect("before");
 
         let failed: std::result::Result<FetchedRelease, &str> = Err("offline");
-        assert_eq!(
-            record_check(&path, failed, at(1_900_000_000)),
-            Err("offline")
-        );
-        assert_eq!(fs::read(&path).expect("after"), before);
+        let then = at(1_900_000_000);
+        assert_eq!(record_check(&path, failed, then), Err("offline"));
+        let kept = read_latest_release(&path).expect("kept");
+        assert_eq!(kept.version, old.version);
+        assert_eq!(kept.published_at, old.published_at);
+        assert_eq!(kept.checked_at, then);
+        assert!(!check_due(Some(&kept), then + Duration::hours(23)));
+
+        // With no answer yet, a failure writes nothing.
+        let missing = temp.path().join("missing.json");
+        let failed: std::result::Result<FetchedRelease, &str> = Err("offline");
+        assert_eq!(record_check(&missing, failed, then), Err("offline"));
+        assert!(!missing.exists());
 
         let fetched = FetchedRelease {
             tag: "v2.8.1".to_string(),

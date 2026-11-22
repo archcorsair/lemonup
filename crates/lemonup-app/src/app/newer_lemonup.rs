@@ -17,6 +17,8 @@ pub(super) struct NewerLemonupState {
     pub(super) started: bool,
     pub(super) sender: mpsc::UnboundedSender<LatestRelease>,
     receiver: mpsc::UnboundedReceiver<LatestRelease>,
+    /// The last frame drew the badge, so its shimmer needs redraws.
+    pub(super) badge_drawn: std::cell::Cell<bool>,
 }
 
 impl NewerLemonupState {
@@ -32,6 +34,7 @@ impl NewerLemonupState {
             started: false,
             sender,
             receiver,
+            badge_drawn: std::cell::Cell::new(false),
         }
     }
 }
@@ -49,12 +52,15 @@ impl App {
             .newer_than(env!("CARGO_PKG_VERSION"), now)
     }
 
-    /// Starts this launch's look on GitHub in the background when the setting is on and the
-    /// last answer is a day old. A launch looks at most once; with the setting off it waits,
-    /// and turning it on looks then.
+    /// Starts this launch's look on GitHub in the background once the addon list shows, when
+    /// the setting is on and the last answer is a day old. A launch looks at most once; with the
+    /// setting off it waits, and turning it on looks then.
     pub(super) fn start_newer_lemonup_check(&mut self, now: OffsetDateTime) {
         let state = &mut self.newer_lemonup;
-        if state.started || !self.config_pane.draft.check_lemonup_updates {
+        if state.started
+            || self.shell_mode != ShellMode::Dashboard
+            || !self.config_pane.draft.check_lemonup_updates
+        {
             return;
         }
         state.started = true;
@@ -68,7 +74,7 @@ impl App {
                 Ok(latest) => {
                     let _ = sender.send(latest);
                 }
-                // Silent: the next launch after a day may look again.
+                // Silent: the answer stays, and the next look waits a day.
                 Err(error) => {
                     tracing::debug!(kind = ?error.kind, "couldn't look for a newer LemonUp")
                 }
@@ -117,11 +123,10 @@ impl App {
         spans
     }
 
-    /// The addon list shows a shimmering badge, so the frame keeps redrawing.
+    /// The last frame drew a shimmering badge, so the frame keeps redrawing.
     pub(super) fn newer_lemonup_shimmers(&self) -> bool {
-        self.shell_mode == ShellMode::Dashboard
+        self.newer_lemonup.badge_drawn.get()
             && !self.ui_theme.reduce_motion
             && matches!(self.ui_theme.roles.amber, Color::Rgb(..))
-            && self.newer_lemonup(OffsetDateTime::now_utc()).is_some()
     }
 }

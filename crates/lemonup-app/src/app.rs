@@ -7382,6 +7382,7 @@ impl App {
     fn draw(&mut self, frame: &mut Frame<'_>) {
         self.note_question_shown(Instant::now());
         self.search_marquee_live.set(false);
+        self.newer_lemonup.badge_drawn.set(false);
         if self.shell_mode == ShellMode::Dashboard {
             self.draw_dashboard_frame(frame);
         } else {

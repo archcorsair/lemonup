@@ -197,12 +197,15 @@ fn the_game_name_never_clips_and_the_badge_goes_first() {
     let row = first(&app, u16::try_from(width).expect("width"));
     assert_eq!(row, format!("{lead}     {}", badge()), "{row}");
     // Too narrow for the badge: it goes, and the game name stays whole.
+    assert!(app.has_active_animation());
     let row = first(
         &app,
         u16::try_from(lead_width + 1 + badge_width).expect("width"),
     );
     assert!(row.starts_with(lead), "{row}");
     assert!(!row.contains("Update available"), "{row}");
+    // No badge drawn, so nothing shimmers and the frame doesn't redraw for it.
+    assert!(!app.has_active_animation());
 }
 
 #[test]
@@ -279,10 +282,21 @@ fn a_launch_looks_once_and_only_with_the_setting_on() {
     app.config_pane.draft.check_lemonup_updates = true;
     app.start_newer_lemonup_check(now);
     assert!(app.newer_lemonup.started);
+    // A look is due now, but `started` keeps a launch to one: a second look would call
+    // `tokio::spawn`, which panics here, outside a runtime.
     app.newer_lemonup.latest = None;
-    // A second call would look if it could; `started` keeps it to one.
     app.start_newer_lemonup_check(now + Duration::days(2));
-    assert!(app.newer_lemonup.latest.is_none());
+    assert!(app.newer_lemonup.started);
+}
+
+#[test]
+fn setup_never_looks() {
+    let mut app = app_for_tests(ShellMode::Onboarding);
+    app.config_pane.draft.check_lemonup_updates = true;
+    // No answer, so a look is due; outside the addon list none starts (and `tokio::spawn`
+    // would panic here, outside a runtime).
+    app.start_newer_lemonup_check(OffsetDateTime::now_utc());
+    assert!(!app.newer_lemonup.started);
 }
 
 #[test]

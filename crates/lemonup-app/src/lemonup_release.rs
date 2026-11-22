@@ -22,8 +22,8 @@ struct ReleaseResponse {
     published_at: OffsetDateTime,
 }
 
-/// Looks for LemonUp's newest release and keeps the answer in `cache`. A failure leaves `cache`
-/// as it is.
+/// Looks for LemonUp's newest release and keeps the answer in `cache`. A failure keeps the
+/// answer already there and only moves when it was last checked.
 pub(crate) async fn check_latest_release(cache: &Path) -> Result<LatestRelease, SourceError> {
     let client = build_github_client().map_err(SourceError::from)?;
     check_latest_release_at(
@@ -119,8 +119,8 @@ mod tests {
         crate::http::client_builder().build().expect("client")
     }
 
-    /// A cache holding an older answer, and its bytes.
-    fn planted_cache() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+    /// A cache holding an older answer, and that answer.
+    fn planted_cache() -> (tempfile::TempDir, PathBuf, LatestRelease) {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("latest-release.json");
         let old = LatestRelease {
@@ -129,8 +129,20 @@ mod tests {
             checked_at: at("2026-11-10T00:00:00Z"),
         };
         write_latest_release(&path, &old).expect("plant");
-        let bytes = std::fs::read(&path).expect("read");
-        (temp, path, bytes)
+        (temp, path, old)
+    }
+
+    /// After a failed look at `now`: the old answer, with only `checked_at` moved.
+    fn assert_kept(cache: &Path, old: &LatestRelease, now: OffsetDateTime, case: &str) {
+        let kept = read_latest_release(cache).expect("kept");
+        assert_eq!(
+            kept,
+            LatestRelease {
+                checked_at: now,
+                ..old.clone()
+            },
+            "{case}"
+        );
     }
 
     #[test]
@@ -177,30 +189,27 @@ mod tests {
                 SourceErrorKind::Other,
             ),
         ] {
-            let (_temp, cache, before) = planted_cache();
+            let (_temp, cache, old) = planted_cache();
             let url = serve_once(response.clone());
-            let error = check_latest_release_at(&client(), &url, &cache, OffsetDateTime::now_utc())
+            let now = at("2026-11-21T09:00:00Z");
+            let error = check_latest_release_at(&client(), &url, &cache, now)
                 .await
                 .expect_err("a failure");
             assert_eq!(error.kind, kind, "{response}");
-            assert_eq!(std::fs::read(&cache).expect("read"), before, "{response}");
+            assert_kept(&cache, &old, now, &response);
         }
     }
 
     #[tokio::test]
     async fn offline_is_no_connection_and_keeps_the_cache() {
-        let (_temp, cache, before) = planted_cache();
+        let (_temp, cache, old) = planted_cache();
+        let now = at("2026-11-21T09:00:00Z");
         // Port 9 on localhost: nothing listens, so the connect is refused.
-        let error = check_latest_release_at(
-            &client(),
-            "http://127.0.0.1:9/",
-            &cache,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .expect_err("offline");
+        let error = check_latest_release_at(&client(), "http://127.0.0.1:9/", &cache, now)
+            .await
+            .expect_err("offline");
         assert_eq!(error.kind, SourceErrorKind::NoConnection);
-        assert_eq!(std::fs::read(&cache).expect("read"), before);
+        assert_kept(&cache, &old, now, "offline");
     }
 
     #[tokio::test]
