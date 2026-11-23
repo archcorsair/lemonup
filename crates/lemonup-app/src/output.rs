@@ -9,7 +9,7 @@ mod profiles;
 mod tests;
 mod update;
 
-pub(crate) use check::CheckReport;
+pub(crate) use check::{CheckReport, UpdateHint};
 pub(crate) use profiles::ProfilesReport;
 pub(crate) use update::{BackupLine, UpdateFlags, UpdateReport};
 
@@ -228,7 +228,7 @@ impl Paint {
 
 /// `text` with every control character as a space. Names, versions and messages come from
 /// files and from the sources, and an escape code among them must never reach the terminal.
-fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn printable(text: &str) -> std::borrow::Cow<'_, str> {
     if text.chars().any(char::is_control) {
         text.chars()
             .map(|character| {
@@ -250,12 +250,15 @@ pub(crate) fn error_label(paint: Paint) -> String {
 }
 
 /// The columns `text` takes on screen. Wide characters, such as Chinese ones, take two.
+/// The width is of the text as it is printed, with control characters as spaces.
 pub(crate) fn columns(text: &str) -> usize {
-    ratatui::text::Span::raw(text).width()
+    ratatui::text::Span::raw(printable(text)).width()
 }
 
+/// `text` as it is printed, filled with spaces to `width` columns.
 pub(crate) fn pad(text: &str, width: usize) -> String {
-    let missing = width.saturating_sub(columns(text));
+    let text = printable(text);
+    let missing = width.saturating_sub(columns(&text));
     format!("{text}{}", " ".repeat(missing))
 }
 
@@ -299,13 +302,14 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
     let mut lines = Vec::new();
     for entry in entries {
         let mut version = match &entry.from {
-            Some(from) => format!(
+            // A reinstall of the same version is not a change, so it gets no arrow or color.
+            Some(from) if *from != entry.version => format!(
                 "{} {} {}",
                 paint.removed(from),
                 paint.text(paint.arrow()),
                 paint.added(&entry.version)
             ),
-            None => paint.text(&entry.version),
+            _ => paint.text(&entry.version),
         };
         if let Some(update) = &entry.update {
             version.push_str(&paint.text(", "));
@@ -396,9 +400,21 @@ pub(crate) fn context_line(paint: Paint, game: &str, addon_dir: &Path, profile: 
     line
 }
 
-/// A version as a report shows it: `unknown` when there is none.
-pub(crate) fn version_text(version: Option<&str>) -> &str {
-    version.unwrap_or("unknown")
+/// A version as a report shows it: `unknown` when there is none or it is blank, a full commit
+/// hash as its first seven characters, and without the addon's own name in front (`names` are
+/// the addon's name and folder; see [`short_version`]).
+pub(crate) fn display_version(version: Option<&str>, names: &[&str]) -> String {
+    let Some(version) = version.map(str::trim).filter(|version| !version.is_empty()) else {
+        return "unknown".to_string();
+    };
+    let is_commit = version.len() == 40
+        && version
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    if is_commit {
+        return version[..7].to_string();
+    }
+    short_version(version, names).to_string()
 }
 
 /// A version without the addon's own name in front. Some sources label a release with it
@@ -457,10 +473,10 @@ pub(crate) fn error_kind_key(kind: SourceErrorKind) -> &'static str {
         SourceErrorKind::KeyRejected => "key_rejected",
         SourceErrorKind::NotFound => "not_found",
         SourceErrorKind::SlowDown => "slow_down",
-        SourceErrorKind::FoldersInTheWay
-        | SourceErrorKind::FoldersOfLinkedAddon
-        | SourceErrorKind::WrongRepository
-        | SourceErrorKind::Other => "other",
+        SourceErrorKind::WrongRepository => "wrong_repository",
+        SourceErrorKind::FoldersInTheWay => "folders_in_the_way",
+        SourceErrorKind::FoldersOfLinkedAddon => "folders_of_linked_addon",
+        SourceErrorKind::Other => "other",
     }
 }
 
@@ -675,28 +691,23 @@ impl<O: Write, E: Write> Output<O, E> {
         }
     }
 
-    /// A warning: on stderr, or in the `warnings` of the JSON document.
+    /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
+    /// A run that fails prints no document, so stderr is the one place a warning can't be lost.
     pub(crate) fn warn(&mut self, text: &str) -> std::io::Result<()> {
-        match self.mode {
-            OutputMode::Human => writeln!(
-                self.stderr,
-                "{} {}",
-                self.stderr_paint.attention("warning:"),
-                printable(text)
-            ),
-            OutputMode::Json => {
-                self.warnings.push(text.to_string());
-                Ok(())
-            }
+        if self.mode == OutputMode::Json {
+            self.warnings.push(text.to_string());
         }
+        writeln!(
+            self.stderr,
+            "{} {}",
+            self.stderr_paint.attention("warning:"),
+            printable(text)
+        )
     }
 
-    /// A notice on stderr. The JSON document leaves it out.
+    /// A notice on stderr, in both modes. The JSON document leaves it out.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
-        match self.mode {
-            OutputMode::Human => writeln!(self.stderr, "{}", printable(text)),
-            OutputMode::Json => Ok(()),
-        }
+        writeln!(self.stderr, "{}", printable(text))
     }
 
     #[cfg(test)]

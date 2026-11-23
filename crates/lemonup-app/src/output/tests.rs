@@ -165,7 +165,11 @@ fn json_is_one_line_with_the_warnings_given_before_it() {
         .expect("print");
     let (stdout, stderr) = out.into_writers();
     let stdout = text(stdout);
-    assert!(text(stderr).is_empty());
+    // Warnings and notes are on stderr as well: a run that fails prints no document.
+    assert_eq!(
+        text(stderr),
+        "warning: WoWInterface didn't answer\nChecking 2 addons\nwarning: Wago.io key is missing\n"
+    );
     assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
     assert!(stdout.ends_with('\n'));
     assert_eq!(
@@ -209,7 +213,11 @@ fn json_never_carries_escape_codes() {
     let stdout = text(stdout);
     assert!(!stdout.contains('\x1b'), "{stdout:?}");
     assert!(stdout.contains("\"addon_dir\":null"), "{stdout:?}");
-    assert!(stderr.is_empty());
+    // The colored label is for the terminal on stderr, never for the document.
+    assert_eq!(
+        text(stderr),
+        "\x1b[38;5;3mwarning:\x1b[0m Wago.io key is missing\n"
+    );
 }
 
 #[test]
@@ -392,4 +400,91 @@ fn a_version_loses_the_addon_name_only_as_a_label() {
     );
     assert_eq!(short_version("背包 1.0", &["背"]), "背包 1.0");
     assert_eq!(short_version("unknown", &["Pawn", ""]), "unknown");
+}
+
+#[test]
+fn widths_are_measured_on_the_text_as_it_is_printed() {
+    // A control character is printed as a space, so it takes a column in the layout too.
+    assert_eq!(columns("Pa\x1bwn"), 5);
+    assert_eq!(pad("Pa\x1bwn", 7), "Pa wn  ");
+    let rows = table(
+        vec![
+            Entry {
+                name: "Pa\x07wn".to_string(),
+                source: "Wago.io".to_string(),
+                version: "1.0".to_string(),
+                update: None,
+                notes: Vec::new(),
+                from: None,
+                done: false,
+            },
+            Entry {
+                name: "Postal".to_string(),
+                source: "GitHub".to_string(),
+                version: "2.0".to_string(),
+                update: None,
+                notes: Vec::new(),
+                from: None,
+                done: false,
+            },
+        ],
+        Paint::PLAIN,
+    );
+    assert_eq!(rows, ["  Pa wn   Wago.io  1.0", "  Postal  GitHub   2.0"]);
+}
+
+#[test]
+fn a_version_is_shown_short_and_never_blank() {
+    assert_eq!(display_version(None, &["Pawn"]), "unknown");
+    assert_eq!(display_version(Some("  "), &["Pawn"]), "unknown");
+    assert_eq!(display_version(Some("Pawn 2.14.4"), &["Pawn"]), "2.14.4");
+    // A full commit hash is shown as its first seven characters.
+    assert_eq!(
+        display_version(Some("0f4d2e4b61234567890abcdef0123456789abcde"), &["Pawn"]),
+        "0f4d2e4"
+    );
+    // A dated version is all digits but not a commit.
+    assert_eq!(display_version(Some("20261122"), &["Pawn"]), "20261122");
+}
+
+#[test]
+fn every_kind_of_source_failure_has_its_own_name_in_json() {
+    use crate::source_error::SourceErrorKind;
+    let names = [
+        SourceErrorKind::NoConnection,
+        SourceErrorKind::KeyRejected,
+        SourceErrorKind::NotFound,
+        SourceErrorKind::SlowDown,
+        SourceErrorKind::WrongRepository,
+        SourceErrorKind::FoldersInTheWay,
+        SourceErrorKind::FoldersOfLinkedAddon,
+        SourceErrorKind::Other,
+    ]
+    .map(error_kind_key);
+    assert_eq!(
+        names,
+        [
+            "no_connection",
+            "key_rejected",
+            "not_found",
+            "slow_down",
+            "wrong_repository",
+            "folders_in_the_way",
+            "folders_of_linked_addon",
+            "other",
+        ]
+    );
+}
+
+#[test]
+fn a_note_reaches_stderr_in_json_mode_too() {
+    let mut out = output(OutputMode::Json, Paint::PLAIN);
+    out.note("Made a backup of your game settings: /data/WTF.zip")
+        .expect("note");
+    let (stdout, stderr) = out.into_writers();
+    assert_eq!(text(stdout), "");
+    assert_eq!(
+        text(stderr),
+        "Made a backup of your game settings: /data/WTF.zip\n"
+    );
 }

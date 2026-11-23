@@ -115,9 +115,14 @@ async fn main() -> ExitCode {
 /// What an error that ends a command prints. A refusal already says what happened and what to
 /// do next, so it prints as it is; anything else is labeled as an error, in `paint`.
 fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -> String {
+    // An error can carry a name or a source's own words, so control characters go here too.
     match error.downcast_ref::<LemonupError>() {
-        Some(LemonupError::Refused(message)) => message.clone(),
-        _ => format!("{} {error}", output::error_label(paint)),
+        Some(LemonupError::Refused(message)) => output::printable(message).into_owned(),
+        _ => format!(
+            "{} {}",
+            output::error_label(paint),
+            output::printable(&error.to_string())
+        ),
     }
 }
 
@@ -814,9 +819,18 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         database = StateDatabase::open(&copy)?;
         scratch = Some(dir);
     }
+    // The update that would follow: refused when no folder is set or the profile is bound to
+    // another one, so the report names no command then.
+    let hint = if effective_addon_dir.is_none() || scratch.is_some() {
+        output::UpdateHint::None
+    } else if runtime.addon_dir_override.is_some() {
+        output::UpdateHint::WithAddonDir
+    } else {
+        output::UpdateHint::Plain
+    };
     // Names, sources and installed versions for the report. Read before the check, so a read
-    // that fails stops the run before anything is saved; a check changes none of them.
-    let rows = database.list_addons()?;
+    // that fails stops the run before anything is saved.
+    let rows_before = database.list_addons()?;
     let checks = refresh_live_update_checks(
         &mut database,
         &addons,
@@ -826,6 +840,9 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
     )
     .await
     .map_err(Box::<dyn std::error::Error>::from)?;
+    // A check can save an addon's name at its source, so the rows are read again. The check
+    // is saved by now: if this read fails, the report still prints from the earlier rows.
+    let rows = database.list_addons().unwrap_or(rows_before);
     drop(database);
     drop(scratch);
 
@@ -839,7 +856,7 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         &checks,
         &rows,
     )
-    .with_addon_dir(runtime.addon_dir_override.is_some());
+    .with_hint(hint);
     output.print(&report, effective_addon_dir.as_deref())?;
     Ok(CommandOutcome::from_error_count(count_check_errors(
         &checks,
@@ -2500,7 +2517,12 @@ mod addon_dir_binding_tests {
         .await
         .expect("check");
         let (stdout, stderr) = streams(json);
-        assert_eq!(stderr, "");
+        // The warning is on stderr too, where it stays if the run fails before its document.
+        assert!(
+            stderr.ends_with(". Running read-only, results are not saved.\n"),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
         let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
         assert_eq!(document["command"], "check");
         let warnings = document["warnings"].as_array().expect("warnings");
@@ -2572,7 +2594,7 @@ mod addon_dir_binding_tests {
         let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
         assert_eq!(document["command"], "update");
         assert_eq!(document["dry_run"], true);
-        assert_eq!(document["backup"]["status"], "disabled");
+        assert_eq!(document["backup"]["status"], "not_run");
         assert_eq!(document["summary"]["skipped_manual"], 1);
         assert_eq!(document["addons"][0]["folder"], "GitAddon");
     }
@@ -2599,6 +2621,23 @@ mod addon_dir_binding_tests {
             stderr.starts_with("Made a backup of your game settings: "),
             "{stderr}"
         );
+
+        // The next failing run makes none (the last one is minutes old), so it names none.
+        let mut output = capture(OutputMode::Human);
+        run_update(
+            sandbox.paths.clone(),
+            runtime(None),
+            vec!["NoSuchAddon".to_string()],
+            false,
+            false,
+            false,
+            &mut output,
+        )
+        .await
+        .expect_err("an unknown addon stops the run");
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
     }
 
     #[test]

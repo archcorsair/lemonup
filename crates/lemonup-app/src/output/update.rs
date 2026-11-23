@@ -6,8 +6,8 @@ use lemonup_core::{AddonRecord, SourceKind};
 use serde::{Serialize, Serializer};
 
 use super::{
-    Entry, Paint, Report, Tone, context_line, count_headings, rows_by_folder, section,
-    short_version, source_label, table, version_text,
+    Entry, Paint, Report, Tone, context_line, count_headings, display_version, rows_by_folder,
+    section, source_label, table,
 };
 use crate::backup::PreUpdateBackup;
 use crate::find::FindTarget;
@@ -44,15 +44,18 @@ pub(crate) enum BackupLine {
     Failed {
         error: String,
     },
-    /// The setting is off, or nothing ran (a dry run).
+    /// The setting is off.
     Disabled,
+    /// A dry run: no backup is made, whatever the setting.
+    NotRun,
 }
 
 impl BackupLine {
-    /// What `backup` did. A dry run makes no backup, so its line is `Disabled`.
+    /// What `backup` did. `None` is a dry run, which makes no backup.
     pub(crate) fn of(backup: Option<&PreUpdateBackup>) -> Self {
         match backup {
-            None | Some(PreUpdateBackup::Disabled) => Self::Disabled,
+            None => Self::NotRun,
+            Some(PreUpdateBackup::Disabled) => Self::Disabled,
             Some(PreUpdateBackup::Created { path }) => Self::Created { path: path.clone() },
             Some(PreUpdateBackup::Skipped { minutes_ago }) => Self::Skipped {
                 minutes_ago: *minutes_ago,
@@ -83,7 +86,7 @@ impl BackupLine {
             Self::Skipped { minutes_ago } => Some(format!(
                 "Backup of your game settings skipped, the last one is {minutes_ago} min old"
             )),
-            Self::Failed { .. } | Self::Disabled => None,
+            Self::Failed { .. } | Self::Disabled | Self::NotRun => None,
         }
     }
 }
@@ -281,7 +284,7 @@ impl Report for UpdateReport {
         };
         // Without the addon's own name in front, which the row already shows.
         let short = |row: &UpdateRow, version: Option<&str>| {
-            short_version(version_text(version), &[&row.name, &row.folder]).to_string()
+            display_version(version, &[&row.name, &row.folder])
         };
         let previous = |row: &UpdateRow| short(row, row.previous_version.as_deref());
         let remote = |row: &UpdateRow| short(row, row.remote_version.as_deref());
@@ -628,6 +631,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstall_of_the_same_version_shows_no_change() {
+        let addons = vec![addon("Details", "Details", SourceKind::GitHub)];
+        let results = vec![result(
+            "Details",
+            SourceKind::GitHub,
+            LiveUpdateStatus::Updated,
+            (Some("v1.2"), Some("v1.2")),
+        )];
+        let summary = LiveUpdateSummary {
+            updated_addons: 1,
+            ..LiveUpdateSummary::default()
+        };
+        let lines = UpdateReport::new(None, ALL, BackupLine::Disabled, &summary, &results, &addons)
+            .human(Paint::terminal());
+        // Done, so it has the mark, but one version with no arrow and no red.
+        assert_eq!(
+            lines[1],
+            "  \x1b[38;5;2m✓\x1b[0m Details  \x1b[2mGitHub\x1b[0m  v1.2"
+        );
+    }
+
+    #[test]
     fn a_version_drops_the_addons_own_name() {
         let addons = vec![addon("Pawn", "Pawn", SourceKind::Wago)];
         let results = vec![result(
@@ -797,6 +822,35 @@ mod tests {
             closing(LiveUpdateSummary::default()),
             "No linked addons to update."
         );
+        // With names given, a Not linked addon was asked for and left alone.
+        let named = |summary: LiveUpdateSummary| {
+            let flags = UpdateFlags { named: true, ..ALL };
+            let lines = UpdateReport::new(None, flags, BackupLine::Disabled, &summary, &[], &[])
+                .human(Paint::PLAIN);
+            lines.last().expect("closing").clone()
+        };
+        assert_eq!(
+            named(LiveUpdateSummary {
+                skipped_manual: 1,
+                ..LiveUpdateSummary::default()
+            }),
+            "Nothing was updated."
+        );
+        assert_eq!(
+            named(LiveUpdateSummary {
+                up_to_date: 1,
+                skipped_manual: 1,
+                ..LiveUpdateSummary::default()
+            }),
+            "Nothing was updated."
+        );
+        assert_eq!(
+            named(LiveUpdateSummary {
+                up_to_date: 2,
+                ..LiveUpdateSummary::default()
+            }),
+            "Everything is up to date."
+        );
         assert_eq!(closing(summary(3, 0, 0)), "3 updated.");
         assert_eq!(closing(summary(0, 1, 0)), "1 held.");
         assert_eq!(closing(summary(0, 0, 2)), "2 failed.");
@@ -913,10 +967,10 @@ mod tests {
             backup(BackupLine::of(Some(&PreUpdateBackup::Disabled))),
             serde_json::json!({"status": "disabled"})
         );
-        // A dry run makes no backup.
+        // A dry run makes no backup, whatever the setting, and says so.
         assert_eq!(
             backup(BackupLine::of(None)),
-            serde_json::json!({"status": "disabled"})
+            serde_json::json!({"status": "not_run"})
         );
         let dry = UpdateFlags {
             dry_run: true,
@@ -924,7 +978,7 @@ mod tests {
         };
         let document = json(&report(dry, BackupLine::of(None)));
         assert!(
-            document.contains(r#""force":false,"dry_run":true,"backup":{"status":"disabled"},"#),
+            document.contains(r#""force":false,"dry_run":true,"backup":{"status":"not_run"},"#),
             "{document}"
         );
     }

@@ -469,6 +469,17 @@ pub(crate) fn target_plain_line(target: &FindTarget) -> String {
     )
 }
 
+/// The kind of a failed source in the `key=value` lines. They keep the four names they have
+/// always had; the kinds a lookup never ends in stay `other`.
+fn problem_name(kind: SourceErrorKind) -> &'static str {
+    match kind {
+        SourceErrorKind::WrongRepository
+        | SourceErrorKind::FoldersInTheWay
+        | SourceErrorKind::FoldersOfLinkedAddon => "other",
+        kind => crate::output::error_kind_key(kind),
+    }
+}
+
 /// What `lemonup find` prints for a report: problems, a summary by label, then every result
 /// grouped by label.
 pub(crate) fn report_lines(
@@ -486,7 +497,7 @@ pub(crate) fn report_lines(
         lines.push(format!(
             "find warning: source={}, problem={}, detail={}",
             problem.source.name(),
-            crate::output::error_kind_key(problem.error.kind),
+            problem_name(problem.error.kind),
             problem.error.detail
         ));
     }

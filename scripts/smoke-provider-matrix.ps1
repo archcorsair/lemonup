@@ -27,7 +27,8 @@ function Get-JsonDocument {
         [string]$Context
     )
 
-    $line = $Result.Output | Where-Object { $_ -like '{*' } | Select-Object -Last 1
+    # The document starts with its schema. A log line on stderr is JSON too, but never starts so.
+    $line = $Result.Output | Where-Object { $_ -like '{"schema":*' } | Select-Object -Last 1
     if ([string]::IsNullOrWhiteSpace($line)) {
         throw "$Context did not print a JSON document"
     }

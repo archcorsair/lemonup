@@ -4,8 +4,8 @@ use lemonup_core::{AddonRecord, DEFAULT_PROFILE, SourceKind, UpdateStatus};
 use serde::{Serialize, Serializer};
 
 use super::{
-    Entry, Paint, Report, Tone, context_line, count_headings, rows_by_folder, section,
-    short_version, source_label, table, version_text,
+    Entry, Paint, Report, Tone, context_line, count_headings, display_version, rows_by_folder,
+    section, source_label, table,
 };
 use crate::find::FindTarget;
 use crate::source_error::SourceErrorKind;
@@ -23,11 +23,23 @@ pub(crate) struct CheckReport {
     /// Whether addons were named on the command line: then every one gets a row.
     #[serde(skip)]
     named: bool,
-    /// Whether the run was given `--addon-dir`. The update needs it again, so the hint says so.
+    /// Whether, and how, the closing line names the command that installs the updates.
     #[serde(skip)]
-    with_addon_dir: bool,
+    hint: UpdateHint,
     summary: CheckSummary,
     addons: Vec<CheckRow>,
+}
+
+/// Whether, and how, the closing line names the command that installs the updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateHint {
+    /// `lemonup update-all` acts on the folder that was checked.
+    Plain,
+    /// The run was given `--addon-dir`, and the update needs it again.
+    WithAddonDir,
+    /// The update would be refused: no AddOns folder is set, or the profile is bound to
+    /// another one. No command is named.
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -53,6 +65,26 @@ struct CheckRow {
     message: Option<String>,
     #[serde(serialize_with = "super::serialize_error_kind")]
     error_kind: Option<SourceErrorKind>,
+    /// Whether LemonUp's list had a row for the folder. A result without one is never
+    /// treated as Not linked, so it is not left out of the report.
+    #[serde(skip)]
+    listed: bool,
+}
+
+impl CheckRow {
+    /// An addon LemonUp lists as Not linked. It is shown only when it was named.
+    fn not_linked(&self) -> bool {
+        self.listed && self.source == SourceKind::Manual
+    }
+
+    /// The source column: nothing for a result LemonUp's list has no row for.
+    fn source_text(&self) -> &'static str {
+        if self.listed {
+            source_label(self.source)
+        } else {
+            ""
+        }
+    }
 }
 
 fn serialize_status<S: Serializer>(
@@ -89,6 +121,7 @@ impl CheckReport {
                     remote_version: check.remote_version.clone(),
                     message: check.message.clone(),
                     error_kind: check.error_kind,
+                    listed: addon.is_some(),
                 }
             })
             .collect::<Vec<_>>();
@@ -106,16 +139,16 @@ impl CheckReport {
             target,
             profile_name: profile.to_string(),
             named,
-            with_addon_dir: false,
+            hint: UpdateHint::Plain,
             summary,
             addons: rows,
         }
     }
 
-    /// The same report for a run that was given `--addon-dir`: `update-all` alone would act
-    /// on the profile's saved folder, or refuse when there is none.
-    pub(crate) fn with_addon_dir(mut self, given: bool) -> Self {
-        self.with_addon_dir = given;
+    /// The same report with another hint: `update-all` alone would act on the profile's saved
+    /// folder, which may not be the one checked, or be refused.
+    pub(crate) fn with_hint(mut self, hint: UpdateHint) -> Self {
+        self.hint = hint;
         self
     }
 
@@ -152,15 +185,16 @@ impl CheckReport {
             return "Everything is up to date.".to_string();
         }
         let mut closing = format!("{}.", parts.join(", "));
+        let with = match self.hint {
+            UpdateHint::Plain => "",
+            UpdateHint::WithAddonDir => " with the same `--addon-dir`",
+            // A command that would be refused is not suggested.
+            UpdateHint::None => return closing,
+        };
         if updates > 0 {
             closing.push_str(&format!(
-                " Run `{}`{} to update{}.",
+                " Run `{}`{with} to update{}.",
                 self.update_all_command(),
-                if self.with_addon_dir {
-                    " with the same `--addon-dir`"
-                } else {
-                    ""
-                },
                 if updates == 1 { "" } else { " all" }
             ));
         }
@@ -171,7 +205,7 @@ impl CheckReport {
 fn entry(row: &CheckRow, version: String, notes: Vec<String>) -> Entry {
     Entry {
         name: row.name.clone(),
-        source: source_label(row.source).to_string(),
+        source: row.source_text().to_string(),
         version,
         update: None,
         notes,
@@ -180,16 +214,57 @@ fn entry(row: &CheckRow, version: String, notes: Vec<String>) -> Entry {
     }
 }
 
-/// What a failed check says: the advice for its kind of failure, else its message.
+/// What a failed check says: the cause in plain words when LemonUp knows it, as Details says
+/// it in the TUI, else its message. The kind decides, never the message's text.
 fn failure_note(row: &CheckRow) -> Option<String> {
     let Some(kind) = row.error_kind else {
         return row.message.clone();
     };
-    let mut note =
-        crate::app::render_install_search::source_error_advice(kind, source_label(row.source));
-    if kind == SourceErrorKind::Other
-        && let Some(detail) = row.message.as_deref().filter(|detail| !detail.is_empty())
-    {
+    let name = if row.listed {
+        source_label(row.source)
+    } else {
+        "the source"
+    };
+    let mut note = match kind {
+        SourceErrorKind::NoConnection => {
+            format!("Couldn't reach {name}. Check your internet connection and try again.")
+        }
+        SourceErrorKind::KeyRejected if row.source == SourceKind::Wago => {
+            "Wago.io turned down your Wago.io key. Check the key in Settings and try again."
+                .to_string()
+        }
+        SourceErrorKind::KeyRejected if row.source == SourceKind::GitHub => {
+            "GitHub turned down LemonUp's request. If you set a GitHub token, check it and try \
+             again."
+                .to_string()
+        }
+        SourceErrorKind::KeyRejected => {
+            format!("{name} turned down LemonUp's request. Try again later.")
+        }
+        SourceErrorKind::NotFound => {
+            format!("{name} doesn't list this addon anymore. It may have moved or been taken down.")
+        }
+        SourceErrorKind::SlowDown => {
+            format!("{name} asked LemonUp to slow down. Wait a few minutes and try again.")
+        }
+        SourceErrorKind::WrongRepository => "The repository may have a new owner. LemonUp won't \
+                                             update it until its list is updated."
+            .to_string(),
+        SourceErrorKind::Other
+        | SourceErrorKind::FoldersInTheWay
+        | SourceErrorKind::FoldersOfLinkedAddon => {
+            format!("LemonUp couldn't check {name} for a newer version.")
+        }
+    };
+    // Where the plain words don't say what was found, the source's own words follow.
+    let detailed = matches!(
+        kind,
+        SourceErrorKind::Other
+            | SourceErrorKind::FoldersInTheWay
+            | SourceErrorKind::FoldersOfLinkedAddon
+            | SourceErrorKind::WrongRepository
+    );
+    if detailed && let Some(detail) = row.message.as_deref().filter(|detail| !detail.is_empty()) {
         note.push_str(&format!(" Details: {detail}"));
     }
     Some(note)
@@ -211,28 +286,31 @@ impl Report for CheckReport {
                 &target.profile,
             ));
         }
-        if !self.named
-            && self
-                .addons
-                .iter()
-                .all(|row| row.source == SourceKind::Manual)
-        {
+        // Nothing to show: no addon came back, or only Not linked ones that weren't named.
+        let nothing = if self.addons.is_empty() && self.named {
+            Some("Nothing was checked.")
+        } else if !self.named && self.addons.iter().all(CheckRow::not_linked) {
+            Some("No linked addons to check.")
+        } else {
+            None
+        };
+        if let Some(text) = nothing {
             if !lines.is_empty() {
                 lines.push(String::new());
             }
-            lines.push(paint.text("No linked addons to check."));
+            lines.push(paint.text(text));
             return lines;
         }
         let shown = |status: UpdateStatus| {
             self.addons
                 .iter()
                 .filter(move |row| row.status == status)
-                .filter(|row| self.named || row.source != SourceKind::Manual)
+                .filter(|row| self.named || !row.not_linked())
                 .collect::<Vec<_>>()
         };
         // Without the addon's own name in front, which the row already shows.
         let short = |row: &CheckRow, version: Option<&str>| {
-            short_version(version_text(version), &[&row.name, &row.folder]).to_string()
+            display_version(version, &[&row.name, &row.folder])
         };
         let installed = |row: &CheckRow| short(row, row.installed_version.as_deref());
         let remote = |row: &CheckRow| short(row, row.remote_version.as_deref());
@@ -252,7 +330,8 @@ impl Report for CheckReport {
                 .iter()
                 .map(|row| Entry {
                     from: Some(installed(row)),
-                    ..entry(row, remote(row), Vec::new())
+                    // A message here says why this counts as an update when the versions match.
+                    ..entry(row, remote(row), row.message.iter().cloned().collect())
                 })
                 .collect(),
         );
@@ -267,7 +346,7 @@ impl Report for CheckReport {
                     let version = format!(
                         "{}, {} has {}",
                         installed(row),
-                        source_label(row.source),
+                        row.source_text(),
                         remote(row)
                     );
                     entry(row, version, Vec::new())
@@ -330,7 +409,7 @@ mod tests {
 
     use lemonup_core::{AddonRecord, SourceKind, UpdateStatus};
 
-    use super::CheckReport;
+    use super::{CheckReport, UpdateHint};
     use crate::find::FindTarget;
     use crate::output::{Output, OutputMode, Paint, Report};
     use crate::source_error::SourceErrorKind;
@@ -434,8 +513,8 @@ mod tests {
                 "",
                 "Check failed (1)",
                 "  Bagnon  WoWInterface  11.0.1",
-                "      LemonUp couldn't reach WoWInterface. Check your internet connection and",
-                "      try again.",
+                "      Couldn't reach WoWInterface. Check your internet connection and try",
+                "      again.",
                 "",
                 "Not checked yet (1)",
                 "  WeakAuras  Wago.io  unknown",
@@ -538,7 +617,8 @@ mod tests {
         let addons = vec![addon("Pawn", "Pawn", SourceKind::Wago, Some("2.14.4"))];
         let checks = vec![check("Pawn", UpdateStatus::UpdateAvailable, Some("2.14.8"))];
         let report = |profile: &str| {
-            CheckReport::new(None, profile, false, &checks, &addons).with_addon_dir(true)
+            CheckReport::new(None, profile, false, &checks, &addons)
+                .with_hint(UpdateHint::WithAddonDir)
         };
         assert_eq!(
             report("default")
@@ -558,7 +638,7 @@ mod tests {
         // Without the option the hint stays as it was.
         assert_eq!(
             CheckReport::new(None, "default", false, &checks, &addons)
-                .with_addon_dir(false)
+                .with_hint(UpdateHint::Plain)
                 .human(Paint::PLAIN)
                 .last()
                 .expect("closing"),
@@ -630,13 +710,109 @@ mod tests {
             [
                 "Check failed (3)",
                 "  Bagnon  Wago.io  1.0",
-                "      Wago.io didn't accept your Wago.io key. Check it and paste it again.",
+                "      Wago.io turned down your Wago.io key. Check the key in Settings and try again.",
                 "  Pawn    TukUI    2.0",
                 "      the zip has no TOC",
                 "  Postal  GitHub   3.0",
-                "      Something went wrong on the way. Try again; if it keeps happening, the \
-                 technical detail helps with a bug report. Details: bad gateway",
+                "      LemonUp couldn't check GitHub for a newer version. Details: bad gateway",
             ]
+        );
+    }
+
+    #[test]
+    fn a_repository_with_a_new_owner_keeps_its_own_kind_and_detail() {
+        let addons = vec![addon("Postal", "Postal", SourceKind::GitHub, Some("3.0"))];
+        let mut moved = check("Postal", UpdateStatus::Error, None);
+        moved.error_kind = Some(SourceErrorKind::WrongRepository);
+        moved.message = Some("github.com/someone-else/Postal".to_string());
+        let report = CheckReport::new(None, "default", false, &[moved], &addons);
+        assert_eq!(
+            report.human(Paint::PLAIN.with_width(200))[2],
+            "      The repository may have a new owner. LemonUp won't update it until its list is \
+             updated. Details: github.com/someone-else/Postal"
+        );
+        let mut output = Output::new(
+            OutputMode::Json,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            Vec::new(),
+        );
+        output.print(&report, None).expect("print");
+        let document = String::from_utf8(output.into_writers().0).expect("utf-8");
+        assert!(
+            document.contains(r#""error_kind":"wrong_repository""#),
+            "{document}"
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_row_is_shown_not_taken_for_not_linked() {
+        // The list had no row for it when the report was built, so nothing says it is linked.
+        let mut ready = check("Stranger", UpdateStatus::UpdateAvailable, Some("2.0"));
+        ready.message = None;
+        let report = CheckReport::new(None, "default", false, &[ready], &[]);
+        assert_eq!(
+            report.human(Paint::PLAIN),
+            [
+                "Update ready (1)",
+                "  Stranger    unknown → 2.0",
+                "",
+                "1 update ready. Run `lemonup update-all` to update.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_check_that_brought_nothing_back_says_so() {
+        assert_eq!(
+            CheckReport::new(None, "default", true, &[], &[]).human(Paint::PLAIN),
+            ["Nothing was checked."]
+        );
+        assert_eq!(
+            CheckReport::new(None, "default", false, &[], &[]).human(Paint::PLAIN),
+            ["No linked addons to check."]
+        );
+    }
+
+    #[test]
+    fn no_command_is_named_when_the_update_would_be_refused() {
+        let addons = vec![addon("Pawn", "Pawn", SourceKind::Wago, Some("2.14.4"))];
+        let checks = vec![check("Pawn", UpdateStatus::UpdateAvailable, Some("2.14.8"))];
+        let report =
+            CheckReport::new(None, "default", false, &checks, &addons).with_hint(UpdateHint::None);
+        assert_eq!(
+            report.human(Paint::PLAIN).last().expect("closing"),
+            "1 update ready."
+        );
+    }
+
+    #[test]
+    fn the_rows_are_joined_by_folder_whatever_its_case() {
+        let addons = vec![addon("Pawn", "pawn", SourceKind::Wago, Some("2.14.4"))];
+        let checks = vec![check("PAWN", UpdateStatus::UpToDate, Some("2.14.4"))];
+        let lines = CheckReport::new(None, "default", true, &checks, &addons).human(Paint::PLAIN);
+        assert_eq!(lines[1], "  Pawn  Wago.io  2.14.4");
+    }
+
+    #[test]
+    fn an_update_ready_row_shows_why_when_the_check_says() {
+        let addons = vec![addon(
+            "Details",
+            "Details",
+            SourceKind::GitHub,
+            Some("v1.2"),
+        )];
+        let mut ready = check("Details", UpdateStatus::UpdateAvailable, Some("v1.2"));
+        ready.message = Some("the source has a release for this game".to_string());
+        let lines =
+            CheckReport::new(None, "default", false, &[ready], &addons).human(Paint::terminal());
+        // The same version on both sides is no change: one version, no arrow, no red or green.
+        assert_eq!(lines[1], "  Details  \x1b[2mGitHub\x1b[0m  v1.2");
+        assert_eq!(
+            lines[2],
+            "\x1b[2m      the source has a release for this game\x1b[0m"
         );
     }
 
