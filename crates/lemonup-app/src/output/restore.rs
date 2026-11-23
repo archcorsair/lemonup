@@ -20,7 +20,9 @@ impl RestoreReport {
 }
 
 impl Report for RestoreReport {
-    const COMMAND: &'static str = "restore-backup";
+    fn command(&self) -> &'static str {
+        "restore-backup"
+    }
 
     fn human(&self, paint: Paint) -> Vec<String> {
         vec![format!(

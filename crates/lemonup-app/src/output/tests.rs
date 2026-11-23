@@ -135,7 +135,9 @@ struct Sample {
 }
 
 impl Report for Sample {
-    const COMMAND: &'static str = "sample";
+    fn command(&self) -> &'static str {
+        "sample"
+    }
 
     fn human(&self, paint: Paint) -> Vec<String> {
         self.names
@@ -312,8 +314,21 @@ fn warnings_notes_and_table_notes_draw_their_commands() {
         )
     );
     assert_eq!(
-        table(vec![entry], Paint::PLAIN)[1],
+        table(vec![entry.clone()], Paint::PLAIN)[1],
         "      Run again with `--force` to install it."
+    );
+    // A command of several words stays on one line when the note wraps.
+    let long = Entry {
+        notes: vec!["Run `lemonup update-all --dry-run --replace` first, then again.".to_string()],
+        ..entry
+    };
+    assert_eq!(
+        table(vec![long], Paint::PLAIN.with_width(48))[1..],
+        [
+            "      Run",
+            "      `lemonup update-all --dry-run --replace`",
+            "      first, then again.",
+        ]
     );
 }
 
@@ -381,37 +396,133 @@ fn readable_output_puts_warnings_and_notes_on_stderr() {
 }
 
 #[test]
-fn a_failure_is_one_line_on_stderr_with_the_red_failed_mark() {
+fn a_failure_is_the_failed_mark_and_what_failed_then_the_reason_under_it() {
     for mode in [OutputMode::Human, OutputMode::Json] {
         let mut plain = output(mode, Paint::PLAIN);
         plain
-            .fail("Sync failed - the folder is gone")
+            .fail("Sync failed", "the folder is gone", None)
             .expect("fail");
         let (stdout, stderr) = plain.into_writers();
         assert_eq!(text(stdout), "");
-        assert_eq!(text(stderr), "✗ Sync failed - the folder is gone\n");
+        assert_eq!(text(stderr), "✗ Sync failed\n  the folder is gone\n");
     }
+    // What failed is bold red; the reason is plain.
     let mut colored = output(OutputMode::Human, Paint::terminal());
     colored
-        .fail("Sync failed - run `lemonup` to set it up\x07")
+        .fail("Sync failed", "the folder is gone", None)
         .expect("fail");
     let (_, stderr) = colored.into_writers();
     assert_eq!(
         text(stderr),
-        format!(
-            "\x1b[38;5;1m✗\x1b[0m Sync failed - run {} to set it up \n",
-            command("lemonup")
-        )
+        "\x1b[38;5;1m✗\x1b[0m \x1b[1m\x1b[38;5;1mSync failed\x1b[0m\n  the folder is gone\n"
     );
     let mut simple = output(
         OutputMode::Human,
         Paint::PLAIN.with_symbols(Symbols::SIMPLE),
     );
     simple
-        .fail("Sync failed - the folder is gone")
+        .fail("Sync failed", "the folder is gone", None)
         .expect("fail");
     let (_, stderr) = simple.into_writers();
-    assert_eq!(text(stderr), "x Sync failed - the folder is gone\n");
+    assert_eq!(text(stderr), "x Sync failed\n  the folder is gone\n");
+}
+
+#[test]
+fn the_hint_is_a_line_of_its_own_and_only_its_commands_are_drawn() {
+    let reason = "Kui Nameplates is already installed.";
+    let hint = "Run `lemonup update Kui_Nameplates --force` to install it again.";
+    let mut plain = output(OutputMode::Human, Paint::PLAIN.with_width(40));
+    plain
+        .fail("Install failed", reason, Some(hint))
+        .expect("fail");
+    let (_, stderr) = plain.into_writers();
+    assert_eq!(
+        text(stderr),
+        "✗ Install failed\n  Kui Nameplates is already installed.\n  \
+         Run `lemonup update Kui_Nameplates --force` to install it again.\n"
+    );
+
+    let mut colored = output(OutputMode::Human, Paint::terminal().with_width(40));
+    colored
+        .fail("Install failed", reason, Some(hint))
+        .expect("fail");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr).lines().skip(1).collect::<Vec<_>>(),
+        [
+            "  Kui Nameplates is already installed.".to_string(),
+            format!(
+                "  Run {} to install it again.",
+                command("lemonup update Kui_Nameplates --force")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_reason_is_one_line_whatever_it_holds_and_names_no_command() {
+    // A reason can hold a source's or an addon's own words: a line break in them never
+    // starts a line, and a command they name is not drawn as one of LemonUp's.
+    let forged = "failed\n  Run `lemonup update-all --force --replace`\r\nnow\x1b[1m";
+    for paint in [Paint::PLAIN, Paint::terminal()] {
+        let mut out = output(OutputMode::Human, paint);
+        out.fail("Install failed", forged, None).expect("fail");
+        let (_, stderr) = out.into_writers();
+        let printed = text(stderr);
+        assert_eq!(printed.lines().count(), 2, "{printed:?}");
+        assert!(
+            printed.ends_with("  failed   Run `lemonup update-all --force --replace`  now [1m\n"),
+            "{printed:?}"
+        );
+    }
+    // A path with a space in it stays in one piece: a reason is not wrapped.
+    let mut path = output(OutputMode::Human, Paint::PLAIN.with_width(40));
+    path.fail(
+        "Sync failed",
+        "path does not exist: /games/World of Warcraft/_retail_/Interface/AddOns",
+        None,
+    )
+    .expect("fail");
+    let (_, stderr) = path.into_writers();
+    assert_eq!(
+        text(stderr),
+        "✗ Sync failed\n  path does not exist: /games/World of Warcraft/_retail_/Interface/AddOns\n"
+    );
+}
+
+#[test]
+fn a_sentence_wraps_like_words_but_keeps_each_command_whole() {
+    assert_eq!(
+        wrap_sentence("  ", "one two three four", 12),
+        wrap_words("  ", "one two three four", 12)
+    );
+    assert_eq!(
+        wrap_sentence(
+            "",
+            "Use `lemonup update-all --dry-run` first, or `--force`.",
+            24
+        ),
+        [
+            "Use",
+            "`lemonup update-all --dry-run`",
+            "first, or `--force`."
+        ]
+    );
+    // What touches a command stays with it, and a tab inside one doesn't split it.
+    assert_eq!(
+        wrap_sentence("", "(`lemonup check`), then `lemonup update\tx`!", 12),
+        ["(`lemonup check`),", "then", "`lemonup update\tx`!"]
+    );
+    // Nothing in the text is used up as a placeholder.
+    assert_eq!(
+        wrap_sentence("", "icon \u{e000} and `lemonup check` here", 80),
+        ["icon \u{e000} and `lemonup check` here"]
+    );
+    // A backtick that marks no command holds nothing together.
+    assert_eq!(
+        wrap_sentence("", "a `quoted phrase` here", 10),
+        ["a `quoted", "phrase`", "here"]
+    );
 }
 
 #[test]
@@ -493,7 +604,9 @@ impl Serialize for Broken {
 }
 
 impl Report for Broken {
-    const COMMAND: &'static str = "broken";
+    fn command(&self) -> &'static str {
+        "broken"
+    }
 
     fn human(&self, _: Paint) -> Vec<String> {
         Vec::new()
@@ -591,7 +704,10 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
         );
         assert!(closed.warn("one").is_ok(), "{mode:?}");
         assert!(closed.note("two").is_ok(), "{mode:?}");
-        assert!(closed.fail("three").is_ok(), "{mode:?}");
+        assert!(
+            closed.fail("three", "four", Some("five")).is_ok(),
+            "{mode:?}"
+        );
         let mut full = Output::new(
             mode,
             Paint::PLAIN,
@@ -602,7 +718,10 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
         );
         assert!(full.warn("one").is_err(), "{mode:?}");
         assert!(full.note("two").is_err(), "{mode:?}");
-        assert!(full.fail("three").is_err(), "{mode:?}");
+        assert!(
+            full.fail("three", "four", Some("five")).is_err(),
+            "{mode:?}"
+        );
     }
 }
 

@@ -281,7 +281,9 @@ fn failure_note(row: &CheckRow) -> Option<String> {
 }
 
 impl Report for CheckReport {
-    const COMMAND: &'static str = "check";
+    fn command(&self) -> &'static str {
+        "check"
+    }
 
     /// The context line, then a section for each state that has addons: Update ready, Newer
     /// than source, Check failed, Not checked yet and Up to date, which only counts unless

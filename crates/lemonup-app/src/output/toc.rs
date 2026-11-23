@@ -81,7 +81,9 @@ impl TocReport {
 }
 
 impl Report for TocReport {
-    const COMMAND: &'static str = "toc";
+    fn command(&self) -> &'static str {
+        "toc"
+    }
 
     /// The change that was saved, or the addon's name in bold and one aligned row per field.
     fn human(&self, paint: Paint) -> Vec<String> {

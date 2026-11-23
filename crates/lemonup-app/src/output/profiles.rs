@@ -43,7 +43,9 @@ impl ProfilesReport {
 }
 
 impl Report for ProfilesReport {
-    const COMMAND: &'static str = "profiles";
+    fn command(&self) -> &'static str {
+        "profiles"
+    }
 
     /// `Games (N)`, then a row per game: name, game, AddOns folder and addon count in aligned
     /// columns, and what couldn't be read under it. Rows are never cut or wrapped.

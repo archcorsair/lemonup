@@ -190,6 +190,8 @@ pub(crate) fn classify_install_folders(
     reinstalling: Option<&str>,
 ) -> FolderClash {
     let mut clash = FolderClash::default();
+    // The linked addons that own a package folder, each by its own folder.
+    let mut owners: Vec<&AddonRecord> = Vec::new();
     for folder in package_folders {
         let owner = rows
             .iter()
@@ -202,11 +204,57 @@ pub(crate) fn classify_install_folders(
         if let Some(owner) = owner {
             let name = display_name(owner);
             clash.newer_version_linked |= owner.unrecognized.is_some();
+            owners.push(owner);
             clash.linked.push((folder.clone(), name));
         } else if addon_dir.join(folder).exists() {
             clash.replaceable.push(folder.clone());
         }
     }
+    // LemonUp knows an addon by its parent folder: a linked addon whose own folder is the
+    // package's parent folder is the addon being installed, already there. That is said only
+    // when it is the whole story: this version keeps the addon updated, no other row has that
+    // folder in another case, no other linked addon claims a folder of the package, and it is
+    // this addon that is in the way (its folders are linked here, or in the AddOns folder
+    // when it is the addon a reinstall leaves out of `linked`).
+    let installed = rows
+        .iter()
+        .find(|row| {
+            row.source != SourceKind::Manual && same_folder_name(&row.folder, parent_folder)
+        })
+        .filter(|row| {
+            // As `lemonup update` reads a selector: without case and without padding.
+            let alone = rows
+                .iter()
+                .filter(|other| same_folder_name(other.folder.trim(), row.folder.trim()))
+                .count()
+                == 1;
+            let shared = package_folders.iter().any(|folder| {
+                rows.iter().any(|other| {
+                    other.holds_its_folders()
+                        && other.folder != row.folder
+                        && other.claims_folder(folder)
+                })
+            });
+            let in_the_way = owners.iter().any(|owner| owner.folder == row.folder)
+                || (reinstalling == Some(row.folder.as_str())
+                    && clash
+                        .replaceable
+                        .iter()
+                        .any(|folder| row.claims_folder(folder)));
+            alone && !shared && in_the_way
+        });
+    clash.installed = installed.map(|row| {
+        let shown = row.display_name().trim();
+        Box::new(crate::source_error::InstalledAddon {
+            name: if shown.is_empty() {
+                row.folder.clone()
+            } else {
+                shown.to_string()
+            },
+            folder: row.folder.clone(),
+            source: row.source,
+        })
+    });
     // The "Not linked" addon already there: the package parent first, then any other folder.
     let manual_name = |folder: &str| {
         rows.iter()
@@ -884,6 +932,144 @@ mod tests {
         )
         .expect("own folders");
         assert_eq!(replaced, folders(&["AstralKeys"]));
+    }
+
+    #[test]
+    fn a_refused_install_says_when_that_addon_is_already_installed() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Kui_Nameplates", "Kui_Media", "Other_Lib"]);
+        let mut tracked = AddonRecord::new("Kui Title", "Kui_Nameplates", SourceKind::Wago);
+        tracked.source_name = Some("Kui Nameplates".to_string());
+        tracked.owned_folders = owned(&["Kui_Media"]);
+        let other = AddonRecord::new("Other", "Other_Lib", SourceKind::GitHub);
+        let rows = [tracked.clone(), other];
+        let clash = |package: &[&str], parent: &str, reinstalling: Option<&str>| {
+            plan_install_replacements_from_rows(
+                &rows,
+                temp.path(),
+                &folders(package),
+                parent,
+                &[],
+                reinstalling,
+            )
+            .expect_err("folders in the way")
+        };
+
+        // The package's parent folder is the linked addon's own folder, whatever its case: the
+        // same addon, by the name LemonUp shows, its own folder and its source.
+        let same = clash(&["Kui_Media", "kui_nameplates"], "kui_nameplates", None);
+        assert_eq!(same.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        let installed = same.clash.expect("clash").installed.expect("installed");
+        assert_eq!(installed.name, "Kui Nameplates");
+        assert_eq!(installed.folder, "Kui_Nameplates");
+        assert_eq!(installed.source, SourceKind::Wago);
+
+        // A reinstall from Wago.io leaves the addon's own folders out of `linked`: they are in
+        // the way, and it is still that addon.
+        let again = clash(
+            &["Kui_Media", "Kui_Nameplates"],
+            "Kui_Nameplates",
+            Some("Kui_Nameplates"),
+        );
+        assert_eq!(again.kind, SourceErrorKind::FoldersInTheWay);
+        assert_eq!(
+            again
+                .clash
+                .expect("clash")
+                .installed
+                .map(|installed| installed.folder),
+            Some("Kui_Nameplates".to_string())
+        );
+
+        // Another addon that only brings one of its folders is not that addon.
+        let plugin = clash(&["OtherPlates", "Kui_Media"], "OtherPlates", None);
+        assert_eq!(plugin.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(plugin.clash.expect("clash").installed, None);
+
+        // With a second linked addon in the way there is more to say than "already installed".
+        let two = clash(&["Kui_Nameplates", "Other_Lib"], "Kui_Nameplates", None);
+        assert_eq!(two.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(two.clash.expect("clash").installed, None);
+        // The same on a reinstall, where the addon's own folders are left out of `linked`.
+        let two = clash(
+            &["Kui_Nameplates", "Other_Lib"],
+            "Kui_Nameplates",
+            Some("Kui_Nameplates"),
+        );
+        assert_eq!(two.clash.expect("clash").installed, None);
+    }
+
+    #[test]
+    fn already_installed_is_said_only_when_it_is_the_whole_story() {
+        let temp = tempdir().expect("tempdir");
+        make_dirs(temp.path(), &["Extra"]);
+        let installed_in = |addon_dir: &std::path::Path,
+                            rows: &[AddonRecord],
+                            package: &[&str],
+                            reinstalling: Option<&str>| {
+            plan_install_replacements_from_rows(
+                rows,
+                addon_dir,
+                &folders(package),
+                "Foo",
+                &[],
+                reinstalling,
+            )
+            .expect_err("in the way")
+            .clash
+            .expect("clash")
+            .installed
+        };
+        let installed = |rows: &[AddonRecord], package: &[&str], reinstalling: Option<&str>| {
+            installed_in(temp.path(), rows, package, reinstalling)
+        };
+        let foo = AddonRecord::new("Foo", "Foo", SourceKind::Wago);
+
+        // Two linked addons that both list a folder of the package: only the first is named
+        // in `linked`, and the other is still in the way.
+        let mut first = foo.clone();
+        first.owned_folders = owned(&["Foo_Media"]);
+        let mut second = AddonRecord::new("Bar", "Bar", SourceKind::GitHub);
+        second.owned_folders = owned(&["Foo_Media"]);
+        assert_eq!(
+            installed(&[first.clone(), second], &["Foo", "Foo_Media"], None),
+            None
+        );
+        assert!(installed(&[first], &["Foo", "Foo_Media"], None).is_some());
+
+        // Another row whose folder differs only in case or in padding: `lemonup update Foo`
+        // could pick either. A Not linked row claims nothing, so only this keeps the hint back.
+        for folder in ["foo", " Foo", "FOO "] {
+            let twin = AddonRecord::new("Twin", folder, SourceKind::Manual);
+            assert_eq!(
+                installed(&[twin, foo.clone()], &["Foo"], None),
+                None,
+                "{folder:?}"
+            );
+        }
+        // And a linked one in another case is in the way as well.
+        let lower = AddonRecord::new("Lower", "foo", SourceKind::GitHub);
+        assert_eq!(installed(&[foo.clone(), lower], &["Foo"], None), None);
+        // An unrelated Not linked row changes nothing.
+        let unrelated = AddonRecord::new("Unrelated", "Bar", SourceKind::Manual);
+        assert!(installed(&[unrelated, foo.clone()], &["Foo"], None).is_some());
+
+        // A reinstall whose own folders are gone from the AddOns folder: what is in the way
+        // is another, Not linked folder.
+        assert_eq!(
+            installed(std::slice::from_ref(&foo), &["Foo", "Extra"], Some("Foo")),
+            None
+        );
+
+        // An addon a newer LemonUp linked shows as "Not linked" here: this version can't
+        // update it, so there is no update to suggest.
+        let there = tempdir().expect("tempdir");
+        make_dirs(there.path(), &["Foo", "Foo_Media"]);
+        let newer = linked_by_newer_version("Foo", "Foo", &["Foo_Media"]);
+        assert_eq!(
+            installed_in(there.path(), &[newer], &["Foo", "Foo_Media"], None),
+            None
+        );
     }
 
     /// A row a newer LemonUp wrote with a source this version does not know: it loads as

@@ -52,6 +52,21 @@ pub(crate) struct FolderClash {
     pub(crate) newer_version_linked: bool,
     /// The name of the "Not linked" addon already there, when one is known.
     pub(crate) existing_name: Option<String>,
+    /// The linked addon that is the addon being installed itself, when it is already there and
+    /// no other linked addon is in the way. Boxed to keep the error small.
+    pub(crate) installed: Option<Box<InstalledAddon>>,
+}
+
+/// A linked addon whose own folder is the parent folder of the package being installed:
+/// LemonUp knows an addon by that folder, so it is the same addon, already installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstalledAddon {
+    /// The name LemonUp shows for it.
+    pub(crate) name: String,
+    /// Its own folder: what `lemonup update` selects it by without a doubt.
+    pub(crate) folder: String,
+    /// Where it is linked to, which is where an update installs it from.
+    pub(crate) source: lemonup_core::SourceKind,
 }
 
 impl SourceError {
@@ -126,6 +141,9 @@ impl fmt::Display for SourceError {
         formatter.write_str(&self.detail)
     }
 }
+
+/// So a command can pass one on with `?` and still read its kind where it prints.
+impl std::error::Error for SourceError {}
 
 impl From<String> for SourceError {
     fn from(detail: String) -> Self {

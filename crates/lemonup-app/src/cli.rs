@@ -83,7 +83,15 @@ pub enum Commands {
     InstallWago {
         #[arg(value_name = "WAGO_ADDON", value_parser = parse_wago_install_target)]
         addon: String,
-        #[arg(long, value_enum, default_value_t = WagoStability::Stable)]
+        /// The release channel to install from
+        // `--stability` was the flag's name up to 2.8 and still works.
+        #[arg(
+            long = "channel",
+            alias = "stability",
+            value_name = "CHANNEL",
+            value_enum,
+            default_value_t = WagoStability::Stable
+        )]
         stability: WagoStability,
         #[arg(long)]
         dry_run: bool,
@@ -193,12 +201,12 @@ pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
             | Commands::Toc { .. }
             | Commands::ExportAddons { .. }
             | Commands::ImportAddons { .. }
-            | Commands::RestoreBackup { .. },
+            | Commands::RestoreBackup { .. }
+            | Commands::InstallWago { .. }
+            | Commands::InstallTukui { .. }
+            | Commands::InstallWowinterface { .. }
+            | Commands::InstallGithub { .. },
         ) => return None,
-        Some(Commands::InstallWago { .. }) => "install-wago",
-        Some(Commands::InstallTukui { .. }) => "install-tukui",
-        Some(Commands::InstallWowinterface { .. }) => "install-wowinterface",
-        Some(Commands::InstallGithub { .. }) => "install-github",
         Some(Commands::Find { .. }) => "find",
     };
     Some(format!(
@@ -341,31 +349,74 @@ mod tests {
     }
 
     #[test]
+    fn install_wago_takes_the_channel_and_still_the_old_flag_name() {
+        let channel = |args: &[&str]| match Cli::try_parse_from(args).expect("parses").command {
+            Some(Commands::InstallWago { stability, .. }) => stability,
+            other => panic!("expected install-wago, got {other:?}"),
+        };
+        assert_eq!(
+            channel(&["lemonup", "install-wago", "weakauras"]),
+            crate::wago::WagoStability::Stable
+        );
+        assert_eq!(
+            channel(&["lemonup", "install-wago", "weakauras", "--channel", "beta"]),
+            crate::wago::WagoStability::Beta
+        );
+        // The name the flag had before, kept so scripts go on working.
+        assert_eq!(
+            channel(&[
+                "lemonup",
+                "install-wago",
+                "weakauras",
+                "--stability",
+                "alpha"
+            ]),
+            crate::wago::WagoStability::Alpha
+        );
+        // Help names only the new one.
+        let help = Cli::try_parse_from(["lemonup", "install-wago", "--help"])
+            .expect_err("help")
+            .to_string();
+        assert!(help.contains("--channel <CHANNEL>"), "{help}");
+        assert!(!help.contains("--stability"), "{help}");
+    }
+
+    #[test]
+    fn json_is_accepted_for_the_install_commands() {
+        for args in [
+            &["lemonup", "--json", "install-wago", "weakauras"][..],
+            &["lemonup", "install-tukui", "elvui", "--json"][..],
+            &[
+                "lemonup",
+                "install-wowinterface",
+                "https://www.wowinterface.com/downloads/info25687-ElvUI_WindTools.html",
+                "--json",
+                "--dry-run",
+            ][..],
+            &[
+                "lemonup",
+                "--json",
+                "install-github",
+                "https://github.com/WeakAuras/WeakAuras2",
+            ][..],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            assert!(cli.json, "{args:?}");
+            assert_eq!(json_refusal(cli.command.as_ref()), None, "{args:?}");
+        }
+    }
+
+    #[test]
     fn json_is_refused_for_commands_that_dont_print_it_yet() {
         let refusal = |args: &[&str]| {
             let cli = Cli::try_parse_from(args).expect("parses");
             assert!(cli.json, "{args:?}");
             json_refusal(cli.command.as_ref())
         };
-        for (args, name) in [
-            (&["lemonup", "find", "--json", "--link"][..], "find"),
-            (
-                &["lemonup", "install-tukui", "elvui", "--json"][..],
-                "install-tukui",
-            ),
-            (
-                &["lemonup", "--json", "install-wago", "weakauras"][..],
-                "install-wago",
-            ),
-        ] {
-            assert_eq!(
-                refusal(args),
-                Some(format!(
-                    "`--json` is not available for `lemonup {name}` yet."
-                )),
-                "{args:?}"
-            );
-        }
+        assert_eq!(
+            refusal(&["lemonup", "find", "--json", "--link"]).as_deref(),
+            Some("`--json` is not available for `lemonup find` yet.")
+        );
         assert_eq!(
             refusal(&["lemonup", "--json"]).as_deref(),
             Some("`--json` needs a command, for example `lemonup --json profiles`.")

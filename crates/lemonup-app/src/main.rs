@@ -46,15 +46,15 @@ use crate::backup::{
 };
 use crate::cli::{Cli, Commands};
 use crate::event::EventHandler;
-use crate::github::install_github_addon;
+use crate::github::install_github_addon_checked;
 use crate::transfer::{collect_existing_import_folders, install_transfer_addons};
 use crate::tui::Tui;
-use crate::tukui::install_tukui_addon;
+use crate::tukui::install_tukui_addon_checked;
 #[cfg(test)]
 use crate::update::refresh_managed_update_state;
 use crate::update::{LiveUpdateSummary, apply_live_updates, refresh_live_update_checks};
-use crate::wago::{WagoStability, install_wago_addon, resolve_wago_api_key};
-use crate::wowinterface::install_wowinterface_addon;
+use crate::wago::{WagoStability, install_wago_addon_with_replace, resolve_wago_api_key};
+use crate::wowinterface::install_wowinterface_addon_checked;
 
 /// How a command that ran to completion maps to the process exit status.
 ///
@@ -220,20 +220,27 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             )
             .await?
         }
-        // Install commands target a single addon: a failed install is a fatal `Err` (exit 1).
+        // Install commands target a single addon: a failed install says so in its own last
+        // lines and exits 1.
         Commands::InstallWago {
             addon,
             stability,
             dry_run,
-        } => run_install_wago(paths, runtime, &addon, stability, dry_run).await?,
+        } => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_install_wago(paths, runtime, &addon, stability, dry_run, &mut output).await?
+        }
         Commands::InstallTukui { addon, dry_run } => {
-            run_install_tukui(paths, runtime, &addon, dry_run).await?
+            let mut output = command_output(&paths, &runtime, json);
+            run_install_tukui(paths, runtime, &addon, dry_run, &mut output).await?
         }
         Commands::InstallWowinterface { addon, dry_run } => {
-            run_install_wowinterface(paths, runtime, &addon, dry_run).await?
+            let mut output = command_output(&paths, &runtime, json);
+            run_install_wowinterface(paths, runtime, &addon, dry_run, &mut output).await?
         }
         Commands::InstallGithub { addon, dry_run } => {
-            run_install_github(paths, runtime, &addon, dry_run).await?
+            let mut output = command_output(&paths, &runtime, json);
+            run_install_github(paths, runtime, &addon, dry_run, &mut output).await?
         }
         Commands::ExportAddons { output: file } => {
             let mut output = command_output(&paths, &runtime, json);
@@ -325,9 +332,12 @@ fn no_addon_dir_refusal(profile: &str) -> LemonupError {
     } else {
         tui_command_hint(profile)
     };
-    LemonupError::Refused(format!(
-        "No AddOns folder is set for this game. Run `{command}` to set it up."
-    ))
+    LemonupError::Refused(format!("Run `{command}` to configure your game first"))
+}
+
+/// The refusal of `install-wago` when no Wago.io key is saved or in the environment.
+fn wago_key_refusal() -> LemonupError {
+    LemonupError::Refused("Add your Wago.io key in Settings to install from Wago.io".to_string())
 }
 
 /// The settings CLI output is drawn with (only its symbols): the profile's, read without
@@ -1096,7 +1106,7 @@ fn run_sync<O: std::io::Write, E: std::io::Write>(
         Ok(report) => report,
         Err(error) if is_refusal(error.as_ref()) => return Err(error),
         Err(error) => {
-            output.fail(&format!("Sync failed - {}", failure_reason(error.as_ref())))?;
+            output.fail("Sync failed", &failure_reason(error.as_ref()), None)?;
             return Ok(CommandOutcome::Failed);
         }
     };
@@ -1335,14 +1345,107 @@ fn run_restore_backup<O: std::io::Write, E: std::io::Write>(
     Ok(())
 }
 
-async fn run_install_wago(
+/// An install command's report, and the warning its source gave with it.
+type InstallDone = (output::InstallReport, Option<String>);
+
+/// Prints what an install command did. A failed install is said the way a finished one is: a
+/// mark, then what happened. A refusal already says what to do next, so it stays as it is.
+fn finish_install<O: std::io::Write, E: std::io::Write>(
+    done: Result<InstallDone, Box<dyn std::error::Error>>,
+    request: output::InstallRequest,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let (report, warning) = match done {
+        Ok(done) => done,
+        Err(error) if is_refusal(error.as_ref()) => return Err(error),
+        Err(error) => {
+            // A source's failure is said from its kind; anything else in its own words.
+            let (reason, hint) = match error.downcast_ref::<crate::source_error::SourceError>() {
+                Some(source_error) => output::install_failure(source_error, request),
+                None => (failure_reason(error.as_ref()), None),
+            };
+            output.fail("Install failed", &reason, hint.as_deref())?;
+            return Ok(CommandOutcome::Failed);
+        }
+    };
+    if let Some(warning) = warning {
+        output.warn(&warning)?;
+    }
+    output.print(&report, Some(report.addon_dir()))?;
+    Ok(CommandOutcome::Success)
+}
+
+/// What an install command was asked for, as the words of a failure need it.
+fn install_request<'a>(
+    source: lemonup_core::SourceKind,
+    target: &'a str,
+    runtime: &'a AppRuntime,
+) -> output::InstallRequest<'a> {
+    output::InstallRequest {
+        source,
+        target,
+        profile: &runtime.profile_name,
+        addon_dir_given: runtime.addon_dir_override.is_some(),
+    }
+}
+
+async fn run_install_wago<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     addon: &str,
     stability: WagoStability,
     dry_run: bool,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let (config_store, config_state) = load_profile_config(&paths)?;
+    let done = install_wago_report(&paths, &runtime, addon, stability, dry_run).await;
+    let request = install_request(lemonup_core::SourceKind::Wago, addon, &runtime);
+    finish_install(done, request, output)
+}
+
+async fn run_install_tukui<O: std::io::Write, E: std::io::Write>(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    dry_run: bool,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let done = install_tukui_report(&paths, &runtime, addon, dry_run).await;
+    let request = install_request(lemonup_core::SourceKind::Tukui, addon, &runtime);
+    finish_install(done, request, output)
+}
+
+async fn run_install_wowinterface<O: std::io::Write, E: std::io::Write>(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    dry_run: bool,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let done = install_wowinterface_report(&paths, &runtime, addon, dry_run).await;
+    let request = install_request(lemonup_core::SourceKind::WowInterface, addon, &runtime);
+    finish_install(done, request, output)
+}
+
+async fn run_install_github<O: std::io::Write, E: std::io::Write>(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    dry_run: bool,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    let done = install_github_report(&paths, &runtime, addon, dry_run).await;
+    let request = install_request(lemonup_core::SourceKind::GitHub, addon, &runtime);
+    finish_install(done, request, output)
+}
+
+async fn install_wago_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
+    addon: &str,
+    stability: WagoStability,
+    dry_run: bool,
+) -> Result<InstallDone, Box<dyn std::error::Error>> {
+    let (config_store, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1352,11 +1455,7 @@ async fn run_install_wago(
         .clone()
         .or(configured_addon_dir.clone());
     let Some(addon_dir) = effective_addon_dir else {
-        println!(
-            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
-            runtime.profile_name, addon, dry_run
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -1374,54 +1473,54 @@ async fn run_install_wago(
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     ensure_bound_addon_dir(
         &database,
-        &paths,
-        &runtime,
+        paths,
+        runtime,
         configured_addon_dir.as_deref(),
         &addon_dir,
         !dry_run,
     )?;
 
     let Some(api_key) = resolve_wago_api_key(&config_store, &config_state)? else {
-        println!(
-            "install skipped: profile={}, addon={}, reason=no Wago API key configured",
-            runtime.profile_name, addon
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(wago_key_refusal()));
     };
 
-    let summary = install_wago_addon(
+    // The error keeps its kind, so a failure can be said in plain words.
+    let summary = install_wago_addon_with_replace(
         &mut database,
         &addon_dir,
         addon,
         &api_key,
         stability,
         dry_run,
+        &[],
     )
-    .await
-    .map_err(Box::<dyn std::error::Error>::from)?;
+    .await?;
 
-    println!(
-        "wago install: profile={}, addon_id={}, addon_name={}, parent={}, folders={}, stability={}, version={}, dry_run={}",
-        runtime.profile_name,
-        summary.addon_id,
-        summary.addon_name,
-        summary.parent_folder,
-        summary.installed_folders.join("|"),
-        summary.stability.as_str(),
-        summary.version.as_deref().unwrap_or("<unknown>"),
-        summary.dry_run
+    let report = output::InstallReport::new(
+        report_target(paths, runtime, &addon_dir),
+        summary.dry_run,
+        output::InstalledAddon {
+            name: summary.addon_name,
+            source: lemonup_core::SourceKind::Wago,
+            id: summary.addon_id,
+            version: summary.version,
+            channel: Some(summary.stability.as_str()),
+            release: None,
+            commit: None,
+            parent_folder: summary.parent_folder,
+            folders: summary.installed_folders,
+        },
     );
-
-    Ok(CommandOutcome::Success)
+    Ok((report, None))
 }
 
-async fn run_install_tukui(
-    paths: AppPaths,
-    runtime: AppRuntime,
+async fn install_tukui_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let (_, config_state) = load_profile_config(&paths)?;
+) -> Result<InstallDone, Box<dyn std::error::Error>> {
+    let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1431,11 +1530,7 @@ async fn run_install_tukui(
         .clone()
         .or(configured_addon_dir.clone());
     let Some(addon_dir) = effective_addon_dir else {
-        println!(
-            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
-            runtime.profile_name, addon, dry_run
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -1453,38 +1548,41 @@ async fn run_install_tukui(
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     ensure_bound_addon_dir(
         &database,
-        &paths,
-        &runtime,
+        paths,
+        runtime,
         configured_addon_dir.as_deref(),
         &addon_dir,
         !dry_run,
     )?;
 
-    let summary = install_tukui_addon(&mut database, &addon_dir, addon, dry_run)
-        .await
-        .map_err(Box::<dyn std::error::Error>::from)?;
+    let summary =
+        install_tukui_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
 
-    println!(
-        "tukui install: profile={}, addon_slug={}, addon_name={}, parent={}, folders={}, version={}, dry_run={}",
-        runtime.profile_name,
-        summary.addon_slug,
-        summary.addon_name,
-        summary.parent_folder,
-        summary.installed_folders.join("|"),
-        summary.version.as_deref().unwrap_or("<unknown>"),
-        summary.dry_run
+    let report = output::InstallReport::new(
+        report_target(paths, runtime, &addon_dir),
+        summary.dry_run,
+        output::InstalledAddon {
+            name: summary.addon_name,
+            source: lemonup_core::SourceKind::Tukui,
+            id: summary.addon_slug,
+            version: summary.version,
+            channel: None,
+            release: None,
+            commit: None,
+            parent_folder: summary.parent_folder,
+            folders: summary.installed_folders,
+        },
     );
-
-    Ok(CommandOutcome::Success)
+    Ok((report, None))
 }
 
-async fn run_install_wowinterface(
-    paths: AppPaths,
-    runtime: AppRuntime,
+async fn install_wowinterface_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let (_, config_state) = load_profile_config(&paths)?;
+) -> Result<InstallDone, Box<dyn std::error::Error>> {
+    let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1494,11 +1592,7 @@ async fn run_install_wowinterface(
         .clone()
         .or(configured_addon_dir.clone());
     let Some(addon_dir) = effective_addon_dir else {
-        println!(
-            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
-            runtime.profile_name, addon, dry_run
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -1516,41 +1610,42 @@ async fn run_install_wowinterface(
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     ensure_bound_addon_dir(
         &database,
-        &paths,
-        &runtime,
+        paths,
+        runtime,
         configured_addon_dir.as_deref(),
         &addon_dir,
         !dry_run,
     )?;
 
-    let summary = install_wowinterface_addon(&mut database, &addon_dir, addon, dry_run)
-        .await
-        .map_err(Box::<dyn std::error::Error>::from)?;
+    let summary =
+        install_wowinterface_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
 
-    println!(
-        "wowinterface install: profile={}, addon_id={}, addon_name={}, parent={}, folders={}, version={}, dry_run={}",
-        runtime.profile_name,
-        summary.addon_id,
-        summary.addon_name,
-        summary.parent_folder,
-        summary.installed_folders.join("|"),
-        summary.version.as_deref().unwrap_or("<unknown>"),
-        summary.dry_run
+    let warning = summary.warning.clone();
+    let report = output::InstallReport::new(
+        report_target(paths, runtime, &addon_dir),
+        summary.dry_run,
+        output::InstalledAddon {
+            name: summary.addon_name,
+            source: lemonup_core::SourceKind::WowInterface,
+            id: summary.addon_id,
+            version: summary.version,
+            channel: None,
+            release: None,
+            commit: None,
+            parent_folder: summary.parent_folder,
+            folders: summary.installed_folders,
+        },
     );
-    if let Some(warning) = &summary.warning {
-        println!("wowinterface warning: {warning}");
-    }
-
-    Ok(CommandOutcome::Success)
+    Ok((report, warning))
 }
 
-async fn run_install_github(
-    paths: AppPaths,
-    runtime: AppRuntime,
+async fn install_github_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
-) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let (_, config_state) = load_profile_config(&paths)?;
+) -> Result<InstallDone, Box<dyn std::error::Error>> {
+    let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1560,11 +1655,7 @@ async fn run_install_github(
         .clone()
         .or(configured_addon_dir.clone());
     let Some(addon_dir) = effective_addon_dir else {
-        println!(
-            "install skipped: profile={}, addon={}, addon_dir=<unconfigured>, dry_run={}",
-            runtime.profile_name, addon, dry_run
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
     };
 
     if runtime.is_guarded_path(&addon_dir) {
@@ -1582,31 +1673,32 @@ async fn run_install_github(
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     ensure_bound_addon_dir(
         &database,
-        &paths,
-        &runtime,
+        paths,
+        runtime,
         configured_addon_dir.as_deref(),
         &addon_dir,
         !dry_run,
     )?;
 
-    let summary = install_github_addon(&mut database, &addon_dir, addon, dry_run)
-        .await
-        .map_err(Box::<dyn std::error::Error>::from)?;
+    let summary =
+        install_github_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
 
-    println!(
-        "github install: profile={}, repo_url={}, repo_name={}, parent={}, folders={}, version={}, commit={}, release={}, dry_run={}",
-        runtime.profile_name,
-        summary.repo_url,
-        summary.repo_name,
-        summary.parent_folder,
-        summary.installed_folders.join("|"),
-        summary.version.as_deref().unwrap_or("<unknown>"),
-        summary.git_commit.as_deref().unwrap_or("<none>"),
-        summary.release_tag.as_deref().unwrap_or("<none>"),
-        summary.dry_run
+    let report = output::InstallReport::new(
+        report_target(paths, runtime, &addon_dir),
+        summary.dry_run,
+        output::InstalledAddon {
+            name: summary.repo_name,
+            source: lemonup_core::SourceKind::GitHub,
+            id: summary.repo_url,
+            version: summary.version,
+            channel: None,
+            release: summary.release_tag,
+            commit: summary.git_commit,
+            parent_folder: summary.parent_folder,
+            folders: summary.installed_folders,
+        },
     );
-
-    Ok(CommandOutcome::Success)
+    Ok((report, None))
 }
 
 /// Refuses to let `addon_dir` touch this profile's tracked state or backups unless it is
@@ -1887,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn skipped_install_outcome_exits_nonzero() {
+    fn a_skipped_command_exits_nonzero() {
         assert_eq!(CommandOutcome::Skipped.exit_status(), 1);
         assert_ne!(CommandOutcome::Skipped, CommandOutcome::Success);
         assert_eq!(CommandOutcome::Success.exit_status(), 0);
@@ -2560,9 +2652,7 @@ mod addon_dir_binding_tests {
                     .expect_err("refused");
                     assert_eq!(
                         error_text(error.as_ref(), Paint::PLAIN),
-                        format!(
-                            "No AddOns folder is set for this game. Run {command} to set it up."
-                        )
+                        format!("Run {command} to configure your game first")
                     );
                     let (stdout, stderr) = streams(output);
                     assert_eq!(stdout, "", "{profile} {mode:?}");
@@ -3029,7 +3119,7 @@ mod addon_dir_binding_tests {
             assert_eq!(stdout, "", "{mode:?}");
             assert_eq!(
                 stderr,
-                format!("✗ Sync failed - path does not exist: {}\n", gone.display()),
+                format!("✗ Sync failed\n  path does not exist: {}\n", gone.display()),
                 "{mode:?}"
             );
         }
@@ -3071,7 +3161,7 @@ mod addon_dir_binding_tests {
             run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("refused");
         assert_eq!(
             refusal.to_string(),
-            "No AddOns folder is set for this game. Run `lemonup` to set it up."
+            "Run `lemonup` to configure your game first"
         );
         assert_eq!(streams(output), (String::new(), String::new()));
     }
@@ -3094,7 +3184,7 @@ mod addon_dir_binding_tests {
     async fn sync_toc_import_and_restore_refuse_without_an_addons_folder_and_print_nothing() {
         let sandbox = sandbox();
         let input = empty_import_file(&sandbox);
-        let expected = "No AddOns folder is set for this game. Run `lemonup` to set it up.";
+        let expected = "Run `lemonup` to configure your game first";
         for config in [Some(AppConfig::default()), None] {
             without_addon_dir(&sandbox, config);
             for mode in [OutputMode::Human, OutputMode::Json] {
@@ -3141,6 +3231,235 @@ mod addon_dir_binding_tests {
                 assert_eq!(stderr, "", "{mode:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_install_commands_refuse_without_an_addons_folder_and_print_nothing() {
+        let sandbox = sandbox();
+        let expected = "Run `lemonup` to configure your game first";
+        for config in [Some(AppConfig::default()), None] {
+            without_addon_dir(&sandbox, config);
+            for (mode, dry_run) in [
+                (OutputMode::Human, false),
+                (OutputMode::Json, false),
+                (OutputMode::Human, true),
+            ] {
+                let mut output = capture(mode);
+                let paths = || sandbox.paths.clone();
+                let errors = [
+                    super::run_install_wago(
+                        paths(),
+                        runtime(None),
+                        "weakauras",
+                        crate::wago::WagoStability::Stable,
+                        dry_run,
+                        &mut output,
+                    )
+                    .await
+                    .expect_err("wago"),
+                    super::run_install_tukui(paths(), runtime(None), "elvui", dry_run, &mut output)
+                        .await
+                        .expect_err("tukui"),
+                    super::run_install_wowinterface(
+                        paths(),
+                        runtime(None),
+                        "25687",
+                        dry_run,
+                        &mut output,
+                    )
+                    .await
+                    .expect_err("wowinterface"),
+                    super::run_install_github(
+                        paths(),
+                        runtime(None),
+                        "https://github.com/example/GitAddon",
+                        dry_run,
+                        &mut output,
+                    )
+                    .await
+                    .expect_err("github"),
+                ];
+                for error in errors {
+                    assert_eq!(
+                        error_text(error.as_ref(), Paint::PLAIN),
+                        expected,
+                        "{mode:?}"
+                    );
+                }
+                let (stdout, stderr) = streams(output);
+                assert_eq!(stdout, "", "{mode:?}");
+                assert_eq!(stderr, "", "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_install_ends_with_the_failed_mark_and_a_refusal_stays_as_it_is() {
+        let report = || {
+            crate::output::InstallReport::new(
+                crate::find::FindTarget::new(
+                    DEFAULT_PROFILE,
+                    Path::new("/games/wow/_retail_/Interface/AddOns"),
+                    lemonup_core::GameFlavor::Retail,
+                    &[],
+                ),
+                false,
+                crate::output::InstalledAddon {
+                    name: "Pawn".to_string(),
+                    source: SourceKind::Wago,
+                    id: "pawn".to_string(),
+                    version: Some("2.14.8".to_string()),
+                    channel: Some("stable"),
+                    release: None,
+                    commit: None,
+                    parent_folder: "Pawn".to_string(),
+                    folders: vec!["Pawn".to_string()],
+                },
+            )
+        };
+        let request = |source| crate::output::InstallRequest {
+            source,
+            target: "https://github.com/a/b",
+            profile: DEFAULT_PROFILE,
+            addon_dir_given: false,
+        };
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            // A failure: one line on stderr, nothing on stdout, exit 1.
+            let mut output = capture(mode);
+            let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
+                "GitHub repo 'a/b' was not found".to_string(),
+            ));
+            let outcome =
+                super::finish_install(Err(failure), request(SourceKind::GitHub), &mut output)
+                    .expect("said on stderr");
+            assert_eq!(outcome, CommandOutcome::Failed);
+            assert_eq!(outcome.exit_status(), 1);
+            assert_eq!(
+                streams(output),
+                (
+                    String::new(),
+                    "✗ Install failed\n  GitHub repo 'a/b' was not found\n".to_string()
+                ),
+                "{mode:?}"
+            );
+
+            // A refusal is passed on as it is.
+            let mut output = capture(mode);
+            let refusal = super::finish_install(
+                Err(Box::new(super::wago_key_refusal())),
+                request(SourceKind::Wago),
+                &mut output,
+            )
+            .expect_err("refused");
+            assert!(super::is_refusal(refusal.as_ref()));
+            assert_eq!(streams(output), (String::new(), String::new()), "{mode:?}");
+
+            // A failure of the source is said from its kind, not in its raw words.
+            let mut output = capture(mode);
+            let offline: Box<dyn std::error::Error> =
+                Box::new(crate::source_error::SourceError::new(
+                    crate::source_error::SourceErrorKind::NoConnection,
+                    "error sending request for url (https://api.github.com/repos/a/b)",
+                ));
+            super::finish_install(Err(offline), request(SourceKind::GitHub), &mut output)
+                .expect("said on stderr");
+            assert_eq!(
+                streams(output).1,
+                "✗ Install failed\n  LemonUp couldn't reach GitHub. Check your internet \
+                 connection and try again.\n",
+                "{mode:?}"
+            );
+
+            // An install that worked prints its report, after the warning its source gave.
+            let mut output = capture(mode);
+            let outcome = super::finish_install(
+                Ok((
+                    report(),
+                    Some("WoWInterface may not support WoW Forever".to_string()),
+                )),
+                request(SourceKind::Wago),
+                &mut output,
+            )
+            .expect("printed");
+            assert_eq!(outcome, CommandOutcome::Success);
+            let (stdout, stderr) = streams(output);
+            assert_eq!(
+                stderr,
+                "warning: WoWInterface may not support WoW Forever\n"
+            );
+            match mode {
+                OutputMode::Human => assert_eq!(
+                    stdout,
+                    "Retail  /games/wow/_retail_/Interface/AddOns\n\n\
+                     ✓ Installed Pawn 2.14.8 from Wago.io\n  Folders  Pawn\n"
+                ),
+                OutputMode::Json => {
+                    let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+                    assert_eq!(document["command"], "install-wago");
+                    assert_eq!(document["addon"]["parent_folder"], "Pawn");
+                    assert_eq!(
+                        document["warnings"],
+                        serde_json::json!(["WoWInterface may not support WoW Forever"])
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_install_that_fails_keeps_the_kind_of_its_error_up_to_the_failure_line() {
+        use crate::source_error::{SourceError, SourceErrorKind};
+        let sandbox = sandbox();
+        // Targets that are turned down before any request is made.
+        let github = super::install_github_report(
+            &sandbox.paths,
+            &runtime(None),
+            "https://example.com/not/github",
+            true,
+        )
+        .await
+        .expect_err("not a GitHub address");
+        let tukui = super::install_tukui_report(&sandbox.paths, &runtime(None), "nope", true)
+            .await
+            .expect_err("not a TukUI package");
+        let wowinterface =
+            super::install_wowinterface_report(&sandbox.paths, &runtime(None), "nope", true)
+                .await
+                .expect_err("not a WoWInterface address");
+        for error in [&github, &tukui, &wowinterface] {
+            let source_error = error
+                .downcast_ref::<SourceError>()
+                .unwrap_or_else(|| panic!("the kind was lost: {error}"));
+            assert_eq!(source_error.kind, SourceErrorKind::Other, "{error}");
+        }
+
+        // The command says it in its last lines and exits 1, with nothing on stdout.
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            let mut output = capture(mode);
+            let outcome = super::run_install_tukui(
+                sandbox.paths.clone(),
+                runtime(None),
+                "nope",
+                true,
+                &mut output,
+            )
+            .await
+            .expect("said on stderr");
+            assert_eq!(outcome, CommandOutcome::Failed);
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stdout, "", "{mode:?}");
+            assert_eq!(stderr, format!("✗ Install failed\n  {tukui}\n"), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn install_wago_without_a_key_is_refused_in_plain_words() {
+        let refusal = super::wago_key_refusal();
+        assert!(matches!(refusal, LemonupError::Refused(_)), "{refusal:?}");
+        assert_eq!(
+            error_text(&refusal, Paint::PLAIN),
+            "Add your Wago.io key in Settings to install from Wago.io"
+        );
     }
 
     #[test]
@@ -3588,13 +3907,13 @@ mod addon_dir_binding_tests {
         assert_eq!(
             error_text(refusal.as_ref(), Paint::terminal()),
             format!(
-                "No AddOns folder is set for this game. Run {} to set it up.",
+                "Run {} to configure your game first",
                 command("lemonup --profile forever tui")
             )
         );
         assert_eq!(
             error_text(refusal.as_ref(), Paint::PLAIN),
-            "No AddOns folder is set for this game. Run `lemonup --profile forever tui` to set it up."
+            "Run `lemonup --profile forever tui` to configure your game first"
         );
         let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
             "no match, run `lemonup check`".to_string(),
@@ -3800,10 +4119,10 @@ mod profile_tests {
             "fn sync_report(",
             "async fn run_import_addons<",
             "fn run_restore_backup<",
-            "async fn run_install_wago(",
-            "async fn run_install_tukui(",
-            "async fn run_install_wowinterface(",
-            "async fn run_install_github(",
+            "async fn install_wago_report(",
+            "async fn install_tukui_report(",
+            "async fn install_wowinterface_report(",
+            "async fn install_github_report(",
         ];
         for command in commands {
             let start = source.find(command).unwrap_or_else(|| panic!("{command}"));

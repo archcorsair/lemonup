@@ -299,30 +299,6 @@ function Get-JsonDocument {
     return $lines[0] | ConvertFrom-Json
 }
 
-function Get-OutputLineMap {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Line
-    )
-
-    $separator = $Line.IndexOf(':')
-    if ($separator -lt 0) {
-        throw "line does not contain a ':' separator: $Line"
-    }
-
-    $body = $Line.Substring($separator + 1).Trim()
-    $map = [ordered]@{}
-    foreach ($segment in $body -split ',\s+') {
-        $pair = $segment.Split('=', 2)
-        if ($pair.Count -ne 2) {
-            continue
-        }
-        $map[$pair[0].Trim()] = $pair[1].Trim()
-    }
-
-    return $map
-}
-
 function Assert-ProcessSucceeded {
     param(
         [Parameter(Mandatory = $true)]

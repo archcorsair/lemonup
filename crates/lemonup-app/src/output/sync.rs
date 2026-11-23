@@ -85,7 +85,9 @@ impl SyncReport {
 }
 
 impl Report for SyncReport {
-    const COMMAND: &'static str = "sync";
+    fn command(&self) -> &'static str {
+        "sync"
+    }
 
     /// The context line, the folders that couldn't be read, then the closing line.
     fn human(&self, paint: Paint) -> Vec<String> {
