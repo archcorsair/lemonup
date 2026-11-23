@@ -211,6 +211,8 @@ fn ready_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         update: update_ready(found)
             .map(|latest| format!("update ready ({})", collapse_spaces(latest))),
         notes,
+        from: None,
+        done: false,
     }
 }
 
@@ -275,6 +277,8 @@ fn likely_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         },
         update: None,
         notes,
+        from: None,
+        done: false,
     }
 }
 
@@ -303,6 +307,8 @@ fn partial_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         version,
         update: None,
         notes,
+        from: None,
+        done: false,
     }
 }
 
@@ -405,16 +411,7 @@ fn note(report: &FindReport, problems: &[SourceProblem], wago_folders: usize) ->
 /// The first line of the readable report: the game and its AddOns folder, and the profile
 /// unless it is the default one.
 pub(crate) fn target_line(target: &FindTarget, paint: Paint) -> String {
-    let mut line = format!(
-        "{}  {}",
-        paint.bold(&target.game),
-        paint.muted(&crate::app::friendly_path(&target.addon_dir))
-    );
-    if target.profile != lemonup_core::DEFAULT_PROFILE {
-        line.push_str("  ");
-        line.push_str(&paint.muted(&format!("(profile {})", target.profile)));
-    }
-    line
+    crate::output::context_line(paint, &target.game, &target.addon_dir, &target.profile)
 }
 
 pub(crate) fn human_report(

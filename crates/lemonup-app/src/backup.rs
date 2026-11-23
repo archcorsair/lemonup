@@ -198,18 +198,6 @@ pub enum PreUpdateBackup {
 }
 
 impl PreUpdateBackup {
-    /// One-line CLI output; `None` when the setting is off.
-    pub fn cli_line(&self) -> Option<String> {
-        match self {
-            Self::Disabled => None,
-            Self::Created { path } => Some(format!("wtf backup: created {}", path.display())),
-            Self::Skipped { minutes_ago } => Some(format!(
-                "wtf backup: skipped (last backup {minutes_ago} min ago)"
-            )),
-            Self::Warning(error) => Some(format!("wtf backup warning: {error}")),
-        }
-    }
-
     /// Short note for the TUI status line; only worth showing when something happened.
     pub fn status_note(&self) -> Option<String> {
         match self {
@@ -878,7 +866,6 @@ mod tests {
         let result = run_pre_update_backup(&settings(false, &backup_dir), &addons, NOW);
 
         assert_eq!(result, PreUpdateBackup::Disabled);
-        assert_eq!(result.cli_line(), None);
         assert!(!backup_dir.exists());
     }
 
@@ -894,12 +881,6 @@ mod tests {
             panic!("expected created, got {result:?}");
         };
         assert!(path.is_file());
-        assert!(
-            result
-                .cli_line()
-                .expect("line")
-                .starts_with("wtf backup: created ")
-        );
         assert_eq!(result.status_note().as_deref(), Some("settings backed up"));
     }
 
@@ -916,10 +897,6 @@ mod tests {
         let result = run_pre_update_backup(&settings(true, &backup_dir), &addons, NOW);
 
         assert_eq!(result, PreUpdateBackup::Skipped { minutes_ago: 59 });
-        assert_eq!(
-            result.cli_line().as_deref(),
-            Some("wtf backup: skipped (last backup 59 min ago)")
-        );
         assert_eq!(result.status_note(), None);
         assert_eq!(list_backups(&backup_dir).expect("list").len(), 1);
     }
@@ -968,12 +945,6 @@ mod tests {
             panic!("expected warning, got {result:?}");
         };
         assert!(message.contains("WTF folder missing"));
-        assert!(
-            result
-                .cli_line()
-                .expect("line")
-                .starts_with("wtf backup warning: ")
-        );
         assert!(
             result
                 .status_note()

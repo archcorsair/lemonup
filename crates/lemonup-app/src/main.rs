@@ -53,10 +53,7 @@ use crate::tui::Tui;
 use crate::tukui::install_tukui_addon;
 #[cfg(test)]
 use crate::update::refresh_managed_update_state;
-use crate::update::{
-    LiveUpdateResult, LiveUpdateStatus, LiveUpdateSummary, apply_live_updates,
-    refresh_live_update_checks, serialize_live_update_status, serialize_update_status,
-};
+use crate::update::{LiveUpdateSummary, apply_live_updates, refresh_live_update_checks};
 use crate::wago::{WagoStability, install_wago_addon, resolve_wago_api_key};
 use crate::wowinterface::install_wowinterface_addon;
 
@@ -173,31 +170,43 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         }
         Commands::Sync => run_sync(paths, runtime)?,
         Commands::Profiles => {
-            // Built per command while only some print through it, so the others start as before.
-            let mut output = output::Output::stdio(
-                output::OutputMode::from_json_flag(json),
-                &output_config(&paths),
-                runtime.display,
-                &profile,
-            );
+            let mut output = command_output(&paths, &runtime, json);
             output.print(
                 &output::ProfilesReport::new(&list_profiles(&paths.roots)?),
                 None,
             )?;
             CommandOutcome::Success
         }
-        Commands::Check { addons } => run_check(paths, runtime, addons).await?,
+        Commands::Check { addons } => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_check(paths, runtime, addons, &mut output).await?
+        }
         Commands::Update {
             addons,
             force,
             dry_run,
             replace,
-        } => run_update(paths, runtime, addons, force, dry_run, replace).await?,
+        } => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_update(paths, runtime, addons, force, dry_run, replace, &mut output).await?
+        }
         Commands::UpdateAll {
             force,
             dry_run,
             replace,
-        } => run_update(paths, runtime, Vec::new(), force, dry_run, replace).await?,
+        } => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_update(
+                paths,
+                runtime,
+                Vec::new(),
+                force,
+                dry_run,
+                replace,
+                &mut output,
+            )
+            .await?
+        }
         // Install commands target a single addon: a failed install is a fatal `Err` (exit 1).
         Commands::InstallWago {
             addon,
@@ -262,6 +271,43 @@ fn command_profile(
         None if matches!(command, Commands::Tui) => tui_profile(roots, None),
         None => Ok(plain(DEFAULT_PROFILE.to_string())),
     }
+}
+
+/// Where a command that prints through `output` prints, for the run's profile. Built per
+/// command while only some print through it, so the others start as before.
+fn command_output(paths: &AppPaths, runtime: &AppRuntime, json: bool) -> output::Output {
+    output::Output::stdio(
+        output::OutputMode::from_json_flag(json),
+        &output_config(paths),
+        runtime.display,
+        &runtime.profile_name,
+    )
+}
+
+/// The game a report is about: the game of `addon_dir` as `profiles` names it.
+fn report_target(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
+    addon_dir: &Path,
+) -> crate::find::FindTarget {
+    crate::find::FindTarget::new(
+        &runtime.profile_name,
+        addon_dir,
+        GameFlavor::for_addons_dir(addon_dir),
+        &list_profiles(&paths.roots).unwrap_or_default(),
+    )
+}
+
+/// The refusal of a command that needs the game's AddOns folder when none is set.
+fn no_addon_dir_refusal(profile: &str) -> LemonupError {
+    let command = if profile == DEFAULT_PROFILE {
+        "lemonup".to_string()
+    } else {
+        tui_command_hint(profile)
+    };
+    LemonupError::Refused(format!(
+        "No AddOns folder is set for this game. Run `{command}` to set it up."
+    ))
 }
 
 /// The settings CLI output is drawn with (only its symbols): the profile's, read without
@@ -730,14 +776,14 @@ async fn run_tui(
     Ok(())
 }
 
-async fn run_check(
+async fn run_check<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     addons: Vec<String>,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(&paths)?;
-    let mut database = StateDatabase::open(paths.state_db_file)?;
-    let show_details = !addons.is_empty();
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
     let api_key = resolve_wago_api_key(&config_store, &config_state)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
@@ -759,7 +805,9 @@ async fn run_check(
             false,
         )?
     {
-        eprintln!("check warning: {mismatch} | running read-only, results are not saved");
+        output.warn(&format!(
+            "{mismatch}. Running read-only, results are not saved."
+        ))?;
         let dir = tempfile::tempdir()?;
         let copy = dir.path().join("state.sqlite");
         database.copy_to(&copy)?;
@@ -775,68 +823,39 @@ async fn run_check(
     )
     .await
     .map_err(Box::<dyn std::error::Error>::from)?;
+    // The check is saved by now. If the rows can't be read again, the report still prints,
+    // with folder names in place of addon names.
+    let rows = database.list_addons().unwrap_or_else(|error| {
+        tracing::warn!(%error, "could not read the addon list for the check report");
+        Vec::new()
+    });
     drop(database);
     drop(scratch);
 
-    let up_to_date = checks
-        .iter()
-        .filter(|check| check.status == UpdateStatus::UpToDate)
-        .count();
-    let update_available = checks
-        .iter()
-        .filter(|check| check.status == UpdateStatus::UpdateAvailable)
-        .count();
-    let remote_older = checks
-        .iter()
-        .filter(|check| check.status == UpdateStatus::RemoteOlder)
-        .count();
-    let unknown = checks
-        .iter()
-        .filter(|check| check.status == UpdateStatus::Unknown)
-        .count();
-    let errors = count_check_errors(&checks);
-
-    println!(
-        "check summary: targets={}, checked={}, up_to_date={}, update_available={}, remote_older={}, unknown={}, errors={}",
-        if addons.is_empty() {
-            "all".to_string()
-        } else {
-            addons.join("|")
-        },
-        checks.len(),
-        up_to_date,
-        update_available,
-        remote_older,
-        unknown,
-        errors
+    let target = effective_addon_dir
+        .as_deref()
+        .map(|addon_dir| report_target(&paths, &runtime, addon_dir));
+    let report = output::CheckReport::new(
+        target,
+        &runtime.profile_name,
+        !addons.is_empty(),
+        &checks,
+        &rows,
     );
-
-    if show_details {
-        for check in checks {
-            println!(
-                "check result: addon={}, status={}, remote_version={}, message={}",
-                check.addon_name,
-                serialize_update_status(check.status),
-                check.remote_version.as_deref().unwrap_or("<unknown>"),
-                check.message.as_deref().unwrap_or("<none>")
-            );
-        }
-    } else {
-        println!(
-            "check detail: pass one or more exact addon names or folders to inspect individual results"
-        );
-    }
-
-    Ok(CommandOutcome::from_error_count(errors))
+    output.print(&report, effective_addon_dir.as_deref())?;
+    Ok(CommandOutcome::from_error_count(count_check_errors(
+        &checks,
+    )))
 }
 
-async fn run_update(
+async fn run_update<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     addons: Vec<String>,
     force: bool,
     dry_run: bool,
     replace: bool,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(&paths)?;
     let mut database = StateDatabase::open(&paths.state_db_file)?;
@@ -872,75 +891,62 @@ async fn run_update(
         )?;
     }
 
-    let outcome = match config_state {
-        ConfigLoad::Missing(path) if runtime.addon_dir_override.is_none() => {
-            println!(
-                "config missing at {}. run `{}` to initialize v2 first.",
-                path.display(),
-                tui_command_hint(&runtime.profile_name)
-            );
-            CommandOutcome::Skipped
-        }
-        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
-            println!(
-                "update skipped: profile={}, tracked_addons={}, targets={}, addon_dir=<unconfigured>, force={}, dry_run={}",
-                runtime.profile_name,
-                installed.len(),
-                render_target_list(&addons),
-                force,
-                dry_run
-            );
-            CommandOutcome::Skipped
-        }
-        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
-            let addon_dir = effective_addon_dir.expect("checked above");
-            let api_key = resolve_wago_api_key(&config_store, &config_state)?;
-            if !dry_run {
-                let backup_settings =
-                    pre_update_backup_settings(&config_state, &paths.data_dir, &addon_dir);
-                let backup = run_pre_update_backup(
-                    &backup_settings,
-                    &addon_dir,
-                    time::OffsetDateTime::now_utc(),
-                );
-                if let Some(line) = backup.cli_line() {
-                    println!("{line}");
-                }
+    // A missing config without `--addon-dir` has no folder either.
+    let Some(addon_dir) = effective_addon_dir else {
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+    };
+    let api_key = resolve_wago_api_key(&config_store, &config_state)?;
+    let backup = if dry_run {
+        None
+    } else {
+        let backup_settings =
+            pre_update_backup_settings(&config_state, &paths.data_dir, &addon_dir);
+        Some(run_pre_update_backup(
+            &backup_settings,
+            &addon_dir,
+            time::OffsetDateTime::now_utc(),
+        ))
+    };
+    let backup = output::BackupLine::of(backup.as_ref());
+    if let Some(warning) = backup.warning() {
+        output.warn(&warning)?;
+    }
+    let run = match apply_live_updates(
+        &mut database,
+        &addon_dir,
+        &addons,
+        api_key.as_deref(),
+        force,
+        dry_run,
+        replace,
+        |_| {},
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            // No report will print, so say here that a backup was made before the failure.
+            if let Some(line) = backup.text() {
+                output.note(&line)?;
             }
-            let run = apply_live_updates(
-                &mut database,
-                &addon_dir,
-                &addons,
-                api_key.as_deref(),
-                force,
-                dry_run,
-                replace,
-                |_| {},
-            )
-            .await?;
-            // Held packages are removed when `run` drops; the CLI never asks.
-            let summary = run.summary;
-            println!(
-                "update summary: profile={}, tracked_addons={}, targets={}, updated={}, up_to_date={}, remote_older={}, held={}, skipped_manual={}, skipped_no_api_key={}, errors={}, force={}, dry_run={}",
-                runtime.profile_name,
-                installed.len(),
-                render_target_list(&addons),
-                summary.updated_addons,
-                summary.up_to_date,
-                summary.remote_older,
-                summary.held,
-                summary.skipped_manual,
-                summary.skipped_no_api_key,
-                summary.errors,
-                force,
-                dry_run
-            );
-            print_update_details(&addons, &run.results);
-            update_outcome(&summary)
+            return Err(error.into());
         }
     };
-
-    Ok(outcome)
+    // Held packages are removed when `run` drops; the CLI never asks.
+    let report = output::UpdateReport::new(
+        Some(report_target(&paths, &runtime, &addon_dir)),
+        output::UpdateFlags {
+            named: !addons.is_empty(),
+            force,
+            dry_run,
+        },
+        backup,
+        &run.summary,
+        &run.results,
+        &installed,
+    );
+    output.print(&report, Some(&addon_dir))?;
+    Ok(update_outcome(&run.summary))
 }
 
 /// A run that held addons for a yes did not finish them, so it counts them with the errors.
@@ -1085,14 +1091,6 @@ fn leftover_staging_warnings(addon_dir: &Path, summary: &ScanSummary) -> Vec<Str
             )
         })
         .collect()
-}
-
-fn render_target_list(addons: &[String]) -> String {
-    if addons.is_empty() {
-        "all".to_string()
-    } else {
-        addons.join("|")
-    }
 }
 
 fn run_export_addons(
@@ -1289,85 +1287,6 @@ fn print_import_analysis(input_path: &std::path::Path, analysis: &ImportAnalysis
         .filter_map(lemonup_core::TransferAddon::unknown_source_warning)
     {
         println!("import warning: {warning}");
-    }
-}
-
-fn print_update_details(addons: &[String], results: &[LiveUpdateResult]) {
-    for line in build_update_detail_lines(addons, results) {
-        println!("{line}");
-    }
-}
-
-fn build_update_detail_lines(addons: &[String], results: &[LiveUpdateResult]) -> Vec<String> {
-    if !addons.is_empty() {
-        return results.iter().map(format_update_result_line).collect();
-    }
-
-    let skipped_manual = results
-        .iter()
-        .filter(|result| result.status == LiveUpdateStatus::SkippedManual)
-        .count();
-    let skipped_no_api_key = results
-        .iter()
-        .filter(|result| result.status == LiveUpdateStatus::SkippedNoApiKey)
-        .count();
-    // Errors, held-back older remotes, plus updates that succeeded but carry a warning (for
-    // example the WoWInterface Forever notice), stay visible in the aggregated view. Up-to-date
-    // results carry a boilerplate message and are intentionally not listed.
-    let attention_lines = results
-        .iter()
-        .filter(|result| {
-            result.status == LiveUpdateStatus::Error
-                || result.status == LiveUpdateStatus::RemoteOlder
-                || result.status == LiveUpdateStatus::Held
-                || (result.status == LiveUpdateStatus::Updated && result.message.is_some())
-        })
-        .map(format_update_result_line)
-        .collect::<Vec<_>>();
-
-    let mut lines = Vec::new();
-    if skipped_manual > 0 || skipped_no_api_key > 0 {
-        lines.push(format!(
-            "update detail: skipped manual={}, no_api_key={} | rerun `lemonup update <addon...>` for per-addon detail",
-            skipped_manual, skipped_no_api_key
-        ));
-    }
-
-    if lines.is_empty() && attention_lines.is_empty() {
-        lines.push(
-            "update detail: all processed targets were updated or already up to date".to_string(),
-        );
-        return lines;
-    }
-
-    lines.extend(attention_lines);
-    lines
-}
-
-fn format_update_result_line(result: &LiveUpdateResult) -> String {
-    let held_hint = if result.status == LiveUpdateStatus::Held {
-        "; rerun with --replace to replace them"
-    } else {
-        ""
-    };
-    format!(
-        "update result: addon={}, source={}, status={}, previous_version={}, remote_version={}, message={}{held_hint}",
-        result.addon_name,
-        render_source_kind(result.source),
-        serialize_live_update_status(result.status),
-        result.previous_version.as_deref().unwrap_or("<unknown>"),
-        result.remote_version.as_deref().unwrap_or("<unknown>"),
-        result.message.as_deref().unwrap_or("<none>")
-    )
-}
-
-fn render_source_kind(source: lemonup_core::SourceKind) -> &'static str {
-    match source {
-        lemonup_core::SourceKind::GitHub => "GitHub",
-        lemonup_core::SourceKind::Tukui => "TukUI",
-        lemonup_core::SourceKind::WowInterface => "WoWInterface",
-        lemonup_core::SourceKind::Wago => "Wago",
-        lemonup_core::SourceKind::Manual => "manual",
     }
 }
 
@@ -1713,13 +1632,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandOutcome, LogDestination, build_update_detail_lines, count_check_errors,
-        default_log_filter, log_destination, log_writer, open_log_file, pre_update_backup_settings,
-        refresh_managed_update_state, tui_command_hint, update_outcome,
+        CommandOutcome, LogDestination, count_check_errors, default_log_filter, log_destination,
+        log_writer, open_log_file, pre_update_backup_settings, refresh_managed_update_state,
+        tui_command_hint, update_outcome,
     };
     use crate::update::{
-        CheckResult, LiveUpdateResult, LiveUpdateStatus, LiveUpdateSummary,
-        build_managed_update_record, build_update_checks, determine_update_status,
+        CheckResult, LiveUpdateSummary, build_managed_update_record, build_update_checks,
+        determine_update_status,
     };
     use lemonup_core::{
         AddonKind, GameFlavor, OwnedFolder, ScannedAddon, SourceKind, StateDatabase, UpdateStatus,
@@ -1993,42 +1912,6 @@ mod tests {
     }
 
     #[test]
-    fn a_held_update_names_its_folders_and_the_replace_flag() {
-        let mut held = update_result("BigWigs", LiveUpdateStatus::Held, SourceKind::GitHub);
-        held.message = Some(
-            "would replace Not linked folders: BigWigs_Core (has .git, likely a dev copy), \
-             BigWigs_Options"
-                .to_string(),
-        );
-        // Named or all: a held addon is always listed.
-        for addons in [Vec::new(), vec!["BigWigs".to_string()]] {
-            let lines = build_update_detail_lines(&addons, std::slice::from_ref(&held));
-            assert!(
-                lines.iter().any(|line| line.contains("status=held")
-                    && line
-                        .contains("BigWigs_Core (has .git, likely a dev copy), BigWigs_Options")
-                    && line.ends_with("; rerun with --replace to replace them")),
-                "{lines:?}"
-            );
-        }
-    }
-
-    fn update_result(
-        addon_name: &str,
-        status: LiveUpdateStatus,
-        source: SourceKind,
-    ) -> LiveUpdateResult {
-        LiveUpdateResult {
-            addon_name: addon_name.to_string(),
-            source,
-            status,
-            previous_version: Some("1.0.0".to_string()),
-            remote_version: Some("1.1.0".to_string()),
-            message: Some("detail".to_string()),
-        }
-    }
-
-    #[test]
     fn refresh_managed_update_state_records_managed_rows() {
         let temp = tempdir().expect("tempdir");
         let addons_dir = temp
@@ -2228,91 +2111,6 @@ mod tests {
     }
 
     #[test]
-    fn update_all_detail_lines_aggregate_skip_noise() {
-        let lines = build_update_detail_lines(
-            &[],
-            &[
-                update_result(
-                    "HandyNotes",
-                    LiveUpdateStatus::SkippedManual,
-                    SourceKind::Manual,
-                ),
-                update_result("Pawn", LiveUpdateStatus::SkippedManual, SourceKind::Manual),
-            ],
-        );
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(
-            lines[0],
-            "update detail: skipped manual=2, no_api_key=0 | rerun `lemonup update <addon...>` for per-addon detail"
-        );
-    }
-
-    #[test]
-    fn update_all_detail_lines_keep_error_rows_actionable() {
-        let lines = build_update_detail_lines(
-            &[],
-            &[update_result(
-                "WeakAuras",
-                LiveUpdateStatus::Error,
-                SourceKind::Wago,
-            )],
-        );
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("update result: addon=WeakAuras"));
-        assert!(lines[0].contains("status=error"));
-    }
-
-    #[test]
-    fn update_all_detail_lines_show_warnings_on_updated_results() {
-        let mut warned = update_result(
-            "Details",
-            LiveUpdateStatus::Updated,
-            SourceKind::WowInterface,
-        );
-        warned.message = Some("WoWInterface may not support WoW Forever".to_string());
-        let mut quiet = update_result("Pawn", LiveUpdateStatus::Updated, SourceKind::WowInterface);
-        quiet.message = None;
-        let up_to_date = update_result("Bagnon", LiveUpdateStatus::UpToDate, SourceKind::Wago);
-
-        let lines = build_update_detail_lines(&[], &[warned, quiet, up_to_date]);
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("update result: addon=Details"));
-        assert!(lines[0].contains("status=updated"));
-        assert!(lines[0].contains("message=WoWInterface may not support WoW Forever"));
-    }
-
-    #[test]
-    fn update_all_detail_lines_list_remote_older_and_count_missing_key_skips() {
-        let mut older = update_result(
-            "RareScanner",
-            LiveUpdateStatus::RemoteOlder,
-            SourceKind::WowInterface,
-        );
-        older.message = Some(
-            "remote version 9.2.5.1 is older than installed 12.1.5.3; use --force to install it anyway"
-                .to_string(),
-        );
-        let lines = build_update_detail_lines(
-            &[],
-            &[
-                older,
-                update_result("Pawn", LiveUpdateStatus::SkippedNoApiKey, SourceKind::Wago),
-            ],
-        );
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(
-            lines[0],
-            "update detail: skipped manual=0, no_api_key=1 | rerun `lemonup update <addon...>` for per-addon detail"
-        );
-        assert!(lines[1].contains("addon=RareScanner"));
-        assert!(lines[1].contains("status=remote_older"));
-    }
-
-    #[test]
     fn remote_older_and_missing_key_skips_do_not_fail_the_command() {
         let checks = vec![crate::update::CheckResult {
             addon_name: "Postal".to_string(),
@@ -2326,22 +2124,6 @@ mod tests {
             CommandOutcome::from_error_count(count_check_errors(&checks)).exit_status(),
             0
         );
-    }
-
-    #[test]
-    fn targeted_update_detail_lines_keep_per_addon_rows() {
-        let lines = build_update_detail_lines(
-            &["WeakAuras".to_string()],
-            &[update_result(
-                "WeakAuras",
-                LiveUpdateStatus::SkippedManual,
-                SourceKind::Manual,
-            )],
-        );
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("update result: addon=WeakAuras"));
-        assert!(lines[0].contains("status=skipped_manual"));
     }
 }
 
@@ -2437,13 +2219,13 @@ mod addon_dir_binding_tests {
     use tempfile::tempdir;
 
     use super::{
-        error_text, format_skipped_detail, format_sync_summary, guarded_dirs_of,
-        leftover_staging_warnings, run_import_addons, run_restore_backup, run_sync, run_update,
-        toc_command,
+        CommandOutcome, error_text, format_skipped_detail, format_sync_summary, guarded_dirs_of,
+        leftover_staging_warnings, run_check, run_import_addons, run_restore_backup, run_sync,
+        run_update, toc_command,
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
-    use crate::output::Paint;
+    use crate::output::{Output, OutputMode, Paint};
 
     struct Sandbox {
         _temp: tempfile::TempDir,
@@ -2578,6 +2360,7 @@ mod addon_dir_binding_tests {
     #[tokio::test]
     async fn mismatched_addon_dir_refuses_update_before_any_backup() {
         let sandbox = sandbox();
+        let mut output = capture(OutputMode::Human);
         let error = run_update(
             sandbox.paths.clone(),
             runtime(Some(&sandbox.forever)),
@@ -2585,6 +2368,7 @@ mod addon_dir_binding_tests {
             false,
             false,
             false,
+            &mut output,
         )
         .await
         .expect_err("update against forever must be refused");
@@ -2595,6 +2379,204 @@ mod addon_dir_binding_tests {
                 .exists()
         );
         assert_eq!(tracked_github(&sandbox.paths).source, SourceKind::GitHub);
+        let (stdout, _) = output.into_writers();
+        assert!(stdout.is_empty());
+    }
+
+    type Captured = Output<Vec<u8>, Vec<u8>>;
+
+    fn capture(mode: OutputMode) -> Captured {
+        Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            DEFAULT_PROFILE,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn streams(output: Captured) -> (String, String) {
+        let (stdout, stderr) = output.into_writers();
+        (
+            String::from_utf8(stdout).expect("utf-8"),
+            String::from_utf8(stderr).expect("utf-8"),
+        )
+    }
+
+    /// The sandbox's GitHub addon as one that is not linked, so a run asks no source.
+    fn unlink_tracked(paths: &AppPaths) {
+        let mut addon = tracked_github(paths);
+        addon.source = SourceKind::Manual;
+        addon.source_url = None;
+        StateDatabase::open(&paths.state_db_file)
+            .expect("open db")
+            .upsert_addon(&addon)
+            .expect("unlink");
+    }
+
+    #[tokio::test]
+    async fn update_without_an_addons_folder_refuses_and_prints_nothing() {
+        let sandbox = sandbox();
+        for (profile, command) in [
+            (DEFAULT_PROFILE, "`lemonup`"),
+            ("forever", "`lemonup --profile forever tui`"),
+        ] {
+            let runtime = AppRuntime::new(profile.to_string(), None, Vec::new());
+            for config in [Some(AppConfig::default()), None] {
+                match &config {
+                    Some(config) => {
+                        ConfigStore::for_profile(&sandbox.paths)
+                            .write_config(config)
+                            .expect("config without a folder");
+                    }
+                    None => {
+                        let _ = fs::remove_file(&sandbox.paths.config_file);
+                    }
+                }
+                for mode in [OutputMode::Human, OutputMode::Json] {
+                    let mut output = capture(mode);
+                    let error = run_update(
+                        sandbox.paths.clone(),
+                        runtime.clone(),
+                        Vec::new(),
+                        false,
+                        false,
+                        false,
+                        &mut output,
+                    )
+                    .await
+                    .expect_err("refused");
+                    assert_eq!(
+                        error_text(error.as_ref(), Paint::PLAIN),
+                        format!(
+                            "No AddOns folder is set for this game. Run {command} to set it up."
+                        )
+                    );
+                    let (stdout, stderr) = streams(output);
+                    assert_eq!(stdout, "", "{profile} {mode:?}");
+                    assert_eq!(stderr, "", "{profile} {mode:?}");
+                }
+            }
+        }
+        assert!(!backup_root(&sandbox.paths.data_dir).join("retail").exists());
+    }
+
+    #[tokio::test]
+    async fn check_against_another_folder_warns_that_it_runs_read_only() {
+        let sandbox = sandbox();
+        unlink_tracked(&sandbox.paths);
+        let mut human = capture(OutputMode::Human);
+        let outcome = run_check(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.forever)),
+            Vec::new(),
+            &mut human,
+        )
+        .await
+        .expect("check");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(human);
+        assert!(
+            stderr.starts_with("warning: profile 'default' is bound to the AddOns folder"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.ends_with(". Running read-only, results are not saved.\n"),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(!stdout.contains("warning"), "{stdout}");
+        assert!(
+            stdout.ends_with("\n\nNo linked addons to check.\n"),
+            "{stdout}"
+        );
+
+        let mut json = capture(OutputMode::Json);
+        run_check(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.forever)),
+            Vec::new(),
+            &mut json,
+        )
+        .await
+        .expect("check");
+        let (stdout, stderr) = streams(json);
+        assert_eq!(stderr, "");
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["command"], "check");
+        let warnings = document["warnings"].as_array().expect("warnings");
+        assert_eq!(warnings.len(), 1, "{document}");
+        assert!(
+            warnings[0]
+                .as_str()
+                .expect("text")
+                .ends_with(". Running read-only, results are not saved."),
+            "{document}"
+        );
+        assert_eq!(document["addons"][0]["source"], "manual");
+        assert_eq!(document["addons"][0]["status"], "unknown");
+        // Nothing was written for the other folder.
+        assert_eq!(
+            StateDatabase::open(&sandbox.paths.state_db_file)
+                .expect("open")
+                .bound_addon_dir()
+                .expect("binding"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn update_all_prints_its_report_and_backs_up_first() {
+        let sandbox = sandbox();
+        unlink_tracked(&sandbox.paths);
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_update(
+            sandbox.paths.clone(),
+            runtime(None),
+            Vec::new(),
+            false,
+            false,
+            false,
+            &mut output,
+        )
+        .await
+        .expect("update");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        let lines = stdout.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("Retail  "), "{stdout}");
+        assert_eq!(lines[1], "");
+        assert!(
+            lines[2].starts_with("Made a backup of your game settings: "),
+            "{stdout}"
+        );
+        assert_eq!(
+            lines[3..],
+            ["", "Not linked (1)", "", "No linked addons to update."]
+        );
+
+        // A dry run makes no backup, and JSON says so.
+        let mut output = capture(OutputMode::Json);
+        run_update(
+            sandbox.paths.clone(),
+            runtime(None),
+            vec!["GitAddon".to_string()],
+            false,
+            true,
+            false,
+            &mut output,
+        )
+        .await
+        .expect("dry run");
+        let (stdout, _) = streams(output);
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["command"], "update");
+        assert_eq!(document["dry_run"], true);
+        assert_eq!(document["backup"]["status"], "disabled");
+        assert_eq!(document["summary"]["skipped_manual"], 1);
+        assert_eq!(document["addons"][0]["folder"], "GitAddon");
     }
 
     #[test]
@@ -3138,8 +3120,8 @@ mod profile_tests {
         let commands = [
             "fn run_toc(",
             "async fn run_find(",
-            "async fn run_check(",
-            "async fn run_update(",
+            "async fn run_check<",
+            "async fn run_update<",
             "fn run_sync(",
             "async fn run_import_addons(",
             "fn run_restore_backup(",

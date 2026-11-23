@@ -2,7 +2,7 @@
 provider = "tukui"
 install_command = "install-tukui ElvUI"
 selector = "ElvUI"
-expected_source = "TukUI"
+expected_source = "tukui"
 expected_parent = "ElvUI"
 requires_api_key = false
 
@@ -10,7 +10,7 @@ requires_api_key = false
 provider = "github"
 install_command = "install-github https://github.com/WeakAuras/WeakAuras2"
 selector = "WeakAuras"
-expected_source = "GitHub"
+expected_source = "github"
 expected_parent = "WeakAuras"
 requires_api_key = false
 
@@ -18,7 +18,7 @@ requires_api_key = false
 provider = "wowinterface"
 install_command = "install-wowinterface https://www.wowinterface.com/downloads/info7032-TomTom.html"
 selector = "TomTom"
-expected_source = "WoWInterface"
+expected_source = "wowinterface"
 expected_parent = "TomTom"
 requires_api_key = false
 
@@ -26,7 +26,7 @@ requires_api_key = false
 provider = "wago"
 install_command = "install-wago bigwigs"
 selector = "BigWigs"
-expected_source = "Wago"
+expected_source = "wago"
 expected_parent = "BigWigs"
 requires_api_key = true
 

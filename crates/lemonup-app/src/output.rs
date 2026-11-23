@@ -3,22 +3,27 @@
 //! Colors are always the terminal's own 16 colors, whatever theme is saved: the CLI draws no
 //! background, so a theme's text color could be close to invisible on the terminal's own.
 
+mod check;
 mod profiles;
 #[cfg(test)]
 mod tests;
+mod update;
 
+pub(crate) use check::CheckReport;
 pub(crate) use profiles::ProfilesReport;
+pub(crate) use update::{BackupLine, UpdateFlags, UpdateReport};
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crossterm::Command;
 use crossterm::style::{Attribute, Colored, SetAttribute, SetForegroundColor};
-use lemonup_core::AppConfig;
+use lemonup_core::{AppConfig, SourceKind};
 use ratatui::backend::IntoCrossterm;
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Serialize, Serializer};
 
+use crate::source_error::SourceErrorKind;
 use crate::theme::{ColorRoles, DisplayEnv, Symbols};
 
 /// Longest line of a wrapped list or sentence when the terminal's width is unknown. Table rows
@@ -148,10 +153,6 @@ impl Paint {
     }
 
     /// From the installed version to the new one: `→`, or `->` with simple symbols.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the reports of later commands use it")
-    )]
     pub(crate) fn arrow(self) -> &'static str {
         self.symbols.arrow
     }
@@ -198,6 +199,16 @@ impl Paint {
     /// Something to look at, such as the word `warning:`: yellow.
     pub(crate) fn attention(self, text: &str) -> String {
         self.apply(text, |roles| Style::new().fg(roles.amber), false)
+    }
+
+    /// What an update leaves behind, such as the old version: red.
+    pub(crate) fn removed(self, text: &str) -> String {
+        self.apply(text, |roles| Style::new().fg(roles.red), false)
+    }
+
+    /// What an update brings, such as the new version, and the done mark: green.
+    pub(crate) fn added(self, text: &str) -> String {
+        self.apply(text, |roles| Style::new().fg(roles.green), false)
     }
 
     pub(crate) fn bold(self, text: &str) -> String {
@@ -257,6 +268,11 @@ pub(crate) struct Entry {
     /// "update ready (x)", shown after the version in its own color.
     pub(crate) update: Option<String>,
     pub(crate) notes: Vec<String>,
+    /// The version the addon moves on from. With it the row reads `from → version`, the old
+    /// version in red and the new one in green.
+    pub(crate) from: Option<String>,
+    /// A done mark before the name, in green.
+    pub(crate) done: bool,
 }
 
 /// The lines of a section's addons, sorted by name, with the name and source columns aligned.
@@ -272,21 +288,42 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
         .map(|entry| columns(&entry.source))
         .max()
         .unwrap_or(0);
+    // A table with a done row keeps a column for the mark, so every name starts in line.
+    let mark = paint.symbols.done;
+    let mark_width = if entries.iter().any(|entry| entry.done) {
+        columns(mark) + 1
+    } else {
+        0
+    };
+    let note_indent = format!("{SUB_INDENT}{}", " ".repeat(mark_width));
     let mut lines = Vec::new();
     for entry in entries {
-        let mut version = paint.text(&entry.version);
+        let mut version = match &entry.from {
+            Some(from) => format!(
+                "{} {} {}",
+                paint.removed(from),
+                paint.text(paint.arrow()),
+                paint.added(&entry.version)
+            ),
+            None => paint.text(&entry.version),
+        };
         if let Some(update) = &entry.update {
             version.push_str(&paint.text(", "));
             version.push_str(&paint.update_ready(update));
         }
+        let marked = if entry.done {
+            format!("{} ", paint.added(mark))
+        } else {
+            " ".repeat(mark_width)
+        };
         lines.push(format!(
-            "{INDENT}{}  {}  {version}",
+            "{INDENT}{marked}{}  {}  {version}",
             paint.text(&pad(&entry.name, name_width)),
             paint.muted(&pad(&entry.source, source_width)),
         ));
         for note in &entry.notes {
             lines.extend(
-                wrap_words(SUB_INDENT, note, paint.width)
+                wrap_words(&note_indent, note, paint.width)
                     .iter()
                     .map(|line| paint.muted(line)),
             );
@@ -308,12 +345,140 @@ pub(crate) fn section(
     if !lines.is_empty() {
         lines.push(String::new());
     }
-    lines.push(format!(
+    lines.push(heading_line(paint, tone, title, count));
+    lines.extend(body);
+}
+
+/// A heading in `tone` with its muted count.
+fn heading_line(paint: Paint, tone: Tone, title: &str, count: usize) -> String {
+    format!(
         "{} {}",
         paint.heading(tone, title),
         paint.muted(&format!("({count})"))
-    ));
-    lines.extend(body);
+    )
+}
+
+/// Adds headings that only count, on adjacent lines with one blank line above the group.
+/// A heading whose count is 0 is left out, and so is the group when every count is.
+pub(crate) fn count_headings(
+    lines: &mut Vec<String>,
+    paint: Paint,
+    tone: Tone,
+    counts: &[(&str, usize)],
+) {
+    let shown = counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .collect::<Vec<_>>();
+    if shown.is_empty() {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    for (title, count) in shown {
+        lines.push(heading_line(paint, tone, title, *count));
+    }
+}
+
+/// The first line of a report on one game: the game in bold, its AddOns folder muted, then
+/// the profile unless it is the default one.
+pub(crate) fn context_line(paint: Paint, game: &str, addon_dir: &Path, profile: &str) -> String {
+    let mut line = format!(
+        "{}  {}",
+        paint.bold(game),
+        paint.muted(&crate::app::friendly_path(addon_dir))
+    );
+    if profile != lemonup_core::DEFAULT_PROFILE {
+        line.push_str("  ");
+        line.push_str(&paint.muted(&format!("(profile {profile})")));
+    }
+    line
+}
+
+/// A version as a report shows it: `unknown` when there is none.
+pub(crate) fn version_text(version: Option<&str>) -> &str {
+    version.unwrap_or("unknown")
+}
+
+/// A version without the addon's own name in front. Some sources label a release with it
+/// (`Pawn 2.14.4`), and the row already starts with the name. `names` are the addon's name
+/// and folder. A version that is nothing but the name stays as it is.
+pub(crate) fn short_version<'a>(version: &'a str, names: &[&str]) -> &'a str {
+    let version = version.trim();
+    for name in names {
+        let Some(prefix) = version.get(..name.len()) else {
+            continue;
+        };
+        if name.is_empty() || !prefix.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let rest = &version[name.len()..];
+        let trimmed = rest.trim_start_matches([' ', '-', '_', ':']);
+        // Only a name followed by a separator is a label: "Pawn2" is left alone.
+        if trimmed.len() < rest.len() && !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    version
+}
+
+/// A source as the TUI names it. An addon that is not linked is "Not linked".
+pub(crate) fn source_label(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::Manual => "Not linked",
+        linked => crate::app::dashboard_source_name(linked, true),
+    }
+}
+
+/// A source's name in JSON and in `key=value` lines. Written out here, never taken from
+/// `SourceKind`'s own serde names (`git_hub`, `wow_interface`).
+pub(crate) fn source_key(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::Wago => "wago",
+        SourceKind::WowInterface => "wowinterface",
+        SourceKind::Tukui => "tukui",
+        SourceKind::GitHub => "github",
+        SourceKind::Manual => "manual",
+    }
+}
+
+/// The kind of a source failure in JSON and in `key=value` lines.
+pub(crate) fn error_kind_key(kind: SourceErrorKind) -> &'static str {
+    match kind {
+        SourceErrorKind::NoConnection => "no_connection",
+        SourceErrorKind::KeyRejected => "key_rejected",
+        SourceErrorKind::NotFound => "not_found",
+        SourceErrorKind::SlowDown => "slow_down",
+        SourceErrorKind::FoldersInTheWay
+        | SourceErrorKind::FoldersOfLinkedAddon
+        | SourceErrorKind::WrongRepository
+        | SourceErrorKind::Other => "other",
+    }
+}
+
+fn serialize_source<S: Serializer>(source: &SourceKind, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(source_key(*source))
+}
+
+fn serialize_error_kind<S: Serializer>(
+    kind: &Option<SourceErrorKind>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match kind {
+        Some(kind) => serializer.serialize_some(error_kind_key(*kind)),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Rows of a report keyed by folder, compared without case as Windows and macOS do.
+fn rows_by_folder(
+    addons: &[lemonup_core::AddonRecord],
+) -> std::collections::HashMap<String, &lemonup_core::AddonRecord> {
+    addons
+        .iter()
+        .map(|addon| (addon.folder.to_lowercase(), addon))
+        .collect()
 }
 
 /// Fills lines of at most `width` columns with `units`, each kept whole, after `indent`.
@@ -356,6 +521,11 @@ fn lossy_path<S: Serializer>(path: &Option<PathBuf>, serializer: S) -> Result<S:
         Some(path) => serializer.serialize_some(&path.to_string_lossy()),
         None => serializer.serialize_none(),
     }
+}
+
+/// A path as a JSON string, written with replacement characters where it isn't valid Unicode.
+fn lossy_path_buf<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
 }
 
 /// What a command prints: its readable report, or its fields in the JSON document.
@@ -499,16 +669,13 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// A warning: on stderr, or in the `warnings` of the JSON document.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "later commands warn through it")
-    )]
     pub(crate) fn warn(&mut self, text: &str) -> std::io::Result<()> {
         match self.mode {
             OutputMode::Human => writeln!(
                 self.stderr,
-                "{} {text}",
-                self.stderr_paint.attention("warning:")
+                "{} {}",
+                self.stderr_paint.attention("warning:"),
+                printable(text)
             ),
             OutputMode::Json => {
                 self.warnings.push(text.to_string());
@@ -518,13 +685,9 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// A notice on stderr. The JSON document leaves it out.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "later commands note through it")
-    )]
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
         match self.mode {
-            OutputMode::Human => writeln!(self.stderr, "{text}"),
+            OutputMode::Human => writeln!(self.stderr, "{}", printable(text)),
             OutputMode::Json => Ok(()),
         }
     }

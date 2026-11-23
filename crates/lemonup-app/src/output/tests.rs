@@ -225,6 +225,8 @@ fn wide_characters_count_as_two_columns() {
                 version: "1.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                from: None,
+                done: false,
             },
             Entry {
                 name: "Pawn".to_string(),
@@ -232,6 +234,8 @@ fn wide_characters_count_as_two_columns() {
                 version: "2.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                from: None,
+                done: false,
             },
         ],
         Paint::PLAIN,
@@ -358,4 +362,24 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
         );
         assert!(full.print(&sample(), None).is_err(), "{mode:?}");
     }
+}
+
+#[test]
+fn a_version_loses_the_addon_name_only_as_a_label() {
+    assert_eq!(short_version("Pawn 2.14.4", &["Pawn"]), "2.14.4");
+    assert_eq!(short_version("pawn-2.14.4", &["Pawn"]), "2.14.4");
+    assert_eq!(
+        short_version("ElvUI_WindTools-4.16", &["Wind Tools", "ElvUI_WindTools"]),
+        "4.16"
+    );
+    // Not a label: no separator, nothing after it, or another name.
+    assert_eq!(short_version("Pawn2", &["Pawn"]), "Pawn2");
+    assert_eq!(short_version("Pawn", &["Pawn"]), "Pawn");
+    assert_eq!(short_version("16.02", &["ElvUI"]), "16.02");
+    assert_eq!(
+        short_version("v1.56", &["ElvUI Floating Combat Text"]),
+        "v1.56"
+    );
+    assert_eq!(short_version("背包 1.0", &["背"]), "背包 1.0");
+    assert_eq!(short_version("unknown", &["Pawn", ""]), "unknown");
 }
