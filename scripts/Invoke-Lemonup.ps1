@@ -280,6 +280,24 @@ function Invoke-Lemonup {
     }
 }
 
+# The JSON document a `--json` run printed on stdout. Invoke-Lemonup merges stderr into Output,
+# so the document is picked out by how it starts: with its schema. A log line on stderr is JSON
+# too, but never starts so.
+function Get-JsonDocument {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Result,
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    $line = $Result.Output | Where-Object { $_ -like '{"schema":*' } | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        throw "$Context did not print a JSON document"
+    }
+    return $line | ConvertFrom-Json
+}
+
 function Get-OutputLineMap {
     param(
         [Parameter(Mandatory = $true)]

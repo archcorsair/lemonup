@@ -60,14 +60,10 @@ foreach ($target in $matrix) {
     $results.Add((Get-CompactResultLine -Name $target.selector -Stage 'seed' -Status 'ok' -Detail "parent=$($parsed['parent'])"))
 }
 
-$sync = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments @('sync')
+$sync = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments @('sync', '--json')
 Assert-ProcessSucceeded -Result $sync -Context 'seed sync'
-$syncLine = $sync.Output | Where-Object { $_ -like 'sync summary:*' } | Select-Object -Last 1
-if ([string]::IsNullOrWhiteSpace($syncLine)) {
-    throw 'seed sync did not produce a sync summary'
-}
-$syncParsed = Get-OutputLineMap -Line $syncLine
-$results.Add((Get-CompactResultLine -Name 'state' -Stage 'sync' -Status 'ok' -Detail "scanned=$($syncParsed['scanned_addons']) upserted=$($syncParsed['upserted_addons'])"))
+$syncSummary = (Get-JsonDocument -Result $sync -Context 'seed sync').summary
+$results.Add((Get-CompactResultLine -Name 'state' -Stage 'sync' -Status 'ok' -Detail "scanned=$($syncSummary.scanned_addons) upserted=$($syncSummary.upserted_addons)"))
 
 Write-Host "manual seed results:"
 foreach ($line in $results) {

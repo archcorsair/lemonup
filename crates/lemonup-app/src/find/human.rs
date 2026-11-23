@@ -704,7 +704,10 @@ pub(crate) fn human_closing(
     error_paint: Paint,
 ) -> Result<Vec<String>, LemonupError> {
     let lines = closing_text(report, names, link, error_paint)?;
-    Ok(lines.iter().map(|line| paint.bold(line)).collect())
+    Ok(lines
+        .iter()
+        .map(|line| paint.commands(line, Paint::bold))
+        .collect())
 }
 
 /// The closing lines as text. `error_paint` draws the refusal, which goes to stderr.
@@ -733,8 +736,8 @@ fn closing_text(
         LinkOutcome::NothingToLink => Ok(vec![
             "Nothing was linked. No addon is ready to link.".to_string(),
         ]),
-        LinkOutcome::NeedsYes(regrouping) => {
-            Err(LemonupError::Refused(error_paint.bold(&format!(
+        LinkOutcome::NeedsYes(regrouping) => Err(LemonupError::Refused(error_paint.commands(
+            &format!(
                 "{} of these {} folders between addons: {}. Nothing was linked. \
              Run `lemonup find --link --yes` to link the {}.",
                 regrouping.len(),
@@ -745,8 +748,9 @@ fn closing_text(
                 } else {
                     format!("{ready} addons ready to link")
                 }
-            ))))
-        }
+            ),
+            Paint::bold,
+        ))),
         LinkOutcome::Linked {
             rows,
             unconfirmed,

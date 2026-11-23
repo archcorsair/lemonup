@@ -14,6 +14,16 @@ pub(crate) struct TransferInstallSummary {
     pub installed: usize,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    /// What happened to each addon of the list, in the order they were installed.
+    pub outcomes: Vec<TransferInstallOutcome>,
+}
+
+/// One addon of an import: installed, or the error that stopped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransferInstallOutcome {
+    pub name: String,
+    pub source: TransferSourceKind,
+    pub result: Result<(), String>,
 }
 
 pub(crate) fn collect_existing_import_folders(
@@ -57,16 +67,26 @@ pub(crate) async fn install_transfer_addons(
         installed: 0,
         errors: Vec::new(),
         warnings: Vec::new(),
+        outcomes: Vec::new(),
     };
 
     for addon in &analysis.to_install {
-        match install_transfer_addon(database, addon_dir, addon, wago_api_key).await {
+        let result = match install_transfer_addon(database, addon_dir, addon, wago_api_key).await {
             Ok(warning) => {
                 summary.installed += 1;
                 summary.warnings.extend(warning);
+                Ok(())
             }
-            Err(error) => summary.errors.push(format!("{}: {error}", addon.name)),
-        }
+            Err(error) => {
+                summary.errors.push(format!("{}: {error}", addon.name));
+                Err(error)
+            }
+        };
+        summary.outcomes.push(TransferInstallOutcome {
+            name: addon.name.clone(),
+            source: addon.source.clone(),
+            result,
+        });
     }
 
     summary
@@ -116,5 +136,84 @@ async fn install_transfer_addon(
             "this version of LemonUp can't install addons from '{}'",
             addon.source.as_str()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lemonup_core::{ImportAnalysis, StateDatabase, TransferAddon, TransferSourceKind};
+    use tempfile::tempdir;
+
+    use super::{TransferInstallOutcome, install_transfer_addons};
+
+    fn addon(name: &str, source: TransferSourceKind, url: Option<&str>) -> TransferAddon {
+        TransferAddon {
+            name: name.to_string(),
+            folder: name.to_string(),
+            source,
+            url: url.map(str::to_string),
+            owned_folders: None,
+            reinstallable: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn each_addon_has_its_outcome_and_the_errors_keep_their_text() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp.path().join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("addons");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("db");
+        // None of these reaches a source: each fails before any download.
+        let analysis = ImportAnalysis {
+            to_install: vec![
+                addon("NoLink", TransferSourceKind::GitHub, None),
+                addon(
+                    "WagoOne",
+                    TransferSourceKind::Wago,
+                    Some("https://addons.wago.io/x"),
+                ),
+                addon(
+                    "Mine",
+                    TransferSourceKind::Manual,
+                    Some("https://example.com"),
+                ),
+            ],
+            already_installed: Vec::new(),
+            manual_addons: Vec::new(),
+            duplicate_addons: Vec::new(),
+            unsupported_addons: Vec::new(),
+        };
+        let summary = install_transfer_addons(&mut database, &addon_dir, &analysis, None).await;
+        assert_eq!(summary.installed, 0);
+        assert_eq!(
+            summary.errors,
+            [
+                "NoLink: missing install URL",
+                "WagoOne: missing Wago API key",
+                "Mine: exports of addons that are not linked cannot be reinstalled",
+            ]
+        );
+        assert_eq!(
+            summary.outcomes,
+            [
+                TransferInstallOutcome {
+                    name: "NoLink".to_string(),
+                    source: TransferSourceKind::GitHub,
+                    result: Err("missing install URL".to_string()),
+                },
+                TransferInstallOutcome {
+                    name: "WagoOne".to_string(),
+                    source: TransferSourceKind::Wago,
+                    result: Err("missing Wago API key".to_string()),
+                },
+                TransferInstallOutcome {
+                    name: "Mine".to_string(),
+                    source: TransferSourceKind::Manual,
+                    result: Err(
+                        "exports of addons that are not linked cannot be reinstalled".to_string()
+                    ),
+                },
+            ]
+        );
     }
 }

@@ -1362,6 +1362,8 @@ fn plain_output_keeps_its_fields_and_fixes_the_three_lines() {
 
 const BOLD: &str = "\x1b[1m";
 const END: &str = "\x1b[0m";
+/// A command: bold cyan.
+const COMMAND: &str = "\x1b[1m\x1b[38;5;6m";
 const GREEN: &str = "\x1b[38;5;2m";
 const AMBER: &str = "\x1b[38;5;3m";
 const RED: &str = "\x1b[38;5;1m";
@@ -1501,8 +1503,21 @@ fn the_closing_line_and_the_refusal_are_bold() {
     assert_eq!(
         closing,
         [format!(
-            "{BOLD}Nothing was changed. `lemonup find --link` links the 5 addons ready to link.{END}"
+            "{BOLD}Nothing was changed. {END}{COMMAND}lemonup find --link{END}{BOLD} links the 5 \
+             addons ready to link.{END}"
         )]
+    );
+    let plain = human_closing(
+        &full_report(),
+        &full_names(),
+        None,
+        Paint::PLAIN,
+        Paint::PLAIN,
+    )
+    .expect("closing");
+    assert_eq!(
+        plain,
+        ["Nothing was changed. `lemonup find --link` links the 5 addons ready to link."]
     );
 
     let linked = LinkOutcome::Linked {
@@ -1545,7 +1560,18 @@ fn the_closing_line_and_the_refusal_are_bold() {
     };
     let bold = refused(Paint::terminal());
     assert!(bold.starts_with(BOLD) && bold.ends_with(END), "{bold:?}");
-    assert!(!refused(Paint::PLAIN).contains('\x1b'));
+    assert!(
+        bold.contains(&format!(
+            " Run {END}{COMMAND}lemonup find --link --yes{END}{BOLD} to link the "
+        )),
+        "{bold:?}"
+    );
+    let plain = refused(Paint::PLAIN);
+    assert!(!plain.contains('\x1b'));
+    assert!(
+        plain.contains(" Run `lemonup find --link --yes` to link the "),
+        "{plain:?}"
+    );
 }
 
 #[test]

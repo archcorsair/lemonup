@@ -17,23 +17,6 @@ if (-not (Test-Path -LiteralPath $layout.AddonsDir)) {
 
 $matrix = Read-ManualTestMatrix
 
-# The JSON document a `--json` run printed on stdout. Invoke-Lemonup merges stderr into Output,
-# so the document is the line that starts with '{'.
-function Get-JsonDocument {
-    param(
-        [Parameter(Mandatory = $true)]
-        $Result,
-        [Parameter(Mandatory = $true)]
-        [string]$Context
-    )
-
-    # The document starts with its schema. A log line on stderr is JSON too, but never starts so.
-    $line = $Result.Output | Where-Object { $_ -like '{"schema":*' } | Select-Object -Last 1
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        throw "$Context did not print a JSON document"
-    }
-    return $line | ConvertFrom-Json
-}
 $results = New-Object System.Collections.Generic.List[string]
 
 $sync = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments @('sync')

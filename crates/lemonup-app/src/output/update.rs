@@ -77,15 +77,16 @@ impl BackupLine {
     }
 
     /// The line of the readable report, when there is one to show.
-    pub(crate) fn text(&self) -> Option<String> {
+    pub(crate) fn text(&self, paint: Paint) -> Option<String> {
         match self {
             Self::Created { path } => Some(format!(
-                "Made a backup of your game settings: {}",
-                crate::app::friendly_path(path)
+                "{} {}",
+                paint.text("Made a backup of your game settings:"),
+                paint.path(path)
             )),
-            Self::Skipped { minutes_ago } => Some(format!(
+            Self::Skipped { minutes_ago } => Some(paint.text(&format!(
                 "Backup of your game settings skipped, the last one is {minutes_ago} min old"
-            )),
+            ))),
             Self::Failed { .. } | Self::Disabled | Self::NotRun => None,
         }
     }
@@ -192,7 +193,7 @@ impl UpdateReport {
 
     fn closing(&self) -> String {
         if self.dry_run {
-            return "Dry run. Nothing was changed.".to_string();
+            return "Dry run - no changes".to_string();
         }
         let parts = [
             (self.summary.updated, "updated"),
@@ -243,7 +244,7 @@ fn held_note(row: &UpdateRow) -> Option<String> {
         return row.message.clone();
     }
     Some(format!(
-        "Would replace Not linked {}: {}. Run again with --replace.",
+        "Would replace Not linked {}: {}. Run again with `--replace`.",
         if row.replaces.len() == 1 {
             "folder"
         } else {
@@ -270,11 +271,11 @@ impl Report for UpdateReport {
                 &target.profile,
             ));
         }
-        if let Some(text) = self.backup.text() {
+        if let Some(text) = self.backup.text(paint) {
             if !lines.is_empty() {
                 lines.push(String::new());
             }
-            lines.push(paint.text(&text));
+            lines.push(text);
         }
         let shown = |status: LiveUpdateStatus| {
             self.addons
@@ -338,7 +339,7 @@ impl Report for UpdateReport {
                         source_label(row.source),
                         remote(row)
                     );
-                    let note = "Run again with --force to install it.".to_string();
+                    let note = "Run again with `--force` to install it.".to_string();
                     entry(row, version, vec![note])
                 })
                 .collect(),
@@ -376,7 +377,12 @@ impl Report for UpdateReport {
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        lines.push(paint.text(&self.closing()));
+        let closing = self.closing();
+        lines.push(if self.dry_run {
+            paint.attention(&closing)
+        } else {
+            paint.text(&closing)
+        });
         lines
     }
 }
@@ -542,11 +548,11 @@ mod tests {
                 "Held (1)",
                 "  ElvUI  TukUI  14.04 → 14.05",
                 "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries. Run",
-                "      again with --replace.",
+                "      again with `--replace`.",
                 "",
                 "Newer than source (1)",
                 "  Pawn  WoWInterface  2.11.4, WoWInterface has 2.11.2",
-                "      Run again with --force to install it.",
+                "      Run again with `--force` to install it.",
                 "",
                 "Failed (1)",
                 "  Bagnon  WoWInterface  11.0.1",
@@ -575,9 +581,12 @@ mod tests {
             !lines.iter().any(|line| line.contains("backup")),
             "{lines:?}"
         );
+        assert_eq!(lines[lines.len() - 2..], ["", "Dry run - no changes"]);
+        // Yellow, so a dry run is not taken for the real thing.
+        let colored = report(flags, BackupLine::of(None)).human(Paint::terminal());
         assert_eq!(
-            lines[lines.len() - 2..],
-            ["", "Dry run. Nothing was changed."]
+            colored.last().map(String::as_str),
+            Some("\x1b[38;5;3mDry run - no changes\x1b[0m")
         );
         // Nothing is done yet, so no row has the done mark.
         assert_eq!(
@@ -754,7 +763,7 @@ mod tests {
                 [
                     "  ElvUI  TukUI  14.04 → 14.05",
                     "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries. Run again \
-                     with --replace.",
+                     with `--replace`.",
                 ]
             );
         }
@@ -770,7 +779,7 @@ mod tests {
             .human(Paint::PLAIN.with_width(200));
         assert!(
             lines.contains(
-                &"      Would replace Not linked folder: ElvUI_Options. Run again with --replace."
+                &"      Would replace Not linked folder: ElvUI_Options. Run again with `--replace`."
                     .to_string()
             ),
             "{lines:?}"
@@ -893,7 +902,7 @@ mod tests {
         assert_eq!(
             lines[at + 2],
             "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries (has .git, \
-             likely a dev copy). Run again with --replace."
+             likely a dev copy). Run again with `--replace`."
         );
     }
 
