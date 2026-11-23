@@ -12,6 +12,10 @@ pub(crate) struct TocReport {
     folder: String,
     fields: Vec<TocRow>,
     changed: Option<TocChange>,
+    /// The change was saved but the files could not be read again, so `fields` is empty
+    /// without the addon having none.
+    #[serde(skip)]
+    fields_unread: bool,
 }
 
 /// One field as the game reads it from the addon's files.
@@ -51,6 +55,27 @@ impl TocReport {
             folder: folder.to_string(),
             fields,
             changed,
+            fields_unread: false,
+        }
+    }
+
+    /// The report of a change whose files could not be read again afterwards.
+    pub(crate) fn with_fields_unread(self) -> Self {
+        Self {
+            fields_unread: true,
+            ..self
+        }
+    }
+
+    /// What `fields` can't say: that it is empty because the files could not be read.
+    pub(crate) fn warnings(&self) -> Vec<String> {
+        if self.fields_unread {
+            vec![
+                "The change is saved, but the addon's .toc files could not be read again."
+                    .to_string(),
+            ]
+        } else {
+            Vec::new()
         }
     }
 }
@@ -181,6 +206,25 @@ mod tests {
         assert_eq!(
             report.human(Paint::PLAIN)[1],
             "Notes     My Keys  (yours, not in the files)"
+        );
+    }
+
+    #[test]
+    fn a_change_whose_files_could_not_be_read_again_warns() {
+        assert!(changed(Some("Bags")).warnings().is_empty());
+        let unread = changed(Some("Bags")).with_fields_unread();
+        assert_eq!(
+            unread.warnings(),
+            ["The change is saved, but the addon's .toc files could not be read again."]
+        );
+        // The warning is in the document too.
+        let warnings = unread.warnings();
+        let document = json_document(&unread, None, &[warnings[0].as_str()]);
+        assert!(
+            document.trim_end().ends_with(
+                r#""warnings":["The change is saved, but the addon's .toc files could not be read again."]}"#
+            ),
+            "{document}"
         );
     }
 

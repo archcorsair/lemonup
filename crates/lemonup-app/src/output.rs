@@ -304,11 +304,6 @@ impl Paint {
         out
     }
 
-    /// Text that is already drawn, for [`Paint::commands`]: it stays as it is.
-    pub(crate) fn as_drawn(self, text: &str) -> String {
-        text.to_string()
-    }
-
     pub(crate) fn heading(self, tone: Tone, text: &str) -> String {
         let pick: fn(&ColorRoles) -> Style = match tone {
             Tone::Good => |roles| Style::new().fg(roles.green),
@@ -317,6 +312,15 @@ impl Paint {
             Tone::Quiet => |roles| Style::new().fg(roles.text),
         };
         self.apply(text, pick, true)
+    }
+}
+
+/// A reader that went away (`| head`) is not an error of the command: there is nobody left
+/// to tell.
+fn ignore_closed(written: std::io::Result<()>) -> std::io::Result<()> {
+    match written {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
     }
 }
 
@@ -445,6 +449,8 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
             lines.extend(
                 wrap_words(&note_indent, note, paint.width)
                     .iter()
+                    // Drawn after wrapping, so a command here must be one word, as a flag is:
+                    // one split over two lines would keep its backticks.
                     .map(|line| paint.commands(line, Paint::muted)),
             );
         }
@@ -800,11 +806,7 @@ impl<O: Write, E: Write> Output<O, E> {
             }
         }
         .and_then(|()| self.stdout.flush());
-        match written {
-            // The reader went away (`| head`): there is nobody left to tell.
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            other => other,
-        }
+        ignore_closed(written)
     }
 
     /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
@@ -813,32 +815,32 @@ impl<O: Write, E: Write> Output<O, E> {
         if self.mode == OutputMode::Json {
             self.warnings.push(text.to_string());
         }
-        writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{} {}",
             self.stderr_paint.attention("warning:"),
             self.stderr_paint.commands(text, Paint::text)
-        )
+        ))
     }
 
     /// The last line of a command that failed, on stderr in both modes: the red mark, then
     /// what failed and why. Nothing goes to stdout after it.
     pub(crate) fn fail(&mut self, text: &str) -> std::io::Result<()> {
-        writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{} {}",
             self.stderr_paint.failed(),
             self.stderr_paint.commands(text, Paint::text)
-        )
+        ))
     }
 
     /// A notice on stderr, in both modes. The JSON document leaves it out.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
-        writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{}",
             self.stderr_paint.commands(text, Paint::text)
-        )
+        ))
     }
 
     #[cfg(test)]

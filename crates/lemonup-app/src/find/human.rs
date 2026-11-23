@@ -695,27 +695,31 @@ fn moves_text(regrouping: &[FoundAddon], names: &LocalNames) -> String {
 
 /// The lines that end the report, saying what happened: nothing was changed, nothing was
 /// linked, or what was linked. A refusal (`--link` without `--yes` when matches move folders)
-/// is an error that prints as it is.
+/// is an error in plain words; [`human_refusal`] draws it.
 pub(crate) fn human_closing(
     report: &FindReport,
     names: &LocalNames,
     link: Option<LinkOutcome>,
     paint: Paint,
-    error_paint: Paint,
 ) -> Result<Vec<String>, LemonupError> {
-    let lines = closing_text(report, names, link, error_paint)?;
+    let lines = closing_text(report, names, link)?;
     Ok(lines
         .iter()
         .map(|line| paint.commands(line, Paint::bold))
         .collect())
 }
 
-/// The closing lines as text. `error_paint` draws the refusal, which goes to stderr.
+/// The refusal of `find --link` as stderr gets it: bold, like the closing line it takes the
+/// place of. Its words name addons and folders, so it is drawn here and never kept drawn.
+pub(crate) fn human_refusal(message: &str, error_paint: Paint) -> String {
+    error_paint.commands(message, Paint::bold)
+}
+
+/// The closing lines as text.
 fn closing_text(
     report: &FindReport,
     names: &LocalNames,
     link: Option<LinkOutcome>,
-    error_paint: Paint,
 ) -> Result<Vec<String>, LemonupError> {
     let ready = exact_picks(report).len();
     let Some(outcome) = link else {
@@ -736,20 +740,17 @@ fn closing_text(
         LinkOutcome::NothingToLink => Ok(vec![
             "Nothing was linked. No addon is ready to link.".to_string(),
         ]),
-        LinkOutcome::NeedsYes(regrouping) => Err(LemonupError::Refused(error_paint.commands(
-            &format!(
-                "{} of these {} folders between addons: {}. Nothing was linked. \
+        LinkOutcome::NeedsYes(regrouping) => Err(LemonupError::Refused(format!(
+            "{} of these {} folders between addons: {}. Nothing was linked. \
              Run `lemonup find --link --yes` to link the {}.",
-                regrouping.len(),
-                plural(regrouping.len(), "moves", "move"),
-                moves_text(&regrouping, names),
-                if ready == 1 {
-                    "addon ready to link".to_string()
-                } else {
-                    format!("{ready} addons ready to link")
-                }
-            ),
-            Paint::bold,
+            regrouping.len(),
+            plural(regrouping.len(), "moves", "move"),
+            moves_text(&regrouping, names),
+            if ready == 1 {
+                "addon ready to link".to_string()
+            } else {
+                format!("{ready} addons ready to link")
+            }
         ))),
         LinkOutcome::Linked {
             rows,

@@ -59,6 +59,16 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_backup_is_a_link_where_the_terminal_has_links() {
+        let line = &report().human(Paint::terminal().with_links(true))[0];
+        assert!(
+            line.ends_with("from \x1b]8;;file:///data/backups/retail/WTF-2026-11-22-2140.zip\x1b\\\x1b[1m/data/backups/retail/WTF-2026-11-22-2140.zip\x1b[0m\x1b]8;;\x1b\\"),
+            "{line:?}"
+        );
+    }
+
     #[test]
     fn the_done_mark_is_green_and_only_the_16_colors_are_used() {
         let line = &report().human(Paint::terminal())[0];

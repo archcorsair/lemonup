@@ -69,7 +69,7 @@ enum CommandOutcome {
     /// The command could not run (no addon dir, no Wago API key) and printed a skip message.
     /// Scripts must see this as a failure, so it exits 1.
     Skipped,
-    /// The command failed and said so in its own last line.
+    /// The command failed or refused and said so in its own last line.
     Failed,
 }
 
@@ -114,13 +114,11 @@ async fn main() -> ExitCode {
 }
 
 /// What an error that ends a command prints. A refusal already says what happened and what to
-/// do next, so it prints as it is; anything else is labeled as an error, in `paint`.
+/// do next, so it has no label; anything else is labeled as an error, in `paint`. Both can
+/// name an addon, a folder or a source's own words, so control characters are removed.
 fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -> String {
     match error.downcast_ref::<LemonupError>() {
-        // LemonUp's own words, already drawn for the terminal (`find` makes one bold). Only
-        // the commands they name are drawn here.
-        Some(LemonupError::Refused(message)) => paint.commands(message, output::Paint::as_drawn),
-        // An error can carry a source's own words, so control characters are removed.
+        Some(LemonupError::Refused(message)) => paint.commands(message, output::Paint::text),
         _ => format!(
             "{} {}",
             output::error_label(paint),
@@ -182,7 +180,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         }
         Commands::Sync => {
             let mut output = command_output(&paths, &runtime, json);
-            sync_command(paths, runtime, &mut output)?
+            run_sync(paths, runtime, &mut output)?
         }
         Commands::Profiles => {
             let mut output = command_output(&paths, &runtime, json);
@@ -410,6 +408,9 @@ fn run_toc<O: std::io::Write, E: std::io::Write>(
         change.is_some(),
     )?;
     let report = toc_command(&mut database, &addon_dir, addon, change, yes)?;
+    for warning in report.warnings() {
+        output.warn(&warning)?;
+    }
     output.print(&report, Some(&addon_dir))?;
     Ok(CommandOutcome::Success)
 }
@@ -533,10 +534,20 @@ async fn run_find(
         }
         println!();
         let outcome = if link { Some(link_now()?) } else { None };
-        // A refusal leaves the report on screen and ends the run with what happened.
-        let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
-        for line in crate::find::human_closing(&report, &names, outcome, paint, error_paint)? {
-            println!("{line}");
+        // A refusal leaves the report on screen and ends the run with what happened, bold
+        // like the closing line it takes the place of.
+        match crate::find::human_closing(&report, &names, outcome, paint) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(LemonupError::Refused(message)) => {
+                let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
+                eprintln!("{}", crate::find::human_refusal(&message, error_paint));
+                return Ok(CommandOutcome::Failed);
+            }
+            Err(error) => return Err(Box::new(error)),
         }
     }
     Ok(CommandOutcome::from_error_count(lookups.problems.len()))
@@ -604,7 +615,7 @@ fn toc_command(
     if record.source == lemonup_core::SourceKind::Manual && !yes {
         return Err(LemonupError::Refused(format!(
             "{} is Not linked: LemonUp didn't install it, so changing its .toc files needs \
-             --yes. Its own lines are kept, and --clear puts them back. Nothing was changed.",
+             `--yes`. Its own lines are kept, and `--clear` puts them back. Nothing was changed.",
             record.name
         )));
     }
@@ -625,21 +636,26 @@ fn toc_command(
     }
     // The change is saved by now. If the files can't be read again, the report has no fields
     // rather than failing a run that did what it was asked.
-    let rows = toc_rows(addon_dir, &record.folder, &overrides).unwrap_or_else(|error| {
+    let rows = toc_rows(addon_dir, &record.folder, &overrides).map_err(|error| {
         tracing::warn!(%error, "could not read the .toc fields after a change");
-        Vec::new()
     });
+    let unread = rows.is_err();
     let changed = output::TocChange {
         field: field.name(),
         value: value.and_then(|_| overrides.get(field.name()).cloned()),
         folders,
     };
-    Ok(output::TocReport::new(
+    let report = output::TocReport::new(
         record.display_name(),
         &record.folder,
-        rows,
+        rows.unwrap_or_default(),
         Some(changed),
-    ))
+    );
+    Ok(if unread {
+        report.with_fields_unread()
+    } else {
+        report
+    })
 }
 
 /// Log filter used when `RUST_LOG` is unset or invalid: quiet (`warn`) for
@@ -1052,22 +1068,6 @@ fn pre_update_backup_settings(
     }
 }
 
-/// `sync`, with a failure said the way its success is: a mark, then what happened. A refusal
-/// already says what to do next, so it stays as it is.
-fn sync_command<O: std::io::Write, E: std::io::Write>(
-    paths: AppPaths,
-    runtime: AppRuntime,
-    output: &mut output::Output<O, E>,
-) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    match run_sync(paths, runtime, output) {
-        Err(error) if !is_refusal(error.as_ref()) => {
-            output.fail(&format!("Sync failed - {}", failure_reason(error.as_ref())))?;
-            Ok(CommandOutcome::Failed)
-        }
-        result => result,
-    }
-}
-
 fn is_refusal(error: &(dyn std::error::Error + 'static)) -> bool {
     matches!(
         error.downcast_ref::<LemonupError>(),
@@ -1083,12 +1083,36 @@ fn failure_reason(error: &(dyn std::error::Error + 'static)) -> String {
     }
 }
 
+/// `sync`, with a failure said the way its success is: a mark, then what happened. A refusal
+/// already says what to do next, so it stays as it is. Only the sync itself is called a
+/// failed sync: a report that can't be written is an error of its own, because by then
+/// LemonUp's list is saved.
 fn run_sync<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let (_, config_state) = load_profile_config(&paths)?;
+    let report = match sync_report(&paths, &runtime) {
+        Ok(report) => report,
+        Err(error) if is_refusal(error.as_ref()) => return Err(error),
+        Err(error) => {
+            output.fail(&format!("Sync failed - {}", failure_reason(error.as_ref())))?;
+            return Ok(CommandOutcome::Failed);
+        }
+    };
+    for warning in report.warnings() {
+        output.warn(&warning)?;
+    }
+    output.print(&report, Some(report.addon_dir()))?;
+    Ok(CommandOutcome::Success)
+}
+
+/// Reads the AddOns folder into LemonUp's list and says what it found. Prints nothing.
+fn sync_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
+) -> Result<output::SyncReport, Box<dyn std::error::Error>> {
+    let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
@@ -1116,8 +1140,8 @@ fn run_sync<O: std::io::Write, E: std::io::Write>(
     let mut database = StateDatabase::open(&paths.state_db_file)?;
     ensure_bound_addon_dir(
         &database,
-        &paths,
-        &runtime,
+        paths,
+        runtime,
         configured_addon_dir.as_deref(),
         &addon_dir,
         true,
@@ -1127,12 +1151,10 @@ fn run_sync<O: std::io::Write, E: std::io::Write>(
         scan_addons_dir_report(&addon_dir, GameFlavor::for_addons_dir(&addon_dir), &tracked)?;
     let summary = database.reconcile_scan(&report)?;
 
-    let report = output::SyncReport::new(report_target(&paths, &runtime, &addon_dir), &summary);
-    for warning in report.warnings() {
-        output.warn(&warning)?;
-    }
-    output.print(&report, Some(report.addon_dir()))?;
-    Ok(CommandOutcome::Success)
+    Ok(output::SyncReport::new(
+        report_target(paths, runtime, &addon_dir),
+        &summary,
+    ))
 }
 
 fn run_export_addons<O: std::io::Write, E: std::io::Write>(
@@ -1172,6 +1194,11 @@ async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
         .addon_dir_override
         .clone()
         .or(configured_addon_dir.clone());
+    // A dry run only reads, so it reports without a folder too; installing needs one. Refused
+    // before the list is opened, so a refused run changes nothing.
+    if !dry_run && effective_addon_dir.is_none() {
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+    }
 
     let mut database = StateDatabase::open(paths.state_db_file.clone())?;
     // Same order as every other command: guard, validate, and only then bind. A dry run
@@ -1204,10 +1231,6 @@ async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
             |error| Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>,
         )?;
     let analysis = analyze_import(&transfer, &existing_folders);
-    // A dry run only reads, so it reports without a folder too; installing needs one.
-    if !dry_run && effective_addon_dir.is_none() {
-        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
-    }
     for warning in analysis
         .unsupported_addons
         .iter()
@@ -2330,12 +2353,13 @@ mod addon_dir_binding_tests {
         )
     }
 
-    /// `lemonup sync`, printing into a buffer nobody reads.
+    /// The work of `lemonup sync`, with the error it ends in. `run_sync` says a failure in
+    /// its own last line.
     fn sync(
         paths: AppPaths,
         runtime: AppRuntime,
     ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-        run_sync(paths, runtime, &mut capture(OutputMode::Human))
+        super::sync_report(&paths, &runtime).map(|_| CommandOutcome::Success)
     }
 
     /// `lemonup restore-backup`, printing into a buffer nobody reads.
@@ -2997,9 +3021,8 @@ mod addon_dir_binding_tests {
         let gone = sandbox.retail.join("gone");
         for mode in [OutputMode::Human, OutputMode::Json] {
             let mut output = capture(mode);
-            let outcome =
-                super::sync_command(sandbox.paths.clone(), runtime(Some(&gone)), &mut output)
-                    .expect("the failure is said on stderr");
+            let outcome = run_sync(sandbox.paths.clone(), runtime(Some(&gone)), &mut output)
+                .expect("the failure is said on stderr");
             assert_eq!(outcome, CommandOutcome::Failed);
             assert_eq!(outcome.exit_status(), 1);
             let (stdout, stderr) = streams(output);
@@ -3013,18 +3036,39 @@ mod addon_dir_binding_tests {
 
         // A sync that works is untouched.
         let mut output = capture(OutputMode::Human);
-        let outcome =
-            super::sync_command(sandbox.paths.clone(), runtime(None), &mut output).expect("sync");
+        let outcome = run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect("sync");
         assert_eq!(outcome, CommandOutcome::Success);
         let (stdout, stderr) = streams(output);
         assert!(stdout.ends_with(" - sync complete\n"), "{stdout}");
         assert_eq!(stderr, "");
 
+        // A report that can't be written is an error of its own: the sync itself worked.
+        struct FullDisk;
+        impl std::io::Write for FullDisk {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = Output::new(
+            OutputMode::Human,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            DEFAULT_PROFILE,
+            FullDisk,
+            Vec::new(),
+        );
+        run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("not written");
+        let (_, stderr) = output.into_writers();
+        assert_eq!(String::from_utf8(stderr).expect("utf-8"), "");
+
         // A refusal says what to do next, so it is not called a failure.
         without_addon_dir(&sandbox, None);
         let mut output = capture(OutputMode::Human);
-        let refusal = super::sync_command(sandbox.paths.clone(), runtime(None), &mut output)
-            .expect_err("refused");
+        let refusal =
+            run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("refused");
         assert_eq!(
             refusal.to_string(),
             "No AddOns folder is set for this game. Run `lemonup` to set it up."
@@ -3498,12 +3542,19 @@ mod addon_dir_binding_tests {
     }
 
     #[test]
-    fn a_refusal_keeps_its_own_drawing_and_an_error_loses_control_characters() {
-        // `find --link` makes its refusal bold itself; it has to arrive as it was drawn.
-        let bold = Paint::terminal().bold("Nothing was linked.");
-        assert!(bold.contains('\x1b'), "{bold:?}");
-        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(bold.clone()));
-        assert_eq!(error_text(refusal.as_ref(), Paint::terminal()), bold);
+    fn a_refusal_and_an_error_lose_control_characters() {
+        // A refusal can name an addon, whose title comes from its files.
+        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(
+            "Evil\x1b]0;x\x07 is Not linked, so it needs `--yes`.\u{9b}".to_string(),
+        ));
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::PLAIN),
+            "Evil ]0;x  is Not linked, so it needs `--yes`. "
+        );
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::terminal()),
+            "Evil ]0;x  is Not linked, so it needs \x1b[1m\x1b[38;5;6m--yes\x1b[0m. "
+        );
         // Any other error can carry a source's own words.
         let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
             "bad\x1b[31m name\x07".to_string(),
@@ -3512,6 +3563,22 @@ mod addon_dir_binding_tests {
             error_text(failure.as_ref(), Paint::PLAIN),
             "Error: invalid argument: bad [31m name "
         );
+    }
+
+    #[test]
+    fn a_failure_gives_its_reason_without_the_kind_of_error() {
+        let argument: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
+            "path does not exist: /x".to_string(),
+        ));
+        assert_eq!(
+            super::failure_reason(argument.as_ref()),
+            "path does not exist: /x"
+        );
+        let other: Box<dyn std::error::Error> = Box::new(std::io::Error::other("disk on fire"));
+        assert_eq!(super::failure_reason(other.as_ref()), "disk on fire");
+        assert!(!super::is_refusal(other.as_ref()));
+        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused("no".to_string()));
+        assert!(super::is_refusal(refusal.as_ref()));
     }
 
     #[test]
@@ -3539,10 +3606,6 @@ mod addon_dir_binding_tests {
                 command("lemonup check")
             )
         );
-        // The refusal `find --link` drew bold itself has no backticks left to draw again.
-        let drawn = Paint::terminal().commands("Run `lemonup find --link --yes`.", Paint::bold);
-        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(drawn.clone()));
-        assert_eq!(error_text(refusal.as_ref(), Paint::terminal()), drawn);
     }
 
     #[test]
@@ -3629,7 +3692,13 @@ mod addon_dir_binding_tests {
         assert!(printed.ends_with("Nothing was changed."), "{printed}");
         let error = refusal.to_string();
         assert!(error.contains("Bar is Not linked"), "{error}");
-        assert!(error.contains("--yes"), "{error}");
+        assert!(error.contains("needs `--yes`."), "{error}");
+        // With color the flags are drawn as commands.
+        let colored = error_text(&refusal, Paint::terminal());
+        assert!(
+            colored.contains("needs \x1b[1m\x1b[38;5;6m--yes\x1b[0m. Its own lines are kept, and \x1b[1m\x1b[38;5;6m--clear\x1b[0m puts"),
+            "{colored:?}"
+        );
         let toc = std::fs::read_to_string(addon_dir.join("Bar/Bar.toc")).expect("toc");
         assert!(!toc.contains("LemonUp"), "{toc}");
         assert!(
@@ -3728,7 +3797,7 @@ mod profile_tests {
             "async fn run_find(",
             "async fn run_check<",
             "async fn run_update<",
-            "fn run_sync<",
+            "fn sync_report(",
             "async fn run_import_addons<",
             "fn run_restore_backup<",
             "async fn run_install_wago(",
@@ -3745,7 +3814,7 @@ mod profile_tests {
                 .min()
                 .unwrap_or(rest.len());
             let body = &rest[..end];
-            assert!(body.contains("load_profile_config(&paths)"), "{command}");
+            assert!(body.contains("load_profile_config("), "{command}");
             assert!(!body.contains("ConfigStore::new("), "{command}");
         }
     }

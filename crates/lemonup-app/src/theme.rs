@@ -78,6 +78,17 @@ fn hyperlinks(set: impl Fn(&str) -> Option<String>) -> bool {
     };
     let program = set("TERM_PROGRAM").unwrap_or_default();
     let term = set("TERM").unwrap_or_default();
+    // Over SSH a `file://` link would open a file of the machine the terminal runs on. And
+    // tmux and screen sit between LemonUp and the terminal named in the environment: some
+    // versions drop a link, some print it as text.
+    let remote = set("SSH_CONNECTION").is_some() || set("SSH_TTY").is_some();
+    let multiplexed = set("TMUX").is_some()
+        || set("STY").is_some()
+        || term.starts_with("screen")
+        || term.starts_with("tmux");
+    if remote || multiplexed || term == "dumb" {
+        return false;
+    }
     matches!(
         program.as_str(),
         "ghostty" | "iTerm.app" | "WezTerm" | "vscode" | "Hyper" | "Tabby"
@@ -600,8 +611,43 @@ mod tests {
                 vec![("FORCE_HYPERLINK", "0"), ("TERM_PROGRAM", "ghostty")],
                 false,
             ),
+            (vec![("FORCE_HYPERLINK", ""), ("TERM", "dumb")], false),
             (
                 vec![("FORCE_HYPERLINK", ""), ("TERM_PROGRAM", "ghostty")],
+                true,
+            ),
+            // A link would point at the wrong machine over SSH, and tmux or screen may not
+            // pass it on. The override still wins.
+            (
+                vec![("TERM_PROGRAM", "ghostty"), ("SSH_CONNECTION", "1 2 3 4")],
+                false,
+            ),
+            (
+                vec![("TERM_PROGRAM", "ghostty"), ("SSH_TTY", "/dev/pts/1")],
+                false,
+            ),
+            (
+                vec![
+                    ("VTE_VERSION", "7600"),
+                    ("TMUX", "/tmp/tmux-1000/default,1,0"),
+                ],
+                false,
+            ),
+            (
+                vec![("VTE_VERSION", "7600"), ("TERM", "screen-256color")],
+                false,
+            ),
+            (
+                vec![("WT_SESSION", "abc"), ("TERM", "tmux-256color")],
+                false,
+            ),
+            (
+                vec![("TERM_PROGRAM", "vscode"), ("STY", "1234.pts-0.host")],
+                false,
+            ),
+            (vec![("TERM_PROGRAM", "vscode"), ("TERM", "dumb")], false),
+            (
+                vec![("FORCE_HYPERLINK", "1"), ("TMUX", "x"), ("SSH_TTY", "y")],
                 true,
             ),
         ] {

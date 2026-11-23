@@ -123,6 +123,16 @@ mod tests {
         assert!(!line.contains("48;"), "{line:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_a_link_where_the_terminal_has_links() {
+        let line = &report(2).human(Paint::terminal().with_links(true))[0];
+        assert!(
+            line.ends_with("to \x1b]8;;file:///data/lemonup-addons.json\x1b\\\x1b[1m/data/lemonup-addons.json\x1b[0m\x1b]8;;\x1b\\"),
+            "{line:?}"
+        );
+    }
+
     #[test]
     fn an_addon_from_a_newer_lemonup_is_a_warning() {
         let addons = [

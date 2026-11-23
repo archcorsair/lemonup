@@ -410,6 +410,17 @@ mod tests {
                 .ends_with("from \x1b[1m/data/lemonup-addons.json\x1b[0m"),
             "{colored:?}"
         );
+        // And a link where the terminal has links.
+        #[cfg(unix)]
+        assert!(
+            report(false)
+                .human(Paint::terminal().with_links(true))
+                .last()
+                .expect("closing")
+                .ends_with(
+                    "from \x1b]8;;file:///data/lemonup-addons.json\x1b\\\x1b[1m/data/lemonup-addons.json\x1b[0m\x1b]8;;\x1b\\"
+                ),
+        );
         let stripped = colored.iter().map(|line| strip(line)).collect::<Vec<_>>();
         assert_eq!(stripped, report(false).human(Paint::PLAIN));
         let simple = report(false).human(Paint::PLAIN.with_symbols(Symbols::SIMPLE));

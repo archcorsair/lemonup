@@ -1088,7 +1088,7 @@ fn the_last_line_always_says_what_happened() {
     let names = full_names();
 
     assert_eq!(
-        human_closing(&report, &names, None, Paint::PLAIN, Paint::PLAIN).expect("closing"),
+        human_closing(&report, &names, None, Paint::PLAIN).expect("closing"),
         ["Nothing was changed. `lemonup find --link` links the 5 addons ready to link."]
     );
     let nothing_ready = FindReport {
@@ -1098,7 +1098,7 @@ fn the_last_line_always_says_what_happened() {
         not_asked: Vec::new(),
     };
     assert_eq!(
-        human_closing(&nothing_ready, &names, None, Paint::PLAIN, Paint::PLAIN).expect("closing"),
+        human_closing(&nothing_ready, &names, None, Paint::PLAIN).expect("closing"),
         ["Nothing was changed."]
     );
     assert_eq!(
@@ -1106,7 +1106,6 @@ fn the_last_line_always_says_what_happened() {
             &nothing_ready,
             &names,
             Some(LinkOutcome::NothingToLink),
-            Paint::PLAIN,
             Paint::PLAIN,
         )
         .expect("closing"),
@@ -1130,8 +1129,7 @@ fn find_link_without_yes_prints_a_refusal_that_says_what_moves() {
     )
     .expect("a refusal is an outcome");
 
-    let error = human_closing(&report, &names, Some(outcome), Paint::PLAIN, Paint::PLAIN)
-        .expect_err("refused");
+    let error = human_closing(&report, &names, Some(outcome), Paint::PLAIN).expect_err("refused");
 
     assert!(matches!(error, LemonupError::Refused(_)), "{error:?}");
     assert_eq!(
@@ -1168,7 +1166,6 @@ fn a_refusal_names_folders_that_become_their_own_addon() {
         &names,
         Some(LinkOutcome::NeedsYes(vec![gather])),
         Paint::PLAIN,
-        Paint::PLAIN,
     )
     .expect_err("refused");
 
@@ -1196,7 +1193,7 @@ fn find_link_with_yes_ends_with_what_was_linked_and_what_is_ready_to_update() {
     .expect("linked");
 
     assert_eq!(
-        human_closing(&report, &names, Some(outcome), Paint::PLAIN, Paint::PLAIN).expect("closing"),
+        human_closing(&report, &names, Some(outcome), Paint::PLAIN).expect("closing"),
         [
             "Linked 2 addons: 1 up to date, 1 with an update ready (Pawn). \
           `lemonup update-all` updates it."
@@ -1243,14 +1240,8 @@ fn find_link_closing_names_the_linked_addons_curseforge_also_manages() {
         panic!("{outcome:?}");
     };
     assert_eq!(curseforge, &["Pawn"]);
-    let lines = human_closing(
-        &report,
-        &full_names(),
-        Some(outcome),
-        Paint::PLAIN,
-        Paint::PLAIN,
-    )
-    .expect("closing");
+    let lines =
+        human_closing(&report, &full_names(), Some(outcome), Paint::PLAIN).expect("closing");
     assert_eq!(
         lines.last().map(String::as_str),
         Some("CurseForge also manages Pawn. Mark it Ignored there (Install Settings).")
@@ -1293,14 +1284,8 @@ fn a_link_the_database_does_not_hold_is_said_not_claimed() {
         curseforge: Vec::new(),
     };
 
-    let lines = human_closing(
-        &full_report(),
-        &full_names(),
-        Some(outcome),
-        Paint::PLAIN,
-        Paint::PLAIN,
-    )
-    .expect("closing");
+    let lines =
+        human_closing(&full_report(), &full_names(), Some(outcome), Paint::PLAIN).expect("closing");
 
     assert!(lines[0].starts_with("Linked 1 addon: "), "{lines:?}");
     assert_eq!(
@@ -1492,14 +1477,8 @@ fn colored_detail_lines_are_muted_and_the_note_is_muted() {
 
 #[test]
 fn the_closing_line_and_the_refusal_are_bold() {
-    let closing = human_closing(
-        &full_report(),
-        &full_names(),
-        None,
-        Paint::terminal(),
-        Paint::PLAIN,
-    )
-    .expect("closing");
+    let closing =
+        human_closing(&full_report(), &full_names(), None, Paint::terminal()).expect("closing");
     assert_eq!(
         closing,
         [format!(
@@ -1507,14 +1486,7 @@ fn the_closing_line_and_the_refusal_are_bold() {
              addons ready to link.{END}"
         )]
     );
-    let plain = human_closing(
-        &full_report(),
-        &full_names(),
-        None,
-        Paint::PLAIN,
-        Paint::PLAIN,
-    )
-    .expect("closing");
+    let plain = human_closing(&full_report(), &full_names(), None, Paint::PLAIN).expect("closing");
     assert_eq!(
         plain,
         ["Nothing was changed. `lemonup find --link` links the 5 addons ready to link."]
@@ -1530,7 +1502,6 @@ fn the_closing_line_and_the_refusal_are_bold() {
         &full_names(),
         Some(linked),
         Paint::terminal(),
-        Paint::PLAIN,
     )
     .expect("closing");
     assert!(
@@ -1548,15 +1519,17 @@ fn the_closing_line_and_the_refusal_are_bold() {
         not_asked: Vec::new(),
     };
     let refused = |error_paint| {
-        human_closing(
+        let error = human_closing(
             &report,
             &full_names(),
             Some(LinkOutcome::NeedsYes(vec![gather.clone()])),
             Paint::terminal(),
-            error_paint,
         )
         .expect_err("refused")
-        .to_string()
+        .to_string();
+        // Kept in plain words, however the report is drawn, and drawn only when printed.
+        assert!(!error.contains('\x1b'), "{error:?}");
+        human_refusal(&error, error_paint)
     };
     let bold = refused(Paint::terminal());
     assert!(bold.starts_with(BOLD) && bold.ends_with(END), "{bold:?}");
@@ -1572,6 +1545,18 @@ fn the_closing_line_and_the_refusal_are_bold() {
         plain.contains(" Run `lemonup find --link --yes` to link the "),
         "{plain:?}"
     );
+    // The refusal names addons and folders, so an escape code in a name never gets through.
+    let named = "Evil\x1b]0;x\x07 moves folders. Run `lemonup find --link --yes`.";
+    assert_eq!(
+        human_refusal(named, Paint::terminal()),
+        format!(
+            "{BOLD}Evil ]0;x  moves folders. Run {END}{COMMAND}lemonup find --link --yes{END}{BOLD}.{END}"
+        )
+    );
+    assert_eq!(
+        human_refusal(named, Paint::PLAIN),
+        "Evil ]0;x  moves folders. Run `lemonup find --link --yes`."
+    );
 }
 
 #[test]
@@ -1584,14 +1569,8 @@ fn uncolored_output_has_no_escape_codes() {
         Paint::PLAIN,
     );
     assert!(lines.iter().all(|line| !line.contains('\x1b')), "{lines:?}");
-    let closing = human_closing(
-        &full_report(),
-        &full_names(),
-        None,
-        Paint::PLAIN,
-        Paint::PLAIN,
-    )
-    .expect("closing");
+    let closing =
+        human_closing(&full_report(), &full_names(), None, Paint::PLAIN).expect("closing");
     assert!(closing.iter().all(|line| !line.contains('\x1b')));
 
     // Colors only add escape codes: with them stripped, the text is the same.
@@ -1653,7 +1632,6 @@ fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
         &report,
         &full_names(),
         Some(LinkOutcome::NeedsYes(vec![data])),
-        Paint::PLAIN,
         Paint::PLAIN,
     )
     .expect_err("refused")

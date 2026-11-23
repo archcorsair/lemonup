@@ -228,13 +228,15 @@ fn the_text_around_a_command_keeps_its_own_drawing() {
             command("lemonup find --link")
         )
     );
-    // Text that is already drawn stays as it is, escape codes included.
-    let drawn = "\x1b[1mNothing was linked.\x1b[0m Run `lemonup find`.";
+    // Text of more than one byte a character, on both sides of a command and inside it.
     assert_eq!(
-        Paint::terminal().commands(drawn, Paint::as_drawn),
+        Paint::terminal().commands(
+            "caf\u{e9} \u{2713} `--addon-dir '/j\u{fc}rgen'` \u{4e2d}\u{6587}",
+            Paint::text
+        ),
         format!(
-            "\x1b[1mNothing was linked.\x1b[0m Run {}.",
-            command("lemonup find")
+            "caf\u{e9} \u{2713} {} \u{4e2d}\u{6587}",
+            command("--addon-dir '/j\u{fc}rgen'")
         )
     );
 }
@@ -577,6 +579,30 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
             Vec::new(),
         );
         assert!(full.print(&sample(), None).is_err(), "{mode:?}");
+
+        // The same on stderr, for a warning, a notice and a failure.
+        let mut closed = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            ClosedPipe,
+        );
+        assert!(closed.warn("one").is_ok(), "{mode:?}");
+        assert!(closed.note("two").is_ok(), "{mode:?}");
+        assert!(closed.fail("three").is_ok(), "{mode:?}");
+        let mut full = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            FullDisk,
+        );
+        assert!(full.warn("one").is_err(), "{mode:?}");
+        assert!(full.note("two").is_err(), "{mode:?}");
+        assert!(full.fail("three").is_err(), "{mode:?}");
     }
 }
 

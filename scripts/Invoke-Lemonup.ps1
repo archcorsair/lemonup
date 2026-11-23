@@ -291,11 +291,12 @@ function Get-JsonDocument {
         [string]$Context
     )
 
-    $line = $Result.Output | Where-Object { $_ -like '{"schema":*' } | Select-Object -Last 1
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        throw "$Context did not print a JSON document"
+    $lines = @($Result.Output | Where-Object { $_ -like '{"schema":*' })
+    if ($lines.Count -ne 1) {
+        $printed = $Result.Output -join [Environment]::NewLine
+        throw "$Context printed $($lines.Count) JSON documents, expected 1:$([Environment]::NewLine)$printed"
     }
-    return $line | ConvertFrom-Json
+    return $lines[0] | ConvertFrom-Json
 }
 
 function Get-OutputLineMap {
