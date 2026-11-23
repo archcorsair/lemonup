@@ -159,7 +159,9 @@ impl ImportReport {
 }
 
 impl Report for ImportReport {
-    const COMMAND: &'static str = "import-addons";
+    fn command(&self) -> &'static str {
+        "import-addons"
+    }
 
     /// The context line, Installed (Would install in a dry run) and Failed with a row per
     /// addon, the headings that only count, then the closing line.

@@ -49,7 +49,9 @@ impl ExportReport {
 }
 
 impl Report for ExportReport {
-    const COMMAND: &'static str = "export-addons";
+    fn command(&self) -> &'static str {
+        "export-addons"
+    }
 
     fn human(&self, paint: Paint) -> Vec<String> {
         let addons = match self.count {

@@ -255,7 +255,9 @@ fn held_note(row: &UpdateRow) -> Option<String> {
 }
 
 impl Report for UpdateReport {
-    const COMMAND: &'static str = "update";
+    fn command(&self) -> &'static str {
+        "update"
+    }
 
     /// The context line, the backup line, then a section for each outcome that has addons:
     /// Updated (Would update in a dry run), Held, Newer than source and Failed, then Up to

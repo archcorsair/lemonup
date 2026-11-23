@@ -18,10 +18,11 @@ $results = New-Object System.Collections.Generic.List[string]
 foreach ($target in $matrix | Where-Object { $_.requires_api_key }) {
     $installParts = Split-ManifestCommand -CommandText $target.install_command
     $preflight = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments ($installParts + '--dry-run')
-    Assert-ProcessSucceeded -Result $preflight -Context "preflight $($target.selector)"
-    if ($preflight.Output -match 'reason=no Wago API key configured') {
+    # Without a key the install is refused, which is a failed run: name the cause first.
+    if ($preflight.Output -match 'Add your Wago\.io key') {
         throw "seed preflight failed for $($target.selector): no Wago API key configured"
     }
+    Assert-ProcessSucceeded -Result $preflight -Context "preflight $($target.selector)"
 }
 
 $layout = Initialize-WowSandboxLayout -SandboxRoot $SandboxRoot -Reset
@@ -36,28 +37,15 @@ foreach ($target in $matrix) {
     }
 
     $command = Split-ManifestCommand -CommandText $target.install_command
-    $result = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments $command
+    $result = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments ($command + '--json')
     Assert-ProcessSucceeded -Result $result -Context "seed install $($target.selector)"
 
-    $skippedLine = $result.Output | Where-Object { $_ -like 'install skipped:*' } | Select-Object -Last 1
-    if (-not [string]::IsNullOrWhiteSpace($skippedLine)) {
-        throw "seed install for $($target.selector) was skipped: $skippedLine"
+    $installed = (Get-JsonDocument -Result $result -Context "seed install $($target.selector)").addon
+    if ($installed.parent_folder -ne $target.expected_parent) {
+        throw "seed install for $($target.selector) produced unexpected parent '$($installed.parent_folder)' (expected '$($target.expected_parent)')"
     }
 
-    $installLine = $result.Output |
-        Where-Object { $_ -match '^(wago|tukui|wowinterface|github) install:' } |
-        Select-Object -Last 1
-    if ([string]::IsNullOrWhiteSpace($installLine)) {
-        $rendered = $result.Output -join [Environment]::NewLine
-        throw "seed install for $($target.selector) did not produce an install summary`n$rendered"
-    }
-
-    $parsed = Get-OutputLineMap -Line $installLine
-    if ($parsed['parent'] -ne $target.expected_parent) {
-        throw "seed install for $($target.selector) produced unexpected parent '$($parsed['parent'])' (expected '$($target.expected_parent)')"
-    }
-
-    $results.Add((Get-CompactResultLine -Name $target.selector -Stage 'seed' -Status 'ok' -Detail "parent=$($parsed['parent'])"))
+    $results.Add((Get-CompactResultLine -Name $target.selector -Stage 'seed' -Status 'ok' -Detail "parent=$($installed.parent_folder)"))
 }
 
 $sync = Invoke-Lemonup -Profile $Profile -AddonDir $layout.AddonsDir -Arguments @('sync', '--json')

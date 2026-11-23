@@ -108,7 +108,7 @@ pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> Stri
 
 /// `source_error_advice`, naming the folder and the linked addon it belongs
 /// to when an install was refused for that.
-pub(super) fn install_error_advice(
+pub(crate) fn install_error_advice(
     kind: SourceErrorKind,
     provider: &str,
     clash: Option<&FolderClash>,

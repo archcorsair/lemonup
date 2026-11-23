@@ -6,6 +6,7 @@
 mod check;
 mod export;
 mod import;
+mod install;
 mod profiles;
 mod restore;
 mod sync;
@@ -17,6 +18,9 @@ mod update;
 pub(crate) use check::{CheckReport, UpdateHint};
 pub(crate) use export::ExportReport;
 pub(crate) use import::ImportReport;
+pub(crate) use install::{
+    InstallReport, InstallRequest, InstalledAddon, failure as install_failure,
+};
 pub(crate) use profiles::ProfilesReport;
 pub(crate) use restore::RestoreReport;
 pub(crate) use sync::SyncReport;
@@ -275,33 +279,16 @@ impl Paint {
         if !self.colored {
             return rest(self, text);
         }
-        let mut out = String::new();
-        let mut plain = String::new();
-        let mut remaining = text;
-        while let Some(start) = remaining.find('`') {
-            let after = &remaining[start + 1..];
-            match after.find('`') {
-                Some(end) if is_command(&after[..end]) => {
-                    plain.push_str(&remaining[..start]);
-                    if !plain.is_empty() {
-                        out.push_str(&rest(self, &plain));
-                        plain.clear();
-                    }
-                    out.push_str(&self.command(&after[..end]));
-                    remaining = &after[end + 1..];
+        pieces(text)
+            .into_iter()
+            .map(|(command, piece)| {
+                if command {
+                    self.command(piece)
+                } else {
+                    rest(self, piece)
                 }
-                // Not a command: this backtick is text, and the next one may open a command.
-                _ => {
-                    plain.push_str(&remaining[..=start]);
-                    remaining = after;
-                }
-            }
-        }
-        plain.push_str(remaining);
-        if !plain.is_empty() {
-            out.push_str(&rest(self, &plain));
-        }
-        out
+            })
+            .collect()
     }
 
     pub(crate) fn heading(self, tone: Tone, text: &str) -> String {
@@ -331,6 +318,34 @@ fn file_url(path: &Path) -> Option<String> {
     reqwest::Url::from_file_path(absolute)
         .ok()
         .map(String::from)
+}
+
+/// `text` cut where it names a command between backticks: `(true, the command)` without its
+/// backticks, and `(false, text)` for everything around it, other backticks included.
+fn pieces(text: &str) -> Vec<(bool, &str)> {
+    let mut pieces = Vec::new();
+    // Where the text not yet given out starts, and where the search for a backtick goes on.
+    let (mut plain_from, mut at) = (0, 0);
+    while let Some(found) = text[at..].find('`') {
+        let open = at + found;
+        let after = open + 1;
+        match text[after..].find('`') {
+            Some(length) if is_command(&text[after..after + length]) => {
+                if open > plain_from {
+                    pieces.push((false, &text[plain_from..open]));
+                }
+                pieces.push((true, &text[after..after + length]));
+                at = after + length + 1;
+                plain_from = at;
+            }
+            // Not a command: this backtick is text, and the next one may open a command.
+            _ => at = after,
+        }
+    }
+    if plain_from < text.len() {
+        pieces.push((false, &text[plain_from..]));
+    }
+    pieces
 }
 
 /// Whether the words between two backticks are a LemonUp command or one of its flags.
@@ -447,10 +462,8 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
         ));
         for note in &entry.notes {
             lines.extend(
-                wrap_words(&note_indent, note, paint.width)
+                wrap_sentence(&note_indent, note, paint.width)
                     .iter()
-                    // Drawn after wrapping, so a command here must be one word, as a flag is:
-                    // one split over two lines would keep its backticks.
                     .map(|line| paint.commands(line, Paint::muted)),
             );
         }
@@ -659,6 +672,35 @@ pub(crate) fn wrap_words(indent: &str, text: &str, width: usize) -> Vec<String> 
     )
 }
 
+/// `text` wrapped like [`wrap_words`], with each command it names kept on one line, so
+/// [`Paint::commands`] still finds the command whole on the line it landed on.
+pub(crate) fn wrap_sentence(indent: &str, text: &str, width: usize) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    // No space stood before what comes next, so it carries on the last unit: the period
+    // after a command, or a command right after a bracket.
+    let mut joined = false;
+    for (command, piece) in pieces(text) {
+        if command {
+            let unit = format!("`{piece}`");
+            match units.last_mut() {
+                Some(last) if joined => last.push_str(&unit),
+                _ => units.push(unit),
+            }
+            joined = true;
+            continue;
+        }
+        let spaced = piece.starts_with(char::is_whitespace);
+        for (index, word) in piece.split_whitespace().enumerate() {
+            match units.last_mut() {
+                Some(last) if index == 0 && joined && !spaced => last.push_str(word),
+                _ => units.push(word.to_string()),
+            }
+        }
+        joined = !piece.ends_with(char::is_whitespace);
+    }
+    wrap_units(indent, &units, width)
+}
+
 /// A path as JSON: a string, or `null`. A path that isn't valid Unicode is written with
 /// replacement characters rather than failing the whole document.
 fn lossy_path<S: Serializer>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error> {
@@ -676,7 +718,7 @@ fn lossy_path_buf<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S:
 /// What a command prints: its readable report, or its fields in the JSON document.
 pub(crate) trait Report: Serialize {
     /// The `command` value of the JSON envelope, for example "check".
-    const COMMAND: &'static str;
+    fn command(&self) -> &'static str;
     /// The readable report, one string per line.
     fn human(&self, paint: Paint) -> Vec<String>;
 }
@@ -789,7 +831,7 @@ impl<O: Write, E: Write> Output<O, E> {
                 let warnings = std::mem::take(&mut self.warnings);
                 let envelope = Envelope {
                     schema: 1,
-                    command: R::COMMAND,
+                    command: report.command(),
                     profile: &self.profile,
                     addon_dir: addon_dir.map(|dir| dir.to_string_lossy().into_owned()),
                     report,
@@ -823,15 +865,32 @@ impl<O: Write, E: Write> Output<O, E> {
         ))
     }
 
-    /// The last line of a command that failed, on stderr in both modes: the red mark, then
-    /// what failed and why. Nothing goes to stdout after it.
-    pub(crate) fn fail(&mut self, text: &str) -> std::io::Result<()> {
-        ignore_closed(writeln!(
-            self.stderr,
-            "{} {}",
-            self.stderr_paint.failed(),
-            self.stderr_paint.commands(text, Paint::text)
-        ))
+    /// How a command that failed ends, on stderr in both modes: the red mark and `what` failed
+    /// on a line of their own, then `reason` under it, then `hint` when there is something to
+    /// run next. Nothing goes to stdout after it.
+    ///
+    /// `reason` can hold a source's or an addon's own words: it is one line however it was
+    /// written, and nothing in it is drawn as a command. It is not wrapped either, since it can
+    /// hold a path. Only `hint`, which LemonUp wrote, has its commands drawn.
+    pub(crate) fn fail(
+        &mut self,
+        what: &str,
+        reason: &str,
+        hint: Option<&str>,
+    ) -> std::io::Result<()> {
+        let paint = self.stderr_paint;
+        let mut lines = vec![
+            format!("{} {}", paint.failed(), paint.heading(Tone::Problem, what)),
+            format!("{INDENT}{}", paint.text(reason)),
+        ];
+        if let Some(hint) = hint {
+            lines.push(format!("{INDENT}{}", paint.commands(hint, Paint::text)));
+        }
+        ignore_closed(
+            lines
+                .iter()
+                .try_for_each(|line| writeln!(self.stderr, "{line}")),
+        )
     }
 
     /// A notice on stderr, in both modes. The JSON document leaves it out.
