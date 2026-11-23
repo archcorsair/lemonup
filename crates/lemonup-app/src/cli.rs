@@ -184,11 +184,13 @@ pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
         Some(Commands::Tui) => {
             return Some("--json is not available for `lemonup tui`.".to_string());
         }
-        Some(Commands::Profiles) => return None,
+        Some(
+            Commands::Profiles
+            | Commands::Check { .. }
+            | Commands::Update { .. }
+            | Commands::UpdateAll { .. },
+        ) => return None,
         Some(Commands::Sync) => "sync",
-        Some(Commands::Check { .. }) => "check",
-        Some(Commands::Update { .. }) => "update",
-        Some(Commands::UpdateAll { .. }) => "update-all",
         Some(Commands::InstallWago { .. }) => "install-wago",
         Some(Commands::InstallTukui { .. }) => "install-tukui",
         Some(Commands::InstallWowinterface { .. }) => "install-wowinterface",
@@ -301,6 +303,20 @@ mod tests {
     }
 
     #[test]
+    fn json_is_accepted_for_check_update_and_update_all() {
+        for args in [
+            &["lemonup", "--json", "check"][..],
+            &["lemonup", "check", "Questie", "--json"][..],
+            &["lemonup", "update", "WeakAuras", "--json", "--dry-run"][..],
+            &["lemonup", "--profile", "forever", "update-all", "--json"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            assert!(cli.json, "{args:?}");
+            assert_eq!(json_refusal(cli.command.as_ref()), None, "{args:?}");
+        }
+    }
+
+    #[test]
     fn json_is_refused_for_commands_that_dont_print_it_yet() {
         let refusal = |args: &[&str]| {
             let cli = Cli::try_parse_from(args).expect("parses");
@@ -308,11 +324,10 @@ mod tests {
             json_refusal(cli.command.as_ref())
         };
         for (args, name) in [
-            (&["lemonup", "update-all", "--json"][..], "update-all"),
             (&["lemonup", "--json", "sync"][..], "sync"),
             (&["lemonup", "find", "--json", "--link"][..], "find"),
             (&["lemonup", "toc", "AdiBags", "--json"][..], "toc"),
-            (&["lemonup", "--json", "check", "Questie"][..], "check"),
+            (&["lemonup", "export-addons", "--json"][..], "export-addons"),
             (
                 &["lemonup", "install-tukui", "elvui", "--json"][..],
                 "install-tukui",

@@ -90,6 +90,7 @@ use self::direct_install::{
 };
 pub(crate) use self::find_sheet::{FindAction, FindMessage, FindState, FindTaskEvent};
 pub(crate) use self::games::{GamesAction, GamesMessage, GamesState, OtherGameChecked};
+pub(crate) use self::render_dashboard::dashboard_source_name;
 #[cfg(test)]
 use self::render_dashboard::{child_row_detail_prefix, child_row_prefix};
 use self::render_dashboard::{

@@ -66,6 +66,10 @@ pub(crate) struct LiveUpdateResult {
     pub(crate) previous_version: Option<String>,
     pub(crate) remote_version: Option<String>,
     pub(crate) message: Option<String>,
+    /// For a held update, every "Not linked" folder it would replace. Empty otherwise.
+    pub(crate) not_linked: Vec<String>,
+    /// Those of `not_linked` that hold a `.git` entry (likely a developer's copy).
+    pub(crate) dev_copies: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -786,6 +790,8 @@ where
                         message: Some(
                             "addons that are not linked cannot be updated yet".to_string(),
                         ),
+                        not_linked: Vec::new(),
+                        dev_copies: Vec::new(),
                     });
                 }
                 UpdateTurn::NoApiKey => {
@@ -797,6 +803,8 @@ where
                         previous_version: addon.version.clone(),
                         remote_version: addon.remote_version.clone(),
                         message: Some("Wago API key not configured".to_string()),
+                        not_linked: Vec::new(),
+                        dev_copies: Vec::new(),
                     });
                 }
                 UpdateTurn::Prepared(prepared) => {
@@ -1130,6 +1138,8 @@ impl HeldUpdate {
             previous_version: self.previous_version.clone(),
             remote_version: self.remote_version.clone(),
             message: None,
+            not_linked: Vec::new(),
+            dev_copies: Vec::new(),
         };
         let tracked = match database.list_addons() {
             Ok(rows) => rows.into_iter().find(|row| row.folder == self.folder),
@@ -1241,20 +1251,28 @@ fn record_provider_result(
         previous_version,
         remote_version,
         message,
+        not_linked: Vec::new(),
+        dev_copies: Vec::new(),
     };
     match outcome {
         Ok((outcome, package)) if !outcome.finished.not_linked.is_empty() => {
             summary.held += 1;
             let dev = dev_copies(addon_dir, &outcome.finished.not_linked);
-            results.push(base(
-                LiveUpdateStatus::Held,
-                outcome.finished.previous_version.clone(),
-                outcome.finished.remote_version.clone(),
-                Some(format!(
-                    "would replace Not linked folders: {}",
-                    describe_not_linked_folders(&outcome.finished.not_linked, &dev)
-                )),
-            ));
+            // The folders ride on the result itself: a dry run keeps no package, so `held`
+            // stays empty there, and the report still has to name them.
+            results.push(LiveUpdateResult {
+                not_linked: outcome.finished.not_linked.clone(),
+                dev_copies: dev.clone(),
+                ..base(
+                    LiveUpdateStatus::Held,
+                    outcome.finished.previous_version.clone(),
+                    outcome.finished.remote_version.clone(),
+                    Some(format!(
+                        "would replace Not linked folders: {}",
+                        describe_not_linked_folders(&outcome.finished.not_linked, &dev)
+                    )),
+                )
+            });
             if let Some(package) = package {
                 held.push(HeldUpdate::new(
                     addon,
@@ -1326,6 +1344,8 @@ fn remote_older_result(
         previous_version,
         remote_version,
         message: Some(message),
+        not_linked: Vec::new(),
+        dev_copies: Vec::new(),
     }
 }
 
@@ -2390,6 +2410,12 @@ mod tests {
         assert_eq!(summary.updated_addons, 0);
         assert!(held.is_empty());
         assert_eq!(results[0].status, super::LiveUpdateStatus::Held);
+        // The result itself names the folders, so a dry run's report can too.
+        assert_eq!(
+            results[0].not_linked,
+            vec!["BigWigs_Core".to_string(), "BigWigs_Options".to_string()]
+        );
+        assert_eq!(results[0].dev_copies, vec!["BigWigs_Core".to_string()]);
         assert_eq!(
             results[0].message.as_deref(),
             Some(

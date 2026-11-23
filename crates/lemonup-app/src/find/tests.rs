@@ -2164,3 +2164,21 @@ async fn find_without_wago_reports_no_wago_match_for_a_wago_id_in_the_toc() {
         "{lines:?}"
     );
 }
+
+#[test]
+fn the_key_value_lines_keep_other_for_kinds_a_lookup_never_ends_in() {
+    use crate::source_error::SourceErrorKind;
+    for kind in [
+        SourceErrorKind::WrongRepository,
+        SourceErrorKind::FoldersInTheWay,
+        SourceErrorKind::FoldersOfLinkedAddon,
+        SourceErrorKind::Other,
+    ] {
+        assert_eq!(super::problem_name(kind), "other", "{kind:?}");
+    }
+    assert_eq!(
+        super::problem_name(SourceErrorKind::NoConnection),
+        "no_connection"
+    );
+    assert_eq!(super::problem_name(SourceErrorKind::SlowDown), "slow_down");
+}

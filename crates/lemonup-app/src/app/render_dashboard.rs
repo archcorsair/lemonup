@@ -416,7 +416,7 @@ pub(super) fn dashboard_item_installed_version(item: &DashboardItem) -> String {
 
 /// Source names in full at 110 columns and wider, short below. Empty for an
 /// addon that is not linked.
-pub(super) fn dashboard_source_name(source: SourceKind, wide: bool) -> &'static str {
+pub(crate) fn dashboard_source_name(source: SourceKind, wide: bool) -> &'static str {
     match (source, wide) {
         (SourceKind::Wago, true) => "Wago.io",
         (SourceKind::Wago, false) => "Wago",

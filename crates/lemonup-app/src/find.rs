@@ -327,19 +327,6 @@ fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------------------------
 // `lemonup find`
 
-fn problem_name(kind: SourceErrorKind) -> &'static str {
-    match kind {
-        SourceErrorKind::NoConnection => "no_connection",
-        SourceErrorKind::KeyRejected => "key_rejected",
-        SourceErrorKind::NotFound => "not_found",
-        SourceErrorKind::SlowDown => "slow_down",
-        SourceErrorKind::FoldersInTheWay
-        | SourceErrorKind::FoldersOfLinkedAddon
-        | SourceErrorKind::WrongRepository
-        | SourceErrorKind::Other => "other",
-    }
-}
-
 fn source_cli_name(source: FindSource) -> &'static str {
     match source {
         FindSource::Wago => "wago",
@@ -480,6 +467,17 @@ pub(crate) fn target_plain_line(target: &FindTarget) -> String {
         target.game,
         target.addon_dir.display()
     )
+}
+
+/// The kind of a failed source in the `key=value` lines. They keep the four names they have
+/// always had; the kinds a lookup never ends in stay `other`.
+fn problem_name(kind: SourceErrorKind) -> &'static str {
+    match kind {
+        SourceErrorKind::WrongRepository
+        | SourceErrorKind::FoldersInTheWay
+        | SourceErrorKind::FoldersOfLinkedAddon => "other",
+        kind => crate::output::error_kind_key(kind),
+    }
 }
 
 /// What `lemonup find` prints for a report: problems, a summary by label, then every result
@@ -704,7 +702,7 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
                     format!(
                         "find linked: addon={}, source={}, version={}, latest={}, status={}, folders={}",
                         stored.name,
-                        source_name_of(stored),
+                        crate::output::source_key(stored.source),
                         stored.version.as_deref().unwrap_or("<unknown>"),
                         stored.remote_version.as_deref().unwrap_or("<unknown>"),
                         crate::update::serialize_update_status(status),
@@ -732,16 +730,6 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
             }
             Ok(lines)
         }
-    }
-}
-
-fn source_name_of(record: &AddonRecord) -> &'static str {
-    match record.source {
-        lemonup_core::SourceKind::Wago => "wago",
-        lemonup_core::SourceKind::WowInterface => "wowinterface",
-        lemonup_core::SourceKind::Tukui => "tukui",
-        lemonup_core::SourceKind::GitHub => "github",
-        lemonup_core::SourceKind::Manual => "manual",
     }
 }
 
