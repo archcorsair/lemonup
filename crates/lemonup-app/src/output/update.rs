@@ -136,7 +136,7 @@ pub(crate) struct UpdateFlags {
 
 impl UpdateReport {
     /// The report of a run. `addons` are the profile's rows before it, joined to `results` by
-    /// folder; `held` gives the "Not linked" folders of each held update, by its folder.
+    /// folder. A held result carries the "Not linked" folders it would replace.
     pub(crate) fn new(
         target: Option<FindTarget>,
         flags: UpdateFlags,

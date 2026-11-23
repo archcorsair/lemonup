@@ -23,6 +23,9 @@ pub(crate) struct CheckReport {
     /// Whether addons were named on the command line: then every one gets a row.
     #[serde(skip)]
     named: bool,
+    /// Whether the run was given `--addon-dir`. The update needs it again, so the hint says so.
+    #[serde(skip)]
+    with_addon_dir: bool,
     summary: CheckSummary,
     addons: Vec<CheckRow>,
 }
@@ -103,9 +106,17 @@ impl CheckReport {
             target,
             profile_name: profile.to_string(),
             named,
+            with_addon_dir: false,
             summary,
             addons: rows,
         }
+    }
+
+    /// The same report for a run that was given `--addon-dir`: `update-all` alone would act
+    /// on the profile's saved folder, or refuse when there is none.
+    pub(crate) fn with_addon_dir(mut self, given: bool) -> Self {
+        self.with_addon_dir = given;
+        self
     }
 
     /// The command that installs the updates, for this profile.
@@ -143,8 +154,13 @@ impl CheckReport {
         let mut closing = format!("{}.", parts.join(", "));
         if updates > 0 {
             closing.push_str(&format!(
-                " Run `{}` to update{}.",
+                " Run `{}`{} to update{}.",
                 self.update_all_command(),
+                if self.with_addon_dir {
+                    " with the same `--addon-dir`"
+                } else {
+                    ""
+                },
                 if updates == 1 { "" } else { " all" }
             ));
         }
@@ -515,6 +531,39 @@ mod tests {
         let lines = CheckReport::new(None, profile, false, &checks, &addons).human(Paint::PLAIN);
         assert_eq!(lines[lines.len() - 2], "", "{lines:?}");
         lines.last().expect("closing").clone()
+    }
+
+    #[test]
+    fn a_run_given_an_addons_folder_says_the_update_needs_it_too() {
+        let addons = vec![addon("Pawn", "Pawn", SourceKind::Wago, Some("2.14.4"))];
+        let checks = vec![check("Pawn", UpdateStatus::UpdateAvailable, Some("2.14.8"))];
+        let report = |profile: &str| {
+            CheckReport::new(None, profile, false, &checks, &addons).with_addon_dir(true)
+        };
+        assert_eq!(
+            report("default")
+                .human(Paint::PLAIN)
+                .last()
+                .expect("closing"),
+            "1 update ready. Run `lemonup update-all` with the same `--addon-dir` to update."
+        );
+        assert_eq!(
+            report("forever")
+                .human(Paint::PLAIN)
+                .last()
+                .expect("closing"),
+            "1 update ready. Run `lemonup --profile forever update-all` with the same \
+             `--addon-dir` to update."
+        );
+        // Without the option the hint stays as it was.
+        assert_eq!(
+            CheckReport::new(None, "default", false, &checks, &addons)
+                .with_addon_dir(false)
+                .human(Paint::PLAIN)
+                .last()
+                .expect("closing"),
+            "1 update ready. Run `lemonup update-all` to update."
+        );
     }
 
     #[test]

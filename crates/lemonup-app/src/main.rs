@@ -814,6 +814,9 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         database = StateDatabase::open(&copy)?;
         scratch = Some(dir);
     }
+    // Names, sources and installed versions for the report. Read before the check, so a read
+    // that fails stops the run before anything is saved; a check changes none of them.
+    let rows = database.list_addons()?;
     let checks = refresh_live_update_checks(
         &mut database,
         &addons,
@@ -823,12 +826,6 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
     )
     .await
     .map_err(Box::<dyn std::error::Error>::from)?;
-    // The check is saved by now. If the rows can't be read again, the report still prints,
-    // with folder names in place of addon names.
-    let rows = database.list_addons().unwrap_or_else(|error| {
-        tracing::warn!(%error, "could not read the addon list for the check report");
-        Vec::new()
-    });
     drop(database);
     drop(scratch);
 
@@ -841,7 +838,8 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         !addons.is_empty(),
         &checks,
         &rows,
-    );
+    )
+    .with_addon_dir(runtime.addon_dir_override.is_some());
     output.print(&report, effective_addon_dir.as_deref())?;
     Ok(CommandOutcome::from_error_count(count_check_errors(
         &checks,
@@ -926,7 +924,7 @@ async fn run_update<O: std::io::Write, E: std::io::Write>(
         Ok(run) => run,
         Err(error) => {
             // No report will print, so say here that a backup was made before the failure.
-            if let Some(line) = backup.text() {
+            if let (output::BackupLine::Created { .. }, Some(line)) = (&backup, backup.text()) {
                 output.note(&line)?;
             }
             return Err(error.into());
@@ -2577,6 +2575,30 @@ mod addon_dir_binding_tests {
         assert_eq!(document["backup"]["status"], "disabled");
         assert_eq!(document["summary"]["skipped_manual"], 1);
         assert_eq!(document["addons"][0]["folder"], "GitAddon");
+    }
+
+    #[tokio::test]
+    async fn an_update_that_fails_after_its_backup_still_names_the_backup() {
+        let sandbox = sandbox();
+        unlink_tracked(&sandbox.paths);
+        let mut output = capture(OutputMode::Human);
+        run_update(
+            sandbox.paths.clone(),
+            runtime(None),
+            vec!["NoSuchAddon".to_string()],
+            false,
+            false,
+            false,
+            &mut output,
+        )
+        .await
+        .expect_err("an unknown addon stops the run");
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stdout, "");
+        assert!(
+            stderr.starts_with("Made a backup of your game settings: "),
+            "{stderr}"
+        );
     }
 
     #[test]

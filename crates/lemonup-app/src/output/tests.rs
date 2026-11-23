@@ -372,6 +372,16 @@ fn a_version_loses_the_addon_name_only_as_a_label() {
         short_version("ElvUI_WindTools-4.16", &["Wind Tools", "ElvUI_WindTools"]),
         "4.16"
     );
+    assert_eq!(short_version("Pawn v2.14.4", &["Pawn"]), "v2.14.4");
+    // The longest name that fits is the label, whichever comes first.
+    assert_eq!(short_version("DBM-Core 11.0", &["DBM", "DBM-Core"]), "11.0");
+    assert_eq!(short_version("DBM-Core 11.0", &["DBM-Core", "DBM"]), "11.0");
+    // What follows the name has to start like a version.
+    assert_eq!(
+        short_version("Bagnon_Config-1.0", &["Bagnon"]),
+        "Bagnon_Config-1.0"
+    );
+    assert_eq!(short_version("Pawn beta", &["Pawn"]), "Pawn beta");
     // Not a label: no separator, nothing after it, or another name.
     assert_eq!(short_version("Pawn2", &["Pawn"]), "Pawn2");
     assert_eq!(short_version("Pawn", &["Pawn"]), "Pawn");

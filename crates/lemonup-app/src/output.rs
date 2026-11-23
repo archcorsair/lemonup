@@ -403,9 +403,12 @@ pub(crate) fn version_text(version: Option<&str>) -> &str {
 
 /// A version without the addon's own name in front. Some sources label a release with it
 /// (`Pawn 2.14.4`), and the row already starts with the name. `names` are the addon's name
-/// and folder. A version that is nothing but the name stays as it is.
+/// and folder; the longest that fits is taken, so `DBM-Core 11.0` loses all of `DBM-Core`.
+/// Only a label is removed: the name, a separator, then something that starts like a version.
 pub(crate) fn short_version<'a>(version: &'a str, names: &[&str]) -> &'a str {
     let version = version.trim();
+    let mut names = names.to_vec();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     for name in names {
         let Some(prefix) = version.get(..name.len()) else {
             continue;
@@ -415,8 +418,12 @@ pub(crate) fn short_version<'a>(version: &'a str, names: &[&str]) -> &'a str {
         }
         let rest = &version[name.len()..];
         let trimmed = rest.trim_start_matches([' ', '-', '_', ':']);
-        // Only a name followed by a separator is a label: "Pawn2" is left alone.
-        if trimmed.len() < rest.len() && !trimmed.is_empty() {
+        // "Pawn2" has no separator, and "Bagnon_Config-1.0" names something else.
+        let starts_like_a_version = trimmed
+            .strip_prefix(['v', 'V'])
+            .unwrap_or(trimmed)
+            .starts_with(|character: char| character.is_ascii_digit());
+        if trimmed.len() < rest.len() && starts_like_a_version {
             return trimmed;
         }
     }
