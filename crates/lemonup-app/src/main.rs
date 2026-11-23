@@ -115,9 +115,10 @@ async fn main() -> ExitCode {
 /// What an error that ends a command prints. A refusal already says what happened and what to
 /// do next, so it prints as it is; anything else is labeled as an error, in `paint`.
 fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -> String {
-    // An error can carry a name or a source's own words, so control characters go here too.
     match error.downcast_ref::<LemonupError>() {
-        Some(LemonupError::Refused(message)) => output::printable(message).into_owned(),
+        // LemonUp's own words, already drawn for the terminal (`find` makes one bold).
+        Some(LemonupError::Refused(message)) => message.clone(),
+        // An error can carry a source's own words, so control characters are removed.
         _ => format!(
             "{} {}",
             output::error_label(paint),
@@ -781,6 +782,28 @@ async fn run_tui(
     Ok(())
 }
 
+/// How the check report names the command that installs the updates. `update` refuses to run
+/// with no AddOns folder, on a folder guarded for the default profile, on a folder that isn't
+/// a valid AddOns folder, and on one the profile isn't bound to (`mismatch`): no command is
+/// named then. A run that was given `--addon-dir` needs it again.
+fn check_update_hint(
+    runtime: &AppRuntime,
+    addon_dir: Option<&Path>,
+    mismatch: bool,
+) -> output::UpdateHint {
+    let refused = match addon_dir {
+        None => true,
+        Some(dir) => mismatch || runtime.is_guarded_path(dir) || validate_addons_path(dir).is_err(),
+    };
+    if refused {
+        output::UpdateHint::None
+    } else if runtime.addon_dir_override.is_some() {
+        output::UpdateHint::WithAddonDir
+    } else {
+        output::UpdateHint::Plain
+    }
+}
+
 async fn run_check<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
@@ -819,15 +842,7 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         database = StateDatabase::open(&copy)?;
         scratch = Some(dir);
     }
-    // The update that would follow: refused when no folder is set or the profile is bound to
-    // another one, so the report names no command then.
-    let hint = if effective_addon_dir.is_none() || scratch.is_some() {
-        output::UpdateHint::None
-    } else if runtime.addon_dir_override.is_some() {
-        output::UpdateHint::WithAddonDir
-    } else {
-        output::UpdateHint::Plain
-    };
+    let hint = check_update_hint(&runtime, effective_addon_dir.as_deref(), scratch.is_some());
     // Names, sources and installed versions for the report. Read before the check, so a read
     // that fails stops the run before anything is saved.
     let rows_before = database.list_addons()?;
@@ -2234,9 +2249,9 @@ mod addon_dir_binding_tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandOutcome, error_text, format_skipped_detail, format_sync_summary, guarded_dirs_of,
-        leftover_staging_warnings, run_check, run_import_addons, run_restore_backup, run_sync,
-        run_update, toc_command,
+        CommandOutcome, check_update_hint, error_text, format_skipped_detail, format_sync_summary,
+        guarded_dirs_of, leftover_staging_warnings, run_check, run_import_addons,
+        run_restore_backup, run_sync, run_update, toc_command,
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
@@ -2329,6 +2344,54 @@ mod addon_dir_binding_tests {
             .get_addon_by_folder("GitAddon")
             .expect("query")
             .expect("GitAddon still tracked")
+    }
+
+    #[test]
+    fn the_check_names_no_update_command_that_would_be_refused() {
+        use crate::output::UpdateHint;
+        let sandbox = sandbox();
+        // The profile's own folder: plain. Given again with --addon-dir: the update needs it too.
+        assert_eq!(
+            check_update_hint(&runtime(None), Some(&sandbox.retail), false),
+            UpdateHint::Plain
+        );
+        assert_eq!(
+            check_update_hint(
+                &runtime(Some(&sandbox.retail)),
+                Some(&sandbox.retail),
+                false
+            ),
+            UpdateHint::WithAddonDir
+        );
+        // No folder, a folder the profile isn't bound to, and a folder that isn't an AddOns
+        // folder are all refused by `update`.
+        assert_eq!(
+            check_update_hint(&runtime(None), None, false),
+            UpdateHint::None
+        );
+        assert_eq!(
+            check_update_hint(
+                &runtime(Some(&sandbox.forever)),
+                Some(&sandbox.forever),
+                true
+            ),
+            UpdateHint::None
+        );
+        let not_addons = sandbox.retail.join("NoSuchFolder");
+        assert_eq!(
+            check_update_hint(&runtime(Some(&not_addons)), Some(&not_addons), false),
+            UpdateHint::None
+        );
+        // A folder guarded for the default profile, seen from another profile.
+        let other = AppRuntime::new(
+            "forever".to_string(),
+            Some(sandbox.retail.clone()),
+            vec![sandbox.retail.clone()],
+        );
+        assert_eq!(
+            check_update_hint(&other, Some(&sandbox.retail), false),
+            UpdateHint::None
+        );
     }
 
     #[test]
@@ -3021,6 +3084,23 @@ mod addon_dir_binding_tests {
         assert_eq!(
             error_text(refusal.as_ref(), Paint::terminal()),
             "Nothing was linked."
+        );
+    }
+
+    #[test]
+    fn a_refusal_keeps_its_own_drawing_and_an_error_loses_control_characters() {
+        // `find --link` makes its refusal bold itself; it has to arrive as it was drawn.
+        let bold = Paint::terminal().bold("Nothing was linked.");
+        assert!(bold.contains('\x1b'), "{bold:?}");
+        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(bold.clone()));
+        assert_eq!(error_text(refusal.as_ref(), Paint::terminal()), bold);
+        // Any other error can carry a source's own words.
+        let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
+            "bad\x1b[31m name\x07".to_string(),
+        ));
+        assert_eq!(
+            error_text(failure.as_ref(), Paint::PLAIN),
+            "Error: invalid argument: bad [31m name "
         );
     }
 

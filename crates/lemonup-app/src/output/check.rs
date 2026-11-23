@@ -56,8 +56,10 @@ struct CheckSummary {
 struct CheckRow {
     name: String,
     folder: String,
-    #[serde(serialize_with = "super::serialize_source")]
-    source: SourceKind,
+    /// `None` when LemonUp's list had no row for the folder. Such a result is never taken
+    /// for Not linked, so it is not left out of the report, and JSON says `null`.
+    #[serde(serialize_with = "serialize_known_source")]
+    source: Option<SourceKind>,
     #[serde(serialize_with = "serialize_status")]
     status: UpdateStatus,
     installed_version: Option<String>,
@@ -65,25 +67,35 @@ struct CheckRow {
     message: Option<String>,
     #[serde(serialize_with = "super::serialize_error_kind")]
     error_kind: Option<SourceErrorKind>,
-    /// Whether LemonUp's list had a row for the folder. A result without one is never
-    /// treated as Not linked, so it is not left out of the report.
-    #[serde(skip)]
-    listed: bool,
 }
 
 impl CheckRow {
     /// An addon LemonUp lists as Not linked. It is shown only when it was named.
     fn not_linked(&self) -> bool {
-        self.listed && self.source == SourceKind::Manual
+        self.source == Some(SourceKind::Manual)
     }
 
     /// The source column: nothing for a result LemonUp's list has no row for.
     fn source_text(&self) -> &'static str {
-        if self.listed {
-            source_label(self.source)
-        } else {
-            ""
+        self.source.map_or("", source_label)
+    }
+
+    /// The source inside a sentence, and at the start of one.
+    fn source_words(&self) -> (&'static str, &'static str) {
+        match self.source {
+            Some(source) => (source_label(source), source_label(source)),
+            None => ("the source", "The source"),
         }
+    }
+}
+
+fn serialize_known_source<S: Serializer>(
+    source: &Option<SourceKind>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match source {
+        Some(source) => serializer.serialize_some(super::source_key(*source)),
+        None => serializer.serialize_none(),
     }
 }
 
@@ -115,13 +127,12 @@ impl CheckReport {
                         |addon| addon.display_name().to_string(),
                     ),
                     folder: check.addon_name.clone(),
-                    source: addon.map_or(SourceKind::Manual, |addon| addon.source),
+                    source: addon.map(|addon| addon.source),
                     status: check.status,
                     installed_version: addon.and_then(|addon| addon.version.clone()),
                     remote_version: check.remote_version.clone(),
                     message: check.message.clone(),
                     error_kind: check.error_kind,
-                    listed: addon.is_some(),
                 }
             })
             .collect::<Vec<_>>();
@@ -220,32 +231,31 @@ fn failure_note(row: &CheckRow) -> Option<String> {
     let Some(kind) = row.error_kind else {
         return row.message.clone();
     };
-    let name = if row.listed {
-        source_label(row.source)
-    } else {
-        "the source"
-    };
+    // `name` inside a sentence, `first` at the start of one.
+    let (name, first) = row.source_words();
     let mut note = match kind {
         SourceErrorKind::NoConnection => {
             format!("Couldn't reach {name}. Check your internet connection and try again.")
         }
-        SourceErrorKind::KeyRejected if row.source == SourceKind::Wago => {
+        SourceErrorKind::KeyRejected if row.source == Some(SourceKind::Wago) => {
             "Wago.io turned down your Wago.io key. Check the key in Settings and try again."
                 .to_string()
         }
-        SourceErrorKind::KeyRejected if row.source == SourceKind::GitHub => {
+        SourceErrorKind::KeyRejected if row.source == Some(SourceKind::GitHub) => {
             "GitHub turned down LemonUp's request. If you set a GitHub token, check it and try \
              again."
                 .to_string()
         }
         SourceErrorKind::KeyRejected => {
-            format!("{name} turned down LemonUp's request. Try again later.")
+            format!("{first} turned down LemonUp's request. Try again later.")
         }
         SourceErrorKind::NotFound => {
-            format!("{name} doesn't list this addon anymore. It may have moved or been taken down.")
+            format!(
+                "{first} doesn't list this addon anymore. It may have moved or been taken down."
+            )
         }
         SourceErrorKind::SlowDown => {
-            format!("{name} asked LemonUp to slow down. Wait a few minutes and try again.")
+            format!("{first} asked LemonUp to slow down. Wait a few minutes and try again.")
         }
         SourceErrorKind::WrongRepository => "The repository may have a new owner. LemonUp won't \
                                              update it until its list is updated."
@@ -328,10 +338,19 @@ impl Report for CheckReport {
             "Update ready",
             ready
                 .iter()
-                .map(|row| Entry {
-                    from: Some(installed(row)),
-                    // A message here says why this counts as an update when the versions match.
-                    ..entry(row, remote(row), row.message.iter().cloned().collect())
+                .map(|row| {
+                    let (from, to) = (installed(row), remote(row));
+                    // Every update carries a message. It is worth a line only when the two
+                    // versions read the same, where it is the one thing that says why.
+                    let why = if from == to {
+                        row.message.iter().cloned().collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Entry {
+                        from: Some(from),
+                        ..entry(row, to, why)
+                    }
                 })
                 .collect(),
         );
@@ -346,7 +365,7 @@ impl Report for CheckReport {
                     let version = format!(
                         "{}, {} has {}",
                         installed(row),
-                        row.source_text(),
+                        row.source_words().0,
                         remote(row)
                     );
                     entry(row, version, Vec::new())
@@ -758,6 +777,65 @@ mod tests {
             [
                 "Update ready (1)",
                 "  Stranger    unknown → 2.0",
+                "",
+                "1 update ready. Run `lemonup update-all` to update.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_row_reads_as_a_sentence_and_has_no_source_in_json() {
+        let older = check("Stranger", UpdateStatus::RemoteOlder, Some("1.0"));
+        let mut gone = check("Wanderer", UpdateStatus::Error, None);
+        gone.error_kind = Some(SourceErrorKind::NotFound);
+        let mut slow = check("Yonder", UpdateStatus::Error, None);
+        slow.error_kind = Some(SourceErrorKind::SlowDown);
+        let report = CheckReport::new(None, "default", false, &[older, gone, slow], &[]);
+        assert_eq!(
+            report.human(Paint::PLAIN.with_width(200)),
+            [
+                "Newer than source (1)",
+                "  Stranger    unknown, the source has 1.0",
+                "",
+                "Check failed (2)",
+                "  Wanderer    unknown",
+                "      The source doesn't list this addon anymore. It may have moved or been taken \
+                 down.",
+                "  Yonder      unknown",
+                "      The source asked LemonUp to slow down. Wait a few minutes and try again.",
+                "",
+                "1 newer than source, 2 checks failed.",
+            ]
+        );
+        let mut output = Output::new(
+            OutputMode::Json,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            Vec::new(),
+        );
+        output.print(&report, None).expect("print");
+        let document = String::from_utf8(output.into_writers().0).expect("utf-8");
+        // Nothing says these are Not linked, so JSON doesn't call them `manual`.
+        assert!(
+            document.contains(r#""name":"Stranger","folder":"Stranger","source":null"#),
+            "{document}"
+        );
+    }
+
+    #[test]
+    fn an_update_ready_row_has_no_note_when_its_versions_differ() {
+        let addons = vec![addon("Pawn", "Pawn", SourceKind::Wago, Some("2.14.4"))];
+        // Every real update carries this message.
+        let mut ready = check("Pawn", UpdateStatus::UpdateAvailable, Some("2.14.8"));
+        ready.message =
+            Some("the source has a different version than the installed one".to_string());
+        assert_eq!(
+            CheckReport::new(None, "default", false, &[ready], &addons).human(Paint::PLAIN),
+            [
+                "Update ready (1)",
+                "  Pawn  Wago.io  2.14.4 → 2.14.8",
                 "",
                 "1 update ready. Run `lemonup update-all` to update.",
             ]
