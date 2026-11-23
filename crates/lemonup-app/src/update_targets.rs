@@ -222,9 +222,10 @@ pub(crate) fn classify_install_folders(
             row.source != SourceKind::Manual && same_folder_name(&row.folder, parent_folder)
         })
         .filter(|row| {
+            // As `lemonup update` reads a selector: without case and without padding.
             let alone = rows
                 .iter()
-                .filter(|other| same_folder_name(&other.folder, &row.folder))
+                .filter(|other| same_folder_name(other.folder.trim(), row.folder.trim()))
                 .count()
                 == 1;
             let shared = package_folders.iter().any(|folder| {
@@ -1036,9 +1037,22 @@ mod tests {
         );
         assert!(installed(&[first], &["Foo", "Foo_Media"], None).is_some());
 
-        // Two rows whose folders differ only in case: `lemonup update Foo` could pick either.
+        // Another row whose folder differs only in case or in padding: `lemonup update Foo`
+        // could pick either. A Not linked row claims nothing, so only this keeps the hint back.
+        for folder in ["foo", " Foo", "FOO "] {
+            let twin = AddonRecord::new("Twin", folder, SourceKind::Manual);
+            assert_eq!(
+                installed(&[twin, foo.clone()], &["Foo"], None),
+                None,
+                "{folder:?}"
+            );
+        }
+        // And a linked one in another case is in the way as well.
         let lower = AddonRecord::new("Lower", "foo", SourceKind::GitHub);
         assert_eq!(installed(&[foo.clone(), lower], &["Foo"], None), None);
+        // An unrelated Not linked row changes nothing.
+        let unrelated = AddonRecord::new("Unrelated", "Bar", SourceKind::Manual);
+        assert!(installed(&[unrelated, foo.clone()], &["Foo"], None).is_some());
 
         // A reinstall whose own folders are gone from the AddOns folder: what is in the way
         // is another, Not linked folder.
