@@ -50,7 +50,7 @@ pub enum Commands {
     Tui,
     /// Scan the AddOns folder and update LemonUp's list
     Sync,
-    /// List your games: profile name, game version, AddOns folder and addon count
+    /// List your games: profile name, game, AddOns folder and addon count
     Profiles,
     /// Check linked addons for updates without changing anything
     Check {
@@ -175,10 +175,14 @@ pub enum Commands {
 /// once it prints through `crate::output`.
 pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
     let name = match command {
-        None | Some(Commands::Tui) => {
+        None => {
             return Some(
                 "--json needs a command, for example lemonup --json profiles.".to_string(),
             );
+        }
+        // The TUI prints no result, so this one stays.
+        Some(Commands::Tui) => {
+            return Some("--json is not available for `lemonup tui`.".to_string());
         }
         Some(Commands::Profiles) => return None,
         Some(Commands::Sync) => "sync",
@@ -324,16 +328,14 @@ mod tests {
                 "{args:?}"
             );
         }
-        for args in [
-            &["lemonup", "--json"][..],
-            &["lemonup", "--json", "tui"][..],
-        ] {
-            assert_eq!(
-                refusal(args).as_deref(),
-                Some("--json needs a command, for example lemonup --json profiles."),
-                "{args:?}"
-            );
-        }
+        assert_eq!(
+            refusal(&["lemonup", "--json"]).as_deref(),
+            Some("--json needs a command, for example lemonup --json profiles.")
+        );
+        assert_eq!(
+            refusal(&["lemonup", "--json", "tui"]).as_deref(),
+            Some("--json is not available for `lemonup tui`.")
+        );
     }
 
     #[test]

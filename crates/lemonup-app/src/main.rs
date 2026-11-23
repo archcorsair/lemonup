@@ -126,6 +126,7 @@ fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -
 
 async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    // Before anything reads or writes a folder: a refused run changes nothing.
     if cli.json
         && let Some(refusal) = cli::json_refusal(cli.command.as_ref())
     {

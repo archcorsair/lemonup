@@ -157,6 +157,7 @@ impl Paint {
     }
 
     fn apply(self, text: &str, pick: fn(&ColorRoles) -> Style, bold: bool) -> String {
+        let text = &printable(text);
         if !self.colored {
             return text.to_string();
         }
@@ -211,6 +212,24 @@ impl Paint {
             Tone::Quiet => |roles| Style::new().fg(roles.text),
         };
         self.apply(text, pick, true)
+    }
+}
+
+/// `text` with every control character as a space. Names, versions and messages come from
+/// files and from the sources, and an escape code among them must never reach the terminal.
+fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        text.chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect()
+    } else {
+        std::borrow::Cow::Borrowed(text)
     }
 }
 
@@ -446,12 +465,11 @@ impl<O: Write, E: Write> Output<O, E> {
         report: &R,
         addon_dir: Option<&Path>,
     ) -> std::io::Result<()> {
-        match self.mode {
-            OutputMode::Human => {
-                for line in report.human(self.stdout_paint) {
-                    writeln!(self.stdout, "{line}")?;
-                }
-            }
+        let written = match self.mode {
+            OutputMode::Human => report
+                .human(self.stdout_paint)
+                .iter()
+                .try_for_each(|line| writeln!(self.stdout, "{line}")),
             OutputMode::Json => {
                 let warnings = std::mem::take(&mut self.warnings);
                 let envelope = Envelope {
@@ -469,10 +487,15 @@ impl<O: Write, E: Write> Output<O, E> {
                 // Written whole or not at all: a document that fails to serialize prints nothing.
                 let mut line = serde_json::to_vec(&envelope)?;
                 line.push(b'\n');
-                self.stdout.write_all(&line)?;
+                self.stdout.write_all(&line)
             }
         }
-        self.stdout.flush()
+        .and_then(|()| self.stdout.flush());
+        match written {
+            // The reader went away (`| head`): there is nobody left to tell.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            other => other,
+        }
     }
 
     /// A warning: on stderr, or in the `warnings` of the JSON document.

@@ -286,3 +286,76 @@ fn a_document_that_fails_to_serialize_prints_nothing() {
     assert_eq!(text(stdout), "");
     assert_eq!(text(stderr), "");
 }
+
+#[test]
+fn control_characters_never_reach_the_terminal() {
+    let hostile = "Pawn\x1b[31m\x07\r\nv2\t\u{9b}";
+    for paint in [Paint::PLAIN, Paint::terminal()] {
+        for drawn in [
+            paint.text(hostile),
+            paint.muted(hostile),
+            paint.bold(hostile),
+            paint.heading(Tone::Problem, hostile),
+        ] {
+            // What is left of the name has no control character; the only escape codes are
+            // the ones `Paint` wrote around it.
+            assert!(drawn.contains("Pawn [31m   v2  "), "{drawn:?}");
+            assert!(!drawn.contains("Pawn\x1b"), "{drawn:?}");
+            assert!(
+                !drawn.contains(['\x07', '\r', '\n', '\t', '\u{9b}']),
+                "{drawn:?}"
+            );
+        }
+    }
+    assert_eq!(Paint::PLAIN.text("Details!"), "Details!");
+}
+
+/// A stream whose reader went away.
+struct ClosedPipe;
+
+impl Write for ClosedPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+/// A stream that fails for another reason.
+struct FullDisk;
+
+impl Write for FullDisk {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::StorageFull.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
+    for mode in [OutputMode::Human, OutputMode::Json] {
+        let mut closed = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            ClosedPipe,
+            Vec::new(),
+        );
+        assert!(closed.print(&sample(), None).is_ok(), "{mode:?}");
+        let mut full = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            FullDisk,
+            Vec::new(),
+        );
+        assert!(full.print(&sample(), None).is_err(), "{mode:?}");
+    }
+}
