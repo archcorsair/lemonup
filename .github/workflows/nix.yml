@@ -53,12 +53,16 @@ jobs:
       # Pulls from and pushes to the lemonup cache. Skipped until the
       # CACHIX_AUTH_TOKEN secret is set (and on pull requests from forks),
       # because the action fails when the cache doesn't exist yet.
+      # The action's default installer evaluates a Nixpkgs that dropped
+      # x86_64-darwin, so Intel Macs install Cachix from the flake's locked
+      # 26.05 input instead. An empty installCommand keeps the default.
       - name: Set up Cachix
         if: env.CACHIX_AUTH_TOKEN != ''
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: lemonup
           authToken: ${{ env.CACHIX_AUTH_TOKEN }}
+          installCommand: ${{ matrix.system == 'x86_64-darwin' && 'nix profile add --inputs-from . nixpkgs-x86_64-darwin#cachix' || '' }}
 
       - name: Build
         run: nix build -L
