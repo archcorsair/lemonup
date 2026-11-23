@@ -16,6 +16,8 @@ pub struct DisplayEnv {
     pub truecolor: bool,
     /// The locale can show symbols beyond ASCII.
     pub utf8: bool,
+    /// The terminal is one known to turn OSC 8 links into something to click.
+    pub hyperlinks: bool,
 }
 
 impl DisplayEnv {
@@ -25,6 +27,7 @@ impl DisplayEnv {
         no_color: false,
         truecolor: true,
         utf8: true,
+        hyperlinks: true,
     };
 
     pub fn detect() -> Self {
@@ -58,8 +61,45 @@ impl DisplayEnv {
             no_color,
             truecolor,
             utf8,
+            hyperlinks: hyperlinks(set),
         }
     }
+}
+
+/// Whether the terminal turns OSC 8 links into something to click. No terminal can be asked,
+/// so this goes by how the ones that do identify themselves. `FORCE_HYPERLINK` overrides it,
+/// as in other tools: `0` turns links off, anything else turns them on.
+fn hyperlinks(set: impl Fn(&str) -> Option<String>) -> bool {
+    if let Some(forced) = set("FORCE_HYPERLINK") {
+        return forced != "0";
+    }
+    let at_least = |name: &str, version: u32| {
+        set(name).is_some_and(|value| value.parse::<u32>().is_ok_and(|found| found >= version))
+    };
+    let program = set("TERM_PROGRAM").unwrap_or_default();
+    let term = set("TERM").unwrap_or_default();
+    // Over SSH a `file://` link would open a file of the machine the terminal runs on. And
+    // tmux and screen sit between LemonUp and the terminal named in the environment: some
+    // versions drop a link, some print it as text.
+    let remote = set("SSH_CONNECTION").is_some() || set("SSH_TTY").is_some();
+    let multiplexed = set("TMUX").is_some()
+        || set("STY").is_some()
+        || term.starts_with("screen")
+        || term.starts_with("tmux");
+    if remote || multiplexed || term == "dumb" {
+        return false;
+    }
+    matches!(
+        program.as_str(),
+        "ghostty" | "iTerm.app" | "WezTerm" | "vscode" | "Hyper" | "Tabby"
+    ) || ["xterm-ghostty", "xterm-kitty", "alacritty", "foot", "wezterm"]
+        .iter()
+        .any(|known| term.starts_with(known))
+        || set("WT_SESSION").is_some()
+        // GNOME Terminal and the others built on VTE, from 0.50.
+        || at_least("VTE_VERSION", 5000)
+        // Konsole from 21.04.
+        || at_least("KONSOLE_VERSION", 210_400)
 }
 
 /// The theme a saved choice shows as right now: Terminal while `NO_COLOR`
@@ -237,6 +277,8 @@ pub(crate) struct Symbols {
     pub(crate) simple: bool,
     /// Up to date, done.
     pub(crate) done: &'static str,
+    /// A command that failed.
+    pub(crate) failed: &'static str,
     /// From the installed version to the new one.
     pub(crate) arrow: &'static str,
     /// Work in progress, and the spinner under reduce motion.
@@ -248,6 +290,7 @@ impl Symbols {
     pub(crate) const FANCY: Self = Self {
         simple: false,
         done: "✓",
+        failed: "✗",
         arrow: "→",
         ellipsis: "…",
         spinner: &["⠋", "⠙", "⠸", "⠴"],
@@ -256,6 +299,7 @@ impl Symbols {
     pub(crate) const SIMPLE: Self = Self {
         simple: true,
         done: "ok",
+        failed: "x",
         arrow: "->",
         ellipsis: "...",
         spinner: &["|", "/", "-", "\\"],
@@ -278,6 +322,7 @@ pub(crate) fn ascii_symbol(symbol: &str) -> Option<&'static str> {
         '·' | '─' | '━' | '⠸' => "-",
         '•' | '●' | '✓' => "*",
         '○' => "o",
+        '✗' => "x",
         '▌' | '│' | '┃' | '⠋' => "|",
         '⠙' => "/",
         '⠴' => "\\",
@@ -536,6 +581,79 @@ mod tests {
         }
         assert!(!DisplayEnv::from_vars(vars(&[]), false).truecolor);
         assert!(DisplayEnv::from_vars(vars(&[("WT_SESSION", "abc")]), true).truecolor);
+    }
+
+    #[test]
+    fn links_are_for_terminals_known_to_have_them() {
+        for (pairs, hyperlinks) in [
+            (vec![("TERM_PROGRAM", "ghostty")], true),
+            (vec![("TERM_PROGRAM", "iTerm.app")], true),
+            (vec![("TERM_PROGRAM", "WezTerm")], true),
+            (vec![("TERM_PROGRAM", "vscode")], true),
+            (vec![("TERM", "xterm-ghostty")], true),
+            (vec![("TERM", "xterm-kitty")], true),
+            (vec![("TERM", "alacritty")], true),
+            (vec![("TERM", "foot-extra")], true),
+            (vec![("WT_SESSION", "abc")], true),
+            (vec![("VTE_VERSION", "7600")], true),
+            (vec![("KONSOLE_VERSION", "240800")], true),
+            // Too old, unknown, or nothing said.
+            (vec![("VTE_VERSION", "4804")], false),
+            (vec![("KONSOLE_VERSION", "200400")], false),
+            (vec![("VTE_VERSION", "new")], false),
+            (vec![("TERM_PROGRAM", "Apple_Terminal")], false),
+            (vec![("TERM", "xterm-256color")], false),
+            (vec![("TERM", "dumb")], false),
+            (vec![], false),
+            // The override wins both ways; empty counts as not set.
+            (vec![("FORCE_HYPERLINK", "1"), ("TERM", "dumb")], true),
+            (
+                vec![("FORCE_HYPERLINK", "0"), ("TERM_PROGRAM", "ghostty")],
+                false,
+            ),
+            (vec![("FORCE_HYPERLINK", ""), ("TERM", "dumb")], false),
+            (
+                vec![("FORCE_HYPERLINK", ""), ("TERM_PROGRAM", "ghostty")],
+                true,
+            ),
+            // A link would point at the wrong machine over SSH, and tmux or screen may not
+            // pass it on. The override still wins.
+            (
+                vec![("TERM_PROGRAM", "ghostty"), ("SSH_CONNECTION", "1 2 3 4")],
+                false,
+            ),
+            (
+                vec![("TERM_PROGRAM", "ghostty"), ("SSH_TTY", "/dev/pts/1")],
+                false,
+            ),
+            (
+                vec![
+                    ("VTE_VERSION", "7600"),
+                    ("TMUX", "/tmp/tmux-1000/default,1,0"),
+                ],
+                false,
+            ),
+            (
+                vec![("VTE_VERSION", "7600"), ("TERM", "screen-256color")],
+                false,
+            ),
+            (
+                vec![("WT_SESSION", "abc"), ("TERM", "tmux-256color")],
+                false,
+            ),
+            (
+                vec![("TERM_PROGRAM", "vscode"), ("STY", "1234.pts-0.host")],
+                false,
+            ),
+            (vec![("TERM_PROGRAM", "vscode"), ("TERM", "dumb")], false),
+            (
+                vec![("FORCE_HYPERLINK", "1"), ("TMUX", "x"), ("SSH_TTY", "y")],
+                true,
+            ),
+        ] {
+            let env = DisplayEnv::from_vars(vars(&pairs), false);
+            assert_eq!(env.hyperlinks, hyperlinks, "{pairs:?}");
+        }
     }
 
     #[test]

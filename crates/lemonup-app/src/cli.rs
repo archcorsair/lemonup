@@ -177,31 +177,33 @@ pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
     let name = match command {
         None => {
             return Some(
-                "--json needs a command, for example lemonup --json profiles.".to_string(),
+                "`--json` needs a command, for example `lemonup --json profiles`.".to_string(),
             );
         }
         // The TUI prints no result, so this one stays.
         Some(Commands::Tui) => {
-            return Some("--json is not available for `lemonup tui`.".to_string());
+            return Some("`--json` is not available for `lemonup tui`.".to_string());
         }
         Some(
             Commands::Profiles
             | Commands::Check { .. }
             | Commands::Update { .. }
-            | Commands::UpdateAll { .. },
+            | Commands::UpdateAll { .. }
+            | Commands::Sync
+            | Commands::Toc { .. }
+            | Commands::ExportAddons { .. }
+            | Commands::ImportAddons { .. }
+            | Commands::RestoreBackup { .. },
         ) => return None,
-        Some(Commands::Sync) => "sync",
         Some(Commands::InstallWago { .. }) => "install-wago",
         Some(Commands::InstallTukui { .. }) => "install-tukui",
         Some(Commands::InstallWowinterface { .. }) => "install-wowinterface",
         Some(Commands::InstallGithub { .. }) => "install-github",
-        Some(Commands::ExportAddons { .. }) => "export-addons",
-        Some(Commands::ImportAddons { .. }) => "import-addons",
-        Some(Commands::RestoreBackup { .. }) => "restore-backup",
         Some(Commands::Find { .. }) => "find",
-        Some(Commands::Toc { .. }) => "toc",
     };
-    Some(format!("--json is not available for `lemonup {name}` yet."))
+    Some(format!(
+        "`--json` is not available for `lemonup {name}` yet."
+    ))
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -317,6 +319,28 @@ mod tests {
     }
 
     #[test]
+    fn json_is_accepted_for_sync_toc_export_import_and_restore() {
+        for args in [
+            &["lemonup", "--json", "sync"][..],
+            &["lemonup", "toc", "AdiBags", "--json"][..],
+            &["lemonup", "toc", "AdiBags", "category", "Bags", "--json"][..],
+            &["lemonup", "export-addons", "--json"][..],
+            &["lemonup", "--json", "import-addons", "--dry-run"][..],
+            &[
+                "lemonup",
+                "--profile",
+                "forever",
+                "restore-backup",
+                "--json",
+            ][..],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            assert!(cli.json, "{args:?}");
+            assert_eq!(json_refusal(cli.command.as_ref()), None, "{args:?}");
+        }
+    }
+
+    #[test]
     fn json_is_refused_for_commands_that_dont_print_it_yet() {
         let refusal = |args: &[&str]| {
             let cli = Cli::try_parse_from(args).expect("parses");
@@ -324,32 +348,31 @@ mod tests {
             json_refusal(cli.command.as_ref())
         };
         for (args, name) in [
-            (&["lemonup", "--json", "sync"][..], "sync"),
             (&["lemonup", "find", "--json", "--link"][..], "find"),
-            (&["lemonup", "toc", "AdiBags", "--json"][..], "toc"),
-            (&["lemonup", "export-addons", "--json"][..], "export-addons"),
             (
                 &["lemonup", "install-tukui", "elvui", "--json"][..],
                 "install-tukui",
             ),
             (
-                &["lemonup", "restore-backup", "--json"][..],
-                "restore-backup",
+                &["lemonup", "--json", "install-wago", "weakauras"][..],
+                "install-wago",
             ),
         ] {
             assert_eq!(
                 refusal(args),
-                Some(format!("--json is not available for `lemonup {name}` yet.")),
+                Some(format!(
+                    "`--json` is not available for `lemonup {name}` yet."
+                )),
                 "{args:?}"
             );
         }
         assert_eq!(
             refusal(&["lemonup", "--json"]).as_deref(),
-            Some("--json needs a command, for example lemonup --json profiles.")
+            Some("`--json` needs a command, for example `lemonup --json profiles`.")
         );
         assert_eq!(
             refusal(&["lemonup", "--json", "tui"]).as_deref(),
-            Some("--json is not available for `lemonup tui`.")
+            Some("`--json` is not available for `lemonup tui`.")
         );
     }
 

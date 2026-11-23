@@ -4,13 +4,23 @@
 //! background, so a theme's text color could be close to invisible on the terminal's own.
 
 mod check;
+mod export;
+mod import;
 mod profiles;
+mod restore;
+mod sync;
 #[cfg(test)]
 mod tests;
+mod toc;
 mod update;
 
 pub(crate) use check::{CheckReport, UpdateHint};
+pub(crate) use export::ExportReport;
+pub(crate) use import::ImportReport;
 pub(crate) use profiles::ProfilesReport;
+pub(crate) use restore::RestoreReport;
+pub(crate) use sync::SyncReport;
+pub(crate) use toc::{TocChange, TocReport, TocRow};
 pub(crate) use update::{BackupLine, UpdateFlags, UpdateReport};
 
 use std::io::{IsTerminal, Write};
@@ -84,6 +94,8 @@ pub(crate) struct Paint {
     colored: bool,
     symbols: Symbols,
     width: usize,
+    /// Paths are links to click (OSC 8).
+    links: bool,
 }
 
 impl Paint {
@@ -92,6 +104,7 @@ impl Paint {
         colored: false,
         symbols: Symbols::FANCY,
         width: WIDTH,
+        links: false,
     };
 
     /// The same drawing, wrapped to `width` columns.
@@ -102,6 +115,11 @@ impl Paint {
     /// The same drawing with `symbols`.
     pub(crate) fn with_symbols(self, symbols: Symbols) -> Self {
         Self { symbols, ..self }
+    }
+
+    /// The same drawing, with paths as links to click or not.
+    pub(crate) fn with_links(self, links: bool) -> Self {
+        Self { links, ..self }
     }
 
     /// In the terminal's own 16 colors.
@@ -118,8 +136,9 @@ impl Paint {
     /// Colored for a stream that `is_terminal` (and that `display` allows), else plain. Simple
     /// symbols when `config` asks for them or the locale can't show others, as in the TUI.
     pub(crate) fn for_stream(is_terminal: bool, display: DisplayEnv, config: &AppConfig) -> Self {
+        // A link is an escape code too, so it goes only where color goes.
         let paint = if color_wanted(is_terminal, display) {
-            Self::terminal()
+            Self::terminal().with_links(display.hyperlinks)
         } else {
             Self::PLAIN
         };
@@ -150,6 +169,16 @@ impl Paint {
     /// The columns lines are wrapped to.
     pub(crate) fn width(self) -> usize {
         self.width
+    }
+
+    /// The mark of a finished action, in green: `✓`, or `ok` with simple symbols.
+    pub(crate) fn done(self) -> String {
+        self.added(self.symbols.done)
+    }
+
+    /// The mark of a command that failed, in red: `✗`, or `x` with simple symbols.
+    pub(crate) fn failed(self) -> String {
+        self.removed(self.symbols.failed)
     }
 
     /// From the installed version to the new one: `→`, or `->` with simple symbols.
@@ -215,6 +244,66 @@ impl Paint {
         self.apply(text, |roles| Style::new().fg(roles.text), true)
     }
 
+    /// A file or folder a command wrote or read: bold, and a link to it where the terminal
+    /// has links.
+    pub(crate) fn path(self, path: &Path) -> String {
+        let shown = self.bold(&crate::app::friendly_path(path));
+        match (self.colored && self.links)
+            .then(|| file_url(path))
+            .flatten()
+        {
+            // OSC 8: the link opens, the text, the link closes.
+            Some(url) => format!("\x1b]8;;{url}\x1b\\{shown}\x1b]8;;\x1b\\"),
+            None => shown,
+        }
+    }
+
+    /// A command to run, such as `lemonup update-all`, or a flag: bold cyan. Plain output keeps
+    /// the backticks, which are all that marks it there.
+    pub(crate) fn command(self, command: &str) -> String {
+        if self.colored {
+            self.apply(command, |roles| Style::new().fg(roles.blue), true)
+        } else {
+            format!("`{}`", printable(command))
+        }
+    }
+
+    /// `text` with each command it names between backticks drawn as a command, and the rest
+    /// drawn by `rest`. Only LemonUp's own commands and flags count, so a backtick in a name or
+    /// in a source's message stays as it is.
+    pub(crate) fn commands(self, text: &str, rest: fn(Self, &str) -> String) -> String {
+        if !self.colored {
+            return rest(self, text);
+        }
+        let mut out = String::new();
+        let mut plain = String::new();
+        let mut remaining = text;
+        while let Some(start) = remaining.find('`') {
+            let after = &remaining[start + 1..];
+            match after.find('`') {
+                Some(end) if is_command(&after[..end]) => {
+                    plain.push_str(&remaining[..start]);
+                    if !plain.is_empty() {
+                        out.push_str(&rest(self, &plain));
+                        plain.clear();
+                    }
+                    out.push_str(&self.command(&after[..end]));
+                    remaining = &after[end + 1..];
+                }
+                // Not a command: this backtick is text, and the next one may open a command.
+                _ => {
+                    plain.push_str(&remaining[..=start]);
+                    remaining = after;
+                }
+            }
+        }
+        plain.push_str(remaining);
+        if !plain.is_empty() {
+            out.push_str(&rest(self, &plain));
+        }
+        out
+    }
+
     pub(crate) fn heading(self, tone: Tone, text: &str) -> String {
         let pick: fn(&ColorRoles) -> Style = match tone {
             Tone::Good => |roles| Style::new().fg(roles.green),
@@ -224,6 +313,29 @@ impl Paint {
         };
         self.apply(text, pick, true)
     }
+}
+
+/// A reader that went away (`| head`) is not an error of the command: there is nobody left
+/// to tell.
+fn ignore_closed(written: std::io::Result<()>) -> std::io::Result<()> {
+    match written {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// `path` as a `file://` address, with everything but plain ASCII percent-encoded, so no
+/// character of a file name can end the link or reach the terminal as an escape code.
+fn file_url(path: &Path) -> Option<String> {
+    let absolute = std::path::absolute(path).ok()?;
+    reqwest::Url::from_file_path(absolute)
+        .ok()
+        .map(String::from)
+}
+
+/// Whether the words between two backticks are a LemonUp command or one of its flags.
+fn is_command(span: &str) -> bool {
+    span == "lemonup" || span.starts_with("lemonup ") || span.starts_with("--")
 }
 
 /// `text` with every control character as a space. Names, versions and messages come from
@@ -320,16 +432,26 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
         } else {
             " ".repeat(mark_width)
         };
+        // A row without a version ends with its source, so the line has no trailing spaces.
+        let rest = if version.is_empty() {
+            paint.muted(&entry.source)
+        } else {
+            format!(
+                "{}  {version}",
+                paint.muted(&pad(&entry.source, source_width))
+            )
+        };
         lines.push(format!(
-            "{INDENT}{marked}{}  {}  {version}",
+            "{INDENT}{marked}{}  {rest}",
             paint.text(&pad(&entry.name, name_width)),
-            paint.muted(&pad(&entry.source, source_width)),
         ));
         for note in &entry.notes {
             lines.extend(
                 wrap_words(&note_indent, note, paint.width)
                     .iter()
-                    .map(|line| paint.muted(line)),
+                    // Drawn after wrapping, so a command here must be one word, as a flag is:
+                    // one split over two lines would keep its backticks.
+                    .map(|line| paint.commands(line, Paint::muted)),
             );
         }
     }
@@ -684,11 +806,7 @@ impl<O: Write, E: Write> Output<O, E> {
             }
         }
         .and_then(|()| self.stdout.flush());
-        match written {
-            // The reader went away (`| head`): there is nobody left to tell.
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            other => other,
-        }
+        ignore_closed(written)
     }
 
     /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
@@ -697,17 +815,32 @@ impl<O: Write, E: Write> Output<O, E> {
         if self.mode == OutputMode::Json {
             self.warnings.push(text.to_string());
         }
-        writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{} {}",
             self.stderr_paint.attention("warning:"),
-            printable(text)
-        )
+            self.stderr_paint.commands(text, Paint::text)
+        ))
+    }
+
+    /// The last line of a command that failed, on stderr in both modes: the red mark, then
+    /// what failed and why. Nothing goes to stdout after it.
+    pub(crate) fn fail(&mut self, text: &str) -> std::io::Result<()> {
+        ignore_closed(writeln!(
+            self.stderr,
+            "{} {}",
+            self.stderr_paint.failed(),
+            self.stderr_paint.commands(text, Paint::text)
+        ))
     }
 
     /// A notice on stderr, in both modes. The JSON document leaves it out.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
-        writeln!(self.stderr, "{}", printable(text))
+        ignore_closed(writeln!(
+            self.stderr,
+            "{}",
+            self.stderr_paint.commands(text, Paint::text)
+        ))
     }
 
     #[cfg(test)]

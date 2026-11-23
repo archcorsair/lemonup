@@ -31,11 +31,10 @@ use std::time::Duration;
 use clap::Parser;
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding};
 use lemonup_core::{
-    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    ProfileRoots, ScanSummary, StateDatabase, TuiProfile, UpdateStatus, V1Location,
-    V1MigrationOutcome, analyze_import, default_transfer_path, export_addons, list_profiles,
-    migrate_v1_if_needed, parse_import_file, remember_last_used, scan_addons_dir_report,
-    tui_profile, validate_addons_path,
+    AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, LemonupError, ProfileRoots,
+    StateDatabase, TuiProfile, UpdateStatus, V1Location, V1MigrationOutcome, analyze_import,
+    default_transfer_path, export_addons, list_profiles, migrate_v1_if_needed, parse_import_file,
+    remember_last_used, scan_addons_dir_report, tui_profile, validate_addons_path,
 };
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -70,6 +69,8 @@ enum CommandOutcome {
     /// The command could not run (no addon dir, no Wago API key) and printed a skip message.
     /// Scripts must see this as a failure, so it exits 1.
     Skipped,
+    /// The command failed or refused and said so in its own last line.
+    Failed,
 }
 
 impl CommandOutcome {
@@ -84,7 +85,7 @@ impl CommandOutcome {
     fn exit_status(self) -> u8 {
         match self {
             Self::Success => 0,
-            Self::Failures(_) | Self::Skipped => 1,
+            Self::Failures(_) | Self::Skipped | Self::Failed => 1,
         }
     }
 }
@@ -113,16 +114,15 @@ async fn main() -> ExitCode {
 }
 
 /// What an error that ends a command prints. A refusal already says what happened and what to
-/// do next, so it prints as it is; anything else is labeled as an error, in `paint`.
+/// do next, so it has no label; anything else is labeled as an error, in `paint`. Both can
+/// name an addon, a folder or a source's own words, so control characters are removed.
 fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -> String {
     match error.downcast_ref::<LemonupError>() {
-        // LemonUp's own words, already drawn for the terminal (`find` makes one bold).
-        Some(LemonupError::Refused(message)) => message.clone(),
-        // An error can carry a source's own words, so control characters are removed.
+        Some(LemonupError::Refused(message)) => paint.commands(message, output::Paint::text),
         _ => format!(
             "{} {}",
             output::error_label(paint),
-            output::printable(&error.to_string())
+            paint.commands(&error.to_string(), output::Paint::text)
         ),
     }
 }
@@ -166,7 +166,11 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     if let Some(notice) = startup_notice.as_ref()
         && !matches!(command, Commands::Tui)
     {
-        notice.print();
+        // Only the colors matter here, and they don't depend on the settings.
+        notice.print(output::Paint::for_stderr(
+            &lemonup_core::AppConfig::default(),
+            runtime.display,
+        ));
     }
 
     let outcome = match command {
@@ -174,7 +178,10 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             run_tui(paths, runtime, startup_notice).await?;
             CommandOutcome::Success
         }
-        Commands::Sync => run_sync(paths, runtime)?,
+        Commands::Sync => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_sync(paths, runtime, &mut output)?
+        }
         Commands::Profiles => {
             let mut output = command_output(&paths, &runtime, json);
             output.print(
@@ -228,15 +235,18 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         Commands::InstallGithub { addon, dry_run } => {
             run_install_github(paths, runtime, &addon, dry_run).await?
         }
-        Commands::ExportAddons { output } => {
-            run_export_addons(paths, output)?;
+        Commands::ExportAddons { output: file } => {
+            let mut output = command_output(&paths, &runtime, json);
+            run_export_addons(paths, file, &mut output)?;
             CommandOutcome::Success
         }
         Commands::ImportAddons { input, dry_run } => {
-            run_import_addons(paths, runtime, input, dry_run).await?
+            let mut output = command_output(&paths, &runtime, json);
+            run_import_addons(paths, runtime, input, dry_run, &mut output).await?
         }
         Commands::RestoreBackup { archive } => {
-            run_restore_backup(paths, runtime, archive)?;
+            let mut output = command_output(&paths, &runtime, json);
+            run_restore_backup(paths, runtime, archive, &mut output)?;
             CommandOutcome::Success
         }
         Commands::Toc {
@@ -245,7 +255,11 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             value,
             clear,
             yes,
-        } => run_toc(paths, runtime, &addon, field, value, clear, yes)?,
+        } => {
+            let change = toc_change(field, value, clear)?;
+            let mut output = command_output(&paths, &runtime, json);
+            run_toc(paths, runtime, &addon, change, yes, &mut output)?
+        }
         Commands::Find {
             link,
             yes,
@@ -331,28 +345,37 @@ fn output_config(paths: &AppPaths) -> lemonup_core::AppConfig {
     }
 }
 
-/// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
-/// asks, so changing a "Not linked" addon needs `--yes`.
-fn run_toc(
-    paths: AppPaths,
-    runtime: AppRuntime,
-    addon: &str,
+/// A field and the change `lemonup toc` makes to it: a new value, or `None` to restore the
+/// addon's own.
+type TocChangeArg = (lemonup_core::TocField, Option<String>);
+
+/// The change `lemonup toc` was asked for, if any: a field needs a new value or `--clear`.
+fn toc_change(
     field: Option<lemonup_core::TocField>,
     value: Option<String>,
     clear: bool,
+) -> Result<Option<TocChangeArg>, LemonupError> {
+    match (field, value, clear) {
+        (None, _, _) => Ok(None),
+        (Some(field), Some(value), false) => Ok(Some((field, Some(value)))),
+        (Some(field), None, true) => Ok(Some((field, None))),
+        (Some(field), _, _) => Err(LemonupError::InvalidArgument(format!(
+            "give a new {} value, or `--clear` to restore the addon's own",
+            field.name()
+        ))),
+    }
+}
+
+/// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
+/// asks, so changing a "Not linked" addon needs `--yes`.
+fn run_toc<O: std::io::Write, E: std::io::Write>(
+    paths: AppPaths,
+    runtime: AppRuntime,
+    addon: &str,
+    change: Option<TocChangeArg>,
     yes: bool,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let change = match (field, value, clear) {
-        (None, _, _) => None,
-        (Some(field), Some(value), false) => Some((field, Some(value))),
-        (Some(field), None, true) => Some((field, None)),
-        (Some(field), _, _) => {
-            return Err(Box::new(LemonupError::InvalidArgument(format!(
-                "give a new {} value, or --clear to restore the addon's own",
-                field.name()
-            ))));
-        }
-    };
     let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
@@ -363,11 +386,7 @@ fn run_toc(
         .clone()
         .or(configured_addon_dir.clone())
     else {
-        println!(
-            "toc skipped: profile={}, addon_dir=<unconfigured>",
-            runtime.profile_name
-        );
-        return Ok(CommandOutcome::Skipped);
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
     };
     if runtime.is_guarded_path(&addon_dir) {
         return Err(Box::new(LemonupError::InvalidArgument(format!(
@@ -388,9 +407,11 @@ fn run_toc(
         &addon_dir,
         change.is_some(),
     )?;
-    for line in toc_command(&mut database, &addon_dir, addon, change, yes)? {
-        println!("{line}");
+    let report = toc_command(&mut database, &addon_dir, addon, change, yes)?;
+    for warning in report.warnings() {
+        output.warn(&warning)?;
     }
+    output.print(&report, Some(&addon_dir))?;
     Ok(CommandOutcome::Success)
 }
 
@@ -513,13 +534,46 @@ async fn run_find(
         }
         println!();
         let outcome = if link { Some(link_now()?) } else { None };
-        // A refusal leaves the report on screen and ends the run with what happened.
-        let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
-        for line in crate::find::human_closing(&report, &names, outcome, paint, error_paint)? {
-            println!("{line}");
+        // A refusal leaves the report on screen and ends the run with what happened, bold
+        // like the closing line it takes the place of.
+        match crate::find::human_closing(&report, &names, outcome, paint) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(LemonupError::Refused(message)) => {
+                let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
+                eprintln!("{}", crate::find::human_refusal(&message, error_paint));
+                return Ok(CommandOutcome::Failed);
+            }
+            Err(error) => return Err(Box::new(error)),
         }
     }
     Ok(CommandOutcome::from_error_count(lookups.problems.len()))
+}
+
+/// The fields of the addon in `folder` as its .toc files have them, and where each comes from
+/// given the stored `overrides`.
+fn toc_rows(
+    addon_dir: &Path,
+    folder: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<output::TocRow>, LemonupError> {
+    let flavor = GameFlavor::for_addons_dir(addon_dir);
+    let effective =
+        lemonup_core::read_addon_toc_fields(addon_dir, folder, flavor)?.unwrap_or_default();
+    Ok(lemonup_core::TocField::ALL
+        .into_iter()
+        .map(|field| {
+            let value = effective.get(field);
+            output::TocRow {
+                field: field.name(),
+                value: value.map(str::to_string),
+                source: lemonup_core::toc_edit::value_source(field, overrides, value),
+            }
+        })
+        .collect())
 }
 
 /// What `lemonup toc` prints, after changing a field when `change` asks for it (`None` as the
@@ -529,9 +583,9 @@ fn toc_command(
     database: &mut StateDatabase,
     addon_dir: &Path,
     selector: &str,
-    change: Option<(lemonup_core::TocField, Option<String>)>,
+    change: Option<TocChangeArg>,
     yes: bool,
-) -> Result<Vec<String>, LemonupError> {
+) -> Result<output::TocReport, LemonupError> {
     use lemonup_core::toc_edit;
 
     let installed = database.list_addons()?;
@@ -547,20 +601,13 @@ fn toc_command(
     let flavor = GameFlavor::for_addons_dir(addon_dir);
 
     let Some((field, value)) = change else {
-        let effective = lemonup_core::read_addon_toc_fields(addon_dir, &record.folder, flavor)?
-            .unwrap_or_default();
-        return Ok(lemonup_core::TocField::ALL
-            .into_iter()
-            .map(|field| {
-                let value = effective.get(field);
-                format!(
-                    "toc field={} value={} source={}",
-                    field.name(),
-                    value.unwrap_or("<none>"),
-                    toc_edit::value_source(field, &record.toc_overrides, value).cli_name()
-                )
-            })
-            .collect());
+        let rows = toc_rows(addon_dir, &record.folder, &record.toc_overrides)?;
+        return Ok(output::TocReport::new(
+            record.display_name(),
+            &record.folder,
+            rows,
+            None,
+        ));
     };
 
     let mut overrides = record.toc_overrides.clone();
@@ -568,7 +615,7 @@ fn toc_command(
     if record.source == lemonup_core::SourceKind::Manual && !yes {
         return Err(LemonupError::Refused(format!(
             "{} is Not linked: LemonUp didn't install it, so changing its .toc files needs \
-             --yes. Its own lines are kept, and --clear puts them back. Nothing was changed.",
+             `--yes`. Its own lines are kept, and `--clear` puts them back. Nothing was changed.",
             record.name
         )));
     }
@@ -587,22 +634,27 @@ fn toc_command(
     if let Err(error) = rescan {
         tracing::warn!(%error, "could not read the AddOns folder after a .toc change");
     }
-    let folders = folders.join("|");
-    Ok(match value {
-        Some(_) => vec![
-            format!(
-                "toc saved: addon={}, field={}, value={}, folders={folders}",
-                record.name,
-                field.name(),
-                overrides.get(field.name()).map_or("", String::as_str)
-            ),
-            "toc note: /reload in the game to see it".to_string(),
-        ],
-        None => vec![format!(
-            "toc restored: addon={}, field={}, folders={folders}",
-            record.name,
-            field.name()
-        )],
+    // The change is saved by now. If the files can't be read again, the report has no fields
+    // rather than failing a run that did what it was asked.
+    let rows = toc_rows(addon_dir, &record.folder, &overrides).map_err(|error| {
+        tracing::warn!(%error, "could not read the .toc fields after a change");
+    });
+    let unread = rows.is_err();
+    let changed = output::TocChange {
+        field: field.name(),
+        value: value.and_then(|_| overrides.get(field.name()).cloned()),
+        folders,
+    };
+    let report = output::TocReport::new(
+        record.display_name(),
+        &record.folder,
+        rows.unwrap_or_default(),
+        Some(changed),
+    );
+    Ok(if unread {
+        report.with_fields_unread()
+    } else {
+        report
     })
 }
 
@@ -689,12 +741,19 @@ struct StartupNotice {
 }
 
 impl StartupNotice {
-    /// CLI output goes to stderr so it never mixes with `key=value` result lines.
-    fn print(&self) {
-        eprintln!("{}", self.text);
-        for line in &self.details {
-            eprintln!("  {line}");
+    /// CLI output goes to stderr so it never mixes with the result on stdout.
+    fn print(&self, paint: output::Paint) {
+        for line in self.lines(paint) {
+            eprintln!("{line}");
         }
+    }
+
+    /// The lines a CLI command prints, with the commands they name drawn as commands.
+    fn lines(&self, paint: output::Paint) -> Vec<String> {
+        std::iter::once(self.text.clone())
+            .chain(self.details.iter().map(|line| format!("  {line}")))
+            .map(|line| paint.commands(&line, output::Paint::text))
+            .collect()
     }
 }
 
@@ -956,7 +1015,9 @@ async fn run_update<O: std::io::Write, E: std::io::Write>(
         Ok(run) => run,
         Err(error) => {
             // No report will print, so say here that a backup was made before the failure.
-            if let (output::BackupLine::Created { .. }, Some(line)) = (&backup, backup.text()) {
+            if let (output::BackupLine::Created { .. }, Some(line)) =
+                (&backup, backup.text(output::Paint::PLAIN))
+            {
                 output.note(&line)?;
             }
             return Err(error.into());
@@ -1007,151 +1068,119 @@ fn pre_update_backup_settings(
     }
 }
 
-fn run_sync(
+fn is_refusal(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<LemonupError>(),
+        Some(LemonupError::Refused(_))
+    )
+}
+
+/// Why a command failed, without the name of the kind of error in front.
+fn failure_reason(error: &(dyn std::error::Error + 'static)) -> String {
+    match error.downcast_ref::<LemonupError>() {
+        Some(LemonupError::InvalidArgument(reason)) => reason.clone(),
+        _ => error.to_string(),
+    }
+}
+
+/// `sync`, with a failure said the way its success is: a mark, then what happened. A refusal
+/// already says what to do next, so it stays as it is. Only the sync itself is called a
+/// failed sync: a report that can't be written is an error of its own, because by then
+/// LemonUp's list is saved.
+fn run_sync<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let mut outcome = CommandOutcome::Success;
-    let (_, config_state) = load_profile_config(&paths)?;
+    let report = match sync_report(&paths, &runtime) {
+        Ok(report) => report,
+        Err(error) if is_refusal(error.as_ref()) => return Err(error),
+        Err(error) => {
+            output.fail(&format!("Sync failed - {}", failure_reason(error.as_ref())))?;
+            return Ok(CommandOutcome::Failed);
+        }
+    };
+    for warning in report.warnings() {
+        output.warn(&warning)?;
+    }
+    output.print(&report, Some(report.addon_dir()))?;
+    Ok(CommandOutcome::Success)
+}
+
+/// Reads the AddOns folder into LemonUp's list and says what it found. Prints nothing.
+fn sync_report(
+    paths: &AppPaths,
+    runtime: &AppRuntime,
+) -> Result<output::SyncReport, Box<dyn std::error::Error>> {
+    let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
     };
-    let effective_addon_dir = runtime
+    // A missing config without `--addon-dir` has no folder either.
+    let Some(addon_dir) = runtime
         .addon_dir_override
         .clone()
-        .or(configured_addon_dir.clone());
-
-    match config_state {
-        ConfigLoad::Missing(path) if runtime.addon_dir_override.is_none() => {
-            println!(
-                "sync skipped: profile={}, addon_dir=<unconfigured>, config={}",
-                runtime.profile_name,
-                path.display()
-            );
-            outcome = CommandOutcome::Skipped;
-        }
-        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) if effective_addon_dir.is_none() => {
-            println!(
-                "sync skipped: profile={}, addon_dir=<unconfigured>",
-                runtime.profile_name
-            );
-            outcome = CommandOutcome::Skipped;
-        }
-        ConfigLoad::Missing(_) | ConfigLoad::Loaded(_) => {
-            let addon_dir = effective_addon_dir.expect("checked above");
-            if runtime.is_guarded_path(&addon_dir) {
-                return Err(Box::new(LemonupError::InvalidArgument(format!(
-                    "profile '{}' refuses to target the default profile addon directory: {}",
-                    runtime.profile_name,
-                    addon_dir.display()
-                ))));
-            }
-
-            validate_addons_path(&addon_dir).map_err(|error| {
-                Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
-            })?;
-
-            let mut database = StateDatabase::open(&paths.state_db_file)?;
-            ensure_bound_addon_dir(
-                &database,
-                &paths,
-                &runtime,
-                configured_addon_dir.as_deref(),
-                &addon_dir,
-                true,
-            )?;
-            let tracked = database.list_addons()?;
-            let report = scan_addons_dir_report(
-                &addon_dir,
-                GameFlavor::for_addons_dir(&addon_dir),
-                &tracked,
-            )?;
-            let summary = database.reconcile_scan(&report)?;
-
-            println!(
-                "{}",
-                format_sync_summary(&runtime.profile_name, &addon_dir, &summary)
-            );
-            if let Some(detail) = format_skipped_detail(&summary) {
-                println!("{detail}");
-            }
-            for warning in leftover_staging_warnings(&addon_dir, &summary) {
-                eprintln!("{warning}");
-            }
-        }
+        .or(configured_addon_dir.clone())
+    else {
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+    };
+    if runtime.is_guarded_path(&addon_dir) {
+        return Err(Box::new(LemonupError::InvalidArgument(format!(
+            "profile '{}' refuses to target the default profile addon directory: {}",
+            runtime.profile_name,
+            addon_dir.display()
+        ))));
     }
 
-    Ok(outcome)
+    validate_addons_path(&addon_dir).map_err(|error| {
+        Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>
+    })?;
+
+    let mut database = StateDatabase::open(&paths.state_db_file)?;
+    ensure_bound_addon_dir(
+        &database,
+        paths,
+        runtime,
+        configured_addon_dir.as_deref(),
+        &addon_dir,
+        true,
+    )?;
+    let tracked = database.list_addons()?;
+    let report =
+        scan_addons_dir_report(&addon_dir, GameFlavor::for_addons_dir(&addon_dir), &tracked)?;
+    let summary = database.reconcile_scan(&report)?;
+
+    Ok(output::SyncReport::new(
+        report_target(paths, runtime, &addon_dir),
+        &summary,
+    ))
 }
 
-/// The `sync summary:` line. New fields are appended at the end so parsers that read the
-/// earlier `key=value` pairs keep working.
-fn format_sync_summary(profile: &str, addon_dir: &Path, summary: &ScanSummary) -> String {
-    format!(
-        "sync summary: profile={}, addon_dir={}, scanned_addons={}, upserted_addons={}, removed_addons={}, skipped={}",
-        profile,
-        addon_dir.display(),
-        summary.scanned_addons,
-        summary.upserted_addons,
-        summary.removed_addons,
-        summary.skipped_folders.len()
-    )
-}
-
-/// Names the addon folders the scan could not read (they were left as they were).
-fn format_skipped_detail(summary: &ScanSummary) -> Option<String> {
-    (!summary.skipped_folders.is_empty()).then(|| {
-        format!(
-            "sync detail: skipped (unreadable): {}",
-            summary.skipped_folders.join(", ")
-        )
-    })
-}
-
-/// One warning per `.lemonup-staging-*` folder an earlier update left in the AddOns folder.
-fn leftover_staging_warnings(addon_dir: &Path, summary: &ScanSummary) -> Vec<String> {
-    summary
-        .leftover_staging
-        .iter()
-        .map(|name| {
-            format!(
-                "warning: leftover update staging folder {} may contain previous addon versions; see Troubleshooting",
-                addon_dir.join(name).display()
-            )
-        })
-        .collect()
-}
-
-fn run_export_addons(
+fn run_export_addons<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
-    output: Option<PathBuf>,
+    file: Option<PathBuf>,
+    output: &mut output::Output<O, E>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = StateDatabase::open(paths.state_db_file)?;
     let addons = database.list_addons()?;
-    let output_path = output.unwrap_or(default_transfer_path()?);
+    let output_path = file.unwrap_or(default_transfer_path()?);
     let export = export_addons(&addons, &output_path)?;
-    println!(
-        "export summary: output={}, addons={}",
-        output_path.display(),
-        export.addons.len()
-    );
-    for addon in &export.addons {
-        if let Some(source) = addon.unknown_source() {
-            println!(
-                "export warning: {}: linked to '{source}' by a newer version of LemonUp; saved, but only a newer version can reinstall it",
-                addon.name
-            );
-        }
+    let file = std::path::absolute(&output_path).unwrap_or(output_path);
+    let report = output::ExportReport::new(file, &export.addons);
+    for warning in report.warnings() {
+        output.warn(&warning)?;
     }
+    output.print(&report, None)?;
     Ok(())
 }
 
-async fn run_import_addons(
+async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     input: Option<PathBuf>,
     dry_run: bool,
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let input_path = input.unwrap_or(default_transfer_path()?);
     let transfer = parse_import_file(&input_path)?;
@@ -1165,6 +1194,11 @@ async fn run_import_addons(
         .addon_dir_override
         .clone()
         .or(configured_addon_dir.clone());
+    // A dry run only reads, so it reports without a folder too; installing needs one. Refused
+    // before the list is opened, so a refused run changes nothing.
+    if !dry_run && effective_addon_dir.is_none() {
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+    }
 
     let mut database = StateDatabase::open(paths.state_db_file.clone())?;
     // Same order as every other command: guard, validate, and only then bind. A dry run
@@ -1197,66 +1231,62 @@ async fn run_import_addons(
             |error| Box::new(LemonupError::InvalidArgument(error)) as Box<dyn std::error::Error>,
         )?;
     let analysis = analyze_import(&transfer, &existing_folders);
-    print_import_analysis(&input_path, &analysis);
-
-    if dry_run {
-        return Ok(CommandOutcome::Success);
+    for warning in analysis
+        .unsupported_addons
+        .iter()
+        .filter_map(lemonup_core::TransferAddon::unknown_source_warning)
+    {
+        output.warn(&warning)?;
     }
+    let file = std::path::absolute(&input_path).unwrap_or(input_path);
+    let target = effective_addon_dir
+        .as_deref()
+        .map(|addon_dir| report_target(&paths, &runtime, addon_dir));
 
-    let Some(addon_dir) = effective_addon_dir else {
-        return Err(Box::new(LemonupError::InvalidArgument(
-            "cannot import without a configured addon directory".to_string(),
-        )));
+    let outcomes = match effective_addon_dir.as_deref() {
+        Some(addon_dir) if !dry_run => {
+            let wago_api_key = resolve_wago_api_key(&config_store, &config_state)?;
+            let summary = install_transfer_addons(
+                &mut database,
+                addon_dir,
+                &analysis,
+                wago_api_key.as_deref(),
+            )
+            .await;
+            for warning in &summary.warnings {
+                output.warn(warning)?;
+            }
+            summary.outcomes
+        }
+        _ => Vec::new(),
     };
-
-    let wago_api_key = resolve_wago_api_key(&config_store, &config_state)?;
-    let summary = install_transfer_addons(
-        &mut database,
-        &addon_dir,
-        &analysis,
-        wago_api_key.as_deref(),
-    )
-    .await;
-
-    println!(
-        "import summary: input={}, installed={}, already_installed={}, manual_skipped={}, duplicate_skipped={}, unsupported_skipped={}, errors={}",
-        input_path.display(),
-        summary.installed,
-        analysis.already_installed.len(),
-        analysis.manual_addons.len(),
-        analysis.duplicate_addons.len(),
-        analysis.unsupported_addons.len(),
-        summary.errors.len()
-    );
-    let error_count = summary.errors.len();
-    for error in summary.errors {
-        println!("import error: {error}");
-    }
-    for warning in summary.warnings {
-        println!("import warning: {warning}");
-    }
+    let report = output::ImportReport::new(target, file, dry_run, &analysis, &outcomes);
+    output.print(&report, effective_addon_dir.as_deref())?;
+    let error_count = outcomes
+        .iter()
+        .filter(|outcome| outcome.result.is_err())
+        .count();
     Ok(CommandOutcome::from_error_count(error_count))
 }
 
-fn run_restore_backup(
+fn run_restore_backup<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     archive: Option<PathBuf>,
+    output: &mut output::Output<O, E>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
         ConfigLoad::Loaded(config) => config.addon_dir.clone(),
         ConfigLoad::Missing(_) => None,
     };
-    let effective_addon_dir = runtime
+    let Some(effective_addon_dir) = runtime
         .addon_dir_override
         .clone()
         .or(configured_addon_dir.clone())
-        .ok_or_else(|| {
-            Box::new(LemonupError::InvalidArgument(
-                "cannot restore backup without a configured addon directory".to_string(),
-            )) as Box<dyn std::error::Error>
-        })?;
+    else {
+        return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+    };
 
     if runtime.is_guarded_path(&effective_addon_dir) {
         return Err(Box::new(LemonupError::InvalidArgument(format!(
@@ -1289,35 +1319,20 @@ fn run_restore_backup(
             .next()
             .map(|entry| entry.path)
             .ok_or_else(|| {
-                Box::new(LemonupError::InvalidArgument(
-                    "no backups found to restore".to_string(),
+                Box::new(LemonupError::Refused(
+                    "There is no backup of your game settings to restore.".to_string(),
                 )) as Box<dyn std::error::Error>
             })?,
     };
 
     restore_wtf_backup(&effective_addon_dir, &backup_dir, &backup_path)
         .map_err(Box::<dyn std::error::Error>::from)?;
-    println!("restore summary: archive={}", backup_path.display());
+    let archive = std::path::absolute(&backup_path).unwrap_or(backup_path);
+    output.print(
+        &output::RestoreReport::new(archive),
+        Some(&effective_addon_dir),
+    )?;
     Ok(())
-}
-
-fn print_import_analysis(input_path: &std::path::Path, analysis: &ImportAnalysis) {
-    println!(
-        "import analysis: input={}, install={}, already_installed={}, manual={}, duplicates={}, unsupported={}",
-        input_path.display(),
-        analysis.to_install.len(),
-        analysis.already_installed.len(),
-        analysis.manual_addons.len(),
-        analysis.duplicate_addons.len(),
-        analysis.unsupported_addons.len()
-    );
-    for warning in analysis
-        .unsupported_addons
-        .iter()
-        .filter_map(lemonup_core::TransferAddon::unknown_source_warning)
-    {
-        println!("import warning: {warning}");
-    }
 }
 
 async fn run_install_wago(
@@ -2249,13 +2264,13 @@ mod addon_dir_binding_tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandOutcome, check_update_hint, error_text, format_skipped_detail, format_sync_summary,
-        guarded_dirs_of, leftover_staging_warnings, run_check, run_import_addons,
-        run_restore_backup, run_sync, run_update, toc_command,
+        CommandOutcome, check_update_hint, error_text, guarded_dirs_of, run_check,
+        run_export_addons, run_import_addons, run_restore_backup, run_sync, run_toc, run_update,
+        toc_command,
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
-    use crate::output::{Output, OutputMode, Paint};
+    use crate::output::{Output, OutputMode, Paint, Report};
 
     struct Sandbox {
         _temp: tempfile::TempDir,
@@ -2338,6 +2353,24 @@ mod addon_dir_binding_tests {
         )
     }
 
+    /// The work of `lemonup sync`, with the error it ends in. `run_sync` says a failure in
+    /// its own last line.
+    fn sync(
+        paths: AppPaths,
+        runtime: AppRuntime,
+    ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+        super::sync_report(&paths, &runtime).map(|_| CommandOutcome::Success)
+    }
+
+    /// `lemonup restore-backup`, printing into a buffer nobody reads.
+    fn restore(
+        paths: AppPaths,
+        runtime: AppRuntime,
+        archive: Option<PathBuf>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        run_restore_backup(paths, runtime, archive, &mut capture(OutputMode::Human))
+    }
+
     fn tracked_github(paths: &AppPaths) -> AddonRecord {
         StateDatabase::open(&paths.state_db_file)
             .expect("open db")
@@ -2398,7 +2431,7 @@ mod addon_dir_binding_tests {
     fn mismatched_addon_dir_refuses_sync_and_keeps_tracking() {
         let sandbox = sandbox();
 
-        let error = run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.forever)))
+        let error = sync(sandbox.paths.clone(), runtime(Some(&sandbox.forever)))
             .expect_err("sync against forever must be refused");
         let message = error.to_string();
         assert!(
@@ -2422,8 +2455,8 @@ mod addon_dir_binding_tests {
     #[test]
     fn matching_addon_dir_syncs() {
         let sandbox = sandbox();
-        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
-        run_sync(sandbox.paths.clone(), runtime(None)).expect("sync configured retail");
+        sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
+        sync(sandbox.paths.clone(), runtime(None)).expect("sync configured retail");
         let addon = tracked_github(&sandbox.paths);
         assert_eq!(addon.source, SourceKind::GitHub);
         let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
@@ -2710,7 +2743,7 @@ mod addon_dir_binding_tests {
         create_wtf_backup(&sandbox.retail, &root.join("retail"), 5).expect("retail backup");
         let forever_wtf = sandbox.forever.join("../../WTF/Config.wtf");
 
-        run_restore_backup(sandbox.paths.clone(), runtime(Some(&sandbox.forever)), None)
+        restore(sandbox.paths.clone(), runtime(Some(&sandbox.forever)), None)
             .expect_err("restore into forever must be refused");
         assert_eq!(fs::read_to_string(&forever_wtf).expect("wtf"), "_forever_");
     }
@@ -2725,7 +2758,7 @@ mod addon_dir_binding_tests {
         // A newer Forever archive in the same store must not be picked for retail.
         create_wtf_backup(&sandbox.forever, &root.join("forever"), 5).expect("forever backup");
 
-        run_restore_backup(sandbox.paths.clone(), runtime(None), None).expect("restore retail");
+        restore(sandbox.paths.clone(), runtime(None), None).expect("restore retail");
         assert_eq!(fs::read_to_string(&retail_wtf).expect("wtf"), "_retail_");
     }
 
@@ -2736,7 +2769,7 @@ mod addon_dir_binding_tests {
         let forever_backup =
             create_wtf_backup(&sandbox.forever, &root.join("forever"), 5).expect("backup");
 
-        let error = run_restore_backup(
+        let error = restore(
             sandbox.paths.clone(),
             runtime(None),
             Some(forever_backup.backup.path),
@@ -2756,7 +2789,7 @@ mod addon_dir_binding_tests {
         let retail_wtf = sandbox.retail.join("../../WTF/Config.wtf");
         fs::write(&retail_wtf, "changed").expect("mutate");
 
-        run_restore_backup(sandbox.paths.clone(), runtime(None), None).expect("restore");
+        restore(sandbox.paths.clone(), runtime(None), None).expect("restore");
         assert_eq!(fs::read_to_string(&retail_wtf).expect("wtf"), "_retail_");
         assert!(!legacy.backup.path.exists());
         let moved = list_backups(&root.join("retail")).expect("list");
@@ -2789,6 +2822,7 @@ mod addon_dir_binding_tests {
             runtime(Some(&nowhere)),
             Some(input.clone()),
             true,
+            &mut capture(OutputMode::Human),
         )
         .await
         .expect_err("invalid folder must be refused");
@@ -2801,6 +2835,7 @@ mod addon_dir_binding_tests {
             runtime(Some(&sandbox.retail)),
             Some(input.clone()),
             true,
+            &mut capture(OutputMode::Human),
         )
         .await
         .expect("dry run on a valid folder");
@@ -2812,13 +2847,14 @@ mod addon_dir_binding_tests {
             runtime(Some(&sandbox.forever)),
             Some(input),
             true,
+            &mut capture(OutputMode::Human),
         )
         .await
         .expect_err("dry run against a different folder is refused");
         assert_eq!(bound(), None);
 
         // A following real sync on the valid folder binds it as usual.
-        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
+        sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync retail");
         assert_eq!(bound(), Some(sandbox.retail.clone()));
     }
 
@@ -2827,7 +2863,7 @@ mod addon_dir_binding_tests {
         let sandbox = sandbox();
         // Default profile pointed at retail with --addon-dir only: no addon_dir in its config.
         fs::remove_file(&sandbox.paths.config_file).expect("remove config");
-        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("default sync");
+        sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("default sync");
         let db_before = fs::read(&sandbox.paths.state_db_file).expect("db bytes");
 
         let guarded = guarded_dirs_of(&sandbox.paths).expect("guard");
@@ -2854,7 +2890,7 @@ mod addon_dir_binding_tests {
             ),
         };
         other_paths.ensure().expect("ensure other");
-        let error = run_sync(
+        let error = sync(
             other_paths.clone(),
             AppRuntime::new("other".to_string(), Some(sandbox.retail.clone()), guarded),
         )
@@ -2900,56 +2936,20 @@ mod addon_dir_binding_tests {
     }
 
     #[test]
-    fn sync_summary_appends_skipped_and_lists_unreadable_folders() {
-        let mut summary = lemonup_core::ScanSummary {
-            scanned_addons: 3,
-            upserted_addons: 2,
-            removed_addons: 1,
-            ..Default::default()
-        };
-        let dir = Path::new("/wow/AddOns");
-        assert_eq!(
-            format_sync_summary("default", dir, &summary),
-            "sync summary: profile=default, addon_dir=/wow/AddOns, scanned_addons=3, upserted_addons=2, removed_addons=1, skipped=0"
-        );
-        assert_eq!(format_skipped_detail(&summary), None);
-
-        summary.skipped_folders = vec!["Locked".to_string(), "Pawn".to_string()];
-        assert!(format_sync_summary("default", dir, &summary).ends_with(", skipped=2"));
-        assert_eq!(
-            format_skipped_detail(&summary).as_deref(),
-            Some("sync detail: skipped (unreadable): Locked, Pawn")
-        );
-    }
-
-    #[test]
-    fn leftover_staging_folders_get_one_warning_each() {
-        let summary = lemonup_core::ScanSummary {
-            leftover_staging: vec![
-                ".lemonup-staging-1-2-0".to_string(),
-                ".lemonup-staging-3-4-0".to_string(),
-            ],
-            ..Default::default()
-        };
-        let warnings = leftover_staging_warnings(Path::new("/wow/AddOns"), &summary);
-        assert_eq!(
-            warnings,
-            vec![
-                "warning: leftover update staging folder /wow/AddOns/.lemonup-staging-1-2-0 may contain previous addon versions; see Troubleshooting".to_string(),
-                "warning: leftover update staging folder /wow/AddOns/.lemonup-staging-3-4-0 may contain previous addon versions; see Troubleshooting".to_string(),
-            ]
-        );
-        assert!(leftover_staging_warnings(Path::new("/x"), &Default::default()).is_empty());
-    }
-
-    #[test]
     fn sync_with_a_leftover_staging_folder_succeeds_and_does_not_track_it() {
         let sandbox = sandbox();
         let staging = sandbox.retail.join(".lemonup-staging-9-9-0").join("old");
         fs::create_dir_all(staging.join("Old")).expect("staging");
         fs::write(staging.join("Old").join("Old.toc"), "## Title: Old\n").expect("toc");
 
-        run_sync(sandbox.paths.clone(), runtime(Some(&sandbox.retail))).expect("sync");
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_sync(
+            sandbox.paths.clone(),
+            runtime(Some(&sandbox.retail)),
+            &mut output,
+        )
+        .expect("sync");
+        assert_eq!(outcome, CommandOutcome::Success);
         let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
         assert!(
             database
@@ -2964,6 +2964,462 @@ mod addon_dir_binding_tests {
         )
         .expect("scan");
         assert_eq!(report.leftover_staging, vec![".lemonup-staging-9-9-0"]);
+
+        // The report is on stdout and the warning on stderr.
+        let staging_dir = sandbox.retail.join(".lemonup-staging-9-9-0");
+        let (stdout, stderr) = streams(output);
+        assert_eq!(
+            stdout,
+            format!(
+                "Retail  {}\n\n✓ 2 addons found - sync complete\n",
+                crate::app::friendly_path(&sandbox.retail)
+            )
+        );
+        assert_eq!(
+            stderr,
+            format!(
+                "warning: Leftover update staging folder {} may contain previous addon \
+                 versions. See Troubleshooting.\n",
+                staging_dir.display()
+            )
+        );
+
+        // With --json the warning is in the document, and on stderr as well.
+        let mut output = capture(OutputMode::Json);
+        run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect("sync");
+        let (stdout, stderr) = streams(output);
+        assert!(
+            stderr.starts_with("warning: Leftover update staging folder "),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["command"], "sync");
+        assert_eq!(
+            document["summary"],
+            serde_json::json!({
+                "scanned_addons": 2, "upserted_addons": 2, "removed_addons": 0, "skipped": 0
+            })
+        );
+        let staging_path = staging_dir.display().to_string();
+        assert_eq!(
+            document["leftover_staging"],
+            serde_json::json!([staging_path.clone()])
+        );
+        assert_eq!(
+            document["warnings"],
+            serde_json::json!([format!(
+                "Leftover update staging folder {staging_path} may contain previous addon \
+                 versions. See Troubleshooting."
+            )])
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_ends_with_the_failed_mark_and_why_and_a_refusal_stays_as_it_is() {
+        let sandbox = sandbox();
+        let gone = sandbox.retail.join("gone");
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            let mut output = capture(mode);
+            let outcome = run_sync(sandbox.paths.clone(), runtime(Some(&gone)), &mut output)
+                .expect("the failure is said on stderr");
+            assert_eq!(outcome, CommandOutcome::Failed);
+            assert_eq!(outcome.exit_status(), 1);
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stdout, "", "{mode:?}");
+            assert_eq!(
+                stderr,
+                format!("✗ Sync failed - path does not exist: {}\n", gone.display()),
+                "{mode:?}"
+            );
+        }
+
+        // A sync that works is untouched.
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect("sync");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(output);
+        assert!(stdout.ends_with(" - sync complete\n"), "{stdout}");
+        assert_eq!(stderr, "");
+
+        // A report that can't be written is an error of its own: the sync itself worked.
+        struct FullDisk;
+        impl std::io::Write for FullDisk {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = Output::new(
+            OutputMode::Human,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            DEFAULT_PROFILE,
+            FullDisk,
+            Vec::new(),
+        );
+        run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("not written");
+        let (_, stderr) = output.into_writers();
+        assert_eq!(String::from_utf8(stderr).expect("utf-8"), "");
+
+        // A refusal says what to do next, so it is not called a failure.
+        without_addon_dir(&sandbox, None);
+        let mut output = capture(OutputMode::Human);
+        let refusal =
+            run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("refused");
+        assert_eq!(
+            refusal.to_string(),
+            "No AddOns folder is set for this game. Run `lemonup` to set it up."
+        );
+        assert_eq!(streams(output), (String::new(), String::new()));
+    }
+
+    /// Writes the sandbox's config without an AddOns folder, or removes it.
+    fn without_addon_dir(sandbox: &Sandbox, config: Option<AppConfig>) {
+        match &config {
+            Some(config) => {
+                ConfigStore::for_profile(&sandbox.paths)
+                    .write_config(config)
+                    .expect("config without a folder");
+            }
+            None => {
+                let _ = fs::remove_file(&sandbox.paths.config_file);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_toc_import_and_restore_refuse_without_an_addons_folder_and_print_nothing() {
+        let sandbox = sandbox();
+        let input = empty_import_file(&sandbox);
+        let expected = "No AddOns folder is set for this game. Run `lemonup` to set it up.";
+        for config in [Some(AppConfig::default()), None] {
+            without_addon_dir(&sandbox, config);
+            for mode in [OutputMode::Human, OutputMode::Json] {
+                let mut errors = Vec::new();
+                let mut output = capture(mode);
+                errors.push(
+                    run_sync(sandbox.paths.clone(), runtime(None), &mut output).expect_err("sync"),
+                );
+                errors.push(
+                    run_toc(
+                        sandbox.paths.clone(),
+                        runtime(None),
+                        "GitAddon",
+                        None,
+                        false,
+                        &mut output,
+                    )
+                    .expect_err("toc"),
+                );
+                errors.push(
+                    run_import_addons(
+                        sandbox.paths.clone(),
+                        runtime(None),
+                        Some(input.clone()),
+                        false,
+                        &mut output,
+                    )
+                    .await
+                    .expect_err("import"),
+                );
+                errors.push(
+                    run_restore_backup(sandbox.paths.clone(), runtime(None), None, &mut output)
+                        .expect_err("restore"),
+                );
+                for error in errors {
+                    assert_eq!(
+                        error_text(error.as_ref(), Paint::PLAIN),
+                        expected,
+                        "{mode:?}"
+                    );
+                }
+                let (stdout, stderr) = streams(output);
+                assert_eq!(stdout, "", "{mode:?}");
+                assert_eq!(stderr, "", "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn restore_without_a_backup_is_refused_and_prints_nothing() {
+        let sandbox = sandbox();
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            let mut output = capture(mode);
+            let error = run_restore_backup(sandbox.paths.clone(), runtime(None), None, &mut output)
+                .expect_err("no backup");
+            assert_eq!(
+                error_text(error.as_ref(), Paint::PLAIN),
+                "There is no backup of your game settings to restore."
+            );
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stdout, "", "{mode:?}");
+            assert_eq!(stderr, "", "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn restore_prints_the_backup_it_put_back() {
+        let sandbox = sandbox();
+        let root = backup_root(&sandbox.paths.data_dir);
+        let created = create_wtf_backup(&sandbox.retail, &root.join("retail"), 5).expect("backup");
+        let mut output = capture(OutputMode::Human);
+        run_restore_backup(sandbox.paths.clone(), runtime(None), None, &mut output)
+            .expect("restore");
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        assert_eq!(
+            stdout,
+            format!(
+                "✓ Restored your game settings from {}\n",
+                crate::app::friendly_path(&created.backup.path)
+            )
+        );
+
+        let mut output = capture(OutputMode::Json);
+        run_restore_backup(sandbox.paths.clone(), runtime(None), None, &mut output)
+            .expect("restore");
+        let (stdout, _) = streams(output);
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["command"], "restore-backup");
+        assert_eq!(
+            document["archive"],
+            created.backup.path.display().to_string()
+        );
+        assert_eq!(document["addon_dir"], sandbox.retail.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn export_then_a_dry_run_import_lists_every_addon_of_the_file() {
+        let sandbox = sandbox();
+        let mut other = AddonRecord::new("OtherAddon", "OtherAddon", SourceKind::GitHub);
+        other.source_url = Some("https://github.com/example/OtherAddon".to_string());
+        let mut not_linked = AddonRecord::new("HandMade", "HandMade", SourceKind::Manual);
+        not_linked.source_url = None;
+        let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
+        database.upsert_addon(&other).expect("other");
+        database.upsert_addon(&not_linked).expect("hand made");
+        drop(database);
+
+        let file = sandbox.paths.data_dir.join("list.json");
+        let mut output = capture(OutputMode::Human);
+        run_export_addons(sandbox.paths.clone(), Some(file.clone()), &mut output).expect("export");
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        assert_eq!(
+            stdout,
+            format!("✓ Saved 3 addons to {}\n", crate::app::friendly_path(&file))
+        );
+        let mut output = capture(OutputMode::Json);
+        run_export_addons(sandbox.paths.clone(), Some(file.clone()), &mut output).expect("export");
+        let (stdout, _) = streams(output);
+        assert_eq!(
+            stdout,
+            format!(
+                "{{\"schema\":1,\"command\":\"export-addons\",\"profile\":\"default\",\
+                 \"addon_dir\":null,\"file\":\"{}\",\"count\":3,\"warnings\":[]}}\n",
+                file.display()
+            )
+        );
+
+        // OtherAddon has no folder on disk once LemonUp forgets it, so it would be installed.
+        StateDatabase::open(&sandbox.paths.state_db_file)
+            .expect("open")
+            .remove_addon("OtherAddon")
+            .expect("forget");
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_import_addons(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(file.clone()),
+            true,
+            &mut output,
+        )
+        .await
+        .expect("dry run");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        assert_eq!(
+            stdout,
+            format!(
+                "Retail  {}\n\nWould install (1)\n  OtherAddon  GitHub\n\nAlready installed (1)\n\
+                 Not linked, can't install (1)\n\nDry run - no changes\n",
+                crate::app::friendly_path(&sandbox.retail)
+            )
+        );
+
+        let mut output = capture(OutputMode::Json);
+        run_import_addons(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(file.clone()),
+            true,
+            &mut output,
+        )
+        .await
+        .expect("dry run");
+        let (stdout, _) = streams(output);
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["command"], "import-addons");
+        assert_eq!(document["file"], file.display().to_string());
+        assert_eq!(document["dry_run"], true);
+        assert_eq!(
+            document["addons"],
+            serde_json::json!([
+                {"name": "GitAddon", "source": "github", "status": "already_installed", "message": null},
+                {"name": "HandMade", "source": "manual", "status": "skipped_manual", "message": null},
+                {"name": "OtherAddon", "source": "github", "status": "would_install", "message": null},
+            ])
+        );
+        // Nothing was installed.
+        assert!(!sandbox.retail.join("OtherAddon").exists());
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_import_needs_no_addons_folder() {
+        let sandbox = sandbox();
+        let input = empty_import_file(&sandbox);
+        without_addon_dir(&sandbox, None);
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_import_addons(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(input),
+            true,
+            &mut output,
+        )
+        .await
+        .expect("a dry run only reads the file");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        // No folder, so no game line; the report is the closing line alone.
+        assert_eq!(stdout, "Dry run - no changes\n");
+    }
+
+    #[tokio::test]
+    async fn an_import_that_fails_lists_the_addon_and_exits_one() {
+        let sandbox = sandbox();
+        // Not a GitHub address, so the install fails before any request is made.
+        let mut bad = AddonRecord::new("BadLink", "BadLink", SourceKind::GitHub);
+        bad.source_url = Some("https://example.com/owner/repo".to_string());
+        let database = StateDatabase::open(&sandbox.paths.state_db_file).expect("open");
+        database.upsert_addon(&bad).expect("bad link");
+        drop(database);
+        let file = sandbox.paths.data_dir.join("list.json");
+        let mut output = capture(OutputMode::Human);
+        run_export_addons(sandbox.paths.clone(), Some(file.clone()), &mut output).expect("export");
+        StateDatabase::open(&sandbox.paths.state_db_file)
+            .expect("open")
+            .remove_addon("BadLink")
+            .expect("forget");
+
+        let mut output = capture(OutputMode::Human);
+        let outcome = run_import_addons(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(file.clone()),
+            false,
+            &mut output,
+        )
+        .await
+        .expect("the run finishes");
+        assert_eq!(outcome, CommandOutcome::Failures(1));
+        assert_eq!(outcome.exit_status(), 1);
+        let (stdout, _) = streams(output);
+        let lines = stdout.lines().collect::<Vec<_>>();
+        let failed = lines
+            .iter()
+            .position(|line| *line == "Failed (1)")
+            .unwrap_or_else(|| panic!("no Failed section: {stdout}"));
+        assert_eq!(lines[failed + 1], "  BadLink  GitHub");
+        assert!(lines[failed + 2].starts_with("      "), "{stdout}");
+        assert!(!stdout.contains("Installed ("), "{stdout}");
+        assert_eq!(
+            lines.last().copied(),
+            Some(format!("1 failed, from {}", crate::app::friendly_path(&file)).as_str())
+        );
+
+        let mut output = capture(OutputMode::Json);
+        let outcome = run_import_addons(
+            sandbox.paths.clone(),
+            runtime(None),
+            Some(file),
+            false,
+            &mut output,
+        )
+        .await
+        .expect("the run finishes");
+        assert_eq!(outcome, CommandOutcome::Failures(1));
+        let (stdout, _) = streams(output);
+        let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        assert_eq!(document["summary"]["errors"], 1);
+        assert_eq!(document["summary"]["installed"], 0);
+        let failed = document["addons"]
+            .as_array()
+            .expect("addons")
+            .iter()
+            .find(|addon| addon["name"] == "BadLink")
+            .expect("bad link");
+        assert_eq!(failed["status"], "error");
+        assert!(failed["message"].is_string(), "{failed}");
+    }
+
+    #[test]
+    fn toc_shows_sets_and_clears_a_field_through_the_report() {
+        use lemonup_core::TocField;
+        let sandbox = sandbox();
+        let toc = |change: Option<(TocField, Option<String>)>, mode| {
+            let mut output = capture(mode);
+            run_toc(
+                sandbox.paths.clone(),
+                runtime(None),
+                "GitAddon",
+                change,
+                false,
+                &mut output,
+            )
+            .expect("toc");
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stderr, "");
+            stdout
+        };
+        assert_eq!(
+            toc(None, OutputMode::Human),
+            "Title     GitAddon\nNotes     none\nCategory  none\n"
+        );
+        assert_eq!(
+            toc(
+                Some((TocField::Category, Some("Bags".to_string()))),
+                OutputMode::Human
+            ),
+            "✓ Saved Category for GitAddon: Bags\n/reload to take effect in game\n"
+        );
+        assert_eq!(
+            toc(None, OutputMode::Human),
+            "Title     GitAddon\nNotes     none\nCategory  Bags  (yours)\n"
+        );
+        let cleared: serde_json::Value =
+            serde_json::from_str(&toc(Some((TocField::Category, None)), OutputMode::Json))
+                .expect("json");
+        assert_eq!(cleared["command"], "toc");
+        assert_eq!(cleared["addon"], "GitAddon");
+        assert_eq!(
+            cleared["changed"],
+            serde_json::json!({"field": "Category", "value": null, "folders": ["GitAddon"]})
+        );
+        // The fields after the change.
+        assert_eq!(
+            cleared["fields"][2],
+            serde_json::json!({"field": "Category", "value": null, "source": "addon"})
+        );
+        assert_eq!(
+            toc(None, OutputMode::Human),
+            "Title     GitAddon\nNotes     none\nCategory  none\n"
+        );
     }
 
     /// An AddOns folder with Foo (linked, from GitHub) and Bar (Not linked), each with a
@@ -3002,14 +3458,14 @@ mod addon_dir_binding_tests {
         let temp = tempdir().expect("tempdir");
         let (addon_dir, mut database) = toc_fixture(temp.path());
 
-        let shown = toc_command(&mut database, &addon_dir, "foo", None, false).expect("show");
+        let show = |database: &mut StateDatabase, selector: &str| {
+            toc_command(database, &addon_dir, selector, None, false)
+                .expect("show")
+                .human(Paint::PLAIN)
+        };
         assert_eq!(
-            shown,
-            vec![
-                "toc field=Title value=Foo source=addon",
-                "toc field=Notes value=<none> source=addon",
-                "toc field=Category value=Bags source=addon",
-            ]
+            show(&mut database, "foo"),
+            ["Title     Foo", "Notes     none", "Category  Bags",]
         );
 
         let saved = toc_command(
@@ -3021,14 +3477,16 @@ mod addon_dir_binding_tests {
         )
         .expect("set");
         assert_eq!(
-            saved[0],
-            "toc saved: addon=Foo, field=Category, value=My Bags, folders=Foo"
+            saved.human(Paint::PLAIN),
+            [
+                "✓ Saved Category for Foo: My Bags",
+                "/reload to take effect in game"
+            ]
         );
         let toc = std::fs::read_to_string(addon_dir.join("Foo/Foo.toc")).expect("toc");
         assert!(toc.contains("## Category: My Bags"), "{toc}");
         assert!(toc.contains("# LemonUp: ## Category: Bags"), "{toc}");
-        let shown = toc_command(&mut database, &addon_dir, "Foo", None, false).expect("show");
-        assert_eq!(shown[2], "toc field=Category value=My Bags source=override");
+        assert_eq!(show(&mut database, "Foo")[2], "Category  My Bags  (yours)");
 
         // Another program puts the addon's own line back.
         std::fs::write(
@@ -3036,10 +3494,9 @@ mod addon_dir_binding_tests {
             "## Interface: 110005\n## Title: Foo\n## Category: Bags\n",
         )
         .expect("toc");
-        let shown = toc_command(&mut database, &addon_dir, "Foo", None, false).expect("show");
         assert_eq!(
-            shown[2],
-            "toc field=Category value=Bags source=override-not-applied"
+            show(&mut database, "Foo")[2],
+            "Category  Bags  (yours, not in the files)"
         );
 
         let cleared = toc_command(
@@ -3050,10 +3507,7 @@ mod addon_dir_binding_tests {
             false,
         )
         .expect("clear");
-        assert_eq!(
-            cleared,
-            vec!["toc restored: addon=Foo, field=Category, folders=Foo"]
-        );
+        assert_eq!(cleared.human(Paint::PLAIN), ["✓ Restored Foo's Category"]);
         let stored = database
             .get_addon_by_folder("Foo")
             .expect("read")
@@ -3088,12 +3542,19 @@ mod addon_dir_binding_tests {
     }
 
     #[test]
-    fn a_refusal_keeps_its_own_drawing_and_an_error_loses_control_characters() {
-        // `find --link` makes its refusal bold itself; it has to arrive as it was drawn.
-        let bold = Paint::terminal().bold("Nothing was linked.");
-        assert!(bold.contains('\x1b'), "{bold:?}");
-        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(bold.clone()));
-        assert_eq!(error_text(refusal.as_ref(), Paint::terminal()), bold);
+    fn a_refusal_and_an_error_lose_control_characters() {
+        // A refusal can name an addon, whose title comes from its files.
+        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused(
+            "Evil\x1b]0;x\x07 is Not linked, so it needs `--yes`.\u{9b}".to_string(),
+        ));
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::PLAIN),
+            "Evil ]0;x  is Not linked, so it needs `--yes`. "
+        );
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::terminal()),
+            "Evil ]0;x  is Not linked, so it needs \x1b[1m\x1b[38;5;6m--yes\x1b[0m. "
+        );
         // Any other error can carry a source's own words.
         let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
             "bad\x1b[31m name\x07".to_string(),
@@ -3101,6 +3562,71 @@ mod addon_dir_binding_tests {
         assert_eq!(
             error_text(failure.as_ref(), Paint::PLAIN),
             "Error: invalid argument: bad [31m name "
+        );
+    }
+
+    #[test]
+    fn a_failure_gives_its_reason_without_the_kind_of_error() {
+        let argument: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
+            "path does not exist: /x".to_string(),
+        ));
+        assert_eq!(
+            super::failure_reason(argument.as_ref()),
+            "path does not exist: /x"
+        );
+        let other: Box<dyn std::error::Error> = Box::new(std::io::Error::other("disk on fire"));
+        assert_eq!(super::failure_reason(other.as_ref()), "disk on fire");
+        assert!(!super::is_refusal(other.as_ref()));
+        let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused("no".to_string()));
+        assert!(super::is_refusal(refusal.as_ref()));
+    }
+
+    #[test]
+    fn an_error_and_a_refusal_draw_the_commands_they_name() {
+        let command = |text: &str| format!("\x1b[1m\x1b[38;5;6m{text}\x1b[0m");
+        let refusal: Box<dyn std::error::Error> = Box::new(super::no_addon_dir_refusal("forever"));
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::terminal()),
+            format!(
+                "No AddOns folder is set for this game. Run {} to set it up.",
+                command("lemonup --profile forever tui")
+            )
+        );
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::PLAIN),
+            "No AddOns folder is set for this game. Run `lemonup --profile forever tui` to set it up."
+        );
+        let failure: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
+            "no match, run `lemonup check`".to_string(),
+        ));
+        assert_eq!(
+            error_text(failure.as_ref(), Paint::terminal()),
+            format!(
+                "\x1b[1m\x1b[38;5;1mError:\x1b[0m invalid argument: no match, run {}",
+                command("lemonup check")
+            )
+        );
+    }
+
+    #[test]
+    fn a_startup_notice_draws_the_command_it_names() {
+        let notice = super::StartupNotice {
+            text: "Moved your v1 settings over".to_string(),
+            is_error: true,
+            details: vec![
+                "to bring addons over: export in v1, then run `lemonup import-addons`".to_string(),
+            ],
+        };
+        assert_eq!(
+            notice.lines(Paint::PLAIN),
+            [
+                "Moved your v1 settings over",
+                "  to bring addons over: export in v1, then run `lemonup import-addons`",
+            ]
+        );
+        assert_eq!(
+            notice.lines(Paint::terminal())[1],
+            "  to bring addons over: export in v1, then run \x1b[1m\x1b[38;5;6mlemonup import-addons\x1b[0m"
         );
     }
 
@@ -3114,8 +3640,10 @@ mod addon_dir_binding_tests {
             lemonup_core::AddonRecord::new("Foo Plugin", "FooPlugin", SourceKind::Wago);
         plugin.source_name = Some("Foo".to_string());
         database.upsert_addon(&plugin).expect("plugin");
-        let shown = toc_command(&mut database, &addon_dir, "foo", None, false).expect("show");
-        assert_eq!(shown[0], "toc field=Title value=Foo source=addon");
+        let shown = toc_command(&mut database, &addon_dir, "foo", None, false)
+            .expect("show")
+            .human(Paint::PLAIN);
+        assert_eq!(shown[0], "Title     Foo");
 
         let mut one = lemonup_core::AddonRecord::new("Twin", "One", SourceKind::Manual);
         one.source_name = None;
@@ -3164,7 +3692,13 @@ mod addon_dir_binding_tests {
         assert!(printed.ends_with("Nothing was changed."), "{printed}");
         let error = refusal.to_string();
         assert!(error.contains("Bar is Not linked"), "{error}");
-        assert!(error.contains("--yes"), "{error}");
+        assert!(error.contains("needs `--yes`."), "{error}");
+        // With color the flags are drawn as commands.
+        let colored = error_text(&refusal, Paint::terminal());
+        assert!(
+            colored.contains("needs \x1b[1m\x1b[38;5;6m--yes\x1b[0m. Its own lines are kept, and \x1b[1m\x1b[38;5;6m--clear\x1b[0m puts"),
+            "{colored:?}"
+        );
         let toc = std::fs::read_to_string(addon_dir.join("Bar/Bar.toc")).expect("toc");
         assert!(!toc.contains("LemonUp"), "{toc}");
         assert!(
@@ -3259,13 +3793,13 @@ mod profile_tests {
         // none opens a profile's config file on its own.
         let source = include_str!("main.rs");
         let commands = [
-            "fn run_toc(",
+            "fn run_toc<",
             "async fn run_find(",
             "async fn run_check<",
             "async fn run_update<",
-            "fn run_sync(",
-            "async fn run_import_addons(",
-            "fn run_restore_backup(",
+            "fn sync_report(",
+            "async fn run_import_addons<",
+            "fn run_restore_backup<",
             "async fn run_install_wago(",
             "async fn run_install_tukui(",
             "async fn run_install_wowinterface(",
@@ -3280,7 +3814,7 @@ mod profile_tests {
                 .min()
                 .unwrap_or(rest.len());
             let body = &rest[..end];
-            assert!(body.contains("load_profile_config(&paths)"), "{command}");
+            assert!(body.contains("load_profile_config("), "{command}");
             assert!(!body.contains("ConfigStore::new("), "{command}");
         }
     }

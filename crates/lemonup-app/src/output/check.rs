@@ -412,12 +412,10 @@ impl Report for CheckReport {
             );
         }
         lines.push(String::new());
-        lines.push(paint.text(&self.closing(
-            ready.len(),
-            newer.len(),
-            failed.len(),
-            not_checked.len(),
-        )));
+        lines.push(paint.commands(
+            &self.closing(ready.len(), newer.len(), failed.len(), not_checked.len()),
+            Paint::text,
+        ));
         lines
     }
 }
@@ -943,8 +941,20 @@ mod tests {
                 .contains(&"\x1b[1m\x1b[38;5;1mCheck failed\x1b[0m \x1b[2m(1)\x1b[0m".to_string()),
             "{colored:?}"
         );
+        // The command is bold cyan, and the backticks that mark it in plain text are gone.
+        assert!(
+            colored.last().expect("closing").ends_with(
+                "Run \x1b[1m\x1b[38;5;6mlemonup --profile forever update-all\x1b[0m to update all."
+            ),
+            "{colored:?}"
+        );
         let stripped = colored.iter().map(|line| strip(line)).collect::<Vec<_>>();
-        assert_eq!(stripped, report.human(Paint::PLAIN));
+        let plain = report
+            .human(Paint::PLAIN)
+            .iter()
+            .map(|line| line.replace('`', ""))
+            .collect::<Vec<_>>();
+        assert_eq!(stripped, plain);
     }
 
     #[test]

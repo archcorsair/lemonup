@@ -41,14 +41,18 @@ fn color_is_for_a_terminal_without_no_color() {
 #[test]
 fn every_saved_theme_paints_in_the_terminal_colors() {
     let truecolor = display_with(&[("LANG", "en_US.UTF-8"), ("COLORTERM", "truecolor")]);
-    for display in [DisplayEnv::FULL, truecolor] {
-        for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
-            assert_eq!(
-                Paint::for_stream(true, display, &config_in(theme)),
-                Paint::terminal(),
-                "{theme:?}"
-            );
-        }
+    for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
+        assert_eq!(
+            Paint::for_stream(true, truecolor, &config_in(theme)),
+            Paint::terminal(),
+            "{theme:?}"
+        );
+        // A terminal known to have links gets them as well.
+        assert_eq!(
+            Paint::for_stream(true, DisplayEnv::FULL, &config_in(theme)),
+            Paint::terminal().with_links(true),
+            "{theme:?}"
+        );
     }
     // Normal text has no color of its own, so it stays as the terminal draws it.
     let paint = Paint::for_stream(true, DisplayEnv::FULL, &config_in(ThemeMode::Dark));
@@ -141,6 +145,178 @@ impl Report for Sample {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_path_is_bold_and_a_link_only_where_the_terminal_has_links() {
+    let path = Path::new("/games/My Addons/caf\u{e9}\x1b]8;;evil\x07.json");
+    // Without color: the path as it is, less its control characters.
+    assert_eq!(
+        Paint::PLAIN.path(path),
+        "/games/My Addons/caf\u{e9} ]8;;evil .json"
+    );
+    assert_eq!(
+        Paint::PLAIN.with_links(true).path(path),
+        Paint::PLAIN.path(path)
+    );
+    let bold = "\x1b[1m/games/My Addons/caf\u{e9} ]8;;evil .json\x1b[0m";
+    assert_eq!(Paint::terminal().path(path), bold);
+    // With links: the address is plain ASCII, so nothing in a name can end the link.
+    assert_eq!(
+        Paint::terminal().with_links(true).path(path),
+        format!(
+            "\x1b]8;;file:///games/My%20Addons/caf%C3%A9%1B]8;;evil%07.json\x1b\\{bold}\x1b]8;;\x1b\\"
+        )
+    );
+    // A path given relative to the working folder still links to the whole path.
+    let relative = Paint::terminal()
+        .with_links(true)
+        .path(Path::new("list.json"));
+    assert!(relative.starts_with("\x1b]8;;file:///"), "{relative:?}");
+    assert!(
+        relative.ends_with("/list.json\x1b\\\x1b[1mlist.json\x1b[0m\x1b]8;;\x1b\\"),
+        "{relative:?}"
+    );
+}
+
+#[test]
+fn links_go_only_to_a_colored_stream_of_a_terminal_that_has_them() {
+    let config = config_in(ThemeMode::Terminal);
+    let linked = |paint: Paint| paint.path(Path::new("/tmp/list.json")).contains("\x1b]8;;");
+    assert!(linked(Paint::for_stream(true, DisplayEnv::FULL, &config)));
+    // A pipe, `NO_COLOR`, and a terminal that isn't known to have links.
+    assert!(!linked(Paint::for_stream(false, DisplayEnv::FULL, &config)));
+    let no_color = DisplayEnv {
+        no_color: true,
+        ..DisplayEnv::FULL
+    };
+    assert!(!linked(Paint::for_stream(true, no_color, &config)));
+    let unknown = display_with(&[("LANG", "en_US.UTF-8"), ("TERM", "xterm-256color")]);
+    assert!(!linked(Paint::for_stream(true, unknown, &config)));
+}
+
+/// A command as the terminal gets it: bold cyan.
+fn command(text: &str) -> String {
+    format!("\x1b[1m\x1b[38;5;6m{text}\x1b[0m")
+}
+
+#[test]
+fn a_command_is_bold_cyan_with_color_and_keeps_its_backticks_without() {
+    let sentence =
+        "1 update ready. Run `lemonup update-all` with the same `--addon-dir` to update.";
+    assert_eq!(Paint::PLAIN.commands(sentence, Paint::text), sentence);
+    assert_eq!(
+        Paint::terminal().commands(sentence, Paint::text),
+        format!(
+            "1 update ready. Run {} with the same {} to update.",
+            command("lemonup update-all"),
+            command("--addon-dir")
+        )
+    );
+    assert_eq!(Paint::PLAIN.command("lemonup"), "`lemonup`");
+    assert_eq!(Paint::terminal().command("lemonup"), command("lemonup"));
+}
+
+#[test]
+fn the_text_around_a_command_keeps_its_own_drawing() {
+    assert_eq!(
+        Paint::terminal().commands(
+            "Nothing was changed. `lemonup find --link` links it.",
+            Paint::bold
+        ),
+        format!(
+            "\x1b[1mNothing was changed. \x1b[0m{}\x1b[1m links it.\x1b[0m",
+            command("lemonup find --link")
+        )
+    );
+    // Text of more than one byte a character, on both sides of a command and inside it.
+    assert_eq!(
+        Paint::terminal().commands(
+            "caf\u{e9} \u{2713} `--addon-dir '/j\u{fc}rgen'` \u{4e2d}\u{6587}",
+            Paint::text
+        ),
+        format!(
+            "caf\u{e9} \u{2713} {} \u{4e2d}\u{6587}",
+            command("--addon-dir '/j\u{fc}rgen'")
+        )
+    );
+}
+
+#[test]
+fn only_lemonup_commands_and_flags_are_drawn_as_commands() {
+    let paint = Paint::terminal();
+    // A name or a source's message can hold backticks of its own.
+    for text in [
+        "Addon `Pawn` not found",
+        "a stray ` backtick",
+        "an empty `` pair",
+        "`lemonupdate` is not a command",
+    ] {
+        assert_eq!(paint.commands(text, Paint::text), text, "{text:?}");
+    }
+    // A backtick that is text doesn't swallow the command after it.
+    assert_eq!(
+        paint.commands("it's ` odd, run `lemonup check`", Paint::text),
+        format!("it's ` odd, run {}", command("lemonup check"))
+    );
+    // Control characters never reach the terminal, in a command or around it.
+    assert_eq!(
+        paint.commands("bad\x1b[31m `lemonup\x07 x` `--yes\x1b`", Paint::text),
+        format!("bad [31m `lemonup  x` {}", command("--yes "))
+    );
+    assert_eq!(
+        Paint::PLAIN.commands("bad\x07 `lemonup check`", Paint::text),
+        "bad  `lemonup check`"
+    );
+}
+
+#[test]
+fn warnings_notes_and_table_notes_draw_their_commands() {
+    let mut colored = output(OutputMode::Human, Paint::terminal());
+    colored.warn("Run `lemonup sync` first").expect("warn");
+    colored.note("Then `lemonup check`").expect("note");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr),
+        format!(
+            "\x1b[38;5;3mwarning:\x1b[0m Run {} first\nThen {}\n",
+            command("lemonup sync"),
+            command("lemonup check")
+        )
+    );
+
+    // The JSON document keeps the words as they were written.
+    let mut json = output(OutputMode::Json, Paint::terminal());
+    json.warn("Run `lemonup sync` first").expect("warn");
+    json.print(&sample(), None).expect("print");
+    let (stdout, _) = json.into_writers();
+    assert!(
+        text(stdout).contains(r#""warnings":["Run `lemonup sync` first"]"#),
+        "json keeps the backticks"
+    );
+
+    let entry = Entry {
+        name: "Pawn".to_string(),
+        source: "Wago.io".to_string(),
+        version: "1.0".to_string(),
+        update: None,
+        notes: vec!["Run again with `--force` to install it.".to_string()],
+        from: None,
+        done: false,
+    };
+    let lines = table(vec![entry.clone()], Paint::terminal());
+    assert_eq!(
+        lines[1],
+        format!(
+            "\x1b[2m      Run again with \x1b[0m{}\x1b[2m to install it.\x1b[0m",
+            command("--force")
+        )
+    );
+    assert_eq!(
+        table(vec![entry], Paint::PLAIN)[1],
+        "      Run again with `--force` to install it."
+    );
+}
+
 fn sample() -> Sample {
     Sample {
         names: vec!["Questie".to_string(), "Pawn".to_string()],
@@ -202,6 +378,40 @@ fn readable_output_puts_warnings_and_notes_on_stderr() {
         text(stderr),
         "\x1b[38;5;3mwarning:\x1b[0m WoWInterface didn't answer\n"
     );
+}
+
+#[test]
+fn a_failure_is_one_line_on_stderr_with_the_red_failed_mark() {
+    for mode in [OutputMode::Human, OutputMode::Json] {
+        let mut plain = output(mode, Paint::PLAIN);
+        plain
+            .fail("Sync failed - the folder is gone")
+            .expect("fail");
+        let (stdout, stderr) = plain.into_writers();
+        assert_eq!(text(stdout), "");
+        assert_eq!(text(stderr), "✗ Sync failed - the folder is gone\n");
+    }
+    let mut colored = output(OutputMode::Human, Paint::terminal());
+    colored
+        .fail("Sync failed - run `lemonup` to set it up\x07")
+        .expect("fail");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr),
+        format!(
+            "\x1b[38;5;1m✗\x1b[0m Sync failed - run {} to set it up \n",
+            command("lemonup")
+        )
+    );
+    let mut simple = output(
+        OutputMode::Human,
+        Paint::PLAIN.with_symbols(Symbols::SIMPLE),
+    );
+    simple
+        .fail("Sync failed - the folder is gone")
+        .expect("fail");
+    let (_, stderr) = simple.into_writers();
+    assert_eq!(text(stderr), "x Sync failed - the folder is gone\n");
 }
 
 #[test]
@@ -369,6 +579,30 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
             Vec::new(),
         );
         assert!(full.print(&sample(), None).is_err(), "{mode:?}");
+
+        // The same on stderr, for a warning, a notice and a failure.
+        let mut closed = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            ClosedPipe,
+        );
+        assert!(closed.warn("one").is_ok(), "{mode:?}");
+        assert!(closed.note("two").is_ok(), "{mode:?}");
+        assert!(closed.fail("three").is_ok(), "{mode:?}");
+        let mut full = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "default",
+            Vec::new(),
+            FullDisk,
+        );
+        assert!(full.warn("one").is_err(), "{mode:?}");
+        assert!(full.note("two").is_err(), "{mode:?}");
+        assert!(full.fail("three").is_err(), "{mode:?}");
     }
 }
 
@@ -487,4 +721,45 @@ fn a_note_reaches_stderr_in_json_mode_too() {
         text(stderr),
         "Made a backup of your game settings: /data/WTF.zip\n"
     );
+}
+
+/// `line` without its escape codes.
+pub(super) fn strip(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The JSON document `report` prints for the default profile, after `warnings`.
+pub(super) fn json_document<R: Report>(
+    report: &R,
+    addon_dir: Option<&Path>,
+    warnings: &[&str],
+) -> String {
+    let mut output = Output::new(
+        OutputMode::Json,
+        Paint::terminal(),
+        Paint::terminal(),
+        "default",
+        Vec::new(),
+        Vec::new(),
+    );
+    for warning in warnings {
+        output.warn(warning).expect("warn");
+    }
+    output.print(report, addon_dir).expect("print");
+    // Warnings are on stderr as well; the document is what stdout got.
+    let (stdout, _) = output.into_writers();
+    String::from_utf8(stdout).expect("utf-8")
 }

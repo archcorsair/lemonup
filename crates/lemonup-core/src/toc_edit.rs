@@ -240,7 +240,7 @@ impl TocValueSource {
         match self {
             Self::Addon => "addon",
             Self::Override => "override",
-            Self::OverrideNotApplied => "override-not-applied",
+            Self::OverrideNotApplied => "override_not_applied",
         }
     }
 }
@@ -973,7 +973,7 @@ mod tests {
         );
         assert_eq!(
             TocValueSource::OverrideNotApplied.cli_name(),
-            "override-not-applied"
+            "override_not_applied"
         );
         assert_eq!(display_value(" |cffff0000Red|r Foo "), "Red Foo");
     }
