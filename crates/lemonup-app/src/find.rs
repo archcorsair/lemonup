@@ -747,8 +747,8 @@ fn source_name_of(record: &AddonRecord) -> &'static str {
 
 mod human;
 pub(crate) use human::{
-    LocalNames, Paint, capitalize, choice_text, human_closing, human_report, linked_parts,
-    listed_names, problem_text, result_entry, target_line,
+    LocalNames, capitalize, choice_text, human_closing, human_report, linked_parts, listed_names,
+    problem_text, result_entry, target_line,
 };
 
 #[cfg(test)]

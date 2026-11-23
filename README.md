@@ -156,8 +156,7 @@ lemonup profiles
 lemonup --profile forever check
 ```
 
-`lemonup profiles` lists each game with its profile name, game version, AddOns folder and addon
-count. Commands use the default game unless you pass `--profile`.
+`lemonup profiles` lists each game with its profile name, game, AddOns folder and addon count. Commands use the default game unless you pass `--profile`.
 
 ## Troubleshooting
 
