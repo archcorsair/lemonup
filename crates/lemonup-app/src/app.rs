@@ -8950,12 +8950,50 @@ where
         .iter()
         .filter_map(|result| match check_step_for_result(result, &sources) {
             Some(DashboardJobStep::Checked {
+                folder,
                 result: Err(failure),
-                ..
-            }) => Some(failure),
+            }) => {
+                log_check_failure(&folder, &failure);
+                Some(failure)
+            }
             _ => None,
         })
         .collect())
+}
+
+/// Writes why a check failed to the log, which outlives the TUI: Details only names the kind
+/// of failure, and the reason itself is lost when LemonUp closes.
+fn log_check_failure(folder: &str, failure: &CheckFailure) {
+    tracing::warn!(
+        folder,
+        source = ?failure.source,
+        kind = ?failure.kind,
+        reason = %without_url_queries(&failure.detail),
+        "couldn't check an addon for updates"
+    );
+}
+
+/// `text` with the query of every URL in it removed, since a download URL can carry a signed
+/// token there.
+fn without_url_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| rest.find(scheme))
+        .min()
+    {
+        let (before, url_and_after) = rest.split_at(start);
+        out.push_str(before);
+        let end = url_and_after
+            .find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(url_and_after.len());
+        let (url, after) = url_and_after.split_at(end);
+        out.push_str(url.split(['?', '#']).next().unwrap_or(url));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What one live check result means for its row: a version came back, the
@@ -22378,6 +22416,87 @@ games = ["forever"]
                     (SourceErrorKind::NotFound, "early"),
                     (SourceErrorKind::NoConnection, "late"),
                 ]
+            );
+        }
+
+        /// Why a check failed goes to the log, since Details doesn't show it and it is gone
+        /// once LemonUp closes. A URL's query, which can hold a signed token, stays out.
+        #[tokio::test]
+        async fn a_failed_check_logs_its_folder_and_reason() {
+            use crate::source_error::SourceError;
+            use crate::source_limits::SourceLimits;
+
+            #[derive(Clone, Default)]
+            struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Captured {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().expect("log").extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut database =
+                StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+            let mut addon = AddonRecord::new("Broken", "Broken", SourceKind::Wago);
+            addon.version = Some("1.0".to_string());
+            database.upsert_addon(&addon).expect("seed addon");
+
+            let captured = Captured::default();
+            let writer = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+
+            let limits = SourceLimits::new(6, 3, 4, 4, 2);
+            let failures = crate::app::check_folders_live_in(
+                &mut database,
+                None,
+                &["Broken".to_string()],
+                Some("fake-key"),
+                &limits,
+                |_client, _addon: AddonRecord, _api_key| async {
+                    Err::<crate::wago::WagoRemoteVersion, _>(SourceError::new(
+                        SourceErrorKind::Other,
+                        "HTTP status server error (502 Bad Gateway) for url \
+                         (https://example.com/release.json?token=signed-secret)",
+                    ))
+                },
+                &mut |_| {},
+            )
+            .await
+            .expect("check");
+            assert_eq!(failures.len(), 1);
+
+            let log = String::from_utf8(captured.0.lock().expect("log").clone()).expect("utf-8");
+            assert!(log.contains("WARN"), "{log}");
+            assert!(log.contains("couldn't check an addon for updates"), "{log}");
+            assert!(log.contains("Broken"), "{log}");
+            assert!(log.contains("source=Wago"), "{log}");
+            assert!(log.contains("kind=Other"), "{log}");
+            assert!(log.contains("502 Bad Gateway"), "{log}");
+            assert!(log.contains("https://example.com/release.json)"), "{log}");
+            assert!(!log.contains("signed-secret"), "{log}");
+        }
+
+        #[test]
+        fn url_queries_are_left_out_of_logged_text() {
+            assert_eq!(
+                crate::app::without_url_queries(
+                    "for url (https://a.example/x?jwt=1) then http://b.example/y#f and \
+                     https://c.example/z?k=2"
+                ),
+                "for url (https://a.example/x) then http://b.example/y and https://c.example/z"
+            );
+            assert_eq!(
+                crate::app::without_url_queries("no url here?"),
+                "no url here?"
             );
         }
 
