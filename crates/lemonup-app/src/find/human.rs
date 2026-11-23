@@ -3,176 +3,15 @@
 //! key=value lines from the parent module instead.
 
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 
-use crossterm::Command;
-use crossterm::style::{Attribute, Colored, SetAttribute, SetForegroundColor};
 use lemonup_core::find::{
     FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon, LikelyReason,
 };
-use lemonup_core::{AddonRecord, AppConfig, LemonupError, UpdateStatus, toc_edit};
-use ratatui::backend::IntoCrossterm;
-use ratatui::style::{Color, Modifier, Style};
+use lemonup_core::{AddonRecord, LemonupError, UpdateStatus, toc_edit};
 
 use super::{FindTarget, LinkOutcome, SourceProblem, exact_picks};
+use crate::output::{Entry, INDENT, Paint, Tone, section, table, wrap_units, wrap_words};
 use crate::source_error::SourceErrorKind;
-use crate::theme::{ColorRoles, DisplayEnv, UiTheme};
-
-/// Longest line of a wrapped list or sentence when the terminal's width is unknown. Addon lines
-/// are never wrapped or cut.
-const WIDTH: usize = 78;
-/// The narrowest and widest the report is wrapped to on a terminal.
-const MIN_WIDTH: usize = 60;
-const MAX_WIDTH: usize = 120;
-const INDENT: &str = "  ";
-const SUB_INDENT: &str = "      ";
-
-/// What a section heading means, which picks its color role.
-#[derive(Clone, Copy)]
-enum Tone {
-    /// Ready to link: the success role.
-    Good,
-    /// Needs a look or a choice: the warning role.
-    Warn,
-    /// A source failed: the problem role.
-    Problem,
-    /// Nothing LemonUp can do: bold in the normal text role, so it stays readable.
-    Quiet,
-}
-
-/// Whether this console understands escape codes. Windows needs them switched on first.
-#[cfg(windows)]
-fn ansi_supported() -> bool {
-    crossterm::ansi_support::supports_ansi()
-}
-
-#[cfg(not(windows))]
-fn ansi_supported() -> bool {
-    true
-}
-
-/// Whether the report is drawn in color: a terminal, and `NO_COLOR` not set.
-pub(crate) fn color_wanted(is_terminal: bool, display: DisplayEnv) -> bool {
-    is_terminal && !display.no_color
-}
-
-/// The columns the report is wrapped to: the terminal's width less a column of margin, kept
-/// between 60 and 120. Without a terminal, or when its size can't be read, 78.
-pub(crate) fn report_width(is_terminal: bool, columns: Option<u16>) -> usize {
-    match columns {
-        Some(columns) if is_terminal => {
-            usize::from(columns.saturating_sub(1)).clamp(MIN_WIDTH, MAX_WIDTH)
-        }
-        _ => WIDTH,
-    }
-}
-
-/// How the readable report is drawn: its color and the columns it wraps to. Colors are the
-/// color roles of the person's theme, as the TUI shows them. It is a
-/// value, not a look at the environment, so tests render both ways and at any width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Paint(Option<ColorRoles>, usize);
-
-impl Paint {
-    /// No escape codes at all, wrapped at 78 columns.
-    pub(crate) const PLAIN: Self = Self(None, WIDTH);
-
-    /// The same drawing, wrapped to `width` columns.
-    pub(crate) fn with_width(self, width: usize) -> Self {
-        Self(self.0, width)
-    }
-
-    /// The Terminal theme's colors.
-    #[cfg(test)]
-    pub(crate) fn terminal() -> Self {
-        Self::with_roles(ColorRoles::terminal())
-    }
-
-    /// Drawn with `roles`.
-    pub(crate) fn with_roles(roles: ColorRoles) -> Self {
-        // The decision to use color was made by the caller. Without this, crossterm would drop
-        // every color again whenever `NO_COLOR` is set in the environment it runs in.
-        Colored::set_ansi_color_disabled(false);
-        Self(Some(roles), WIDTH)
-    }
-
-    /// Colored for a stream that `is_terminal` (and that `display` allows), else plain. The
-    /// colors are the ones the TUI shows for `config`, including its fall back to the
-    /// terminal's own 16 colors when `display` has no 24-bit color.
-    pub(crate) fn for_stream(is_terminal: bool, display: DisplayEnv, config: &AppConfig) -> Self {
-        if color_wanted(is_terminal, display) {
-            let theme = UiTheme::for_config(config, display, !display.truecolor);
-            Self::with_roles(theme.roles)
-        } else {
-            Self::PLAIN
-        }
-    }
-
-    pub(crate) fn for_stdout(config: &AppConfig) -> Self {
-        let is_terminal = std::io::stdout().is_terminal();
-        let colors = is_terminal && ansi_supported();
-        let columns = crossterm::terminal::size().ok().map(|(columns, _)| columns);
-        Self::for_stream(colors, DisplayEnv::detect(), config)
-            .with_width(report_width(is_terminal, columns))
-    }
-
-    pub(crate) fn for_stderr(config: &AppConfig) -> Self {
-        let colors = std::io::stderr().is_terminal() && ansi_supported();
-        Self::for_stream(colors, DisplayEnv::detect(), config)
-    }
-
-    fn apply(self, text: &str, pick: fn(&ColorRoles) -> Style, bold: bool) -> String {
-        let Some(roles) = self.0 else {
-            return text.to_string();
-        };
-        let style = pick(&roles);
-        let color = style.fg.unwrap_or(Color::Reset);
-        let dim = style.add_modifier.contains(Modifier::DIM);
-        if text.is_empty() || (color == Color::Reset && !bold && !dim) {
-            return text.to_string();
-        }
-        let mut out = String::new();
-        if bold {
-            let _ = SetAttribute(Attribute::Bold).write_ansi(&mut out);
-        }
-        if dim {
-            let _ = SetAttribute(Attribute::Dim).write_ansi(&mut out);
-        }
-        if color != Color::Reset {
-            let _ = SetForegroundColor(color.into_crossterm()).write_ansi(&mut out);
-        }
-        out.push_str(text);
-        let _ = SetAttribute(Attribute::Reset).write_ansi(&mut out);
-        out
-    }
-
-    fn text(self, text: &str) -> String {
-        self.apply(text, |roles| Style::new().fg(roles.text), false)
-    }
-
-    fn muted(self, text: &str) -> String {
-        self.apply(text, |roles| roles.muted, false)
-    }
-
-    /// The role of "Update ready" in the TUI.
-    fn update_ready(self, text: &str) -> String {
-        self.apply(text, |roles| Style::new().fg(roles.amber), false)
-    }
-
-    pub(crate) fn bold(self, text: &str) -> String {
-        self.apply(text, |roles| Style::new().fg(roles.text), true)
-    }
-
-    fn heading(self, tone: Tone, text: &str) -> String {
-        let pick: fn(&ColorRoles) -> Style = match tone {
-            Tone::Good => |roles| Style::new().fg(roles.green),
-            Tone::Warn => |roles| Style::new().fg(roles.amber),
-            Tone::Problem => |roles| Style::new().fg(roles.red),
-            Tone::Quiet => |roles| Style::new().fg(roles.text),
-        };
-        self.apply(text, pick, true)
-    }
-}
 
 /// The names LemonUp shows for the addons in the AddOns folder, by parent folder: the name of
 /// its row (its .toc Title, or the one the person set), else the Title of its folder.
@@ -213,17 +52,6 @@ impl LocalNames {
 /// A name with runs of whitespace as one space, so a name never shows doubled spaces.
 fn collapse_spaces(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// One addon line: name, source and version in columns, then lines under it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Entry {
-    pub(crate) name: String,
-    pub(crate) source: String,
-    pub(crate) version: String,
-    /// "update ready (x)", shown after the version in its own color.
-    pub(crate) update: Option<String>,
-    pub(crate) notes: Vec<String>,
 }
 
 /// The line of an `Exact`, `Likely` or `Partial` result in the words of the report, for the
@@ -279,68 +107,6 @@ pub(crate) fn problem_text(problem: &SourceProblem) -> String {
     text
 }
 
-fn pad(text: &str, width: usize) -> String {
-    let missing = width.saturating_sub(text.chars().count());
-    format!("{text}{}", " ".repeat(missing))
-}
-
-/// The lines of a section's addons, sorted by name, with the name and source columns aligned.
-fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
-    entries.sort_by_key(|entry| entry.name.to_lowercase());
-    let name_width = entries
-        .iter()
-        .map(|entry| entry.name.chars().count())
-        .max()
-        .unwrap_or(0);
-    let source_width = entries
-        .iter()
-        .map(|entry| entry.source.chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut lines = Vec::new();
-    for entry in entries {
-        let mut version = paint.text(&entry.version);
-        if let Some(update) = &entry.update {
-            version.push_str(&paint.text(", "));
-            version.push_str(&paint.update_ready(update));
-        }
-        lines.push(format!(
-            "{INDENT}{}  {}  {version}",
-            paint.text(&pad(&entry.name, name_width)),
-            paint.muted(&pad(&entry.source, source_width)),
-        ));
-        for note in &entry.notes {
-            lines.extend(
-                wrap_words(SUB_INDENT, note, paint.1)
-                    .iter()
-                    .map(|line| paint.muted(line)),
-            );
-        }
-    }
-    lines
-}
-
-/// Fills lines of at most `width` columns with `units`, each kept whole, after `indent`.
-fn wrap_units(indent: &str, units: &[String], width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for unit in units {
-        if line.is_empty() {
-            line = format!("{indent}{unit}");
-        } else if line.chars().count() + 1 + unit.chars().count() > width {
-            lines.push(std::mem::take(&mut line));
-            line = format!("{indent}{unit}");
-        } else {
-            line.push(' ');
-            line.push_str(unit);
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
 /// `items` as a wrapped, comma separated list.
 fn wrapped_list(items: Vec<String>, width: usize) -> Vec<String> {
     let last = items.len().saturating_sub(1);
@@ -356,18 +122,6 @@ fn wrapped_list(items: Vec<String>, width: usize) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     wrap_units(INDENT, &units, width)
-}
-
-/// `text` wrapped at spaces, every line after `indent`.
-fn wrap_words(indent: &str, text: &str, width: usize) -> Vec<String> {
-    wrap_units(
-        indent,
-        &text
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-        width,
-    )
 }
 
 fn wrapped_text(text: &str, width: usize) -> Vec<String> {
@@ -633,25 +387,6 @@ fn found_of<'a>(results: &[&'a FindResult]) -> Vec<&'a FoundAddon> {
     results.iter().filter_map(|result| result.found()).collect()
 }
 
-fn section(
-    lines: &mut Vec<String>,
-    paint: Paint,
-    tone: Tone,
-    title: &str,
-    count: usize,
-    body: Vec<String>,
-) {
-    if !lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines.push(format!(
-        "{} {}",
-        paint.heading(tone, title),
-        paint.muted(&format!("({count})"))
-    ));
-    lines.extend(body);
-}
-
 /// The note that opens the report: what was sent to Wago.io, or that a key finds more.
 fn note(report: &FindReport, problems: &[SourceProblem], wago_folders: usize) -> Option<String> {
     if report.skipped.contains(&FindSource::Wago) {
@@ -769,7 +504,7 @@ pub(crate) fn human_report(
             .map(|result| {
                 (
                     names.name(&result.folder, &result.name).to_lowercase(),
-                    choose_one_lines(result, paint.1),
+                    choose_one_lines(result, paint.width()),
                 )
             })
             .collect::<Vec<_>>();
@@ -789,12 +524,12 @@ pub(crate) fn human_report(
         .flat_map(|result| result.not_checked_by.iter().copied())
         .collect::<HashSet<_>>();
     if !not_checked.is_empty() {
-        let mut body = wrapped_list(name_list(&not_checked, names), paint.1);
+        let mut body = wrapped_list(name_list(&not_checked, names), paint.width());
         for problem in problems
             .iter()
             .filter(|problem| asked_in_vain.contains(&problem.source))
         {
-            body.extend(problem_line(problem, paint.1));
+            body.extend(problem_line(problem, paint.width()));
         }
         section(
             &mut lines,
@@ -812,7 +547,7 @@ pub(crate) fn human_report(
     if !unexplained.is_empty() {
         let body = unexplained
             .iter()
-            .flat_map(|problem| problem_line(problem, paint.1))
+            .flat_map(|problem| problem_line(problem, paint.width()))
             .collect();
         section(
             &mut lines,
@@ -842,7 +577,7 @@ pub(crate) fn human_report(
                 Tone::Quiet,
                 &title,
                 results.len(),
-                wrapped_list(name_list(&results, names), paint.1),
+                wrapped_list(name_list(&results, names), paint.width()),
             );
         }
     }

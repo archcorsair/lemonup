@@ -20,6 +20,7 @@ git history; all product work targets Rust.
   - `update.rs` and `update_targets/`: planning installs and updates.
     `update_targets/folder_swap.rs` is the only code that replaces addon folders.
   - `backup.rs`: backups of the game's WTF folder. `archive.rs`: zip extraction.
+  - `output.rs`: how CLI commands print: readable reports, `--json`, and colors.
 - `scripts`: manual smoke scripts (`*.ps1`) and the website screenshot generator
   (`scripts/screenshots`). `testdata`: fixtures for manual testing.
 
@@ -63,6 +64,16 @@ Start with `README.md`, then `docs/manual-testing.md` for testing against a sand
 - Never log, print or show API keys or tokens; key boxes are masked.
 - A GitHub repository on the known addons list installs, updates or checks only when GitHub
   reports the listed repository id and the listed owner.
+
+### CLI output
+
+- Commands print through `output.rs`: a command builds a report and never formats its own lines
+  with `println!`. Commands not converted yet are the exception until they are.
+- stdout carries only the result. Warnings, notices and progress go to stderr.
+- CLI colors are the terminal's own 16 colors through `Paint`, never the saved theme's, and every
+  state also has its word. `NO_COLOR` and pipes get plain text.
+- `--json` prints one JSON object on one line, or nothing when the run failed. Fields are only
+  added; a rename or removal bumps `schema`.
 
 ### TUI
 

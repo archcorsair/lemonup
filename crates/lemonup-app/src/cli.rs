@@ -4,16 +4,28 @@ use crate::github::parse_github_target;
 use crate::tukui::parse_tukui_target;
 use crate::wago::WagoStability;
 use crate::wowinterface::parse_wowinterface_target;
+use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::{Parser, Subcommand};
 use lemonup_core::TocField;
 use lemonup_core::find::FindSource;
+
+/// Help in the terminal's own 16 colors. clap leaves them out for `NO_COLOR` and pipes.
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .literal(Style::new().effects(Effects::BOLD))
+    .placeholder(Style::new())
+    .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default());
 
 #[derive(Debug, Parser)]
 #[command(
     name = "lemonup",
     about = "World of Warcraft addon manager",
     version,
-    disable_version_flag = true
+    disable_version_flag = true,
+    styles = STYLES
 )]
 pub struct Cli {
     /// Print version
@@ -25,6 +37,9 @@ pub struct Cli {
     pub profile: Option<String>,
     #[arg(long)]
     pub addon_dir: Option<PathBuf>,
+    /// Print one JSON object instead of the readable report
+    #[arg(long, global = true)]
+    pub json: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -156,6 +171,33 @@ pub enum Commands {
     },
 }
 
+/// Why `--json` can't be used for `command`, or `None` when it can. A command leaves this list
+/// once it prints through `crate::output`.
+pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
+    let name = match command {
+        None | Some(Commands::Tui) => {
+            return Some(
+                "--json needs a command, for example lemonup --json profiles.".to_string(),
+            );
+        }
+        Some(Commands::Profiles) => return None,
+        Some(Commands::Sync) => "sync",
+        Some(Commands::Check { .. }) => "check",
+        Some(Commands::Update { .. }) => "update",
+        Some(Commands::UpdateAll { .. }) => "update-all",
+        Some(Commands::InstallWago { .. }) => "install-wago",
+        Some(Commands::InstallTukui { .. }) => "install-tukui",
+        Some(Commands::InstallWowinterface { .. }) => "install-wowinterface",
+        Some(Commands::InstallGithub { .. }) => "install-github",
+        Some(Commands::ExportAddons { .. }) => "export-addons",
+        Some(Commands::ImportAddons { .. }) => "import-addons",
+        Some(Commands::RestoreBackup { .. }) => "restore-backup",
+        Some(Commands::Find { .. }) => "find",
+        Some(Commands::Toc { .. }) => "toc",
+    };
+    Some(format!("--json is not available for `lemonup {name}` yet."))
+}
+
 fn parse_addon_selector(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -234,9 +276,85 @@ mod tests {
     use lemonup_core::find::FindSource;
 
     use super::{
-        Cli, Commands, parse_addon_selector, parse_github_install_target,
+        Cli, Commands, json_refusal, parse_addon_selector, parse_github_install_target,
         parse_tukui_install_target, parse_wago_install_target, parse_wowinterface_install_target,
     };
+
+    #[test]
+    fn json_parses_before_and_after_the_command() {
+        for args in [
+            &["lemonup", "--json", "profiles"][..],
+            &["lemonup", "profiles", "--json"][..],
+            &["lemonup", "--profile", "forever", "profiles", "--json"][..],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            assert!(cli.json, "{args:?}");
+            assert!(matches!(cli.command, Some(Commands::Profiles)), "{args:?}");
+            assert_eq!(json_refusal(cli.command.as_ref()), None, "{args:?}");
+        }
+        let cli = Cli::try_parse_from(["lemonup", "profiles"]).expect("parses");
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn json_is_refused_for_commands_that_dont_print_it_yet() {
+        let refusal = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            assert!(cli.json, "{args:?}");
+            json_refusal(cli.command.as_ref())
+        };
+        for (args, name) in [
+            (&["lemonup", "update-all", "--json"][..], "update-all"),
+            (&["lemonup", "--json", "sync"][..], "sync"),
+            (&["lemonup", "find", "--json", "--link"][..], "find"),
+            (&["lemonup", "toc", "AdiBags", "--json"][..], "toc"),
+            (&["lemonup", "--json", "check", "Questie"][..], "check"),
+            (
+                &["lemonup", "install-tukui", "elvui", "--json"][..],
+                "install-tukui",
+            ),
+            (
+                &["lemonup", "restore-backup", "--json"][..],
+                "restore-backup",
+            ),
+        ] {
+            assert_eq!(
+                refusal(args),
+                Some(format!("--json is not available for `lemonup {name}` yet.")),
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["lemonup", "--json"][..],
+            &["lemonup", "--json", "tui"][..],
+        ] {
+            assert_eq!(
+                refusal(args).as_deref(),
+                Some("--json needs a command, for example lemonup --json profiles."),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_uses_the_terminal_colors() {
+        use clap::CommandFactory;
+        use clap::builder::styling::{AnsiColor, Effects, Style};
+
+        let command = Cli::command();
+        let styles = command.get_styles();
+        let bold_yellow = AnsiColor::Yellow.on_default().effects(Effects::BOLD);
+        assert_eq!(*styles.get_header(), bold_yellow);
+        assert_eq!(*styles.get_usage(), bold_yellow);
+        assert_eq!(*styles.get_literal(), Style::new().effects(Effects::BOLD));
+        assert_eq!(*styles.get_placeholder(), Style::new());
+        assert_eq!(
+            *styles.get_error(),
+            AnsiColor::Red.on_default().effects(Effects::BOLD)
+        );
+        assert_eq!(*styles.get_valid(), AnsiColor::Green.on_default());
+        assert_eq!(*styles.get_invalid(), AnsiColor::Yellow.on_default());
+    }
 
     #[test]
     fn profile_flag_is_optional_and_profiles_parses() {

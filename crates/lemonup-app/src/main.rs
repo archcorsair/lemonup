@@ -10,6 +10,7 @@ mod github;
 mod http;
 mod lemonup_release;
 mod onboarding;
+mod output;
 mod shimmer;
 mod source_error;
 mod source_limits;
@@ -31,7 +32,7 @@ use clap::Parser;
 use lemonup_core::binding::{BindingCheck, check_addon_dir_binding};
 use lemonup_core::{
     AppPaths, ConfigLoad, ConfigStore, DEFAULT_PROFILE, GameFlavor, ImportAnalysis, LemonupError,
-    ProfileRoots, ProfileSummary, ScanSummary, StateDatabase, TuiProfile, UpdateStatus, V1Location,
+    ProfileRoots, ScanSummary, StateDatabase, TuiProfile, UpdateStatus, V1Location,
     V1MigrationOutcome, analyze_import, default_transfer_path, export_addons, list_profiles,
     migrate_v1_if_needed, parse_import_file, remember_last_used, scan_addons_dir_report,
     tui_profile, validate_addons_path,
@@ -104,23 +105,32 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(outcome) => ExitCode::from(outcome.exit_status()),
         Err(error) => {
-            eprintln!("{}", error_text(error.as_ref()));
+            let paint = output::Paint::for_stderr(
+                &lemonup_core::AppConfig::default(),
+                theme::DisplayEnv::detect(),
+            );
+            eprintln!("{}", error_text(error.as_ref(), paint));
             ExitCode::FAILURE
         }
     }
 }
 
 /// What an error that ends a command prints. A refusal already says what happened and what to
-/// do next, so it prints as it is; anything else is labeled as an error.
-fn error_text(error: &(dyn std::error::Error + 'static)) -> String {
+/// do next, so it prints as it is; anything else is labeled as an error, in `paint`.
+fn error_text(error: &(dyn std::error::Error + 'static), paint: output::Paint) -> String {
     match error.downcast_ref::<LemonupError>() {
         Some(LemonupError::Refused(message)) => message.clone(),
-        _ => format!("Error: {error}"),
+        _ => format!("{} {error}", output::error_label(paint)),
     }
 }
 
 async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if cli.json
+        && let Some(refusal) = cli::json_refusal(cli.command.as_ref())
+    {
+        return Err(Box::new(LemonupError::Refused(refusal)));
+    }
     let command = cli.command.unwrap_or(Commands::Tui);
     let roots = ProfileRoots::discover()?;
     let TuiProfile {
@@ -135,6 +145,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     .with_display(theme::DisplayEnv::detect());
     let paths = roots.paths(&profile)?;
     paths.ensure()?;
+    let json = cli.json;
 
     configure_tracing(log_destination(&command, &paths));
 
@@ -161,9 +172,17 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         }
         Commands::Sync => run_sync(paths, runtime)?,
         Commands::Profiles => {
-            for line in profile_lines(&list_profiles(&paths.roots)?) {
-                println!("{line}");
-            }
+            // Built per command while only some print through it, so the others start as before.
+            let mut output = output::Output::stdio(
+                output::OutputMode::from_json_flag(json),
+                &output_config(&paths),
+                runtime.display,
+                &profile,
+            );
+            output.print(
+                &output::ProfilesReport::new(&list_profiles(&paths.roots)?),
+                None,
+            )?;
             CommandOutcome::Success
         }
         Commands::Check { addons } => run_check(paths, runtime, addons).await?,
@@ -244,34 +263,19 @@ fn command_profile(
     }
 }
 
-/// `lemonup profiles`: a summary line, then one line per profile.
-fn profile_lines(profiles: &[ProfileSummary]) -> Vec<String> {
-    let mut lines = vec![format!("profiles summary: count={}", profiles.len())];
-    for profile in profiles {
-        let mut line = format!(
-            "profile: name={}, game={}, game_version={}, addon_dir={}, addons={}",
-            profile.name,
-            profile.display_name,
-            profile
-                .flavor
-                .map(lemonup_core::profiles::profile_name_for)
-                .unwrap_or("<unknown>"),
-            profile
-                .addon_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string())
-                .unwrap_or_else(|| "<unconfigured>".to_string()),
-            profile
-                .addon_count
-                .map(|count| count.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        );
-        if let Some(problem) = &profile.problem {
-            line.push_str(&format!(", problem={problem}"));
+/// The settings CLI output is drawn with (only its symbols): the profile's, read without
+/// writing anything. Settings that can't be read give the defaults; the command itself reports
+/// them when it reads them.
+fn output_config(paths: &AppPaths) -> lemonup_core::AppConfig {
+    let store = ConfigStore::for_profile(paths);
+    match store.load_without_writing() {
+        Ok(ConfigLoad::Loaded(config)) => config,
+        _ => {
+            let mut config = lemonup_core::AppConfig::new_unconfigured();
+            let _ = store.refresh_shared(&mut config);
+            config
         }
-        lines.push(line);
     }
-    lines
 }
 
 /// `lemonup toc`: prints the addon's Title, Notes and Category, or changes one. The CLI never
@@ -447,7 +451,7 @@ async fn run_find(
         // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
         // about stderr.
         let theme_config = config_store.effective(&config_state)?;
-        let paint = crate::find::Paint::for_stdout(&theme_config);
+        let paint = crate::output::Paint::for_stdout(&theme_config, runtime.display);
         println!("{}", crate::find::target_line(&target, paint));
         for line in
             crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
@@ -457,7 +461,7 @@ async fn run_find(
         println!();
         let outcome = if link { Some(link_now()?) } else { None };
         // A refusal leaves the report on screen and ends the run with what happened.
-        let error_paint = crate::find::Paint::for_stderr(&theme_config);
+        let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
         for line in crate::find::human_closing(&report, &names, outcome, paint, error_paint)? {
             println!("{line}");
         }
@@ -2438,6 +2442,7 @@ mod addon_dir_binding_tests {
     };
     use crate::app::AppRuntime;
     use crate::backup::{backup_root, create_wtf_backup, list_backups};
+    use crate::output::Paint;
 
     struct Sandbox {
         _temp: tempfile::TempDir,
@@ -2956,8 +2961,23 @@ mod addon_dir_binding_tests {
         let failure: Box<dyn std::error::Error> =
             Box::new(LemonupError::InvalidArgument("bad".to_string()));
 
-        assert_eq!(error_text(refusal.as_ref()), "Nothing was linked.");
-        assert_eq!(error_text(failure.as_ref()), "Error: invalid argument: bad");
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::PLAIN),
+            "Nothing was linked."
+        );
+        assert_eq!(
+            error_text(failure.as_ref(), Paint::PLAIN),
+            "Error: invalid argument: bad"
+        );
+        // With color the label is bold red; a refusal still has no label and no color.
+        assert_eq!(
+            error_text(failure.as_ref(), Paint::terminal()),
+            "\x1b[1m\x1b[38;5;1mError:\x1b[0m invalid argument: bad"
+        );
+        assert_eq!(
+            error_text(refusal.as_ref(), Paint::terminal()),
+            "Nothing was linked."
+        );
     }
 
     #[test]
@@ -3014,7 +3034,7 @@ mod addon_dir_binding_tests {
             .expect_err("needs --yes");
         assert!(matches!(refusal, LemonupError::Refused(_)), "{refusal:?}");
         // The run ends with the refusal as it is, not an "Error: invalid argument" label.
-        let printed = error_text(&refusal);
+        let printed = error_text(&refusal, Paint::PLAIN);
         assert!(!printed.contains("invalid argument"), "{printed}");
         assert!(!printed.starts_with("Error"), "{printed}");
         assert!(printed.ends_with("Nothing was changed."), "{printed}");
@@ -3068,8 +3088,9 @@ mod profile_tests {
     };
     use tempfile::tempdir;
 
-    use super::{command_profile, load_profile_config, profile_lines};
+    use super::{command_profile, load_profile_config};
     use crate::cli::Commands;
+    use crate::output::{Paint, ProfilesReport, Report};
 
     fn test_roots(base: &Path) -> ProfileRoots {
         ProfileRoots::new(base.join("config"), base.join("data"), base.join("cache"))
@@ -3188,29 +3209,36 @@ mod profile_tests {
         fs::create_dir_all(&broken.config_dir).expect("dir");
         fs::write(&broken.config_file, "addon_dir = [").expect("broken");
 
-        let lines = profile_lines(&list_profiles(&roots).expect("list"));
-        assert_eq!(lines.len(), 4, "{lines:?}");
-        assert_eq!(lines[0], "profiles summary: count=3");
+        let lines = ProfilesReport::new(&list_profiles(&roots).expect("list")).human(Paint::PLAIN);
+        assert!(lines.len() >= 5, "{lines:?}");
+        assert_eq!(lines[0], "Games (3)");
+        let retail = crate::app::friendly_path(&retail);
+        let forever = crate::app::friendly_path(&forever);
+        let width = retail.chars().count().max(forever.chars().count());
         assert_eq!(
             lines[1],
-            format!(
-                "profile: name=default, game=Retail, game_version=retail, addon_dir={}, addons=2",
-                retail.display()
-            )
-        );
-        assert!(
-            lines[2].starts_with(
-                "profile: name=broken, game=broken, game_version=<unknown>, addon_dir=<unconfigured>, addons=0, problem=couldn't read its settings:"
-            ),
-            "{}",
-            lines[2]
+            format!("  default  Retail       {retail:<width$}  2 addons")
         );
         assert_eq!(
-            lines[3],
+            lines[2],
             format!(
-                "profile: name=forever, game=WoW Forever, game_version=forever, addon_dir={}, addons=0",
-                forever.display()
+                "  broken   broken       {:<width$}  0 addons",
+                "no AddOns folder set"
             )
+        );
+        // What couldn't be read is a note under its row, however many lines it takes.
+        let (last, notes) = lines[3..].split_last().expect("rows");
+        assert!(
+            notes[0].starts_with("      couldn't read its settings:"),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().all(|line| line.starts_with("      ")),
+            "{notes:?}"
+        );
+        assert_eq!(
+            *last,
+            format!("  forever  WoW Forever  {forever:<width$}  0 addons")
         );
     }
 }

@@ -5,6 +5,7 @@ use lemonup_core::find::{FindInputs, LikelyReason, match_addons};
 use lemonup_core::{OwnedFolder, SourceKind, UpdateStatus};
 
 use super::*;
+use crate::output::Paint;
 
 /// A WoWInterface file list of `count` files, numbered from `first`.
 fn wowi_list(first: usize, count: usize) -> String {
@@ -1606,34 +1607,6 @@ fn the_plain_key_value_output_is_never_colored() {
 }
 
 #[test]
-fn color_is_for_a_terminal_without_no_color() {
-    use super::human::color_wanted;
-    use crate::theme::{ColorRoles, DisplayEnv};
-    use lemonup_core::AppConfig;
-
-    let with = |no_color: &'static str| {
-        DisplayEnv::from_vars(
-            move |name| (name == "NO_COLOR").then(|| no_color.to_string()),
-            false,
-        )
-    };
-    assert!(color_wanted(true, with("")));
-    assert!(color_wanted(true, DisplayEnv::FULL));
-    assert!(!color_wanted(true, with("1")));
-    assert!(!color_wanted(false, with("")));
-    assert!(!color_wanted(false, DisplayEnv::FULL));
-
-    let config = AppConfig::new_unconfigured();
-    assert_eq!(
-        Paint::for_stream(true, DisplayEnv::FULL, &config),
-        Paint::with_roles(ColorRoles::dark())
-    );
-    assert_eq!(Paint::for_stream(true, with("1"), &config), Paint::PLAIN);
-    assert_eq!(Paint::for_stream(false, with(""), &config), Paint::PLAIN);
-    assert_ne!(Paint::terminal(), Paint::PLAIN);
-}
-
-#[test]
 fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
     let mut data = found(
         FindSource::WowInterface,
@@ -1720,20 +1693,6 @@ fn the_report_wraps_to_the_width_it_is_given() {
 }
 
 #[test]
-fn the_width_follows_the_terminal_within_limits() {
-    use super::human::report_width;
-
-    // A column of margin, kept between 60 and 120.
-    assert_eq!(report_width(true, Some(100)), 99);
-    assert_eq!(report_width(true, Some(40)), 60);
-    assert_eq!(report_width(true, Some(200)), 120);
-    // Not a terminal, or a size that can't be read: 78.
-    assert_eq!(report_width(false, Some(200)), 78);
-    assert_eq!(report_width(true, None), 78);
-    assert_eq!(report_width(false, None), 78);
-}
-
-#[test]
 fn choose_one_lists_folders_with_a_short_reason_and_wraps() {
     let lines = human_report(
         &full_report(),
@@ -1783,8 +1742,13 @@ fn choose_one_lists_folders_with_a_short_reason_and_wraps() {
     );
 }
 
-/// The report drawn for a terminal with `display`, in the theme `theme` names.
-fn report_in_theme(theme: lemonup_core::ThemeMode, display: crate::theme::DisplayEnv) -> String {
+/// The report drawn for a stream that `is_terminal`, with `display`, in the theme `theme`
+/// names.
+fn report_in_theme(
+    theme: lemonup_core::ThemeMode,
+    display: crate::theme::DisplayEnv,
+    is_terminal: bool,
+) -> String {
     let mut config = lemonup_core::AppConfig::new_unconfigured();
     config.theme = theme;
     human_report(
@@ -1792,77 +1756,53 @@ fn report_in_theme(theme: lemonup_core::ThemeMode, display: crate::theme::Displa
         &wowinterface_down(),
         &full_names(),
         44,
-        Paint::for_stream(true, display, &config),
+        Paint::for_stream(is_terminal, display, &config),
     )
     .join("\n")
 }
 
 #[test]
-fn the_report_uses_the_colors_of_the_chosen_theme() {
-    use crate::theme::{ColorRoles, DisplayEnv};
-    use lemonup_core::ThemeMode;
-
-    let rgb = |color: ratatui::style::Color| match color {
-        ratatui::style::Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-        other => panic!("expected an RGB role, got {other:?}"),
-    };
-
-    let dark = report_in_theme(ThemeMode::Dark, DisplayEnv::FULL);
-    let roles = ColorRoles::dark();
-    assert!(
-        dark.contains(&rgb(roles.muted.fg.expect("a color"))),
-        "dark muted missing: {dark:?}"
-    );
-    assert!(
-        dark.contains(&rgb(roles.green)),
-        "dark green missing: {dark:?}"
-    );
-
-    let light = report_in_theme(ThemeMode::Light, DisplayEnv::FULL);
-    assert!(
-        light.contains(&rgb(ColorRoles::light().muted.fg.expect("a color"))),
-        "{light:?}"
-    );
-
-    let terminal = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL);
-    assert!(terminal.contains('\u{1b}'), "{terminal:?}");
-    assert!(
-        !terminal.contains("38;2;"),
-        "terminal theme used 24-bit: {terminal:?}"
-    );
-}
-
-#[test]
-fn the_terminal_theme_writes_muted_text_as_dim_with_the_default_color() {
-    use crate::theme::DisplayEnv;
-    use lemonup_core::ThemeMode;
-
-    let report = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL);
-    assert!(
-        report.contains("\u{1b}[2mSent 44 folder names and file hashes to Wago.io.\u{1b}[0m"),
-        "{report:?}"
-    );
-    assert!(!report.contains("\u{1b}[90m"), "bright black: {report:?}");
-    assert!(
-        !report.contains("\u{1b}[38;5;8m"),
-        "bright black: {report:?}"
-    );
-}
-
-#[test]
-fn without_24_bit_color_a_dark_theme_uses_the_16_colors() {
+fn every_saved_theme_draws_the_report_in_the_terminal_colors() {
     use crate::theme::DisplayEnv;
     use lemonup_core::ThemeMode;
 
     let no_truecolor = DisplayEnv::from_vars(|_| None, false);
     assert!(!no_truecolor.truecolor);
-    let report = report_in_theme(ThemeMode::Dark, no_truecolor);
-    assert!(report.contains('\u{1b}'), "{report:?}");
-    assert!(!report.contains("38;2;"), "{report:?}");
+    let expected = report_in_theme(ThemeMode::Terminal, DisplayEnv::FULL, true);
+    assert!(expected.contains('\u{1b}'), "{expected:?}");
+    for display in [DisplayEnv::FULL, no_truecolor] {
+        for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
+            let report = report_in_theme(theme, display, true);
+            assert!(
+                !report.contains("38;2;"),
+                "{theme:?} used 24-bit: {report:?}"
+            );
+            assert_eq!(report, expected, "{theme:?}");
+        }
+    }
 }
 
 #[test]
-fn no_color_draws_no_color_in_any_theme() {
+fn muted_text_is_dim_with_the_default_color_in_every_theme() {
+    use crate::theme::DisplayEnv;
+    use lemonup_core::ThemeMode;
+
+    for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
+        let report = report_in_theme(theme, DisplayEnv::FULL, true);
+        assert!(
+            report.contains("\u{1b}[2mSent 44 folder names and file hashes to Wago.io.\u{1b}[0m"),
+            "{theme:?}: {report:?}"
+        );
+        assert!(!report.contains("\u{1b}[90m"), "bright black: {report:?}");
+        assert!(
+            !report.contains("\u{1b}[38;5;8m"),
+            "bright black: {report:?}"
+        );
+    }
+}
+
+#[test]
+fn no_color_and_pipes_draw_no_color_in_any_theme() {
     use crate::theme::DisplayEnv;
     use lemonup_core::ThemeMode;
 
@@ -1875,8 +1815,10 @@ fn no_color_draws_no_color_in_any_theme() {
         false,
     );
     for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Terminal] {
-        let report = report_in_theme(theme, no_color);
+        let report = report_in_theme(theme, no_color, true);
         assert!(!report.contains('\u{1b}'), "{theme:?}: {report:?}");
+        let piped = report_in_theme(theme, DisplayEnv::FULL, false);
+        assert!(!piped.contains('\u{1b}'), "{theme:?}: {piped:?}");
     }
 }
 
