@@ -27,8 +27,8 @@ const MAX_ADDRESS_LEN: usize = 2048;
 
 /// `url` as an address safe to write inside OSC 8: an http or https address, as `Url` writes
 /// it, with no control or non-ASCII characters left. `None` for anything else, for a host
-/// that is an IP address or has no dot, and for an address with a user name or password, which can make it look
-/// like another site (`https://github.com@example.com`).
+/// that is an IP address or has no dot, and for an address with a user name or password,
+/// which can make it look like another site (`https://github.com@example.com`).
 pub(super) fn link_address(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https")
