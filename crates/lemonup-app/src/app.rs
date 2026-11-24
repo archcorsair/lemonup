@@ -13254,9 +13254,20 @@ mod tests {
         }
         assert!(links_at(&mut app, 120, 36).len() > 1, "wraps when docked");
 
-        // An address that isn't a web page isn't written as a link.
-        app.dashboard.items[index].source_url = Some("javascript:alert(1)".to_string());
+        // Not under a question, where Details is dimmed.
+        app.dashboard
+            .set_pending_delete_folders(Some(vec!["Second".to_string()]));
+        assert!(app.active_question().is_some());
         assert!(links_at(&mut app, 160, 48).is_empty());
+        app.dashboard.set_pending_delete_folders(None);
+        assert!(!links_at(&mut app, 160, 48).is_empty());
+
+        // An address that isn't a web page isn't written as a link, and neither is text with
+        // letters that may take two cells.
+        for source_url in ["javascript:alert(1)", "https://example.com/日本語"] {
+            app.dashboard.items[index].source_url = Some(source_url.to_string());
+            assert!(links_at(&mut app, 160, 48).is_empty(), "{source_url}");
+        }
     }
 
     #[test]

@@ -174,14 +174,21 @@ impl App {
     }
 
     /// The web page Details shows now: its text on screen and the address it opens. `None`
-    /// while Details is closed or the address isn't one to open.
+    /// while Details is closed or under a question, when the address isn't one to open, and
+    /// when the text has anything but plain ASCII letters, which may not take one cell each.
     pub(super) fn details_web_link(&self) -> Option<(String, String)> {
-        if self.shell_ui.overlay.active != Some(OverlayKind::Inspect) {
+        if self.shell_ui.overlay.active != Some(OverlayKind::Inspect)
+            || self.active_question().is_some()
+        {
             return None;
         }
         let url = self.inspect_resolved_target()?.item.source_url.as_deref()?;
         let address = super::links::link_address(url)?;
-        Some((web_page_label(url), address))
+        let label = web_page_label(url);
+        label
+            .chars()
+            .all(|letter| letter.is_ascii_graphic())
+            .then_some((label, address))
     }
 
     fn details_content(&self) -> Option<DetailsContent> {

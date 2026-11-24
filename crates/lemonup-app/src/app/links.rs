@@ -22,6 +22,9 @@ const LINKS: [(&str, &str); 2] = [
     ("addons.wago.io/patreon", "https://addons.wago.io/patreon"),
 ];
 
+/// The longest address written as a link. Some terminals drop a longer OSC 8 sequence.
+const MAX_ADDRESS_LEN: usize = 2048;
+
 /// `url` as an address safe to write inside OSC 8: an http or https address, as `Url` writes
 /// it, with no control or non-ASCII characters left. `None` for anything else, for a host
 /// without a dot, and for an address with a user name or password, which can make it look
@@ -36,9 +39,7 @@ pub(super) fn link_address(url: &str) -> Option<String> {
         return None;
     }
     let address = String::from(parsed);
-    address
-        .chars()
-        .all(|letter| letter.is_ascii_graphic())
+    (address.len() <= MAX_ADDRESS_LEN && address.chars().all(|letter| letter.is_ascii_graphic()))
         .then_some(address)
 }
 
@@ -63,8 +64,8 @@ impl DrawnLinks {
     /// (text and address) for the ones that change, such as the web page in Details. A text
     /// may be wrapped over rows below one another, starting in the same column, each row but
     /// the last followed by a blank cell or the edge. An `extra` text, which a source can
-    /// choose, also needs a blank cell or the edge before each row and after its end, and is
-    /// skipped where it starts on a link already found. Text with wide letters, which take two
+    /// choose, also needs a blank cell or the edge before each row and after its end. A text
+    /// that starts on a link already found is skipped. Text with wide letters, which take two
     /// cells, is never found.
     pub(super) fn find(buffer: &Buffer, extra: &[(String, String)]) -> Self {
         let area = buffer.area;
@@ -75,14 +76,11 @@ impl DrawnLinks {
                     .collect()
             })
             .collect();
-        let texts: Vec<(Vec<char>, &str, bool)> = LINKS
+        // The given links first: a fixed link's text can be the start of one.
+        let texts: Vec<(Vec<char>, &str, bool)> = extra
             .iter()
-            .map(|(text, url)| (*text, *url, false))
-            .chain(
-                extra
-                    .iter()
-                    .map(|(text, url)| (text.as_str(), url.as_str(), true)),
-            )
+            .map(|(text, url)| (text.as_str(), url.as_str(), true))
+            .chain(LINKS.iter().map(|(text, url)| (*text, *url, false)))
             .filter(|(text, _, _)| !text.is_empty())
             .map(|(text, url, apart)| (text.chars().collect(), url, apart))
             .collect();
@@ -98,8 +96,11 @@ impl DrawnLinks {
                                 && (link.x..link.x + link.cells.len() as u16).contains(&x)
                         })
                     };
-                    let Some(pieces) =
-                        place(&rows, start, y, chars, *apart).filter(|_| !(*apart && on_a_link()))
+                    let starts_here = rows[y][start].starts_with(chars[0]);
+                    let Some(pieces) = starts_here
+                        .then(|| place(&rows, start, y, chars, *apart))
+                        .flatten()
+                        .filter(|_| !on_a_link())
                     else {
                         start += 1;
                         continue;
@@ -336,15 +337,29 @@ mod tests {
             .collect();
         assert_eq!(places, vec![(3, 1)]);
 
-        // Never over a fixed link, even with the same text.
-        let same = web_page("lemonup.org/github-token", "https://example.com/");
+        // One link per place, even when a given text is a fixed one's.
+        let same = web_page(
+            "lemonup.org/github-token",
+            "http://lemonup.org/github-token",
+        );
         let buffer = buffer_with(&["see lemonup.org/github-token"]);
-        let urls: Vec<_> = DrawnLinks::find(&buffer, &same)
+        assert_eq!(DrawnLinks::find(&buffer, &same).links().len(), 1);
+
+        // A fixed link's text can start a given one: the given one wins.
+        let longer = web_page(
+            "addons.wago.io/patreon-plus",
+            "https://addons.wago.io/patreon-plus",
+        );
+        let buffer = buffer_with(&["   addons.wago.io/patreon-plus"]);
+        let urls: Vec<_> = DrawnLinks::find(&buffer, &longer)
             .links()
             .iter()
-            .map(|link| link.url.clone())
+            .map(|link| (link.x, link.url.clone()))
             .collect();
-        assert_eq!(urls, vec!["https://lemonup.org/github-token"]);
+        assert_eq!(
+            urls,
+            vec![(3, "https://addons.wago.io/patreon-plus".to_string())]
+        );
 
         // Each row of a wrapped one too.
         let wrapped = web_page("addons.wago.io/addons/x", "https://addons.wago.io/addons/x");
@@ -386,6 +401,7 @@ mod tests {
             "https://user:secret@example.com/",
             // A one-word host would be a link text that matches words on screen.
             "https://Up",
+            &format!("https://example.com/{}", "a".repeat(2048)),
         ] {
             assert_eq!(super::link_address(url), None, "{url:?}");
         }
