@@ -124,6 +124,8 @@ pub struct SharedFields {
     pub check_other_games: Option<OtherGamesCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_lemonup_updates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_progress: Option<bool>,
 }
 
 impl SharedFields {
@@ -148,6 +150,7 @@ impl SharedFields {
             check_interval_secs: Some(settings.check_interval_secs),
             check_other_games: Some(settings.check_other_games),
             check_lemonup_updates: Some(settings.check_lemonup_updates),
+            terminal_progress: Some(settings.terminal_progress),
         }
     }
 
@@ -174,6 +177,7 @@ impl SharedFields {
             &mut self.check_lemonup_updates,
             &other.check_lemonup_updates,
         );
+        fill(&mut self.terminal_progress, &other.terminal_progress);
     }
 
     /// The values `self` has that differ from `written`. A value `self` doesn't have is not
@@ -200,6 +204,7 @@ impl SharedFields {
                 &self.check_lemonup_updates,
                 &written.check_lemonup_updates,
             ),
+            terminal_progress: changed(&self.terminal_progress, &written.terminal_progress),
         }
     }
 
@@ -235,6 +240,9 @@ impl SharedFields {
         if let Some(value) = self.check_lemonup_updates {
             settings.check_lemonup_updates = value;
         }
+        if let Some(value) = self.terminal_progress {
+            settings.terminal_progress = value;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -263,6 +271,7 @@ impl fmt::Debug for SharedFields {
             .field("check_interval_secs", &self.check_interval_secs)
             .field("check_other_games", &self.check_other_games)
             .field("check_lemonup_updates", &self.check_lemonup_updates)
+            .field("terminal_progress", &self.terminal_progress)
             .finish()
     }
 }
@@ -285,6 +294,8 @@ pub struct SharedSettings {
     pub check_other_games: OtherGamesCheck,
     /// The TUI looks on GitHub once a day for a newer LemonUp.
     pub check_lemonup_updates: bool,
+    /// Progress shows in the terminal's own progress bar, on terminals that draw one.
+    pub terminal_progress: bool,
     /// The profile the TUI opened last; plain `lemonup` opens it again.
     pub last_used_profile: Option<String>,
     /// Per profile, the shared values LemonUp last wrote into its `config.toml`. Values
@@ -317,6 +328,7 @@ impl SharedSettings {
             check_interval_secs: config.check_interval_secs,
             check_other_games: config.check_other_games,
             check_lemonup_updates: config.check_lemonup_updates,
+            terminal_progress: config.terminal_progress,
             last_used_profile: None,
             profile_copies: BTreeMap::new(),
             wago_hash_notice_shown: false,
@@ -361,6 +373,9 @@ impl SharedSettings {
         if changed(|seen, config| seen.check_lemonup_updates != config.check_lemonup_updates) {
             self.check_lemonup_updates = config.check_lemonup_updates;
         }
+        if changed(|seen, config| seen.terminal_progress != config.terminal_progress) {
+            self.terminal_progress = config.terminal_progress;
+        }
     }
 
     /// Puts the shared values into a profile's `config`.
@@ -375,6 +390,7 @@ impl SharedSettings {
         config.check_interval_secs = self.check_interval_secs;
         config.check_other_games = self.check_other_games;
         config.check_lemonup_updates = self.check_lemonup_updates;
+        config.terminal_progress = self.terminal_progress;
     }
 }
 
@@ -406,6 +422,7 @@ impl fmt::Debug for SharedSettings {
             .field("check_interval_secs", &self.check_interval_secs)
             .field("check_other_games", &self.check_other_games)
             .field("check_lemonup_updates", &self.check_lemonup_updates)
+            .field("terminal_progress", &self.terminal_progress)
             .field("last_used_profile", &self.last_used_profile)
             .field("profile_copies", &self.profile_copies)
             .field("wago_hash_notice_shown", &self.wago_hash_notice_shown)
@@ -1044,6 +1061,7 @@ mod tests {
         config.check_interval_secs = 900;
         config.check_other_games = OtherGamesCheck::ThreeHours;
         config.check_lemonup_updates = false;
+        config.terminal_progress = false;
         config.addon_dir = Some("/games/_retail_/Interface/AddOns".into());
         config.backup_retention = 9;
         config
@@ -1080,6 +1098,7 @@ mod tests {
         assert_eq!(settings.check_interval_secs, 900);
         assert_eq!(settings.check_other_games, OtherGamesCheck::ThreeHours);
         assert!(!settings.check_lemonup_updates);
+        assert!(!settings.terminal_progress);
         assert!(store.read().expect("reread") == Some(expected));
         // The default profile's config is left exactly as it was.
         assert_eq!(fs::read(roots.default_config_file()).expect("read"), before);
@@ -1316,6 +1335,23 @@ mod tests {
         forever.wago_api_key = None;
         forever_store.write_config(&forever).expect("remove key");
         assert!(loaded(&retail_store).wago_api_key.is_none());
+    }
+
+    /// Files written before 2.9 have no `terminal_progress`; it reads as on.
+    #[test]
+    fn files_from_before_the_terminal_progress_bar_read_it_as_on() {
+        let shared = toml::from_str::<SharedSettings>("schema_version = 1\ntheme = \"light\"\n")
+            .expect("shared.toml");
+        assert!(shared.terminal_progress);
+        let config =
+            toml::from_str::<AppConfig>("schema_version = 1\ntheme = \"light\"\n").expect("config");
+        assert!(config.terminal_progress);
+        let fields = toml::from_str::<SharedFields>("theme = \"light\"\n").expect("fields");
+        assert_eq!(fields.terminal_progress, None);
+        let off =
+            toml::from_str::<SharedSettings>("schema_version = 1\nterminal_progress = false\n")
+                .expect("shared.toml");
+        assert!(!off.terminal_progress);
     }
 
     /// Files written before 2.8 have no `check_lemonup_updates`; it reads as on.

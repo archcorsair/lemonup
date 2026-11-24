@@ -9,6 +9,7 @@ use std::time::Duration;
 use lemonup_core::{AddonRecord, SourceKind};
 
 use super::{OutputMode, Paint, columns, printable};
+use crate::terminal_progress::Bar;
 
 /// How long one spinner frame stays.
 const FRAME: Duration = Duration::from_millis(100);
@@ -30,6 +31,12 @@ static ON_STDERR: OnceLock<Arc<Shared>> = OnceLock::new();
 /// understands escape codes. Never in a pipe, and never with `--json`.
 pub(crate) fn wanted(mode: OutputMode, stderr_is_terminal: bool, term: Option<&str>) -> bool {
     mode == OutputMode::Human && stderr_is_terminal && term != Some("dumb")
+}
+
+/// Whether a run uses the terminal's own progress bar: the terminal draws one, and the
+/// "Terminal progress bar" setting is on.
+pub(crate) fn bar_in_use(drawn_by_terminal: bool, setting: bool) -> bool {
+    drawn_by_terminal && setting
 }
 
 /// What is shown: the text while the spinner turns, and the text of the one unchanging line
@@ -63,6 +70,11 @@ struct State {
     frame: usize,
     /// The line is on screen as it should be. Under Reduce motion it is then left alone.
     drawn: bool,
+    /// The terminal draws a progress bar of its own, and the setting for it is on.
+    bar_enabled: bool,
+    /// What the terminal's progress bar should show, and what it was last told to show.
+    bar_wanted: Bar,
+    bar_shown: Bar,
     /// The cursor is hidden only when something stands ready to show it again on Ctrl+C.
     may_hide_cursor: bool,
     cursor_hidden: bool,
@@ -160,12 +172,29 @@ impl State {
         ))
     }
 
+    /// Tells the terminal's own progress bar what to show, when that changed. Nothing is
+    /// ever written to a terminal that is not known to draw one: others show the sequence
+    /// as a notification.
+    fn draw_bar(&mut self) {
+        // The pulse is an animation, which Reduce motion turns off.
+        let wanted = match self.bar_wanted {
+            Bar::Pulse if self.still => Bar::Off,
+            wanted => wanted,
+        };
+        if self.bar_enabled && wanted != self.bar_shown {
+            let _ = self.writer.write_all(wanted.sequence().as_bytes());
+            let _ = self.writer.flush();
+            self.bar_shown = wanted;
+        }
+    }
+
     /// Draws the line as it is now. Errors are dropped: a status line that can't be
     /// written must never stop the command it reports on.
     fn draw(&mut self) {
         if self.stopped {
             return;
         }
+        self.draw_bar();
         if let Some(line) = self.line() {
             let _ = self.writer.write_all(line.as_bytes());
             let _ = self.writer.flush();
@@ -188,10 +217,17 @@ impl State {
         self.cursor_hidden = false;
     }
 
+    /// The wait is over: the line goes, and so does the terminal's progress bar.
+    fn clear(&mut self) {
+        self.shown = None;
+        self.bar_wanted = Bar::Off;
+        self.erase();
+        self.draw_bar();
+    }
+
     /// Takes the line away for good.
     fn end(&mut self) {
-        self.shown = None;
-        self.erase();
+        self.clear();
         self.stopped = true;
     }
 }
@@ -236,6 +272,8 @@ impl Shared {
         let on_stderr = {
             let mut state = shared.lock();
             state.may_hide_cursor = watched;
+            // The same goes for the terminal's progress bar: Ctrl+C has to take it away.
+            state.bar_enabled &= watched;
             state.on_stderr
         };
         if on_stderr && ON_STDERR.set(Arc::clone(shared)).is_ok() {
@@ -317,7 +355,7 @@ pub(crate) struct Progress {
 impl Progress {
     /// The status line on this process's stderr. Ctrl+C erases it and gives the cursor back
     /// before the run ends.
-    pub(crate) fn on_stderr(paint: Paint, still: bool) -> Self {
+    pub(crate) fn on_stderr(paint: Paint, still: bool, bar: bool) -> Self {
         let progress = Self::build(
             Box::new(std::io::stderr()),
             paint,
@@ -325,7 +363,11 @@ impl Progress {
             Width::Terminal,
             true,
         );
-        progress.shared.lock().on_stderr = true;
+        {
+            let mut state = progress.shared.lock();
+            state.on_stderr = true;
+            state.bar_enabled = bar;
+        }
         progress
     }
 
@@ -347,6 +389,9 @@ impl Progress {
                     shown: None,
                     frame: 0,
                     drawn: false,
+                    bar_enabled: false,
+                    bar_wanted: Bar::Off,
+                    bar_shown: Bar::Off,
                     may_hide_cursor: !live,
                     cursor_hidden: false,
                     stopped: false,
@@ -360,6 +405,13 @@ impl Progress {
                 ticker: Mutex::new(None),
             }),
         }
+    }
+
+    /// The same line on a terminal that draws a progress bar of its own, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_bar(self) -> Self {
+        self.shared.lock().bar_enabled = true;
+        self
     }
 
     /// What a command uses to say what it is doing.
@@ -458,7 +510,7 @@ impl Drop for Waiting<'_> {
 impl Status {
     /// The same text with the spinner and under Reduce motion, until it is cleared.
     pub(crate) fn say(&self, text: &str) {
-        self.show(text, text);
+        self.show(text, text, Bar::Off);
     }
 }
 
@@ -470,8 +522,9 @@ impl Status {
 
     /// Says what the command is doing. `moving` is the text next to the spinner and can
     /// change as often as it likes. `still` is the one line Reduce motion shows: it stays
-    /// as first shown until the line is cleared.
-    pub(crate) fn show(&self, moving: &str, still: &str) {
+    /// as first shown until the line is cleared. `bar` is what the terminal's own progress
+    /// bar shows meanwhile, where there is one.
+    pub(crate) fn show(&self, moving: &str, still: &str, bar: Bar) {
         let Some(shared) = &self.0 else {
             return;
         };
@@ -490,6 +543,7 @@ impl Status {
             moving: moving.to_string(),
             still,
         });
+        state.bar_wanted = bar;
         if state.live && !state.started {
             state.started = true;
             drop(state);
@@ -498,9 +552,9 @@ impl Status {
     }
 
     /// Says `text`, with the spinner and under Reduce motion alike, until the returned
-    /// guard is dropped.
+    /// guard is dropped. There is no count to show, so the terminal's progress bar pulses.
     pub(crate) fn waiting(&self, text: &str) -> Waiting<'_> {
-        self.show(text, text);
+        self.show(text, text, Bar::Pulse);
         Waiting(self)
     }
 
@@ -514,9 +568,7 @@ impl Status {
         let Some(shared) = &self.0 else {
             return;
         };
-        let mut state = shared.lock();
-        state.shown = None;
-        state.erase();
+        shared.lock().clear();
     }
 }
 
@@ -527,8 +579,9 @@ pub(crate) struct Tally {
     label: &'static str,
     /// The name of each addon that is counted, by its folder.
     names: HashMap<String, String>,
-    /// The folders that are done.
+    /// The folders that are done, and whether one of them failed.
     done: HashSet<String>,
+    trouble: bool,
     /// The folders with a request out, in the order they started.
     active: Vec<String>,
 }
@@ -549,6 +602,7 @@ impl Tally {
                 .map(|addon| (addon.folder.clone(), addon.display_name().to_string()))
                 .collect(),
             done: HashSet::new(),
+            trouble: false,
             active: Vec::new(),
         }
     }
@@ -560,10 +614,11 @@ impl Tally {
         }
     }
 
-    /// The addon in `folder` is done.
-    pub(crate) fn finished(&mut self, folder: &str) {
+    /// The addon in `folder` is done; `failed` when it could not be checked or updated.
+    pub(crate) fn finished(&mut self, folder: &str, failed: bool) {
         if self.names.contains_key(folder) {
             self.done.insert(folder.to_string());
+            self.trouble |= failed;
         }
         self.active.retain(|active| active != folder);
     }
@@ -590,11 +645,17 @@ impl Tally {
         }
     }
 
+    /// What the terminal's progress bar shows: how much is done, yellow once an addon
+    /// failed.
+    pub(crate) fn bar(&self) -> Bar {
+        Bar::of(self.done.len(), self.names.len(), self.trouble)
+    }
+
     /// Shows where the count stands. With no addon to ask a source about, nothing is
     /// waited for and nothing is shown.
     pub(crate) fn show(&self, status: &Status) {
         if !self.names.is_empty() {
-            status.show(&self.moving(), &self.still());
+            status.show(&self.moving(), &self.still(), self.bar());
         }
     }
 }
@@ -750,14 +811,14 @@ mod tests {
     fn reduce_motion_shows_one_unchanging_line() {
         let (progress, written) = progress(Paint::terminal(), true, 80);
         let status = progress.status();
-        status.show("Checking 1 of 48", "Checking 48 addons");
+        status.show("Checking 1 of 48", "Checking 48 addons", Bar::Off);
         progress.tick();
         // No spinner, no color, and the cursor stays as it is.
         assert_eq!(written.take(), "\r\x1b[KChecking 48 addons…");
 
         // The count moves on; the line does not.
-        status.show("Checking 2 of 48: Pawn", "Checking 48 addons");
-        status.show("Checking 3 of 48", "something else");
+        status.show("Checking 2 of 48: Pawn", "Checking 48 addons", Bar::Off);
+        status.show("Checking 3 of 48", "something else", Bar::Off);
         progress.tick();
         progress.tick();
         assert_eq!(written.take(), "");
@@ -772,7 +833,7 @@ mod tests {
         // A new wait after a clear says its own line.
         status.clear();
         assert_eq!(written.take(), "\r\x1b[K");
-        status.show("Updating 1 of 2", "Updating 2 addons");
+        status.show("Updating 1 of 2", "Updating 2 addons", Bar::Off);
         progress.tick();
         assert_eq!(written.take(), "\r\x1b[KUpdating 2 addons…");
     }
@@ -842,23 +903,23 @@ mod tests {
         // With several out, none is named.
         tally.started("Pawn");
         assert_eq!(tally.moving(), "Updating 1 of 3");
-        tally.finished("DBM-Core");
+        tally.finished("DBM-Core", false);
         assert_eq!(tally.moving(), "Updating 2 of 3: Pawn");
         // An addon that is done twice is counted once.
-        tally.finished("DBM-Core");
+        tally.finished("DBM-Core", false);
         assert_eq!(tally.moving(), "Updating 2 of 3: Pawn");
         // An addon that is not counted changes nothing, and neither does another folder
         // that differs only in case: folders are told apart as the rows have them.
         tally.started("Mine");
-        tally.finished("Mine");
-        tally.finished("Unknown");
-        tally.finished("pawn");
+        tally.finished("Mine", false);
+        tally.finished("Unknown", false);
+        tally.finished("pawn", false);
         assert_eq!(tally.moving(), "Updating 2 of 3: Pawn");
-        tally.finished("Pawn");
+        tally.finished("Pawn", false);
         tally.started("ElvUI");
         assert_eq!(tally.moving(), "Updating 3 of 3: ElvUI");
         // The count never passes the total.
-        tally.finished("ElvUI");
+        tally.finished("ElvUI", false);
         assert_eq!(tally.moving(), "Updating 3 of 3");
         assert_eq!(tally.still(), "Updating 3 addons");
 
@@ -908,7 +969,7 @@ mod tests {
             let (progress, written) = testing::progress(Paint::PLAIN, false, width);
             progress
                 .status()
-                .show("Checking 1 of 3", "Checking 3 addons");
+                .show("Checking 1 of 3", "Checking 3 addons", Bar::Off);
             progress.tick();
             written.take()
         };
@@ -926,13 +987,13 @@ mod tests {
         let (progress, written) = testing::progress(Paint::PLAIN, true, 3);
         progress
             .status()
-            .show("Checking 1 of 3", "Checking 3 addons");
+            .show("Checking 1 of 3", "Checking 3 addons", Bar::Off);
         progress.tick();
         assert_eq!(written.take(), "\r\x1b[KC…");
         let (progress, written) = testing::progress(Paint::PLAIN, true, 1);
         progress
             .status()
-            .show("Checking 1 of 3", "Checking 3 addons");
+            .show("Checking 1 of 3", "Checking 3 addons", Bar::Off);
         progress.tick();
         assert_eq!(written.take(), "");
     }
@@ -958,8 +1019,8 @@ mod tests {
         // The same for a line that changes while it shows.
         {
             let _line = status.until_done();
-            status.show("Checking 1 of 2", "Checking 2 addons");
-            status.show("Checking 2 of 2", "Checking 2 addons");
+            status.show("Checking 1 of 2", "Checking 2 addons", Bar::Off);
+            status.show("Checking 2 of 2", "Checking 2 addons", Bar::Off);
             progress.tick();
             written.take();
         }
@@ -1008,7 +1069,9 @@ mod tests {
     #[test]
     fn a_live_line_draws_itself_and_never_hides_a_cursor_it_could_not_show_again() {
         // Outside a runtime nothing listens for Ctrl+C, so the cursor is left alone.
+        // The same goes for the terminal's progress bar: nothing would take it away.
         let (screen, progress) = testing::live(Paint::PLAIN, false, 80);
+        let progress = progress.with_bar();
         let status = progress.status();
         // Waits for the line's own thread to have drawn `text`, however busy the machine is.
         let drawn = |text: &str| {
@@ -1018,22 +1081,23 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
-        status.show("Checking 1 of 2", "Checking 2 addons");
+        status.show("Checking 1 of 2", "Checking 2 addons", Bar::of(0, 2, false));
         // The spinner turns with nobody driving it.
         drawn("⠙ Checking 1 of 2");
-        status.show("Checking 2 of 2", "Checking 2 addons");
+        status.show("Checking 2 of 2", "Checking 2 addons", Bar::of(1, 2, true));
         drawn(" Checking 2 of 2");
         // Dropping it joins the thread, so nothing is drawn after this line.
         drop(progress);
         let all = screen.take();
         assert!(!all.contains("\x1b[?25"), "{all:?}");
+        assert!(!all.contains("]9;"), "{all:?}");
         assert!(
             all.starts_with("\r\x1b[K⠋ Checking 1 of 2\r\x1b[K"),
             "{all:?}"
         );
         assert!(all.ends_with("Checking 2 of 2\r\x1b[K"), "{all:?}");
         // Gone for good: saying more draws nothing.
-        status.show("late", "late");
+        status.show("late", "late", Bar::Off);
         std::thread::sleep(FRAME * 3);
         assert_eq!(screen.take(), "");
     }
@@ -1042,7 +1106,7 @@ mod tests {
     fn a_way_out_that_cant_wait_takes_the_line_away_for_good() {
         let (progress, written) = testing::progress(Paint::PLAIN, false, 80);
         let status = progress.status();
-        status.show("Checking 1 of 2", "Checking 2 addons");
+        status.show("Checking 1 of 2", "Checking 2 addons", Bar::Off);
         progress.tick();
         written.take();
 
@@ -1050,14 +1114,16 @@ mod tests {
         progress.shared.leave();
         assert_eq!(written.take(), "\r\x1b[K\x1b[?25h");
         // No frame is drawn after it, whatever the command still says.
-        status.show("Checking 2 of 2", "Checking 2 addons");
+        status.show("Checking 2 of 2", "Checking 2 addons", Bar::Off);
         progress.tick();
         assert_eq!(written.take(), "");
 
         // A holder that never lets go, as one stuck writing to a stopped terminal, is not
         // waited for: the way out stays open, and nothing is written from here.
         let (progress, written) = testing::progress(Paint::PLAIN, false, 80);
-        progress.status().show("Asking TukUI", "Asking TukUI");
+        progress
+            .status()
+            .show("Asking TukUI", "Asking TukUI", Bar::Off);
         progress.tick();
         written.take();
         let shared = Arc::clone(&progress.shared);
@@ -1068,5 +1134,175 @@ mod tests {
         assert!(!held.stopped);
         drop(held);
         assert_eq!(written.take(), "");
+    }
+
+    const BAR_OFF: &str = "\x1b]9;4;0;0\x1b\\";
+
+    #[test]
+    fn the_terminals_progress_bar_follows_the_count_and_goes_with_the_line() {
+        let (progress, written) = progress(Paint::PLAIN, false, 80);
+        let progress = progress.with_bar();
+        let status = progress.status();
+
+        status.show("Checking 1 of 4", "Checking 4 addons", Bar::of(0, 4, false));
+        progress.tick();
+        assert_eq!(
+            written.take(),
+            "\x1b]9;4;1;0\x1b\\\r\x1b[K\x1b[?25l⠋ Checking 1 of 4"
+        );
+        // An unchanged bar is not sent again with every frame.
+        progress.tick();
+        assert_eq!(written.take(), "\r\x1b[K⠙ Checking 1 of 4");
+        // It moves with the count, and turns yellow once an addon failed.
+        status.show("Checking 2 of 4", "Checking 4 addons", Bar::of(1, 4, false));
+        progress.tick();
+        assert!(written.take().starts_with("\x1b]9;4;1;25\x1b\\"));
+        status.show("Checking 3 of 4", "Checking 4 addons", Bar::of(2, 4, true));
+        progress.tick();
+        assert!(written.take().starts_with("\x1b]9;4;4;50\x1b\\"));
+
+        // A warning takes the line away for a moment, and leaves the bar alone.
+        drop(progress.pause());
+        assert_eq!(written.take(), "\r\x1b[K\x1b[?25h");
+        progress.tick();
+        assert!(!written.take().contains("]9;4"));
+
+        // When the wait is over the bar goes with the line, once.
+        status.clear();
+        assert_eq!(written.take(), format!("\r\x1b[K\x1b[?25h{BAR_OFF}"));
+        status.clear();
+        drop(progress);
+        assert_eq!(written.take(), "");
+    }
+
+    #[test]
+    fn every_way_out_takes_the_terminals_progress_bar_away() {
+        // A guard that is dropped, as on an early return.
+        let (progress, written) = progress(Paint::PLAIN, false, 80);
+        let progress = progress.with_bar();
+        let status = progress.status();
+        {
+            let _waiting = status.waiting("Asking TukUI");
+            progress.tick();
+            // No count to show: the bar pulses.
+            assert!(written.take().starts_with("\x1b]9;4;3;0\x1b\\"));
+        }
+        assert!(written.take().ends_with(BAR_OFF));
+
+        // The line being dropped with the run.
+        let (progress, written) = super::testing::progress(Paint::PLAIN, false, 80);
+        let progress = progress.with_bar();
+        progress
+            .status()
+            .show("Updating 1 of 2", "Updating 2 addons", Bar::of(0, 2, false));
+        progress.tick();
+        written.take();
+        drop(progress);
+        assert!(written.take().ends_with(BAR_OFF));
+
+        // Ctrl+C and a panic.
+        let (progress, written) = super::testing::progress(Paint::PLAIN, false, 80);
+        let progress = progress.with_bar();
+        progress
+            .status()
+            .show("Updating 1 of 2", "Updating 2 addons", Bar::of(0, 2, false));
+        progress.tick();
+        written.take();
+        progress.shared.leave();
+        assert!(written.take().ends_with(BAR_OFF));
+    }
+
+    #[test]
+    fn the_bar_needs_a_terminal_that_draws_it_and_the_setting_on() {
+        assert!(bar_in_use(true, true));
+        // The setting is off, or the terminal would show a notification.
+        assert!(!bar_in_use(true, false));
+        assert!(!bar_in_use(false, true));
+        assert!(!bar_in_use(false, false));
+    }
+
+    #[test]
+    fn a_terminal_that_draws_no_bar_is_never_sent_one() {
+        // Other terminals show the sequence as a notification, the one that removes the bar
+        // included.
+        let (progress, written) = progress(Paint::PLAIN, false, 80);
+        let status = progress.status();
+        status.show("Checking 1 of 4", "Checking 4 addons", Bar::of(0, 4, true));
+        progress.tick();
+        let _waiting = status.waiting("Asking TukUI");
+        progress.tick();
+        status.clear();
+        progress.shared.leave();
+        drop(progress);
+        let all = written.take();
+        assert!(!all.contains("]9;"), "{all:?}");
+    }
+
+    #[test]
+    fn reduce_motion_keeps_the_count_in_the_bar_and_drops_the_pulse() {
+        let (progress, written) = progress(Paint::PLAIN, true, 80);
+        let progress = progress.with_bar();
+        let status = progress.status();
+        // The line stays as it is; the bar still moves, since it is no animation.
+        status.show("Checking 1 of 4", "Checking 4 addons", Bar::of(0, 4, false));
+        progress.tick();
+        assert_eq!(
+            written.take(),
+            "\x1b]9;4;1;0\x1b\\\r\x1b[KChecking 4 addons…"
+        );
+        status.show("Checking 3 of 4", "Checking 4 addons", Bar::of(2, 4, false));
+        progress.tick();
+        assert_eq!(written.take(), "\x1b]9;4;1;50\x1b\\");
+        status.clear();
+        written.take();
+
+        // The pulse is an animation.
+        let _waiting = status.waiting("Asking TukUI");
+        progress.tick();
+        assert_eq!(written.take(), "\r\x1b[KAsking TukUI…");
+    }
+
+    #[test]
+    fn a_tally_fills_the_bar_and_marks_trouble() {
+        let rows = [
+            row("Pawn", "Pawn", SourceKind::Tukui),
+            row("Plater", "Plater", SourceKind::Tukui),
+            row("ElvUI", "ElvUI", SourceKind::Tukui),
+            row("Details", "Details", SourceKind::Tukui),
+        ];
+        let selected = rows.iter().collect::<Vec<_>>();
+        let mut tally = Tally::new("Checking", &selected, true);
+        assert_eq!(tally.bar(), Bar::of(0, 4, false));
+        tally.started("Pawn");
+        tally.finished("Pawn", false);
+        assert_eq!(
+            tally.bar(),
+            Bar::Percent {
+                percent: 25,
+                trouble: false
+            }
+        );
+        // Yellow from the first addon that failed, to the end.
+        tally.finished("Plater", true);
+        assert_eq!(
+            tally.bar(),
+            Bar::Percent {
+                percent: 50,
+                trouble: true
+            }
+        );
+        tally.finished("ElvUI", false);
+        tally.finished("Details", false);
+        assert_eq!(
+            tally.bar(),
+            Bar::Percent {
+                percent: 100,
+                trouble: true
+            }
+        );
+        // A failure of an addon that is not counted is not this run's trouble.
+        let mut other = Tally::new("Checking", &selected, true);
+        other.finished("Unknown", true);
+        assert_eq!(other.bar(), Bar::of(0, 4, false));
     }
 }

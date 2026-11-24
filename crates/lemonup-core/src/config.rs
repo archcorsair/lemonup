@@ -49,6 +49,9 @@ pub struct AppConfig {
     pub check_other_games: OtherGamesCheck,
     /// The TUI looks on GitHub once a day for a newer LemonUp. Shared by all games.
     pub check_lemonup_updates: bool,
+    /// Progress shows in the terminal's own progress bar, on terminals that draw one.
+    /// Shared by all games. Configs written before it existed load as `true`.
+    pub terminal_progress: bool,
     /// The sources the Find sheet looks at in this game: `wago`, `wowinterface`, `tukui`.
     /// Missing means all of them. Only this game's `config.toml` holds it. A value that isn't
     /// a list of names reads as missing, and names LemonUp doesn't know are ignored, so a
@@ -121,6 +124,7 @@ impl fmt::Debug for AppConfig {
             .field("reduce_motion", &self.reduce_motion)
             .field("check_other_games", &self.check_other_games)
             .field("check_lemonup_updates", &self.check_lemonup_updates)
+            .field("terminal_progress", &self.terminal_progress)
             .field("find_sources", &self.find_sources)
             .finish()
     }
@@ -148,6 +152,7 @@ impl AppConfig {
             reduce_motion: false,
             check_other_games: OtherGamesCheck::default(),
             check_lemonup_updates: true,
+            terminal_progress: true,
             find_sources: None,
         }
     }
@@ -594,6 +599,9 @@ mod tests {
                 assert_eq!(config.backup_retention, 9);
                 assert_eq!(config.theme, ThemeMode::Light);
                 assert_eq!(config.schema_version, 1);
+                // The terminal progress bar is a setting again: a choice made back then is
+                // kept.
+                assert!(!config.terminal_progress);
             }
             ConfigLoad::Missing(_) => panic!("legacy config should load"),
         }

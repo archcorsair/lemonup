@@ -45,6 +45,7 @@ use crate::onboarding::{
 use crate::shimmer::working_text_spans;
 use crate::source_error::{FolderClash, SourceError, SourceErrorKind};
 use crate::source_limits::SourceLimits;
+use crate::terminal_progress::Bar;
 use crate::theme::{DisplayEnv, UiTheme, cycle_theme, effective_theme, theme_name};
 use crate::transfer::{
     TransferInstallSummary, collect_existing_import_folders, install_transfer_addons,
@@ -120,6 +121,8 @@ pub(crate) const NO_ADDON_HAS_EVERY_WORD: &str =
 /// URL path, so it never has a `/` and never looks like one of these.
 const KNOWN_ROW_ID_PREFIX: &str = "known/";
 const IDLE_TICK_RATE: StdDuration = StdDuration::from_millis(250);
+/// How long the terminal's own progress bar stays as a job left it.
+const TERMINAL_BAR_HOLD: StdDuration = StdDuration::from_millis(500);
 const ANIMATED_TICK_RATE: StdDuration = StdDuration::from_millis(100);
 /// How long a cut version holds at its start and its end before it moves
 /// on: about two seconds of animated ticks.
@@ -835,6 +838,8 @@ enum ConfigField {
     Theme,
     SimpleSymbols,
     ReduceMotion,
+    /// Whether progress shows in the terminal's own progress bar.
+    TerminalProgress,
     ShowLibs,
     ChangeGameFolder,
     SaveAddonList,
@@ -861,12 +866,13 @@ const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 4
 impl ConfigField {
     /// Every row in the order Settings shows them: first the ones all
     /// games share, then the ones of the game in use.
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::WagoApiKey,
         Self::GithubToken,
         Self::Theme,
         Self::SimpleSymbols,
         Self::ReduceMotion,
+        Self::TerminalProgress,
         Self::AutoCheckEnabled,
         Self::AutoCheckInterval,
         Self::CheckInterval,
@@ -894,6 +900,7 @@ impl ConfigField {
             Self::Theme => "Theme",
             Self::SimpleSymbols => "Simple symbols",
             Self::ReduceMotion => "Reduce motion",
+            Self::TerminalProgress => "Terminal progress bar",
             Self::ShowLibs => "Start with folders shown",
             Self::ChangeGameFolder => "Change game folder…",
             Self::SaveAddonList => "Export addon list to a file…",
@@ -910,6 +917,7 @@ impl ConfigField {
             | Self::Theme
             | Self::SimpleSymbols
             | Self::ReduceMotion
+            | Self::TerminalProgress
             | Self::ShowLibs => ConfigRowKind::Toggle,
             Self::AutoCheckInterval
             | Self::CheckInterval
@@ -1159,6 +1167,9 @@ impl ConfigPaneState {
             }
             ConfigField::ReduceMotion => {
                 draft.reduce_motion = !draft.reduce_motion;
+            }
+            ConfigField::TerminalProgress => {
+                draft.terminal_progress = !draft.terminal_progress;
             }
             ConfigField::ShowLibs => {
                 draft.show_libs = !draft.show_libs;
@@ -1524,6 +1535,12 @@ struct DashboardState {
     /// A check started from the list or Details is running.
     check_in_progress: bool,
     job_ui: Option<DashboardJobUiState>,
+    /// An addon of the running job failed: the terminal's progress bar is yellow from then
+    /// on.
+    job_trouble: bool,
+    /// What the terminal's progress bar keeps showing for a moment after a job, and until
+    /// when.
+    bar_hold: Option<(Bar, Instant)>,
     /// Folders the running update was started for, and the ones it has
     /// reached so far, so each row can show Waiting, Updating or Updated.
     job_targets: Vec<String>,
@@ -1606,6 +1623,8 @@ impl DashboardState {
             update_in_progress: false,
             check_in_progress: false,
             job_ui: None,
+            job_trouble: false,
+            bar_hold: None,
             job_targets: Vec::new(),
             job_reached: Vec::new(),
             job_finished: Vec::new(),
@@ -2027,6 +2046,21 @@ impl DashboardState {
     }
 
     fn set_job_ui(&mut self, job_ui: Option<DashboardJobUiState>) {
+        match (&self.job_ui, &job_ui) {
+            // A new job starts with a bar of its own.
+            (None, Some(_)) => {
+                self.job_trouble = false;
+                self.bar_hold = None;
+            }
+            // The job is over: its bar stays full for a moment, yellow if an addon failed.
+            (Some(_), None) => {
+                self.bar_hold = Some((
+                    Bar::of(1, 1, self.job_trouble),
+                    Instant::now() + TERMINAL_BAR_HOLD,
+                ));
+            }
+            _ => {}
+        }
         match &job_ui {
             Some(job) => {
                 if self.job_ui.is_none() {
@@ -2163,6 +2197,7 @@ impl DashboardState {
                     }
                 }
                 Err(failure) => {
+                    self.job_trouble = true;
                     self.check_failures.insert(folder, failure);
                 }
             },
@@ -2192,6 +2227,9 @@ impl DashboardState {
                         | UpdateJobRowState::NewerThanSource
                 ) {
                     self.check_failures.remove(&folder);
+                }
+                if state == UpdateJobRowState::Failed {
+                    self.job_trouble = true;
                 }
                 self.job_results.insert(folder, state);
             }
@@ -2269,6 +2307,29 @@ impl DashboardState {
 
     fn job_ui(&self) -> Option<&DashboardJobUiState> {
         self.job_ui.as_ref()
+    }
+
+    /// What the terminal's own progress bar shows for the addon list at `now`: how far the
+    /// running check or update is, or for a moment after it how it ended.
+    fn terminal_bar(&self, now: Instant) -> Bar {
+        if let Some(job) = &self.job_ui {
+            // An update checks its addons first. That check is not the update's progress:
+            // a bar that filled for it would say the update is done before it began.
+            if self.job_is_update && job.kind == DashboardJobKind::Check {
+                return Bar::Pulse;
+            }
+            return Bar::of(job.finished, job.total, self.job_trouble);
+        }
+        match self.bar_hold {
+            Some((bar, until)) if now < until => bar,
+            _ => Bar::Off,
+        }
+    }
+
+    /// The check or update that just ended failed as a whole: the bar is red for a moment.
+    /// A run can fail before it counted anything, so this does not need a bar to change.
+    fn fail_terminal_bar(&mut self) {
+        self.bar_hold = Some((Bar::Failed, Instant::now() + TERMINAL_BAR_HOLD));
     }
 
     fn set_last_update_summary(&mut self, summary: Option<DashboardUpdateRunSummary>) {
@@ -3556,6 +3617,12 @@ impl App {
             self.start_newer_lemonup_check(OffsetDateTime::now_utc());
             self.process_background_events();
             events.set_tick_rate(self.desired_tick_rate());
+            // Sent only when it changes. Leaving the TUI takes the bar away, however it is
+            // left: see `tui::show_terminal_bar`.
+            crate::tui::show_terminal_bar(
+                terminal.backend_mut(),
+                self.terminal_bar(Instant::now()),
+            )?;
             let drawn = terminal.draw(|frame| self.draw(frame))?;
             if let Some(links) = self.changed_links(drawn.buffer, &written_links) {
                 // The old links' cells are written again from this frame, so keep a copy.
@@ -3594,8 +3661,47 @@ impl App {
         }
     }
 
+    /// What the terminal's own progress bar shows at `now`, where the terminal draws one
+    /// and the setting is on: how far a check or update is, a pulse while a lookup, an
+    /// install or an import waits with no count to show, and nothing otherwise.
+    fn terminal_bar(&self, now: Instant) -> Bar {
+        if !self.terminal_bar_on() {
+            return Bar::Off;
+        }
+        match self.dashboard.terminal_bar(now) {
+            Bar::Off => {}
+            // The pulse is an animation, which Reduce motion turns off.
+            Bar::Pulse if self.ui_theme.reduce_motion => return Bar::Off,
+            bar => return bar,
+        }
+        let waiting = self.find.looking()
+            || self.import_running
+            || matches!(
+                self.search_pane.install_state,
+                SearchInstallState::Checking { .. }
+                    | SearchInstallState::Installing { .. }
+                    | SearchInstallState::InstallingDirect { .. }
+            );
+        if waiting && !self.ui_theme.reduce_motion {
+            Bar::Pulse
+        } else {
+            Bar::Off
+        }
+    }
+
+    /// Whether the terminal's own progress bar is in use: the terminal draws one and the
+    /// setting is on.
+    fn terminal_bar_on(&self) -> bool {
+        self.runtime.display.progress_bar && self.config_pane.draft.terminal_progress
+    }
+
     fn has_active_animation(&self) -> bool {
         if self.dashboard.job_ui().is_some() {
+            return true;
+        }
+
+        // The bar a job left is taken away on a tick, so ticks have to keep coming.
+        if self.terminal_bar_on() && self.dashboard.terminal_bar(Instant::now()) != Bar::Off {
             return true;
         }
 
@@ -5642,7 +5748,10 @@ impl App {
                     vec![AppAction::SetConfigPaneState(
                         self.config_pane.begin_editing(),
                     )]
-                } else if field.kind() == ConfigRowKind::Stepped {
+                } else if field.kind() == ConfigRowKind::Stepped || self.look_setting_forced(field)
+                {
+                    // A setting the terminal decides right now can't be changed from here:
+                    // the row would go on showing what the terminal makes it.
                     vec![]
                 } else {
                     let next = self.config_pane.toggle_selected();
@@ -6193,6 +6302,7 @@ impl App {
                         self.dashboard.detail_mode,
                         &format!("Couldn't check for updates: {error}"),
                     )),
+                    AppAction::TerminalBarFailed,
                 ],
                 AppTaskEvent::DashboardUpdateFinished(Ok(outcome)) => {
                     let failed_names = self.dashboard_names(&outcome.failed_folders);
@@ -6237,6 +6347,7 @@ impl App {
                         self.dashboard.detail_mode,
                         &format!("Couldn't update: {error}"),
                     )),
+                    AppAction::TerminalBarFailed,
                 ],
                 AppTaskEvent::BackupFinished(Ok(outcome)) => {
                     let message = format!(
@@ -6770,6 +6881,7 @@ impl App {
             AppAction::SetDashboardJobUi(job_ui) => {
                 self.dashboard.set_job_ui(job_ui);
             }
+            AppAction::TerminalBarFailed => self.dashboard.fail_terminal_bar(),
             AppAction::ApplyDashboardJobStep(step) => {
                 self.dashboard
                     .apply_job_step(step, OffsetDateTime::now_utc());
@@ -7504,12 +7616,14 @@ impl App {
     }
 
     /// A Look setting that the terminal decides right now: Theme while
-    /// `NO_COLOR` is set, Simple symbols while the locale is not UTF-8.
+    /// `NO_COLOR` is set, Simple symbols while the locale is not UTF-8, and the terminal
+    /// progress bar in a terminal that draws none.
     fn look_setting_forced(&self, field: ConfigField) -> bool {
         let display = self.runtime.display;
         match field {
             ConfigField::Theme => display.no_color,
             ConfigField::SimpleSymbols => !display.utf8,
+            ConfigField::TerminalProgress => !display.progress_bar,
             _ => false,
         }
     }
@@ -8185,6 +8299,9 @@ impl App {
             ))
             .to_string(),
             ConfigField::SimpleSymbols => on_off(draft.simple_symbols || !display.utf8).to_string(),
+            ConfigField::TerminalProgress => {
+                on_off(draft.terminal_progress && display.progress_bar).to_string()
+            }
             ConfigField::WagoApiKey if self.wago_key_from_environment(draft) => {
                 "From WAGO_API_KEY".to_string()
             }
@@ -9599,6 +9716,7 @@ fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
         ConfigField::BackupRetention => draft.backup_retention.to_string(),
         ConfigField::Theme => theme_name(draft.theme).to_string(),
         ConfigField::SimpleSymbols => on_off(draft.simple_symbols).to_string(),
+        ConfigField::TerminalProgress => on_off(draft.terminal_progress).to_string(),
         ConfigField::ReduceMotion => on_off(draft.reduce_motion).to_string(),
         ConfigField::ShowLibs => on_off(draft.show_libs).to_string(),
         ConfigField::ChangeGameFolder | ConfigField::SaveAddonList | ConfigField::LoadAddonList => {
@@ -9880,6 +9998,7 @@ mod tests {
     mod curseforge_mark;
     mod find_sheet;
     mod newer_lemonup;
+    mod terminal_bar;
 
     /// A synthetic `_retail_` game folder with a `.curseclient`, and a
     /// CurseForge record next to it whose instance has that GUID and
@@ -12968,6 +13087,8 @@ mod tests {
             ConfigLoad::Loaded(config) => assert_eq!(config.wago_api_key, None),
             ConfigLoad::Missing(_) => panic!("config should have been written"),
         }
+        // Back on the key's row: at 80x24 the list scrolls, and the row has to be on screen.
+        select_config_field(&mut app, ConfigField::WagoApiKey);
         for (width, height) in [(80, 24), (120, 36)] {
             let text = render_rows(&mut app, width, height).join("\n");
             assert!(text.contains("From WAGO_API_KEY"), "{text}");
@@ -25154,14 +25275,17 @@ games = ["forever"]
 
             // Settings, for all games and for this game.
             let before = shared_now(&games);
+            retail.runtime.display.progress_bar = true;
             change_setting(&mut retail, ConfigField::CheckOtherGames);
             change_setting(&mut retail, ConfigField::CheckLemonupUpdates);
+            change_setting(&mut retail, ConfigField::TerminalProgress);
             change_setting(&mut retail, ConfigField::Theme);
             change_setting(&mut retail, ConfigField::ShowLibs);
             let after = shared_now(&games);
             assert!(after.wago_api_key.as_deref() == Some(KEY));
             assert_ne!(after.check_other_games, before.check_other_games);
             assert!(before.check_lemonup_updates && !after.check_lemonup_updates);
+            assert!(before.terminal_progress && !after.terminal_progress);
             assert_ne!(after.theme, before.theme);
             assert!(retail.config_pane.persisted.show_libs);
 
@@ -25171,6 +25295,7 @@ games = ["forever"]
             assert_eq!(last.theme, after.theme);
             assert_eq!(last.check_other_games, after.check_other_games);
             assert!(!last.check_lemonup_updates);
+            assert!(!last.terminal_progress);
             assert!(last.wago_api_key.as_deref() == Some(KEY));
 
             // Switching games in one window reads the shared settings again.

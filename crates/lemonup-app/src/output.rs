@@ -824,7 +824,13 @@ impl Output {
             std::io::stdout(),
             std::io::stderr(),
         )
-        .with_progress(shown.then(|| Progress::on_stderr(stderr_paint, config.reduce_motion)))
+        .with_progress(shown.then(|| {
+            Progress::on_stderr(
+                stderr_paint,
+                config.reduce_motion,
+                progress::bar_in_use(display.progress_bar, config.terminal_progress),
+            )
+        }))
     }
 }
 

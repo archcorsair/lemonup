@@ -58,6 +58,9 @@ pub enum AppAction {
     SetDashboardUpdateInProgress(bool),
     SetDashboardAutoCheckInProgress(bool),
     SetDashboardJobUi(Option<DashboardJobUiState>),
+    /// The check or update that just ended failed as a whole, so the terminal's progress bar
+    /// shows that for a moment.
+    TerminalBarFailed,
     /// What a running check or update reported for one addon.
     ApplyDashboardJobStep(DashboardJobStep),
     SetDashboardUpdateSummary(Option<DashboardUpdateRunSummary>),
