@@ -185,6 +185,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     });
     crate::github::use_saved_github_token(saved_token.as_deref());
 
+    let what = failed_title(&command);
     let outcome = match command {
         Commands::Tui => {
             run_tui(paths, runtime, startup_notice).await?;
@@ -204,7 +205,8 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         }
         Commands::Check { addons } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_check(paths, runtime, addons, &mut output).await?
+            let checked = run_check(paths, runtime, addons, &mut output).await;
+            or_failed(what, checked, &mut output)?
         }
         Commands::Update {
             addons,
@@ -213,7 +215,9 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             replace,
         } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_update(paths, runtime, addons, force, dry_run, replace, &mut output).await?
+            let updated =
+                run_update(paths, runtime, addons, force, dry_run, replace, &mut output).await;
+            or_failed(what, updated, &mut output)?
         }
         Commands::UpdateAll {
             force,
@@ -221,7 +225,7 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             replace,
         } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_update(
+            let updated = run_update(
                 paths,
                 runtime,
                 Vec::new(),
@@ -230,7 +234,8 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
                 replace,
                 &mut output,
             )
-            .await?
+            .await;
+            or_failed(what, updated, &mut output)?
         }
         // Install commands target a single addon: a failed install says so in its own last
         // lines and exits 1.
@@ -256,17 +261,20 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         }
         Commands::ExportAddons { output: file } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_export_addons(paths, file, &mut output)?;
-            CommandOutcome::Success
+            let exported =
+                run_export_addons(paths, file, &mut output).map(|()| CommandOutcome::Success);
+            or_failed(what, exported, &mut output)?
         }
         Commands::ImportAddons { input, dry_run } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_import_addons(paths, runtime, input, dry_run, &mut output).await?
+            let imported = run_import_addons(paths, runtime, input, dry_run, &mut output).await;
+            or_failed(what, imported, &mut output)?
         }
         Commands::RestoreBackup { archive } => {
             let mut output = command_output(&paths, &runtime, json);
-            run_restore_backup(paths, runtime, archive, &mut output)?;
-            CommandOutcome::Success
+            let restored = run_restore_backup(paths, runtime, archive, &mut output)
+                .map(|()| CommandOutcome::Success);
+            or_failed(what, restored, &mut output)?
         }
         Commands::Toc {
             addon,
@@ -275,9 +283,12 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             clear,
             yes,
         } => {
-            let change = toc_change(field, value, clear)?;
             let mut output = command_output(&paths, &runtime, json);
-            run_toc(paths, runtime, &addon, change, yes, &mut output)?
+            let done = match toc_change(field, value, clear) {
+                Ok(change) => run_toc(paths, runtime, &addon, change, yes, &mut output),
+                Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+            };
+            or_failed(what, done, &mut output)?
         }
         Commands::Find {
             link,
@@ -1129,11 +1140,78 @@ fn is_refusal(error: &(dyn std::error::Error + 'static)) -> bool {
     )
 }
 
-/// Why a command failed, without the name of the kind of error in front.
-fn failure_reason(error: &(dyn std::error::Error + 'static)) -> String {
+/// Why a command failed, without the name of the kind of error in front, and whether the
+/// words are LemonUp's own. Its own words can name a command to run; what the system, a file
+/// or a library said is shown as it is.
+fn failure_reason(error: &(dyn std::error::Error + 'static)) -> (String, bool) {
     match error.downcast_ref::<LemonupError>() {
-        Some(LemonupError::InvalidArgument(reason)) => reason.clone(),
-        _ => error.to_string(),
+        Some(LemonupError::InvalidArgument(reason)) => (reason.clone(), true),
+        Some(
+            LemonupError::Io(_)
+            | LemonupError::Sqlite(_)
+            | LemonupError::TomlDeserialize(_)
+            | LemonupError::TomlSerialize(_)
+            | LemonupError::Json(_),
+        )
+        | None => (error.to_string(), false),
+        Some(_) => (error.to_string(), true),
+    }
+}
+
+/// Says that `what` failed and why `error` says so, in a command's last lines.
+fn say_failed<O: std::io::Write, E: std::io::Write>(
+    output: &mut output::Output<O, E>,
+    what: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> std::io::Result<()> {
+    let (reason, ours) = failure_reason(error);
+    let reason = if ours {
+        output::Reason::Ours(&reason)
+    } else {
+        output::Reason::Theirs(&reason)
+    };
+    output.fail(what, reason, None)
+}
+
+/// What a command says failed when its own work fails, in its last lines. `None` for the
+/// commands that don't end that way here: `sync` and the install commands say theirs where
+/// they run, and the TUI, `profiles` and `find` end with a plain error.
+fn failed_title(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Check { .. } => Some("Check failed"),
+        Commands::Update { .. } | Commands::UpdateAll { .. } => Some("Update failed"),
+        Commands::ExportAddons { .. } => Some("Export failed"),
+        Commands::ImportAddons { .. } => Some("Import failed"),
+        Commands::RestoreBackup { .. } => Some("Restore failed"),
+        // Asked to change a field, the command saves; else it only looks the addon up.
+        Commands::Toc { field: Some(_), .. } => Some("Save failed"),
+        Commands::Toc { field: None, .. } => Some("Lookup failed"),
+        Commands::Sync
+        | Commands::InstallWago { .. }
+        | Commands::InstallTukui { .. }
+        | Commands::InstallWowinterface { .. }
+        | Commands::InstallGithub { .. }
+        | Commands::Tui
+        | Commands::Profiles
+        | Commands::Find { .. } => None,
+    }
+}
+
+/// Ends a command that failed the way one that worked ends: a mark, `what` failed, and why,
+/// with exit 1. Two kinds of error stay as they are: a refusal, which already says what to do
+/// next, and an error of the report itself. When stdout or stderr can't be written the
+/// command's own work is done, so it is not called failed.
+fn or_failed<O: std::io::Write, E: std::io::Write>(
+    what: Option<&str>,
+    result: Result<CommandOutcome, Box<dyn std::error::Error>>,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+    match (what, result) {
+        (Some(what), Err(error)) if !is_refusal(error.as_ref()) && !output.write_failed() => {
+            say_failed(output, what, error.as_ref())?;
+            Ok(CommandOutcome::Failed)
+        }
+        (_, result) => result,
     }
 }
 
@@ -1150,7 +1228,7 @@ fn run_sync<O: std::io::Write, E: std::io::Write>(
         Ok(report) => report,
         Err(error) if is_refusal(error.as_ref()) => return Err(error),
         Err(error) => {
-            output.fail("Sync failed", &failure_reason(error.as_ref()), None)?;
+            say_failed(output, "Sync failed", error.as_ref())?;
             return Ok(CommandOutcome::Failed);
         }
     };
@@ -1404,11 +1482,17 @@ fn finish_install<O: std::io::Write, E: std::io::Write>(
         Err(error) if is_refusal(error.as_ref()) => return Err(error),
         Err(error) => {
             // A source's failure is said from its kind; anything else in its own words.
-            let (reason, hint) = match error.downcast_ref::<crate::source_error::SourceError>() {
-                Some(source_error) => output::install_failure(source_error, request),
-                None => (failure_reason(error.as_ref()), None),
-            };
-            output.fail("Install failed", &reason, hint.as_deref())?;
+            match error.downcast_ref::<crate::source_error::SourceError>() {
+                Some(source_error) => {
+                    let (reason, hint) = output::install_failure(source_error, request);
+                    output.fail(
+                        "Install failed",
+                        output::Reason::Theirs(&reason),
+                        hint.as_deref(),
+                    )?;
+                }
+                None => say_failed(output, "Install failed", error.as_ref())?,
+            }
             return Ok(CommandOutcome::Failed);
         }
     };
@@ -3931,16 +4015,184 @@ mod addon_dir_binding_tests {
     }
 
     #[test]
+    fn each_command_names_what_failed() {
+        use clap::Parser;
+        for (args, what) in [
+            (&["lemonup", "check"][..], Some("Check failed")),
+            (&["lemonup", "check", "Pawn"][..], Some("Check failed")),
+            (&["lemonup", "update", "Pawn"][..], Some("Update failed")),
+            (
+                &["lemonup", "update-all", "--dry-run"][..],
+                Some("Update failed"),
+            ),
+            (&["lemonup", "export-addons"][..], Some("Export failed")),
+            (
+                &["lemonup", "import-addons", "--dry-run"][..],
+                Some("Import failed"),
+            ),
+            (&["lemonup", "restore-backup"][..], Some("Restore failed")),
+            (&["lemonup", "toc", "Pawn"][..], Some("Lookup failed")),
+            (
+                &["lemonup", "toc", "Pawn", "category", "Bags"][..],
+                Some("Save failed"),
+            ),
+            (
+                &["lemonup", "toc", "Pawn", "category", "--clear"][..],
+                Some("Save failed"),
+            ),
+            // These say theirs where they run, or end with a plain error.
+            (&["lemonup", "sync"][..], None),
+            (&["lemonup", "install-tukui", "elvui"][..], None),
+            (&["lemonup", "profiles"][..], None),
+            (&["lemonup", "find"][..], None),
+        ] {
+            let command = crate::cli::Cli::try_parse_from(args)
+                .expect("parses")
+                .command
+                .expect("a command");
+            assert_eq!(super::failed_title(&command), what, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_that_fails_ends_with_the_failed_mark_what_failed_and_why() {
+        let failure = || -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+            Err(Box::new(LemonupError::InvalidArgument(
+                "No linked addon matches: Nope. Run `lemonup check` to see what is linked."
+                    .to_string(),
+            )))
+        };
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            let mut output = capture(mode);
+            let outcome = super::or_failed(Some("Check failed"), failure(), &mut output)
+                .expect("said on stderr");
+            assert_eq!(outcome, CommandOutcome::Failed);
+            assert_eq!(outcome.exit_status(), 1);
+            assert_eq!(
+                streams(output),
+                (
+                    String::new(),
+                    "✗ Check failed\n  No linked addon matches: Nope. Run `lemonup check` to see \
+                     what is linked.\n"
+                        .to_string()
+                ),
+                "{mode:?}"
+            );
+        }
+
+        // With color, LemonUp's own words have their command drawn; the system's never do.
+        let mut colored = Output::new(
+            OutputMode::Human,
+            Paint::terminal(),
+            Paint::terminal(),
+            DEFAULT_PROFILE,
+            Vec::new(),
+            Vec::new(),
+        );
+        super::or_failed(Some("Check failed"), failure(), &mut colored).expect("said");
+        let (_, stderr) = streams(colored);
+        assert!(
+            stderr.contains("Run \x1b[1m\x1b[38;5;6mlemonup check\x1b[0m to see"),
+            "{stderr:?}"
+        );
+        let mut colored = Output::new(
+            OutputMode::Human,
+            Paint::terminal(),
+            Paint::terminal(),
+            DEFAULT_PROFILE,
+            Vec::new(),
+            Vec::new(),
+        );
+        let system: Result<CommandOutcome, Box<dyn std::error::Error>> = Err(Box::new(
+            std::io::Error::other("no such file `lemonup check`"),
+        ));
+        super::or_failed(Some("Export failed"), system, &mut colored).expect("said");
+        let (_, stderr) = streams(colored);
+        assert!(
+            stderr.ends_with("  no such file `lemonup check`\n"),
+            "{stderr:?}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_a_success_and_an_unwritable_report_are_not_called_failures() {
+        // A refusal says what to do next: it is passed on as it is.
+        let mut output = capture(OutputMode::Human);
+        let refused = super::or_failed(
+            Some("Update failed"),
+            Err(Box::new(super::no_addon_dir_refusal(DEFAULT_PROFILE))),
+            &mut output,
+        )
+        .expect_err("refused");
+        assert!(super::is_refusal(refused.as_ref()));
+        assert_eq!(streams(output), (String::new(), String::new()));
+
+        // A command that worked, or that reports its own failed addons, is untouched.
+        for outcome in [CommandOutcome::Success, CommandOutcome::Failures(2)] {
+            let mut output = capture(OutputMode::Human);
+            assert_eq!(
+                super::or_failed(Some("Update failed"), Ok(outcome), &mut output)
+                    .expect("passed on"),
+                outcome
+            );
+            assert_eq!(streams(output), (String::new(), String::new()));
+        }
+
+        // The report could not be written: the command's own work is done, so the error of
+        // the write is passed on and nothing is called failed.
+        struct FullDisk;
+        impl std::io::Write for FullDisk {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = Output::new(
+            OutputMode::Human,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            DEFAULT_PROFILE,
+            FullDisk,
+            Vec::new(),
+        );
+        let unwritten = output
+            .note("fine")
+            .and_then(|()| output.print(&crate::output::ProfilesReport::new(&[]), None));
+        let unwritten: Result<CommandOutcome, Box<dyn std::error::Error>> = unwritten
+            .map(|()| CommandOutcome::Success)
+            .map_err(Into::into);
+        assert!(unwritten.is_err());
+        super::or_failed(Some("Export failed"), unwritten, &mut output).expect_err("passed on");
+        let (_, stderr) = output.into_writers();
+        assert_eq!(String::from_utf8(stderr).expect("utf-8"), "fine\n");
+    }
+
+    #[test]
     fn a_failure_gives_its_reason_without_the_kind_of_error() {
         let argument: Box<dyn std::error::Error> = Box::new(LemonupError::InvalidArgument(
             "path does not exist: /x".to_string(),
         ));
+        // LemonUp's own words, which can name a command.
         assert_eq!(
             super::failure_reason(argument.as_ref()),
-            "path does not exist: /x"
+            ("path does not exist: /x".to_string(), true)
         );
+        // The system's, a file's or a library's words, whether LemonUp wrapped them or not.
         let other: Box<dyn std::error::Error> = Box::new(std::io::Error::other("disk on fire"));
-        assert_eq!(super::failure_reason(other.as_ref()), "disk on fire");
+        assert_eq!(
+            super::failure_reason(other.as_ref()),
+            ("disk on fire".to_string(), false)
+        );
+        let wrapped: Box<dyn std::error::Error> =
+            Box::new(LemonupError::Io(std::io::Error::other("disk on fire")));
+        assert_eq!(
+            super::failure_reason(wrapped.as_ref()),
+            ("io error: disk on fire".to_string(), false)
+        );
+        let settings: Box<dyn std::error::Error> = Box::new(LemonupError::SharedSettingsBusy);
+        assert!(super::failure_reason(settings.as_ref()).1);
         assert!(!super::is_refusal(other.as_ref()));
         let refusal: Box<dyn std::error::Error> = Box::new(LemonupError::Refused("no".to_string()));
         assert!(super::is_refusal(refusal.as_ref()));

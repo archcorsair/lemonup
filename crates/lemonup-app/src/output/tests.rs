@@ -400,7 +400,7 @@ fn a_failure_is_the_failed_mark_and_what_failed_then_the_reason_under_it() {
     for mode in [OutputMode::Human, OutputMode::Json] {
         let mut plain = output(mode, Paint::PLAIN);
         plain
-            .fail("Sync failed", "the folder is gone", None)
+            .fail("Sync failed", Reason::Theirs("the folder is gone"), None)
             .expect("fail");
         let (stdout, stderr) = plain.into_writers();
         assert_eq!(text(stdout), "");
@@ -409,7 +409,7 @@ fn a_failure_is_the_failed_mark_and_what_failed_then_the_reason_under_it() {
     // What failed is bold red; the reason is plain.
     let mut colored = output(OutputMode::Human, Paint::terminal());
     colored
-        .fail("Sync failed", "the folder is gone", None)
+        .fail("Sync failed", Reason::Theirs("the folder is gone"), None)
         .expect("fail");
     let (_, stderr) = colored.into_writers();
     assert_eq!(
@@ -421,7 +421,7 @@ fn a_failure_is_the_failed_mark_and_what_failed_then_the_reason_under_it() {
         Paint::PLAIN.with_symbols(Symbols::SIMPLE),
     );
     simple
-        .fail("Sync failed", "the folder is gone", None)
+        .fail("Sync failed", Reason::Theirs("the folder is gone"), None)
         .expect("fail");
     let (_, stderr) = simple.into_writers();
     assert_eq!(text(stderr), "x Sync failed\n  the folder is gone\n");
@@ -433,7 +433,7 @@ fn the_hint_is_a_line_of_its_own_and_only_its_commands_are_drawn() {
     let hint = "Run `lemonup update Kui_Nameplates --force` to install it again.";
     let mut plain = output(OutputMode::Human, Paint::PLAIN.with_width(40));
     plain
-        .fail("Install failed", reason, Some(hint))
+        .fail("Install failed", Reason::Theirs(reason), Some(hint))
         .expect("fail");
     let (_, stderr) = plain.into_writers();
     assert_eq!(
@@ -444,7 +444,7 @@ fn the_hint_is_a_line_of_its_own_and_only_its_commands_are_drawn() {
 
     let mut colored = output(OutputMode::Human, Paint::terminal().with_width(40));
     colored
-        .fail("Install failed", reason, Some(hint))
+        .fail("Install failed", Reason::Theirs(reason), Some(hint))
         .expect("fail");
     let (_, stderr) = colored.into_writers();
     assert_eq!(
@@ -466,7 +466,8 @@ fn a_reason_is_one_line_whatever_it_holds_and_names_no_command() {
     let forged = "failed\n  Run `lemonup update-all --force --replace`\r\nnow\x1b[1m";
     for paint in [Paint::PLAIN, Paint::terminal()] {
         let mut out = output(OutputMode::Human, paint);
-        out.fail("Install failed", forged, None).expect("fail");
+        out.fail("Install failed", Reason::Theirs(forged), None)
+            .expect("fail");
         let (_, stderr) = out.into_writers();
         let printed = text(stderr);
         assert_eq!(printed.lines().count(), 2, "{printed:?}");
@@ -479,7 +480,7 @@ fn a_reason_is_one_line_whatever_it_holds_and_names_no_command() {
     let mut path = output(OutputMode::Human, Paint::PLAIN.with_width(40));
     path.fail(
         "Sync failed",
-        "path does not exist: /games/World of Warcraft/_retail_/Interface/AddOns",
+        Reason::Ours("path does not exist: /games/World of Warcraft/_retail_/Interface/AddOns"),
         None,
     )
     .expect("fail");
@@ -488,6 +489,68 @@ fn a_reason_is_one_line_whatever_it_holds_and_names_no_command() {
         text(stderr),
         "✗ Sync failed\n  path does not exist: /games/World of Warcraft/_retail_/Interface/AddOns\n"
     );
+}
+
+#[test]
+fn lemonups_own_reason_has_its_commands_drawn_and_is_still_one_line() {
+    let own = "No linked addon matches: Nope.\nRun `lemonup check` to see what is linked.\x07";
+    let mut plain = output(OutputMode::Human, Paint::PLAIN);
+    plain
+        .fail("Check failed", Reason::Ours(own), None)
+        .expect("fail");
+    let (_, stderr) = plain.into_writers();
+    assert_eq!(
+        text(stderr),
+        "✗ Check failed\n  No linked addon matches: Nope. Run `lemonup check` to see what is \
+         linked. \n"
+    );
+    let mut colored = output(OutputMode::Human, Paint::terminal());
+    colored
+        .fail("Check failed", Reason::Ours(own), None)
+        .expect("fail");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr).lines().nth(1),
+        Some(
+            format!(
+                "  No linked addon matches: Nope. Run {} to see what is linked. ",
+                command("lemonup check")
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn a_write_that_fails_is_remembered_and_a_reader_that_went_away_is_not() {
+    let mut fine = output(OutputMode::Human, Paint::PLAIN);
+    fine.warn("one").expect("warn");
+    fine.print(&sample(), None).expect("print");
+    assert!(!fine.write_failed());
+
+    let mut closed = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        ClosedPipe,
+        ClosedPipe,
+    );
+    closed.print(&sample(), None).expect("print");
+    closed.note("two").expect("note");
+    assert!(!closed.write_failed());
+
+    let mut full = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        FullDisk,
+        Vec::new(),
+    );
+    assert!(!full.write_failed());
+    assert!(full.print(&sample(), None).is_err());
+    assert!(full.write_failed());
 }
 
 #[test]
@@ -705,7 +768,9 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
         assert!(closed.warn("one").is_ok(), "{mode:?}");
         assert!(closed.note("two").is_ok(), "{mode:?}");
         assert!(
-            closed.fail("three", "four", Some("five")).is_ok(),
+            closed
+                .fail("three", Reason::Theirs("four"), Some("five"))
+                .is_ok(),
             "{mode:?}"
         );
         let mut full = Output::new(
@@ -719,7 +784,8 @@ fn a_closed_pipe_ends_printing_quietly_and_other_failures_are_errors() {
         assert!(full.warn("one").is_err(), "{mode:?}");
         assert!(full.note("two").is_err(), "{mode:?}");
         assert!(
-            full.fail("three", "four", Some("five")).is_err(),
+            full.fail("three", Reason::Theirs("four"), Some("five"))
+                .is_err(),
             "{mode:?}"
         );
     }
