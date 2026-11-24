@@ -551,18 +551,8 @@ fn install_downloaded_wago_addon(
                 )
             })?;
 
-        if dry_run {
-            return Ok(WagoInstallSummary {
-                addon_id: addon.id.clone(),
-                addon_name: addon.display_name.clone(),
-                parent_folder,
-                installed_folders: extracted.folders,
-                stability,
-                version: release_version(addon, stability),
-                dry_run: true,
-            });
-        }
-
+        // Planned before a dry run returns as well, so it never says an install would work
+        // that is then refused. This only reads the list and the AddOns folder.
         // Only folders on `replace` are taken over: moved aside and restored if anything
         // fails, exactly like an update. A linked addon's folders are never taken, except the
         // folders of this same Wago.io addon when it is installed again.
@@ -575,6 +565,17 @@ fn install_downloaded_wago_addon(
             replace,
             reinstalling.as_deref(),
         )?;
+        if dry_run {
+            return Ok(WagoInstallSummary {
+                addon_id: addon.id.clone(),
+                addon_name: addon.display_name.clone(),
+                parent_folder,
+                installed_folders: extracted.folders,
+                stability,
+                version: release_version(addon, stability),
+                dry_run: true,
+            });
+        }
         let record =
             build_managed_wago_record(addon, parent_metadata, &extracted.folders, stability);
         // The user's TOC overrides go into the staged copies before anything live moves.
@@ -1738,6 +1739,50 @@ mod tests {
         assert!(summary.dry_run);
         assert!(!addon_dir.join("Details").exists());
         assert!(database.list_addons().expect("list addons").is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_is_refused_when_the_install_it_stands_for_would_be() {
+        use crate::source_error::SourceErrorKind;
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        fs::create_dir_all(addon_dir.join("Details")).expect("not linked copy");
+        fs::write(addon_dir.join("Details").join("old.lua"), "-- old").expect("old file");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let bytes = build_zip(&[(
+            "Details/Details.toc",
+            "## Title: Details! Damage Meter\n## Version: 11.2.0\n## Interface: 110205\n",
+        )]);
+        let dry_run = |database: &mut StateDatabase| {
+            install_downloaded_wago_addon(
+                database,
+                &addon_dir,
+                &sample_addon(),
+                &bytes,
+                WagoStability::Stable,
+                true,
+                &[],
+            )
+        };
+
+        // A Not linked folder in the way: the real install would ask first.
+        let refused = dry_run(&mut database).expect_err("folder in the way");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersInTheWay);
+
+        // A folder of an addon linked to another source: the real install refuses.
+        let linked = lemonup_core::AddonRecord::new("Details", "Details", SourceKind::GitHub);
+        database.upsert_addon(&linked).expect("linked addon");
+        let refused = dry_run(&mut database).expect_err("folder of a linked addon");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersOfLinkedAddon);
+
+        // And nothing was touched.
+        assert!(addon_dir.join("Details").join("old.lua").exists());
+        assert!(!addon_dir.join("Details").join("Details.toc").exists());
+        assert_eq!(database.list_addons().expect("list addons").len(), 1);
     }
 
     #[test]

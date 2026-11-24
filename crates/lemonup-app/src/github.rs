@@ -909,6 +909,17 @@ fn install_downloaded_github_addon(
                 )
             })?;
 
+        // Planned before a dry run returns as well, so it never says an install would work
+        // that is then refused. This only reads the list and the AddOns folder.
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            None,
+        )?;
         if dry_run {
             return Ok(GithubInstallSummary {
                 repo_url: resolved.metadata.html_url.clone(),
@@ -921,16 +932,6 @@ fn install_downloaded_github_addon(
                 dry_run: true,
             });
         }
-
-        // Only folders on `replace` that are not linked are taken over.
-        let replaced = crate::update_targets::plan_install_replacements(
-            state_database,
-            addon_dir,
-            &extracted.folders,
-            &parent_folder,
-            replace,
-            None,
-        )?;
         let record = build_managed_github_record(resolved, parent_metadata, &extracted.folders);
         // The user's TOC overrides go into the staged copies before anything live moves.
         let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
@@ -3413,6 +3414,23 @@ games = ["forever"]
         std::fs::write(wtf.join("AdiBags.lua"), "settings").expect("saved variables");
         let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
         let resolved = resolved_repo("AdiAddons", "AdiBags");
+
+        // A dry run is refused as the install it stands for would be, and touches nothing.
+        let dry_run = install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved,
+            &adibags_shaped_zip("-- v1"),
+            true,
+            &[],
+        )
+        .expect_err("a dry run with a folder in the way");
+        assert_eq!(
+            dry_run.kind,
+            crate::source_error::SourceErrorKind::FoldersInTheWay
+        );
+        assert!(addon_dir.join("AdiBags").join("old.lua").exists());
+        assert!(database.list_addons().expect("list").is_empty());
 
         let refused = install_downloaded_github_addon(
             &mut database,
