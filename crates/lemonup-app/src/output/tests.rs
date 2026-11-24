@@ -233,12 +233,12 @@ fn the_text_around_a_command_keeps_its_own_drawing() {
     // Text of more than one byte a character, on both sides of a command and inside it.
     assert_eq!(
         Paint::terminal().commands(
-            "caf\u{e9} \u{2713} `--addon-dir '/j\u{fc}rgen'` \u{4e2d}\u{6587}",
+            "caf\u{e9} \u{2713} `lemonup --addon-dir '/j\u{fc}rgen' sync` \u{4e2d}\u{6587}",
             Paint::text
         ),
         format!(
             "caf\u{e9} \u{2713} {} \u{4e2d}\u{6587}",
-            command("--addon-dir '/j\u{fc}rgen'")
+            command("lemonup --addon-dir '/j\u{fc}rgen' sync")
         )
     );
 }
@@ -260,10 +260,19 @@ fn only_lemonup_commands_and_flags_are_drawn_as_commands() {
         paint.commands("it's ` odd, run `lemonup check`", Paint::text),
         format!("it's ` odd, run {}", command("lemonup check"))
     );
-    // Control characters never reach the terminal, in a command or around it.
+    // Control characters never reach the terminal, and a span that holds one is no command.
     assert_eq!(
         paint.commands("bad\x1b[31m `lemonup\x07 x` `--yes\x1b`", Paint::text),
-        format!("bad [31m `lemonup  x` {}", command("--yes "))
+        "bad [31m `lemonup  x` `--yes `"
+    );
+    assert_eq!(
+        paint.commands("`lemonup update\n--force` and `lemonup x\ty`", Paint::text),
+        "`lemonup update --force` and `lemonup x y`"
+    );
+    // A flag is one word: words after it are not part of a command.
+    assert_eq!(
+        paint.commands("`--replace everything here`", Paint::text),
+        "`--replace everything here`"
     );
     assert_eq!(
         Paint::PLAIN.commands("bad\x07 `lemonup check`", Paint::text),
@@ -491,6 +500,92 @@ fn a_reason_is_one_line_whatever_it_holds_and_names_no_command() {
 }
 
 #[test]
+fn a_failure_with_only_advice_has_no_empty_line_for_the_reason() {
+    let hint = "give a new Category value, or `--clear` to restore the addon's own";
+    for reason in ["", "  "] {
+        let mut plain = output(OutputMode::Human, Paint::PLAIN);
+        plain.fail("Save failed", reason, Some(hint)).expect("fail");
+        let (_, stderr) = plain.into_writers();
+        assert_eq!(
+            text(stderr),
+            "✗ Save failed\n  give a new Category value, or `--clear` to restore the addon's own\n"
+        );
+    }
+    let mut colored = output(OutputMode::Human, Paint::terminal());
+    colored.fail("Save failed", "", Some(hint)).expect("fail");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr).lines().nth(1),
+        Some(
+            format!(
+                "  give a new Category value, or {} to restore the addon's own",
+                command("--clear")
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn only_a_report_that_could_not_be_printed_is_remembered() {
+    let mut fine = output(OutputMode::Human, Paint::PLAIN);
+    fine.warn("one").expect("warn");
+    fine.print(&sample(), None).expect("print");
+    assert!(!fine.report_failed());
+
+    // A reader that went away is not a failure of the report.
+    let mut closed = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        ClosedPipe,
+        ClosedPipe,
+    );
+    closed.print(&sample(), None).expect("print");
+    closed.note("two").expect("note");
+    assert!(!closed.report_failed());
+
+    // A warning, a notice or a failure line that can't be written comes before the report or
+    // in place of it: the command's work may not be done, so it is not remembered.
+    let mut mute = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        Vec::new(),
+        FullDisk,
+    );
+    assert!(mute.warn("one").is_err());
+    assert!(mute.note("two").is_err());
+    assert!(mute.fail("three", "four", None).is_err());
+    assert!(!mute.report_failed());
+
+    // A warning that comes with the report, after the work, is part of the report.
+    assert!(mute.warn_with_report("five").is_err());
+    assert!(mute.report_failed());
+    let mut fine = output(OutputMode::Json, Paint::PLAIN);
+    fine.warn_with_report("six").expect("warn");
+    assert!(!fine.report_failed());
+    fine.print(&sample(), None).expect("print");
+    let (stdout, stderr) = fine.into_writers();
+    assert!(text(stdout).contains(r#""warnings":["six"]"#));
+    assert_eq!(text(stderr), "warning: six\n");
+
+    let mut full = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        FullDisk,
+        Vec::new(),
+    );
+    assert!(!full.report_failed());
+    assert!(full.print(&sample(), None).is_err());
+    assert!(full.report_failed());
+}
+
+#[test]
 fn a_sentence_wraps_like_words_but_keeps_each_command_whole() {
     assert_eq!(
         wrap_sentence("  ", "one two three four", 12),
@@ -508,10 +603,10 @@ fn a_sentence_wraps_like_words_but_keeps_each_command_whole() {
             "first, or `--force`."
         ]
     );
-    // What touches a command stays with it, and a tab inside one doesn't split it.
+    // What touches a command stays with it.
     assert_eq!(
-        wrap_sentence("", "(`lemonup check`), then `lemonup update\tx`!", 12),
-        ["(`lemonup check`),", "then", "`lemonup update\tx`!"]
+        wrap_sentence("", "(`lemonup check`), then `lemonup update x`!", 12),
+        ["(`lemonup check`),", "then", "`lemonup update x`!"]
     );
     // Nothing in the text is used up as a placeholder.
     assert_eq!(
@@ -617,6 +712,8 @@ impl Report for Broken {
 fn a_document_that_fails_to_serialize_prints_nothing() {
     let mut out = output(OutputMode::Json, Paint::PLAIN);
     assert!(out.print(&Broken, None).is_err());
+    // It is a failure of the report, like a write that failed: not of the command's work.
+    assert!(out.report_failed());
     let (stdout, stderr) = out.into_writers();
     assert_eq!(text(stdout), "");
     assert_eq!(text(stderr), "");

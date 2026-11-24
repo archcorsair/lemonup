@@ -35,24 +35,59 @@ pub struct AddonDirMismatch {
     pub requested: PathBuf,
 }
 
-impl fmt::Display for AddonDirMismatch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl AddonDirMismatch {
+    /// What is wrong: the folder the profile is bound to, the one this run targets, and that
+    /// LemonUp won't act on it.
+    pub fn reason(&self) -> String {
+        format!(
+            "profile '{}' is bound to the AddOns folder {} but this run targets {} | refusing to touch tracked addons or backups for a different folder",
+            self.profile,
+            self.bound.display(),
+            self.requested.display(),
+        )
+    }
+
+    /// What to run instead: a profile of its own for that folder, or setup again to move
+    /// this profile there.
+    pub fn hint(&self) -> String {
         let profile_flag = if self.profile == DEFAULT_PROFILE {
             String::new()
         } else {
             format!("--profile {} ", self.profile)
         };
-        let suggested_profile = suggested_profile_name(&self.requested);
-        write!(
-            formatter,
-            "profile '{}' is bound to the AddOns folder {} but this run targets {} | refusing to touch tracked addons or backups for a different folder | to manage that install, give it its own profile: `lemonup --profile {} --addon-dir '{}' sync` | to move this profile to that folder on purpose, open `lemonup {}tui`, press r in Config to rerun setup and pick it",
-            self.profile,
-            self.bound.display(),
-            self.requested.display(),
-            suggested_profile,
-            self.requested.display(),
-            profile_flag,
+        // The folder goes into the command only when every character of it is one no shell
+        // reads as more than text between single quotes: ASCII letters and digits, spaces,
+        // the path separators, and `. _ - ( )`. Anything else (a quote of any kind, a backtick,
+        // `%`, `&`, a line break, another alphabet) is left for the reader to pass; the reason
+        // has named the folder already.
+        let requested = self.requested.display().to_string();
+        let quotable = requested.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    ' ' | '/' | '\\' | ':' | '.' | '_' | '-' | '(' | ')'
+                )
+        });
+        let own_profile = if quotable {
+            format!(
+                "`lemonup --profile {} --addon-dir '{requested}' sync`",
+                suggested_profile_name(&self.requested)
+            )
+        } else {
+            format!(
+                "`lemonup --profile {} sync` with the same `--addon-dir`",
+                suggested_profile_name(&self.requested)
+            )
+        };
+        format!(
+            "to manage that install, give it its own profile: {own_profile} | to move this profile to that folder on purpose, open `lemonup {profile_flag}tui`, press r in Config to rerun setup and pick it",
         )
+    }
+}
+
+impl fmt::Display for AddonDirMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} | {}", self.reason(), self.hint())
     }
 }
 
@@ -223,6 +258,83 @@ mod tests {
                 .expect("check"),
             BindingCheck::Bound
         );
+    }
+
+    #[test]
+    fn a_mismatch_says_what_is_wrong_and_what_to_run_as_two_parts_of_one_line() {
+        let mismatch = super::AddonDirMismatch {
+            profile: "forever".to_string(),
+            bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+            requested: PathBuf::from("/games/wow/_retail_/Interface/AddOns"),
+        };
+        assert_eq!(
+            mismatch.reason(),
+            "profile 'forever' is bound to the AddOns folder /games/wow/_forever_/Interface/AddOns but this run targets /games/wow/_retail_/Interface/AddOns | refusing to touch tracked addons or backups for a different folder"
+        );
+        assert_eq!(
+            mismatch.hint(),
+            "to manage that install, give it its own profile: `lemonup --profile retail --addon-dir '/games/wow/_retail_/Interface/AddOns' sync` | to move this profile to that folder on purpose, open `lemonup --profile forever tui`, press r in Config to rerun setup and pick it"
+        );
+        assert_eq!(
+            mismatch.to_string(),
+            format!("{} | {}", mismatch.reason(), mismatch.hint())
+        );
+        // The same line when it is carried as a usage error with its advice apart.
+        let usage = crate::LemonupError::Usage {
+            reason: mismatch.reason(),
+            hint: mismatch.hint(),
+        };
+        assert_eq!(usage.to_string(), format!("invalid argument: {mismatch}"));
+    }
+
+    #[test]
+    fn a_folder_that_cannot_sit_in_quotes_is_left_out_of_the_command() {
+        for folder in [
+            "/games/O'Brien/_retail_/Interface/AddOns",
+            "/games/O\u{2019}Brien;calc/_retail_/Interface/AddOns",
+            "/games/x` and `lemonup update-all --force`/_retail_/Interface/AddOns",
+            "/games/two\nlines/_retail_/Interface/AddOns",
+            r"C:\WoW\A&calc\_retail_\Interface\AddOns",
+            r"C:\WoW\%TEMP%\_retail_\Interface\AddOns",
+            "/games/say \"hi\"/_retail_/Interface/AddOns",
+            "/games/$HOME/_retail_/Interface/AddOns",
+            "/games/j\u{fc}rgen/_retail_/Interface/AddOns",
+        ] {
+            let mismatch = super::AddonDirMismatch {
+                profile: crate::DEFAULT_PROFILE.to_string(),
+                bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+                requested: PathBuf::from(folder),
+            };
+            let hint = mismatch.hint();
+            // The profile it suggests is named after the game the folder belongs to, which a
+            // Windows path doesn't say on another system.
+            assert!(
+                hint.starts_with(
+                    "to manage that install, give it its own profile: `lemonup --profile "
+                ) && hint.contains(" sync` with the same `--addon-dir` | to move this profile"),
+                "{hint}"
+            );
+            assert!(!hint.contains(folder), "{hint}");
+            // What is wrong still names the folder.
+            assert!(mismatch.reason().contains(folder));
+        }
+        // An ordinary folder, also one of Windows, goes into the command.
+        for folder in [
+            "/home/me/Games/World of Warcraft/_retail_/Interface/AddOns",
+            r"C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
+        ] {
+            let mismatch = super::AddonDirMismatch {
+                profile: crate::DEFAULT_PROFILE.to_string(),
+                bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+                requested: PathBuf::from(folder),
+            };
+            assert!(
+                mismatch
+                    .hint()
+                    .contains(&format!("--addon-dir '{folder}' sync`")),
+                "{folder}"
+            );
+        }
     }
 
     #[test]

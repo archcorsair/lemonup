@@ -302,15 +302,6 @@ impl Paint {
     }
 }
 
-/// A reader that went away (`| head`) is not an error of the command: there is nobody left
-/// to tell.
-fn ignore_closed(written: std::io::Result<()>) -> std::io::Result<()> {
-    match written {
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        other => other,
-    }
-}
-
 /// `path` as a `file://` address, with everything but plain ASCII percent-encoded, so no
 /// character of a file name can end the link or reach the terminal as an escape code.
 fn file_url(path: &Path) -> Option<String> {
@@ -348,9 +339,24 @@ fn pieces(text: &str) -> Vec<(bool, &str)> {
     pieces
 }
 
-/// Whether the words between two backticks are a LemonUp command or one of its flags.
+/// A reader that went away (`| head`) is not an error of the command: there is nobody left
+/// to tell.
+fn ignore_closed(written: std::io::Result<()>) -> std::io::Result<()> {
+    match written {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// Whether the words between two backticks are a LemonUp command or one of its flags: the
+/// command with what follows it on the same line, or a flag, which is one word.
 fn is_command(span: &str) -> bool {
-    span == "lemonup" || span.starts_with("lemonup ") || span.starts_with("--")
+    if span.chars().any(char::is_control) {
+        return false;
+    }
+    span == "lemonup"
+        || span.starts_with("lemonup ")
+        || (span.starts_with("--") && !span.contains(char::is_whitespace))
 }
 
 /// `text` with every control character as a space. Names, versions and messages come from
@@ -774,6 +780,8 @@ pub(crate) struct Output<O: Write = std::io::Stdout, E: Write = std::io::Stderr>
     warnings: Vec<String>,
     stdout: O,
     stderr: E,
+    /// The report could not be printed, other than to a reader that went away.
+    report_failed: bool,
 }
 
 impl Output {
@@ -812,7 +820,14 @@ impl<O: Write, E: Write> Output<O, E> {
             warnings: Vec::new(),
             stdout,
             stderr,
+            report_failed: false,
         }
+    }
+
+    /// Whether the report could not be printed. A report is the last thing a command does,
+    /// so its work is done by then: it has not failed because the report could not be shown.
+    pub(crate) fn report_failed(&self) -> bool {
+        self.report_failed
     }
 
     /// Prints `report`: its lines, or the JSON document with the warnings given so far.
@@ -842,13 +857,21 @@ impl<O: Write, E: Write> Output<O, E> {
                     "a report field has the name of an envelope key"
                 );
                 // Written whole or not at all: a document that fails to serialize prints nothing.
-                let mut line = serde_json::to_vec(&envelope)?;
-                line.push(b'\n');
-                self.stdout.write_all(&line)
+                // That is a failure of the report too, so it goes the same way as a failed
+                // write, without leaving here early.
+                match serde_json::to_vec(&envelope) {
+                    Ok(mut line) => {
+                        line.push(b'\n');
+                        self.stdout.write_all(&line)
+                    }
+                    Err(error) => Err(error.into()),
+                }
             }
         }
         .and_then(|()| self.stdout.flush());
-        ignore_closed(written)
+        let written = ignore_closed(written);
+        self.report_failed |= written.is_err();
+        written
     }
 
     /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
@@ -865,13 +888,22 @@ impl<O: Write, E: Write> Output<O, E> {
         ))
     }
 
+    /// A warning that comes with the report, after the command's work is done. It is written
+    /// like any other, and one that can't be written is a report that could not be printed.
+    pub(crate) fn warn_with_report(&mut self, text: &str) -> std::io::Result<()> {
+        let written = self.warn(text);
+        self.report_failed |= written.is_err();
+        written
+    }
+
     /// How a command that failed ends, on stderr in both modes: the red mark and `what` failed
     /// on a line of their own, then `reason` under it, then `hint` when there is something to
     /// run next. Nothing goes to stdout after it.
     ///
-    /// `reason` can hold a source's or an addon's own words: it is one line however it was
-    /// written, and nothing in it is drawn as a command. It is not wrapped either, since it can
-    /// hold a path. Only `hint`, which LemonUp wrote, has its commands drawn.
+    /// `reason` can hold names, paths, or a source's or the system's own words: it is one line
+    /// however it was written, and nothing in it is drawn as a command. It is not wrapped
+    /// either, since it can hold a path. Only `hint`, which LemonUp wrote, has its commands
+    /// drawn. An empty reason is left out.
     pub(crate) fn fail(
         &mut self,
         what: &str,
@@ -879,10 +911,14 @@ impl<O: Write, E: Write> Output<O, E> {
         hint: Option<&str>,
     ) -> std::io::Result<()> {
         let paint = self.stderr_paint;
-        let mut lines = vec![
-            format!("{} {}", paint.failed(), paint.heading(Tone::Problem, what)),
-            format!("{INDENT}{}", paint.text(reason)),
-        ];
+        let mut lines = vec![format!(
+            "{} {}",
+            paint.failed(),
+            paint.heading(Tone::Problem, what)
+        )];
+        if !reason.trim().is_empty() {
+            lines.push(format!("{INDENT}{}", paint.text(reason)));
+        }
         if let Some(hint) = hint {
             lines.push(format!("{INDENT}{}", paint.commands(hint, Paint::text)));
         }
