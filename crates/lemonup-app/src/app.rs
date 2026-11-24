@@ -18868,6 +18868,76 @@ games = ["forever"]
             app.apply(AppAction::SetDetailMode(DetailMode::Config));
         }
 
+        #[test]
+        fn settings_title_shows_the_lemonup_version() {
+            let title = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
+            for (width, height) in [(80, 24), (120, 36), (160, 45)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                let rows = render_rows(&mut app, width, height);
+                let row = rows
+                    .iter()
+                    .find(|row| row.contains("esc close"))
+                    .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+                assert!(
+                    row.contains(&title),
+                    "{width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+                assert!(row.contains("changes save right away"), "{row}");
+            }
+        }
+
+        #[test]
+        fn only_settings_has_the_version_in_its_title() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_help(&mut app);
+            let rows = render_rows(&mut app, 120, 36);
+            let row = rows
+                .iter()
+                .find(|row| row.contains("esc close"))
+                .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+            assert!(!row.contains("LemonUp"), "{row}");
+        }
+
+        #[test]
+        fn settings_title_drops_the_version_before_the_note() {
+            let version = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
+            let note = "changes save right away";
+            // The note and "esc close" keep their room; the version takes what is left.
+            // " Settings" and " esc close" use 19 columns and one more stays free; the
+            // note needs 26 more and fits from 46 columns.
+            let subtitle = u16::try_from(
+                format!(" · LemonUp {}", env!("CARGO_PKG_VERSION"))
+                    .chars()
+                    .count(),
+            )
+            .expect("short version");
+            let mut cases = vec![
+                (30, false, false),
+                (50, false, true),
+                (46 + subtitle, true, true),
+            ];
+            if 20 + subtitle < 46 {
+                cases.push((20 + subtitle, true, false));
+            }
+            for (width, shown, noted) in cases {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                let rows = render_rows(&mut app, width, 24);
+                let row = rows
+                    .iter()
+                    .find(|row| row.contains("esc close"))
+                    .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+                assert!(row.contains("Settings"), "{width}: {row}");
+                assert_eq!(row.contains(&version), shown, "{width}: {row}");
+                assert_eq!(row.contains(note), noted, "{width}: {row}");
+                if !shown {
+                    assert!(!row.contains("LemonUp"), "{width}: {row}");
+                }
+            }
+        }
+
         fn open_backups(app: &mut App) {
             app.apply(AppAction::SetDetailMode(DetailMode::Backup));
             app.backup_pane.backups = backups(9);

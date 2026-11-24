@@ -30,6 +30,8 @@ impl App {
         };
         let chrome = SheetChrome {
             title,
+            subtitle: (kind == OverlayKind::Config)
+                .then_some(concat!("LemonUp ", env!("CARGO_PKG_VERSION"))),
             note: (kind == OverlayKind::Config).then_some("changes save right away"),
             danger: kind == OverlayKind::Confirm
                 && self.dashboard.pending_delete_folders().is_some(),
