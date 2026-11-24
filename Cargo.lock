@@ -1090,7 +1090,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lemonup-app"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "lemonup-core"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "directories",
  "md-5",
