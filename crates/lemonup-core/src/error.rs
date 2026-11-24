@@ -33,6 +33,12 @@ pub enum LemonupError {
     SharedSettingsBusy,
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// A command can't do what it was asked the way it was asked. `reason` says what is
+    /// wrong and can hold names or paths that were typed or read. `hint` is LemonUp's own
+    /// advice on what to run or pass instead, kept apart so that only it is shown as naming
+    /// commands. Either can be empty.
+    #[error("invalid argument: {}", join_sentences(reason, hint))]
+    Usage { reason: String, hint: String },
     /// A command declined to act and changed nothing. The message says what happened and what
     /// to do next, so it is shown as it is, without an error label.
     #[error("{0}")]
@@ -47,6 +53,14 @@ pub enum LemonupError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+fn join_sentences(first: &str, second: &str) -> String {
+    [first, second]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn list_paths(paths: &[PathBuf]) -> String {

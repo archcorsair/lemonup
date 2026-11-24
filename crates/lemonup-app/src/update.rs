@@ -1748,10 +1748,12 @@ pub(crate) fn resolve_selected_addons<'a>(
         } else {
             "No linked addons match"
         };
-        return Err(LemonupError::InvalidArgument(format!(
-            "{noun}: {}. Use exact addon names or folder names, or run `lemonup check` to see the overall summary.",
-            missing.join(", ")
-        )));
+        return Err(LemonupError::Usage {
+            reason: format!("{noun}: {}.", missing.join(", ")),
+            hint: "Use exact addon names or folder names, or run `lemonup check` to see the \
+                   overall summary."
+                .to_string(),
+        });
     }
 
     Ok(selected)

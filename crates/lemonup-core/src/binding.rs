@@ -35,24 +35,38 @@ pub struct AddonDirMismatch {
     pub requested: PathBuf,
 }
 
-impl fmt::Display for AddonDirMismatch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl AddonDirMismatch {
+    /// What is wrong: the folder the profile is bound to, the one this run targets, and that
+    /// LemonUp won't act on it.
+    pub fn reason(&self) -> String {
+        format!(
+            "profile '{}' is bound to the AddOns folder {} but this run targets {} | refusing to touch tracked addons or backups for a different folder",
+            self.profile,
+            self.bound.display(),
+            self.requested.display(),
+        )
+    }
+
+    /// What to run instead: a profile of its own for that folder, or setup again to move
+    /// this profile there.
+    pub fn hint(&self) -> String {
         let profile_flag = if self.profile == DEFAULT_PROFILE {
             String::new()
         } else {
             format!("--profile {} ", self.profile)
         };
-        let suggested_profile = suggested_profile_name(&self.requested);
-        write!(
-            formatter,
-            "profile '{}' is bound to the AddOns folder {} but this run targets {} | refusing to touch tracked addons or backups for a different folder | to manage that install, give it its own profile: `lemonup --profile {} --addon-dir '{}' sync` | to move this profile to that folder on purpose, open `lemonup {}tui`, press r in Config to rerun setup and pick it",
-            self.profile,
-            self.bound.display(),
-            self.requested.display(),
-            suggested_profile,
+        format!(
+            "to manage that install, give it its own profile: `lemonup --profile {} --addon-dir '{}' sync` | to move this profile to that folder on purpose, open `lemonup {}tui`, press r in Config to rerun setup and pick it",
+            suggested_profile_name(&self.requested),
             self.requested.display(),
             profile_flag,
         )
+    }
+}
+
+impl fmt::Display for AddonDirMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} | {}", self.reason(), self.hint())
     }
 }
 

@@ -339,9 +339,24 @@ fn pieces(text: &str) -> Vec<(bool, &str)> {
     pieces
 }
 
-/// Whether the words between two backticks are a LemonUp command or one of its flags.
+/// A reader that went away (`| head`) is not an error of the command: there is nobody left
+/// to tell.
+fn ignore_closed(written: std::io::Result<()>) -> std::io::Result<()> {
+    match written {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// Whether the words between two backticks are a LemonUp command or one of its flags: the
+/// command with what follows it on the same line, or a flag, which is one word.
 fn is_command(span: &str) -> bool {
-    span == "lemonup" || span.starts_with("lemonup ") || span.starts_with("--")
+    if span.chars().any(char::is_control) {
+        return false;
+    }
+    span == "lemonup"
+        || span.starts_with("lemonup ")
+        || (span.starts_with("--") && !span.contains(char::is_whitespace))
 }
 
 /// `text` with every control character as a space. Names, versions and messages come from
@@ -765,17 +780,8 @@ pub(crate) struct Output<O: Write = std::io::Stdout, E: Write = std::io::Stderr>
     warnings: Vec<String>,
     stdout: O,
     stderr: E,
-    /// A write to stdout or stderr failed, other than to a reader that went away.
-    write_failed: bool,
-}
-
-/// Why a command failed, as [`Output::fail`] draws it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reason<'a> {
-    /// LemonUp's own words. They can name a command to run, which is drawn as one.
-    Ours(&'a str),
-    /// The words of a source, an addon or the system: drawn plain, never as a command.
-    Theirs(&'a str),
+    /// The report could not be printed, other than to a reader that went away.
+    report_failed: bool,
 }
 
 impl Output {
@@ -814,27 +820,14 @@ impl<O: Write, E: Write> Output<O, E> {
             warnings: Vec::new(),
             stdout,
             stderr,
-            write_failed: false,
+            report_failed: false,
         }
     }
 
-    /// Whether a line could not be written. A command whose own work is done has not failed
-    /// because its report could not be printed.
-    pub(crate) fn write_failed(&self) -> bool {
-        self.write_failed
-    }
-
-    /// The result of a write: a reader that went away (`| head`) is not an error of the
-    /// command, since there is nobody left to tell. Any other failure is remembered.
-    fn written(&mut self, written: std::io::Result<()>) -> std::io::Result<()> {
-        match written {
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            Err(error) => {
-                self.write_failed = true;
-                Err(error)
-            }
-            Ok(()) => Ok(()),
-        }
+    /// Whether the report could not be printed. A report is the last thing a command does,
+    /// so its work is done by then: it has not failed because the report could not be shown.
+    pub(crate) fn report_failed(&self) -> bool {
+        self.report_failed
     }
 
     /// Prints `report`: its lines, or the JSON document with the warnings given so far.
@@ -864,13 +857,21 @@ impl<O: Write, E: Write> Output<O, E> {
                     "a report field has the name of an envelope key"
                 );
                 // Written whole or not at all: a document that fails to serialize prints nothing.
-                let mut line = serde_json::to_vec(&envelope)?;
-                line.push(b'\n');
-                self.stdout.write_all(&line)
+                // That is a failure of the report too, so it goes the same way as a failed
+                // write, without leaving here early.
+                match serde_json::to_vec(&envelope) {
+                    Ok(mut line) => {
+                        line.push(b'\n');
+                        self.stdout.write_all(&line)
+                    }
+                    Err(error) => Err(error.into()),
+                }
             }
         }
         .and_then(|()| self.stdout.flush());
-        self.written(written)
+        let written = ignore_closed(written);
+        self.report_failed |= written.is_err();
+        written
     }
 
     /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
@@ -879,54 +880,54 @@ impl<O: Write, E: Write> Output<O, E> {
         if self.mode == OutputMode::Json {
             self.warnings.push(text.to_string());
         }
-        let written = writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{} {}",
             self.stderr_paint.attention("warning:"),
             self.stderr_paint.commands(text, Paint::text)
-        );
-        self.written(written)
+        ))
     }
 
     /// How a command that failed ends, on stderr in both modes: the red mark and `what` failed
     /// on a line of their own, then `reason` under it, then `hint` when there is something to
     /// run next. Nothing goes to stdout after it.
     ///
-    /// The reason is one line however it was written. It is not wrapped, since it can hold a
-    /// path. Words that are not LemonUp's own are never drawn as a command; the hint, which
-    /// LemonUp wrote, always has its commands drawn.
+    /// `reason` can hold names, paths, or a source's or the system's own words: it is one line
+    /// however it was written, and nothing in it is drawn as a command. It is not wrapped
+    /// either, since it can hold a path. Only `hint`, which LemonUp wrote, has its commands
+    /// drawn. An empty reason is left out.
     pub(crate) fn fail(
         &mut self,
         what: &str,
-        reason: Reason,
+        reason: &str,
         hint: Option<&str>,
     ) -> std::io::Result<()> {
         let paint = self.stderr_paint;
-        let reason = match reason {
-            Reason::Ours(words) => paint.commands(words, Paint::text),
-            Reason::Theirs(words) => paint.text(words),
-        };
-        let mut lines = vec![
-            format!("{} {}", paint.failed(), paint.heading(Tone::Problem, what)),
-            format!("{INDENT}{reason}"),
-        ];
+        let mut lines = vec![format!(
+            "{} {}",
+            paint.failed(),
+            paint.heading(Tone::Problem, what)
+        )];
+        if !reason.trim().is_empty() {
+            lines.push(format!("{INDENT}{}", paint.text(reason)));
+        }
         if let Some(hint) = hint {
             lines.push(format!("{INDENT}{}", paint.commands(hint, Paint::text)));
         }
-        let written = lines
-            .iter()
-            .try_for_each(|line| writeln!(self.stderr, "{line}"));
-        self.written(written)
+        ignore_closed(
+            lines
+                .iter()
+                .try_for_each(|line| writeln!(self.stderr, "{line}")),
+        )
     }
 
     /// A notice on stderr, in both modes. The JSON document leaves it out.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
-        let written = writeln!(
+        ignore_closed(writeln!(
             self.stderr,
             "{}",
             self.stderr_paint.commands(text, Paint::text)
-        );
-        self.written(written)
+        ))
     }
 
     #[cfg(test)]
