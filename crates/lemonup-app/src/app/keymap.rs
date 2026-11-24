@@ -1153,13 +1153,21 @@ impl App {
                 }
                 // Only what works on the row under the cursor.
                 let mut hints = vec![KeyHint::key(Id::Fields, "↑/↓", "choose", UP_DOWN)];
-                hints.push(match self.config_pane.selected_field().kind() {
-                    ConfigRowKind::Text => KeyHint::key(Id::Toggle, "enter", "edit", ENTER).main(),
-                    ConfigRowKind::Toggle | ConfigRowKind::Stepped => {
-                        KeyHint::key(Id::Change, "←/→", "change", CHANGE).main()
+                let field = self.config_pane.selected_field();
+                match field.kind() {
+                    ConfigRowKind::Text => {
+                        hints.push(KeyHint::key(Id::Toggle, "enter", "edit", ENTER).main());
                     }
-                    ConfigRowKind::Action => KeyHint::key(Id::Run, "enter", "run", ENTER).main(),
-                });
+                    // No key changes a setting the terminal decides right now.
+                    ConfigRowKind::Toggle | ConfigRowKind::Stepped
+                        if self.look_setting_forced(field) => {}
+                    ConfigRowKind::Toggle | ConfigRowKind::Stepped => {
+                        hints.push(KeyHint::key(Id::Change, "←/→", "change", CHANGE).main());
+                    }
+                    ConfigRowKind::Action => {
+                        hints.push(KeyHint::key(Id::Run, "enter", "run", ENTER).main());
+                    }
+                }
                 hints.push(self.close_hint());
                 hints.extend(self.sheet_scroll_hint(false));
                 hints.push(self.help_hint());

@@ -362,6 +362,9 @@ fn settings_has_the_terminal_progress_bar_row_and_says_when_the_terminal_draws_n
     );
     let wide = render_rows(&mut app, 120, 36).join("\n");
     assert!(wide.contains("It is off now:"), "{wide}");
+    // The key line names no key for changing it, because none does.
+    assert!(!narrow.contains("←/→"), "{narrow}");
+    assert!(!wide.contains("←/→"), "{wide}");
 
     // Where the terminal draws one, enter turns it off and on.
     app.runtime.display.progress_bar = true;
@@ -374,4 +377,5 @@ fn settings_has_the_terminal_progress_bar_row_and_says_when_the_terminal_draws_n
         text.contains("shows progress in your terminal's own progress bar"),
         "{text}"
     );
+    assert!(text.contains("←/→ change"), "{text}");
 }
