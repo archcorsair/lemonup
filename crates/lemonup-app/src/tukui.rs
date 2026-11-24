@@ -474,6 +474,17 @@ fn install_downloaded_tukui_addon(
                 )
             })?;
 
+        // Planned before a dry run returns as well, so it never says an install would work
+        // that is then refused. This only reads the list and the AddOns folder.
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &layout.folders,
+            &layout.parent_folder,
+            replace,
+            None,
+        )?;
         if dry_run {
             return Ok(TukuiInstallSummary {
                 addon_slug: addon.slug.clone(),
@@ -484,16 +495,6 @@ fn install_downloaded_tukui_addon(
                 dry_run: true,
             });
         }
-
-        // Only folders on `replace` that are not linked are taken over.
-        let replaced = crate::update_targets::plan_install_replacements(
-            state_database,
-            addon_dir,
-            &layout.folders,
-            &layout.parent_folder,
-            replace,
-            None,
-        )?;
         let record = build_managed_tukui_record(addon, parent_metadata, &layout.folders);
         // The user's TOC overrides go into the staged copies before anything live moves.
         let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
@@ -947,6 +948,62 @@ mod tests {
             zip.finish().expect("finish zip");
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn a_dry_run_is_refused_when_the_install_it_stands_for_would_be() {
+        use crate::source_error::SourceErrorKind;
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let mut addon = forever_addon_with_patch(&[]);
+        addon.slug = "tukui".to_string();
+        addon.name = "Tukui".to_string();
+        addon.directories = vec!["Tukui".to_string()];
+        let bytes = build_zip(&[(
+            "Tukui/Tukui.toc",
+            "## Title: Tukui\n## Version: 15.08\n## Interface: 120105\n",
+        )]);
+        let dry_run = |database: &mut StateDatabase| {
+            super::install_downloaded_tukui_addon(database, &addon_dir, &addon, &bytes, true, &[])
+        };
+
+        // With nothing in the way it says what it would install, and installs nothing.
+        let summary = dry_run(&mut database).expect("dry run");
+        assert!(summary.dry_run);
+        assert!(!addon_dir.join("Tukui").exists());
+        assert!(database.list_addons().expect("list").is_empty());
+
+        // A Not linked folder in the way: the real install would ask first.
+        std::fs::create_dir_all(addon_dir.join("Tukui")).expect("not linked copy");
+        std::fs::write(addon_dir.join("Tukui").join("old.lua"), "-- old").expect("old file");
+        let refused = dry_run(&mut database).expect_err("folder in the way");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersInTheWay);
+        assert!(addon_dir.join("Tukui").join("old.lua").exists());
+        assert!(!addon_dir.join("Tukui").join("Tukui.toc").exists());
+        assert!(database.list_addons().expect("list").is_empty());
+
+        // A folder of a linked addon: the real install refuses, so the dry run does too.
+        let linked = AddonRecord::new("Tukui", "Tukui", SourceKind::Tukui);
+        database.upsert_addon(&linked).expect("linked addon");
+        let refused = dry_run(&mut database).expect_err("folder of a linked addon");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersOfLinkedAddon);
+        assert_eq!(
+            refused
+                .clash
+                .expect("clash")
+                .installed
+                .map(|installed| installed.folder),
+            Some("Tukui".to_string())
+        );
+        assert!(addon_dir.join("Tukui").join("old.lua").exists());
+        assert!(!addon_dir.join("Tukui").join("Tukui.toc").exists());
+        assert_eq!(database.list_addons().expect("list").len(), 1);
     }
 
     #[test]

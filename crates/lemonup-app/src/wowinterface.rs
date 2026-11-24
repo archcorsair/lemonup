@@ -369,6 +369,17 @@ fn install_downloaded_wowinterface_addon(
                 )
             })?;
 
+        // Planned before a dry run returns as well, so it never says an install would work
+        // that is then refused. This only reads the list and the AddOns folder.
+        // Only folders on `replace` that are not linked are taken over.
+        let replaced = crate::update_targets::plan_install_replacements(
+            state_database,
+            addon_dir,
+            &extracted.folders,
+            &parent_folder,
+            replace,
+            None,
+        )?;
         if dry_run {
             return Ok(WowinterfaceInstallSummary {
                 addon_id: addon.uid.clone(),
@@ -380,16 +391,6 @@ fn install_downloaded_wowinterface_addon(
                 warning: forever_install_warning(addon_dir, &addon.ui_name),
             });
         }
-
-        // Only folders on `replace` that are not linked are taken over.
-        let replaced = crate::update_targets::plan_install_replacements(
-            state_database,
-            addon_dir,
-            &extracted.folders,
-            &parent_folder,
-            replace,
-            None,
-        )?;
         let record = build_managed_wowinterface_record(addon, parent_metadata, &extracted.folders);
         // The user's TOC overrides go into the staged copies before anything live moves.
         let toc_overrides = crate::update_targets::stored_toc_overrides(state_database, &record)?;
@@ -1163,6 +1164,97 @@ mod tests {
         assert!(addon_dir.join("DBM-GUI").join("stale.lua").exists());
         assert!(!addon_dir.join("DBM-VPVEM").exists());
         assert_eq!(database.list_addons().expect("list").len(), 3);
+    }
+
+    #[test]
+    fn a_dry_run_is_refused_when_the_install_it_stands_for_would_be() {
+        let temp = tempdir().expect("tempdir");
+        let addon_dir = temp
+            .path()
+            .join("_retail_")
+            .join("Interface")
+            .join("AddOns");
+        std::fs::create_dir_all(addon_dir.join("ElvUI_WindTools")).expect("not linked copy");
+        let mut database = StateDatabase::open(temp.path().join("state.sqlite")).expect("open db");
+        let addon = super::WowinterfaceAddon {
+            uid: "25687".to_string(),
+            ui_name: "ElvUI_WindTools".to_string(),
+            ui_version: "4.16".to_string(),
+            ui_download: "https://cdn.wowinterface.com/downloads/getfile.php?id=25687".to_string(),
+            ui_author_name: "fang2hou".to_string(),
+            ui_file_name: "ElvUI_WindTools-4.16.zip".to_string(),
+        };
+        let bytes = build_zip(&[(
+            "ElvUI_WindTools/ElvUI_WindTools.toc",
+            "## Title: ElvUI WindTools\n## Version: 4.16\n## Interface: 120105\n",
+        )]);
+
+        let refused = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            true,
+            &[],
+        )
+        .expect_err("a dry run with a folder in the way");
+        assert_eq!(
+            refused.kind,
+            crate::source_error::SourceErrorKind::FoldersInTheWay
+        );
+        assert!(
+            !addon_dir
+                .join("ElvUI_WindTools")
+                .join("ElvUI_WindTools.toc")
+                .exists()
+        );
+        assert!(database.list_addons().expect("list").is_empty());
+
+        // A folder of an addon linked to another source: the real install refuses.
+        let linked = lemonup_core::AddonRecord::new(
+            "ElvUI WindTools",
+            "ElvUI_WindTools",
+            lemonup_core::SourceKind::GitHub,
+        );
+        database.upsert_addon(&linked).expect("linked addon");
+        let refused = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            true,
+            &[],
+        )
+        .expect_err("a dry run over a linked addon");
+        assert_eq!(
+            refused.kind,
+            crate::source_error::SourceErrorKind::FoldersOfLinkedAddon
+        );
+        let rows = database.list_addons().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, lemonup_core::SourceKind::GitHub);
+        assert!(
+            !addon_dir
+                .join("ElvUI_WindTools")
+                .join("ElvUI_WindTools.toc")
+                .exists()
+        );
+        database.remove_addon("ElvUI_WindTools").expect("unlink");
+
+        // With nothing in the way the dry run says what it would install, and installs nothing.
+        std::fs::remove_dir_all(addon_dir.join("ElvUI_WindTools")).expect("remove");
+        let summary = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            true,
+            &[],
+        )
+        .expect("dry run");
+        assert!(summary.dry_run);
+        assert!(!addon_dir.join("ElvUI_WindTools").exists());
+        assert!(database.list_addons().expect("list").is_empty());
     }
 
     #[test]

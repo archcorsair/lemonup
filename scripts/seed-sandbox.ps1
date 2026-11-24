@@ -22,7 +22,13 @@ foreach ($target in $matrix | Where-Object { $_.requires_api_key }) {
     if ($preflight.Output -match 'Add your Wago\.io key') {
         throw "seed preflight failed for $($target.selector): no Wago API key configured"
     }
-    Assert-ProcessSucceeded -Result $preflight -Context "preflight $($target.selector)"
+    # A sandbox seeded before still has the addon, so its dry run is refused. The reset below
+    # removes it; anything else that fails is worth knowing before the sandbox is wiped.
+    # Output is a list of lines: -match keeps the lines that match, so no match is an empty list.
+    $alreadyThere = $preflight.Output -match 'is already installed|already in your AddOns folder'
+    if ($preflight.ExitCode -eq 0 -or -not $alreadyThere) {
+        Assert-ProcessSucceeded -Result $preflight -Context "preflight $($target.selector)"
+    }
 }
 
 $layout = Initialize-WowSandboxLayout -SandboxRoot $SandboxRoot -Reset
