@@ -185,9 +185,7 @@ impl App {
         let url = self.inspect_resolved_target()?.item.source_url.as_deref()?;
         let address = super::links::link_address(url)?;
         let label = web_page_label(url);
-        label
-            .chars()
-            .all(|letter| letter.is_ascii_graphic())
+        (!label.is_empty() && label.chars().all(|letter| letter.is_ascii_graphic()))
             .then_some((label, address))
     }
 

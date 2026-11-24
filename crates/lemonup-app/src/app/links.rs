@@ -27,12 +27,12 @@ const MAX_ADDRESS_LEN: usize = 2048;
 
 /// `url` as an address safe to write inside OSC 8: an http or https address, as `Url` writes
 /// it, with no control or non-ASCII characters left. `None` for anything else, for a host
-/// without a dot, and for an address with a user name or password, which can make it look
+/// that is an IP address or has no dot, and for an address with a user name or password, which can make it look
 /// like another site (`https://github.com@example.com`).
 pub(super) fn link_address(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.host_str().is_some_and(|host| host.contains('.'))
+        || !parsed.host_str().is_some_and(is_named_host)
         || !parsed.username().is_empty()
         || parsed.password().is_some()
     {
@@ -41,6 +41,14 @@ pub(super) fn link_address(url: &str) -> Option<String> {
     let address = String::from(parsed);
     (address.len() <= MAX_ADDRESS_LEN && address.chars().all(|letter| letter.is_ascii_graphic()))
         .then_some(address)
+}
+
+/// A host name of two or more parts (`github.com`), not an IP address.
+fn is_named_host(host: &str) -> bool {
+    !host.starts_with('[')
+        && host.parse::<std::net::Ipv4Addr>().is_err()
+        && host.split('.').count() > 1
+        && host.split('.').all(|part| !part.is_empty())
 }
 
 /// One row of a link on screen: where its text starts, the address, and its cells as drawn.
@@ -217,12 +225,13 @@ fn place(
         if held == 0 {
             return None;
         }
-        pieces.push((index, held));
-        if held == rest.len() {
-            return (!apart || blank_at(row, x + held)).then_some(pieces);
-        }
-        if !blank_at(row, x + held) {
+        let end = held == rest.len();
+        if (!end || apart) && !blank_at(row, x + held) {
             return None;
+        }
+        pieces.push((index, held));
+        if end {
+            return Some(pieces);
         }
         rest = &rest[held..];
     }
@@ -402,6 +411,13 @@ mod tests {
             // A one-word host would be a link text that matches words on screen.
             "https://Up",
             &format!("https://example.com/{}", "a".repeat(2048)),
+            "https://.",
+            "https://www./",
+            "https://example..com/",
+            // IP addresses, which a short label like "1.2" would be on screen.
+            "https://1.2",
+            "http://0x7f.1/",
+            "https://[::1]/",
         ] {
             assert_eq!(super::link_address(url), None, "{url:?}");
         }
