@@ -18868,6 +18868,57 @@ games = ["forever"]
             app.apply(AppAction::SetDetailMode(DetailMode::Config));
         }
 
+        #[test]
+        fn settings_title_shows_the_lemonup_version() {
+            let title = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
+            for (width, height) in [(80, 24), (120, 36), (160, 45)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                let rows = render_rows(&mut app, width, height);
+                let row = rows
+                    .iter()
+                    .find(|row| row.contains("esc close"))
+                    .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+                assert!(
+                    row.contains(&title),
+                    "{width}x{height}:\n{}",
+                    rows.join("\n")
+                );
+                assert!(row.contains("changes save right away"), "{row}");
+            }
+        }
+
+        #[test]
+        fn only_settings_has_the_version_in_its_title() {
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            open_help(&mut app);
+            let rows = render_rows(&mut app, 120, 36);
+            let row = rows
+                .iter()
+                .find(|row| row.contains("esc close"))
+                .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+            assert!(!row.contains("LemonUp"), "{row}");
+        }
+
+        #[test]
+        fn settings_title_drops_the_version_when_it_does_not_fit() {
+            let version = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
+            for (width, shown) in [(30, false), (50, true)] {
+                let mut app = app_for_tests(ShellMode::Dashboard);
+                open_config(&mut app);
+                let rows = render_rows(&mut app, width, 24);
+                let row = rows
+                    .iter()
+                    .find(|row| row.contains("esc close"))
+                    .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
+                assert!(row.contains("Settings"), "{width}: {row}");
+                assert_eq!(row.contains(&version), shown, "{width}: {row}");
+                if !shown {
+                    assert!(!row.contains("LemonUp"), "{width}: {row}");
+                }
+            }
+        }
+
         fn open_backups(app: &mut App) {
             app.apply(AppAction::SetDetailMode(DetailMode::Backup));
             app.backup_pane.backups = backups(9);

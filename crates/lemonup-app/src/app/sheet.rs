@@ -393,6 +393,9 @@ pub(crate) enum SheetMove {
 /// The title row of a sheet.
 pub(super) struct SheetChrome {
     pub(super) title: String,
+    /// Muted text after the title, such as Settings' "LemonUp 2.9.0". It
+    /// goes when the title row has no room for it.
+    pub(super) subtitle: Option<String>,
     /// A muted note before "esc close", such as "changes save right away".
     pub(super) note: Option<&'static str>,
     /// A delete or another step that cannot be undone: the outline is red.
@@ -764,6 +767,14 @@ impl App {
         }
     }
 
+    /// " · LemonUp 2.9.0" after the title, when the whole title and it fit
+    /// in `room` columns.
+    fn sheet_subtitle(chrome: &SheetChrome, title: &str, room: usize) -> Option<String> {
+        let subtitle = format!(" · {}", chrome.subtitle.as_deref()?);
+        (title == chrome.title && title.chars().count() + subtitle.chars().count() <= room)
+            .then_some(subtitle)
+    }
+
     /// The title in the top border (floating) or on the first row (full).
     fn render_sheet_chrome(
         &self,
@@ -787,8 +798,16 @@ impl App {
 
         if geometry.full {
             let title = truncate_text(&chrome.title, width.saturating_sub(13));
-            let mut used = 1 + title.chars().count() + "esc close".len() + 1;
+            let subtitle = Self::sheet_subtitle(chrome, &title, width.saturating_sub(13));
+            let mut used = 1
+                + title.chars().count()
+                + subtitle.as_ref().map_or(0, |text| text.chars().count())
+                + "esc close".len()
+                + 1;
             let mut spans = vec![Span::raw(" "), Span::styled(title, title_style)];
+            if let Some(subtitle) = subtitle {
+                spans.push(Span::styled(subtitle, label_style));
+            }
             let note = chrome
                 .note
                 .filter(|note| used + note.chars().count() + 4 <= width);
@@ -828,7 +847,9 @@ impl App {
         );
         // "╭─ Title ───── esc close ─╮"
         let title = truncate_text(&chrome.title, width.saturating_sub(6));
-        let left = 4 + title.chars().count();
+        let subtitle = Self::sheet_subtitle(chrome, &title, width.saturating_sub(6));
+        let left =
+            4 + title.chars().count() + subtitle.as_ref().map_or(0, |text| text.chars().count());
         let note = chrome.note.filter(|note| {
             left + 1 + note.chars().count() + 3 + " esc close ─╮".chars().count() <= width
         });
@@ -838,8 +859,11 @@ impl App {
         let mut spans = vec![
             Span::styled("╭─ ", border),
             Span::styled(title, title_style),
-            Span::styled(" ", border),
         ];
+        if let Some(subtitle) = subtitle {
+            spans.push(Span::styled(subtitle, label_style));
+        }
+        spans.push(Span::styled(" ", border));
         if left + 1 + right <= width {
             spans.push(Span::styled("─".repeat(width - left - right), border));
             spans.push(Span::styled(" ", border));
