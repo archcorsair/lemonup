@@ -477,7 +477,7 @@ fn run_toc<O: std::io::Write, E: std::io::Write>(
     )?;
     let report = toc_command(&mut database, &addon_dir, addon, change, yes)?;
     for warning in report.warnings() {
-        output.warn(&warning)?;
+        output.warn_with_report(&warning)?;
     }
     output.print(&report, Some(&addon_dir))?;
     Ok(CommandOutcome::Success)
@@ -1299,7 +1299,7 @@ fn run_export_addons<O: std::io::Write, E: std::io::Write>(
     let file = std::path::absolute(&output_path).unwrap_or(output_path);
     let report = output::ExportReport::new(file, &export.addons);
     for warning in report.warnings() {
-        output.warn(&warning)?;
+        output.warn_with_report(&warning)?;
     }
     output.print(&report, None)?;
     Ok(())
@@ -1384,7 +1384,7 @@ async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
             )
             .await;
             for warning in &summary.warnings {
-                output.warn(warning)?;
+                output.warn_with_report(warning)?;
             }
             summary.outcomes
         }
@@ -4074,7 +4074,7 @@ mod addon_dir_binding_tests {
             assert_eq!(body.matches("or_failed(what, ").count(), 1, "{arm}");
             // Nothing in the arm leaves with `?` before the wrapper sees its result.
             let before = &body[..body.find("or_failed(what, ").expect("the wrapper")];
-            assert!(!before.contains("?;") && !before.contains(")?\n"), "{arm}");
+            assert!(!before.contains('?'), "{arm}");
         }
     }
 
@@ -4135,6 +4135,23 @@ mod addon_dir_binding_tests {
             streams(output).1,
             "✗ Save failed\n  give a new Category value, or `--clear` to restore the addon's own\n"
         );
+        // It is advice, so with color its flag is drawn as one.
+        let mut colored = Output::new(
+            OutputMode::Human,
+            Paint::terminal(),
+            Paint::terminal(),
+            DEFAULT_PROFILE,
+            Vec::new(),
+            Vec::new(),
+        );
+        let unsaved = super::toc_change(Some(TocField::Category), None, false)
+            .map(|_| CommandOutcome::Success)
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>);
+        super::or_failed(Some("Save failed"), unsaved, &mut colored).expect("said");
+        assert!(streams(colored).1.ends_with(
+            "  give a new Category value, or \x1b[1m\x1b[38;5;6m--clear\x1b[0m to restore \
+                 the addon's own\n"
+        ));
 
         // export, import and restore with a file that can't be written or isn't there.
         let missing = sandbox.retail.join("not-there.json");

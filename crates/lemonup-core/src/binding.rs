@@ -55,11 +55,26 @@ impl AddonDirMismatch {
         } else {
             format!("--profile {} ", self.profile)
         };
+        // The folder goes into the command only when it can sit between single quotes as it
+        // is. One with a quote, a backtick or a control character in it would end the quotes
+        // or the command early; the reason has named the folder already.
+        let requested = self.requested.display().to_string();
+        let quotable = !requested
+            .chars()
+            .any(|character| matches!(character, '\'' | '`') || character.is_control());
+        let own_profile = if quotable {
+            format!(
+                "`lemonup --profile {} --addon-dir '{requested}' sync`",
+                suggested_profile_name(&self.requested)
+            )
+        } else {
+            format!(
+                "`lemonup --profile {} sync` with the same `--addon-dir`",
+                suggested_profile_name(&self.requested)
+            )
+        };
         format!(
-            "to manage that install, give it its own profile: `lemonup --profile {} --addon-dir '{}' sync` | to move this profile to that folder on purpose, open `lemonup {}tui`, press r in Config to rerun setup and pick it",
-            suggested_profile_name(&self.requested),
-            self.requested.display(),
-            profile_flag,
+            "to manage that install, give it its own profile: {own_profile} | to move this profile to that folder on purpose, open `lemonup {profile_flag}tui`, press r in Config to rerun setup and pick it",
         )
     }
 }
@@ -237,6 +252,58 @@ mod tests {
                 .expect("check"),
             BindingCheck::Bound
         );
+    }
+
+    #[test]
+    fn a_mismatch_says_what_is_wrong_and_what_to_run_as_two_parts_of_one_line() {
+        let mismatch = super::AddonDirMismatch {
+            profile: "forever".to_string(),
+            bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+            requested: PathBuf::from("/games/wow/_retail_/Interface/AddOns"),
+        };
+        assert_eq!(
+            mismatch.reason(),
+            "profile 'forever' is bound to the AddOns folder /games/wow/_forever_/Interface/AddOns but this run targets /games/wow/_retail_/Interface/AddOns | refusing to touch tracked addons or backups for a different folder"
+        );
+        assert_eq!(
+            mismatch.hint(),
+            "to manage that install, give it its own profile: `lemonup --profile retail --addon-dir '/games/wow/_retail_/Interface/AddOns' sync` | to move this profile to that folder on purpose, open `lemonup --profile forever tui`, press r in Config to rerun setup and pick it"
+        );
+        assert_eq!(
+            mismatch.to_string(),
+            format!("{} | {}", mismatch.reason(), mismatch.hint())
+        );
+        // The same line when it is carried as a usage error with its advice apart.
+        let usage = crate::LemonupError::Usage {
+            reason: mismatch.reason(),
+            hint: mismatch.hint(),
+        };
+        assert_eq!(usage.to_string(), format!("invalid argument: {mismatch}"));
+    }
+
+    #[test]
+    fn a_folder_that_cannot_sit_in_quotes_is_left_out_of_the_command() {
+        for folder in [
+            "/games/O'Brien/_retail_/Interface/AddOns",
+            "/games/x` and `lemonup update-all --force`/_retail_/Interface/AddOns",
+            "/games/two\nlines/_retail_/Interface/AddOns",
+        ] {
+            let mismatch = super::AddonDirMismatch {
+                profile: crate::DEFAULT_PROFILE.to_string(),
+                bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+                requested: PathBuf::from(folder),
+            };
+            let hint = mismatch.hint();
+            assert!(
+                hint.starts_with(
+                    "to manage that install, give it its own profile: `lemonup --profile retail sync` with the same `--addon-dir` | to move this profile"
+                ),
+                "{hint}"
+            );
+            assert!(!hint.contains(folder), "{hint}");
+            // What is wrong still names the folder.
+            assert!(mismatch.reason().contains(folder));
+        }
     }
 
     #[test]

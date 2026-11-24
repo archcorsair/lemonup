@@ -561,6 +561,17 @@ fn only_a_report_that_could_not_be_printed_is_remembered() {
     assert!(mute.fail("three", "four", None).is_err());
     assert!(!mute.report_failed());
 
+    // A warning that comes with the report, after the work, is part of the report.
+    assert!(mute.warn_with_report("five").is_err());
+    assert!(mute.report_failed());
+    let mut fine = output(OutputMode::Json, Paint::PLAIN);
+    fine.warn_with_report("six").expect("warn");
+    assert!(!fine.report_failed());
+    fine.print(&sample(), None).expect("print");
+    let (stdout, stderr) = fine.into_writers();
+    assert!(text(stdout).contains(r#""warnings":["six"]"#));
+    assert_eq!(text(stderr), "warning: six\n");
+
     let mut full = Output::new(
         OutputMode::Human,
         Paint::PLAIN,

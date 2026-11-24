@@ -888,6 +888,14 @@ impl<O: Write, E: Write> Output<O, E> {
         ))
     }
 
+    /// A warning that comes with the report, after the command's work is done. It is written
+    /// like any other, and one that can't be written is a report that could not be printed.
+    pub(crate) fn warn_with_report(&mut self, text: &str) -> std::io::Result<()> {
+        let written = self.warn(text);
+        self.report_failed |= written.is_err();
+        written
+    }
+
     /// How a command that failed ends, on stderr in both modes: the red mark and `what` failed
     /// on a line of their own, then `reason` under it, then `hint` when there is something to
     /// run next. Nothing goes to stdout after it.

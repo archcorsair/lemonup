@@ -55,12 +55,18 @@ pub enum LemonupError {
     Json(#[from] serde_json::Error),
 }
 
+/// `first` and `second` as one line: a space after a finished sentence, else the ` | ` that
+/// LemonUp's longer messages use between their parts.
 fn join_sentences(first: &str, second: &str) -> String {
-    [first, second]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    if first.is_empty() || second.is_empty() {
+        return format!("{first}{second}");
+    }
+    let separator = if first.ends_with(['.', '!', '?']) {
+        " "
+    } else {
+        " | "
+    };
+    format!("{first}{separator}{second}")
 }
 
 fn list_paths(paths: &[PathBuf]) -> String {
