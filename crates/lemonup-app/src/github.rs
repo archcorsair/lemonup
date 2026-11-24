@@ -776,6 +776,8 @@ async fn download_github_asset_bytes(
         .send()
         .await
         .map_err(SourceError::from_reqwest)?;
+    let response =
+        crate::http::follow_download_redirects(response, SourceError::from_reqwest).await?;
     ensure_github_success(response)?
         .bytes()
         .await
@@ -870,6 +872,8 @@ async fn download_github_package_bytes(
         .send()
         .await
         .map_err(SourceError::from_reqwest)?;
+    let response =
+        crate::http::follow_download_redirects(response, SourceError::from_reqwest).await?;
     ensure_github_success(response)?
         .bytes()
         .await
