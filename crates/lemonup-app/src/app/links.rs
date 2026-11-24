@@ -23,10 +23,16 @@ const LINKS: [(&str, &str); 2] = [
 ];
 
 /// `url` as an address safe to write inside OSC 8: an http or https address, as `Url` writes
-/// it, with no control or non-ASCII characters left. `None` for anything else.
+/// it, with no control or non-ASCII characters left. `None` for anything else, for a host
+/// without a dot, and for an address with a user name or password, which can make it look
+/// like another site (`https://github.com@example.com`).
 pub(super) fn link_address(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url.trim()).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.host_str().is_some_and(|host| host.contains('.'))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return None;
     }
     let address = String::from(parsed);
@@ -56,7 +62,10 @@ impl DrawnLinks {
     /// Every place a link's text is drawn whole in `buffer`: the fixed links, and `extra`
     /// (text and address) for the ones that change, such as the web page in Details. A text
     /// may be wrapped over rows below one another, starting in the same column, each row but
-    /// the last followed by a blank cell or the edge.
+    /// the last followed by a blank cell or the edge. An `extra` text, which a source can
+    /// choose, also needs a blank cell or the edge before each row and after its end, and is
+    /// skipped where it starts on a link already found. Text with wide letters, which take two
+    /// cells, is never found.
     pub(super) fn find(buffer: &Buffer, extra: &[(String, String)]) -> Self {
         let area = buffer.area;
         let rows: Vec<Vec<&str>> = (area.top()..area.bottom())
@@ -66,27 +75,35 @@ impl DrawnLinks {
                     .collect()
             })
             .collect();
-        let texts: Vec<(Vec<char>, &str)> = LINKS
+        let texts: Vec<(Vec<char>, &str, bool)> = LINKS
             .iter()
-            .map(|(text, url)| (*text, *url))
+            .map(|(text, url)| (*text, *url, false))
             .chain(
                 extra
                     .iter()
-                    .map(|(text, url)| (text.as_str(), url.as_str())),
+                    .map(|(text, url)| (text.as_str(), url.as_str(), true)),
             )
-            .filter(|(text, _)| !text.is_empty())
-            .map(|(text, url)| (text.chars().collect(), url))
+            .filter(|(text, _, _)| !text.is_empty())
+            .map(|(text, url, apart)| (text.chars().collect(), url, apart))
             .collect();
         let mut links = Vec::new();
         for y in 0..rows.len() {
-            for (chars, url) in &texts {
+            for (chars, url, apart) in &texts {
                 let mut start = 0;
                 while start < rows[y].len() {
-                    let Some(pieces) = place(&rows, start, y, chars) else {
+                    let x = area.left() + start as u16;
+                    let on_a_link = || {
+                        links.iter().any(|link: &DrawnLink| {
+                            link.y == area.top() + y as u16
+                                && (link.x..link.x + link.cells.len() as u16).contains(&x)
+                        })
+                    };
+                    let Some(pieces) =
+                        place(&rows, start, y, chars, *apart).filter(|_| !(*apart && on_a_link()))
+                    else {
                         start += 1;
                         continue;
                     };
-                    let x = area.left() + start as u16;
                     for (row, len) in &pieces {
                         let y = area.top() + *row as u16;
                         links.push(DrawnLink {
@@ -122,6 +139,7 @@ impl DrawnLinks {
     pub(super) fn links(&self) -> &[DrawnLink] {
         &self.links
     }
+
     /// Writes each link's cells again inside the OSC 8 sequence. The cursor is saved first and
     /// put back after, so a text box's cursor stays where ratatui left it.
     ///
@@ -168,11 +186,25 @@ impl DrawnLinks {
 
 /// The rows `chars` takes when drawn from column `x` of row `y`: each row's index and how many
 /// letters it holds. A row that doesn't hold the rest must be followed by a blank cell or the
-/// edge, and the rest goes on in the same column of the next row.
-fn place(rows: &[Vec<&str>], x: usize, y: usize, chars: &[char]) -> Option<Vec<(usize, usize)>> {
+/// edge, and the rest goes on in the same column of the next row. `apart` also asks for a blank
+/// cell or the edge before each row and after the end.
+fn place(
+    rows: &[Vec<&str>],
+    x: usize,
+    y: usize,
+    chars: &[char],
+    apart: bool,
+) -> Option<Vec<(usize, usize)>> {
+    let blank_at = |row: &Vec<&str>, column: usize| {
+        row.get(column)
+            .is_none_or(|symbol: &&str| symbol.trim().is_empty())
+    };
     let mut pieces = Vec::new();
     let mut rest = chars;
     for (index, row) in rows.iter().enumerate().skip(y) {
+        if apart && x > 0 && !blank_at(row, x - 1) {
+            return None;
+        }
         let held = rest
             .iter()
             .zip(row.iter().skip(x))
@@ -186,12 +218,9 @@ fn place(rows: &[Vec<&str>], x: usize, y: usize, chars: &[char]) -> Option<Vec<(
         }
         pieces.push((index, held));
         if held == rest.len() {
-            return Some(pieces);
+            return (!apart || blank_at(row, x + held)).then_some(pieces);
         }
-        if row
-            .get(x + held)
-            .is_some_and(|symbol| !symbol.trim().is_empty())
-        {
+        if !blank_at(row, x + held) {
             return None;
         }
         rest = &rest[held..];
@@ -297,6 +326,33 @@ mod tests {
     }
 
     #[test]
+    fn a_link_given_by_the_screen_stands_apart_from_other_text() {
+        let up = web_page("Up", "https://up.example/");
+        let buffer = buffer_with(&["Update ready  xUp  Up:", "   Up"]);
+        let places: Vec<_> = DrawnLinks::find(&buffer, &up)
+            .links()
+            .iter()
+            .map(|link| (link.x, link.y))
+            .collect();
+        assert_eq!(places, vec![(3, 1)]);
+
+        // Never over a fixed link, even with the same text.
+        let same = web_page("lemonup.org/github-token", "https://example.com/");
+        let buffer = buffer_with(&["see lemonup.org/github-token"]);
+        let urls: Vec<_> = DrawnLinks::find(&buffer, &same)
+            .links()
+            .iter()
+            .map(|link| link.url.clone())
+            .collect();
+        assert_eq!(urls, vec!["https://lemonup.org/github-token"]);
+
+        // Each row of a wrapped one too.
+        let wrapped = web_page("addons.wago.io/addons/x", "https://addons.wago.io/addons/x");
+        let buffer = buffer_with(&["   addons.wago.io/ ", "  :addons/x        "]);
+        assert!(DrawnLinks::find(&buffer, &wrapped).is_empty());
+    }
+
+    #[test]
     fn only_web_addresses_are_written_as_links() {
         assert_eq!(
             super::link_address(" https://github.com/owner/repo "),
@@ -326,6 +382,10 @@ mod tests {
             "file:///etc/passwd",
             "ftp://example.com/addon",
             "https://exa\u{1b}mple.com/",
+            "https://github.com@example.com/owner/repo",
+            "https://user:secret@example.com/",
+            // A one-word host would be a link text that matches words on screen.
+            "https://Up",
         ] {
             assert_eq!(super::link_address(url), None, "{url:?}");
         }
