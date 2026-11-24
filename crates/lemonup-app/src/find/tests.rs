@@ -48,6 +48,13 @@ fn cached_list(dir: &Path, age: Duration) -> (PathBuf, SystemTime) {
     write_cached(dir, &list_a(), age)
 }
 
+/// Puts a WoWInterface file list of a minute ago in `cache_dir`, so a lookup that asks
+/// WoWInterface reads it and makes no request.
+pub(crate) fn fresh_wowi_cache(cache_dir: &Path) {
+    fs::create_dir_all(cache_dir).expect("cache dir");
+    cached_list(cache_dir, Duration::from_secs(60));
+}
+
 fn write_cached(dir: &Path, list: &str, age: Duration) -> (PathBuf, SystemTime) {
     let path = dir.join(WOWI_CACHE_FILE);
     fs::write(&path, list).expect("cache");
@@ -2798,5 +2805,31 @@ fn a_closing_line_draws_only_its_hint_as_a_command() {
         .last()
         .map(String::as_str),
         Some("CurseForge also manages Evil ]0;x . Mark it Ignored there (Install Settings).")
+    );
+}
+
+#[test]
+fn the_status_line_names_the_sources_find_asks() {
+    assert_eq!(
+        asking_text(&[
+            FindSource::Wago,
+            FindSource::WowInterface,
+            FindSource::Tukui
+        ])
+        .as_deref(),
+        Some("Asking Wago.io, WoWInterface and TukUI")
+    );
+    assert_eq!(
+        asking_text(&[FindSource::WowInterface, FindSource::Tukui]).as_deref(),
+        Some("Asking WoWInterface and TukUI")
+    );
+    assert_eq!(
+        asking_text(&[FindSource::Wago]).as_deref(),
+        Some("Asking Wago.io")
+    );
+    // Wago.io alone, without its key: nothing is asked, so nothing is said.
+    assert_eq!(
+        asking_text(&FindChoice::only(&[FindSource::Wago]).asked(false)),
+        None
     );
 }

@@ -8647,8 +8647,14 @@ async fn run_transfer_import_task(
     let tracked = database.list_addons().map_err(|error| error.to_string())?;
     let existing_folders = collect_existing_import_folders(Some(addon_dir), &tracked)?;
     let analysis = analyze_import(&transfer, &existing_folders);
-    let install_summary =
-        install_transfer_addons(&mut database, addon_dir, &analysis, wago_api_key.as_deref()).await;
+    let install_summary = install_transfer_addons(
+        &mut database,
+        addon_dir,
+        &analysis,
+        wago_api_key.as_deref(),
+        |_, _| {},
+    )
+    .await;
     let sync = sync_dashboard_state(state_db_file, addon_dir)?;
 
     Ok(TransferImportOutcome {

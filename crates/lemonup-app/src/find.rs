@@ -47,6 +47,21 @@ pub(crate) fn cli_choice(sources: &[FindSource]) -> FindChoice {
     }
 }
 
+/// What the status line says while `lemonup find` waits: `Asking Wago.io, WoWInterface and
+/// TukUI`. `None` when no source is asked.
+pub(crate) fn asking_text(sources: &[FindSource]) -> Option<String> {
+    let names = sources
+        .iter()
+        .map(|source| source.name())
+        .collect::<Vec<_>>();
+    let listed = match names.as_slice() {
+        [] => return None,
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(format!("Asking {listed}"))
+}
+
 /// What the sources answered, ready for `lemonup_core::find::match_addons`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lookups {
@@ -761,4 +776,4 @@ mod printout;
 pub(crate) use printout::{FindPrintout, Found};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

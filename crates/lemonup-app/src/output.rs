@@ -8,6 +8,7 @@ mod export;
 mod import;
 mod install;
 mod profiles;
+pub(crate) mod progress;
 mod restore;
 mod sync;
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub(crate) use install::{
     InstallReport, InstallRequest, InstalledAddon, failure as install_failure,
 };
 pub(crate) use profiles::ProfilesReport;
+pub(crate) use progress::{Progress, Status, Tally};
 pub(crate) use restore::RestoreReport;
 pub(crate) use sync::SyncReport;
 pub(crate) use toc::{TocChange, TocReport, TocRow};
@@ -794,6 +796,9 @@ pub(crate) struct Output<O: Write = std::io::Stdout, E: Write = std::io::Stderr>
     stderr: E,
     /// The report could not be printed, other than to a reader that went away.
     report_failed: bool,
+    /// The status line on stderr, on a terminal only. Everything printed here takes it off
+    /// the screen first, since it shares the terminal with both streams.
+    progress: Option<Progress>,
 }
 
 impl Output {
@@ -804,14 +809,22 @@ impl Output {
         display: DisplayEnv,
         profile: &str,
     ) -> Self {
+        let stderr_paint = Paint::for_stderr(config, display);
+        let term = std::env::var("TERM").ok();
+        let shown = progress::wanted(
+            mode,
+            std::io::stderr().is_terminal() && ansi_supported(),
+            term.as_deref(),
+        );
         Self::new(
             mode,
             Paint::for_stdout(config, display),
-            Paint::for_stderr(config, display),
+            stderr_paint,
             profile,
             std::io::stdout(),
             std::io::stderr(),
         )
+        .with_progress(shown.then(|| Progress::on_stderr(stderr_paint, config.reduce_motion)))
     }
 }
 
@@ -833,6 +846,27 @@ impl<O: Write, E: Write> Output<O, E> {
             stdout,
             stderr,
             report_failed: false,
+            progress: None,
+        }
+    }
+
+    /// The same output with a status line, or without one.
+    pub(crate) fn with_progress(self, progress: Option<Progress>) -> Self {
+        Self { progress, ..self }
+    }
+
+    /// What a command uses to say what it is waiting for. It shows nothing when the run has
+    /// no status line: in a pipe, and with `--json`.
+    pub(crate) fn status(&self) -> Status {
+        self.progress
+            .as_ref()
+            .map_or_else(Status::none, Progress::status)
+    }
+
+    /// Ends the status line before a result is printed.
+    fn end_progress(&self) {
+        if let Some(progress) = &self.progress {
+            progress.clear();
         }
     }
 
@@ -849,6 +883,7 @@ impl<O: Write, E: Write> Output<O, E> {
         report: &R,
         addon_dir: Option<&Path>,
     ) -> std::io::Result<()> {
+        self.end_progress();
         let written = match self.mode {
             OutputMode::Human => report
                 .human(self.stdout_paint)
@@ -894,6 +929,7 @@ impl<O: Write, E: Write> Output<O, E> {
         if self.mode == OutputMode::Json {
             return Ok(());
         }
+        self.end_progress();
         ignore_closed(
             report
                 .human(self.stdout_paint)
@@ -907,6 +943,7 @@ impl<O: Write, E: Write> Output<O, E> {
     /// `reason` can hold names and folders: it is one line, and nothing in it is drawn as a
     /// command. Only `hint`, which LemonUp wrote, has its commands drawn.
     pub(crate) fn refuse(&mut self, reason: &str, hint: &str) -> std::io::Result<()> {
+        self.end_progress();
         let paint = self.stderr_paint;
         ignore_closed(writeln!(
             self.stderr,
@@ -922,6 +959,8 @@ impl<O: Write, E: Write> Output<O, E> {
         if self.mode == OutputMode::Json {
             self.warnings.push(text.to_string());
         }
+        // The status line comes back with its next frame.
+        let _paused = self.progress.as_ref().map(Progress::pause);
         ignore_closed(writeln!(
             self.stderr,
             "{} {}",
@@ -952,6 +991,7 @@ impl<O: Write, E: Write> Output<O, E> {
         reason: &str,
         hint: Option<&str>,
     ) -> std::io::Result<()> {
+        self.end_progress();
         let paint = self.stderr_paint;
         let mut lines = vec![format!(
             "{} {}",
@@ -973,11 +1013,18 @@ impl<O: Write, E: Write> Output<O, E> {
 
     /// A notice on stderr, in both modes. The JSON document leaves it out.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
+        let _paused = self.progress.as_ref().map(Progress::pause);
         ignore_closed(writeln!(
             self.stderr,
             "{}",
             self.stderr_paint.commands(text, Paint::text)
         ))
+    }
+
+    /// The status line, for a test to draw a frame of.
+    #[cfg(test)]
+    pub(crate) fn progress(&self) -> Option<&Progress> {
+        self.progress.as_ref()
     }
 
     #[cfg(test)]

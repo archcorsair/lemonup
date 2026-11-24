@@ -1045,3 +1045,95 @@ fn a_refusal_is_two_lines_on_stderr_and_only_its_hint_names_commands() {
         )
     );
 }
+
+#[test]
+fn everything_printed_takes_the_status_line_off_the_screen_first() {
+    use super::progress::testing::{Buffer, progress};
+    const LINE_GONE: &str = "\r\x1b[K\x1b[?25h";
+    // One terminal shows both streams and the status line, so all three write to one place
+    // here and the order is what a person sees.
+    let screen = |mode| {
+        let (status_line, seen) = progress(Paint::PLAIN, false, 80);
+        let output = Output::new(
+            mode,
+            Paint::PLAIN,
+            Paint::PLAIN,
+            "forever",
+            Buffer::clone(&seen),
+            Buffer::clone(&seen),
+        )
+        .with_progress(Some(status_line));
+        (output, seen)
+    };
+    let frame = |output: &Output<Buffer, Buffer>| output.progress().expect("status line").tick();
+
+    let (mut out, seen) = screen(OutputMode::Human);
+    let status = out.status();
+    status.say("Checking 1 of 2");
+    frame(&out);
+    assert_eq!(seen.take(), "\r\x1b[K\x1b[?25l⠋ Checking 1 of 2");
+
+    // A warning and a note come mid-run: the line makes room, then comes back.
+    out.warn("WoWInterface didn't answer").expect("warn");
+    assert_eq!(
+        seen.take(),
+        format!("{LINE_GONE}warning: WoWInterface didn't answer\n")
+    );
+    frame(&out);
+    assert_eq!(seen.take(), "\r\x1b[K\x1b[?25l⠙ Checking 1 of 2");
+    out.note("Made a backup").expect("note");
+    assert_eq!(seen.take(), format!("{LINE_GONE}Made a backup\n"));
+    frame(&out);
+    seen.take();
+
+    // The report ends the status line for good.
+    out.print(&sample(), None).expect("print");
+    assert_eq!(seen.take(), format!("{LINE_GONE}Questie\nPawn\n"));
+    frame(&out);
+    assert_eq!(seen.take(), "");
+
+    // So does a failure, a refusal, and a report shown before the work is done.
+    type Ending = fn(&mut Output<Buffer, Buffer>);
+    let endings: [(Ending, &str); 3] = [
+        (
+            |out| out.fail("Check failed", "no", None).expect("fail"),
+            "✗ Check failed\n  no\n",
+        ),
+        (
+            |out| {
+                out.refuse("Nothing linked", "Run `lemonup find`")
+                    .expect("refuse")
+            },
+            "Nothing linked\nRun `lemonup find`\n",
+        ),
+        (
+            |out| out.print_readable(&sample()).expect("print"),
+            "Questie\nPawn\n",
+        ),
+    ];
+    for (end, printed) in endings {
+        let (mut out, seen) = screen(OutputMode::Human);
+        out.status().say("Asking TukUI");
+        frame(&out);
+        seen.take();
+        end(&mut out);
+        assert_eq!(seen.take(), format!("{LINE_GONE}{printed}"));
+        frame(&out);
+        assert_eq!(seen.take(), "");
+    }
+}
+
+#[test]
+fn a_run_without_a_status_line_shows_none() {
+    // In a pipe and with `--json` there is no status line: saying something does nothing.
+    let mut out = output(OutputMode::Human, Paint::PLAIN);
+    let status = out.status();
+    status.say("Checking 1 of 2");
+    status.show("Checking 2 of 2", "Checking 2 addons");
+    out.warn("careful").expect("warn");
+    status.clear();
+    out.print(&sample(), None).expect("print");
+    let (stdout, stderr) = out.into_writers();
+    assert_eq!(text(stdout), "Questie\nPawn\n");
+    assert_eq!(text(stderr), "warning: careful\n");
+}

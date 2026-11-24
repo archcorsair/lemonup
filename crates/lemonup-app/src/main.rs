@@ -569,14 +569,29 @@ async fn run_find<O: std::io::Write, E: std::io::Write>(
         );
     }
     let names = crate::find::LocalNames::new(&rows, &inputs);
-    let lookups = crate::find::lookup_sources(
-        &wago_lookups,
-        flavor,
-        api_key.as_deref(),
-        &paths.cache_dir,
-        choice,
-    )
-    .await;
+    // `--plain` prints as it always has, without a status line.
+    let status = if plain {
+        output::Status::none()
+    } else {
+        output.status()
+    };
+    let lookups = {
+        // Wago.io is asked only when there is something to send it.
+        let asked = choice
+            .asked(api_key.is_some())
+            .into_iter()
+            .filter(|source| *source != lemonup_core::find::FindSource::Wago || sends_to_wago)
+            .collect::<Vec<_>>();
+        let _waiting = crate::find::asking_text(&asked).map(|asking| status.waiting(&asking));
+        crate::find::lookup_sources(
+            &wago_lookups,
+            flavor,
+            api_key.as_deref(),
+            &paths.cache_dir,
+            choice,
+        )
+        .await
+    };
     let report = lemonup_core::find::match_addons(&inputs, &rows, None, &lookups.lookups);
     let curseforge_files = lemonup_core::curseforge::record_files();
     let mut link_now = || {
@@ -803,7 +818,7 @@ fn open_log_file(path: &Path) -> Option<File> {
 /// rather than falling back to stderr, which would draw over the alternate screen.
 fn log_writer(destination: &LogDestination) -> BoxMakeWriter {
     match destination {
-        LogDestination::Stderr => BoxMakeWriter::new(std::io::stderr),
+        LogDestination::Stderr => BoxMakeWriter::new(output::progress::stderr_for_logs),
         LogDestination::File(path) => match open_log_file(path) {
             Some(file) => BoxMakeWriter::new(std::sync::Mutex::new(file)),
             None => BoxMakeWriter::new(std::io::sink),
@@ -1007,14 +1022,25 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
     // Names, sources and installed versions for the report. Read before the check, so a read
     // that fails stops the run before anything is saved.
     let rows_before = database.list_addons()?;
-    let checks = refresh_live_update_checks(
-        &mut database,
-        &addons,
-        api_key.as_deref(),
-        effective_addon_dir.as_deref(),
-        |_| {},
-    )
-    .await
+    let status = output.status();
+    // A selection that matches nothing is turned down by the check itself.
+    let mut tally = output::Tally::new(
+        "Checking",
+        &crate::update::resolve_selected_addons(&rows_before, &addons).unwrap_or_default(),
+        api_key.is_some(),
+    );
+    let checks = {
+        let _line = status.until_done();
+        tally.show(&status);
+        refresh_live_update_checks(
+            &mut database,
+            &addons,
+            api_key.as_deref(),
+            effective_addon_dir.as_deref(),
+            check_progress(&mut tally, &status),
+        )
+        .await
+    }
     .map_err(Box::<dyn std::error::Error>::from)?;
     // A check can save an addon's name at its source, so the rows are read again. The check
     // is saved by now: if this read fails, the report still prints from the earlier rows.
@@ -1103,18 +1129,24 @@ async fn run_update<O: std::io::Write, E: std::io::Write>(
     if let Some(warning) = backup.warning() {
         output.warn(&warning)?;
     }
-    let run = match apply_live_updates(
-        &mut database,
-        &addon_dir,
-        &addons,
-        api_key.as_deref(),
-        force,
-        dry_run,
-        replace,
-        |_| {},
-    )
-    .await
-    {
+    let status = output.status();
+    let mut tally = update_tally(&installed, &addons, api_key.is_some(), dry_run);
+    let run = {
+        let _line = status.until_done();
+        tally.show(&status);
+        apply_live_updates(
+            &mut database,
+            &addon_dir,
+            &addons,
+            api_key.as_deref(),
+            force,
+            dry_run,
+            replace,
+            update_progress(&mut tally, &status),
+        )
+        .await
+    };
+    let run = match run {
         Ok(run) => run,
         Err(error) => {
             // No report will print, so say here that a backup was made before the failure.
@@ -1411,13 +1443,26 @@ async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
     let outcomes = match effective_addon_dir.as_deref() {
         Some(addon_dir) if !dry_run => {
             let wago_api_key = resolve_wago_api_key(&config_store, &config_state)?;
+            let status = output.status();
+            let line = status.until_done();
+            let total = analysis.to_install.len();
             let summary = install_transfer_addons(
                 &mut database,
                 addon_dir,
                 &analysis,
                 wago_api_key.as_deref(),
+                |index, addon| {
+                    status.show(
+                        &format!("Installing {} of {total}: {}", index + 1, addon.name),
+                        &format!(
+                            "Installing {total} {}",
+                            if total == 1 { "addon" } else { "addons" }
+                        ),
+                    );
+                },
             )
             .await;
+            drop(line);
             for warning in &summary.warnings {
                 output.warn_with_report(warning)?;
             }
@@ -1547,6 +1592,49 @@ fn install_request<'a>(
     }
 }
 
+/// What a check hands its events to: the count moves on and the status line shows it.
+fn check_progress<'a>(
+    tally: &'a mut output::Tally,
+    status: &'a output::Status,
+) -> impl FnMut(crate::update::CheckEvent) + 'a {
+    move |event| {
+        match &event {
+            crate::update::CheckEvent::Started { folder } => tally.started(folder),
+            crate::update::CheckEvent::Finished { folder, .. } => tally.finished(folder),
+        }
+        tally.show(status);
+    }
+}
+
+/// The count an update shows on the status line. A dry run changes nothing, so it says it is
+/// checking. A selection that matches nothing counts nothing: the update itself turns it down.
+fn update_tally(
+    installed: &[lemonup_core::AddonRecord],
+    selectors: &[String],
+    has_wago_key: bool,
+    dry_run: bool,
+) -> output::Tally {
+    output::Tally::new(
+        if dry_run { "Checking" } else { "Updating" },
+        &crate::update::resolve_selected_addons(installed, selectors).unwrap_or_default(),
+        has_wago_key,
+    )
+}
+
+/// What an update hands its events to, as [`check_progress`] for a check.
+fn update_progress<'a>(
+    tally: &'a mut output::Tally,
+    status: &'a output::Status,
+) -> impl FnMut(crate::update::UpdateEvent) + 'a {
+    move |event| {
+        match &event {
+            crate::update::UpdateEvent::Started { folder } => tally.started(folder),
+            crate::update::UpdateEvent::Finished { folder, .. } => tally.finished(folder),
+        }
+        tally.show(status);
+    }
+}
+
 async fn run_install_wago<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
@@ -1555,7 +1643,15 @@ async fn run_install_wago<O: std::io::Write, E: std::io::Write>(
     dry_run: bool,
     output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let done = install_wago_report(&paths, &runtime, addon, stability, dry_run).await;
+    let done = install_wago_report(
+        &paths,
+        &runtime,
+        addon,
+        stability,
+        dry_run,
+        &output.status(),
+    )
+    .await;
     let request = install_request(lemonup_core::SourceKind::Wago, addon, &runtime);
     finish_install(done, request, output)
 }
@@ -1567,7 +1663,7 @@ async fn run_install_tukui<O: std::io::Write, E: std::io::Write>(
     dry_run: bool,
     output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let done = install_tukui_report(&paths, &runtime, addon, dry_run).await;
+    let done = install_tukui_report(&paths, &runtime, addon, dry_run, &output.status()).await;
     let request = install_request(lemonup_core::SourceKind::Tukui, addon, &runtime);
     finish_install(done, request, output)
 }
@@ -1579,7 +1675,8 @@ async fn run_install_wowinterface<O: std::io::Write, E: std::io::Write>(
     dry_run: bool,
     output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let done = install_wowinterface_report(&paths, &runtime, addon, dry_run).await;
+    let done =
+        install_wowinterface_report(&paths, &runtime, addon, dry_run, &output.status()).await;
     let request = install_request(lemonup_core::SourceKind::WowInterface, addon, &runtime);
     finish_install(done, request, output)
 }
@@ -1591,9 +1688,15 @@ async fn run_install_github<O: std::io::Write, E: std::io::Write>(
     dry_run: bool,
     output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
-    let done = install_github_report(&paths, &runtime, addon, dry_run).await;
+    let done = install_github_report(&paths, &runtime, addon, dry_run, &output.status()).await;
     let request = install_request(lemonup_core::SourceKind::GitHub, addon, &runtime);
     finish_install(done, request, output)
+}
+
+/// What the status line says while an install waits for its source. The addon's name is not
+/// known before the source answers, so it is named as it was typed.
+fn downloading(addon: &str) -> String {
+    format!("Downloading {addon}")
 }
 
 async fn install_wago_report(
@@ -1602,6 +1705,7 @@ async fn install_wago_report(
     addon: &str,
     stability: WagoStability,
     dry_run: bool,
+    status: &output::Status,
 ) -> Result<InstallDone, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
@@ -1643,16 +1747,19 @@ async fn install_wago_report(
     };
 
     // The error keeps its kind, so a failure can be said in plain words.
-    let summary = install_wago_addon_with_replace(
-        &mut database,
-        &addon_dir,
-        addon,
-        &api_key,
-        stability,
-        dry_run,
-        &[],
-    )
-    .await?;
+    let summary = {
+        let _waiting = status.waiting(&downloading(addon));
+        install_wago_addon_with_replace(
+            &mut database,
+            &addon_dir,
+            addon,
+            &api_key,
+            stability,
+            dry_run,
+            &[],
+        )
+        .await
+    }?;
 
     let report = output::InstallReport::new(
         report_target(paths, runtime, &addon_dir),
@@ -1677,6 +1784,7 @@ async fn install_tukui_report(
     runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
+    status: &output::Status,
 ) -> Result<InstallDone, Box<dyn std::error::Error>> {
     let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
@@ -1713,8 +1821,10 @@ async fn install_tukui_report(
         !dry_run,
     )?;
 
-    let summary =
-        install_tukui_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
+    let summary = {
+        let _waiting = status.waiting(&downloading(addon));
+        install_tukui_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await
+    }?;
 
     let report = output::InstallReport::new(
         report_target(paths, runtime, &addon_dir),
@@ -1739,6 +1849,7 @@ async fn install_wowinterface_report(
     runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
+    status: &output::Status,
 ) -> Result<InstallDone, Box<dyn std::error::Error>> {
     let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
@@ -1775,8 +1886,10 @@ async fn install_wowinterface_report(
         !dry_run,
     )?;
 
-    let summary =
-        install_wowinterface_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
+    let summary = {
+        let _waiting = status.waiting(&downloading(addon));
+        install_wowinterface_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await
+    }?;
 
     let warning = summary.warning.clone();
     let report = output::InstallReport::new(
@@ -1802,6 +1915,7 @@ async fn install_github_report(
     runtime: &AppRuntime,
     addon: &str,
     dry_run: bool,
+    status: &output::Status,
 ) -> Result<InstallDone, Box<dyn std::error::Error>> {
     let (_, config_state) = load_profile_config(paths)?;
     let configured_addon_dir = match &config_state {
@@ -1838,8 +1952,10 @@ async fn install_github_report(
         !dry_run,
     )?;
 
-    let summary =
-        install_github_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await?;
+    let summary = {
+        let _waiting = status.waiting(&downloading(addon));
+        install_github_addon_checked(&mut database, &addon_dir, addon, dry_run, &[]).await
+    }?;
 
     let report = output::InstallReport::new(
         report_target(paths, runtime, &addon_dir),
@@ -3571,21 +3687,29 @@ mod addon_dir_binding_tests {
         use crate::source_error::{SourceError, SourceErrorKind};
         let sandbox = sandbox();
         // Targets that are turned down before any request is made.
+        let quiet = crate::output::Status::none();
         let github = super::install_github_report(
             &sandbox.paths,
             &runtime(None),
             "https://example.com/not/github",
             true,
+            &quiet,
         )
         .await
         .expect_err("not a GitHub address");
-        let tukui = super::install_tukui_report(&sandbox.paths, &runtime(None), "nope", true)
-            .await
-            .expect_err("not a TukUI package");
-        let wowinterface =
-            super::install_wowinterface_report(&sandbox.paths, &runtime(None), "nope", true)
+        let tukui =
+            super::install_tukui_report(&sandbox.paths, &runtime(None), "nope", true, &quiet)
                 .await
-                .expect_err("not a WoWInterface address");
+                .expect_err("not a TukUI package");
+        let wowinterface = super::install_wowinterface_report(
+            &sandbox.paths,
+            &runtime(None),
+            "nope",
+            true,
+            &quiet,
+        )
+        .await
+        .expect_err("not a WoWInterface address");
         for error in [&github, &tukui, &wowinterface] {
             let source_error = error
                 .downcast_ref::<SourceError>()
@@ -3796,7 +3920,7 @@ mod addon_dir_binding_tests {
             .remove_addon("BadLink")
             .expect("forget");
 
-        let mut output = capture(OutputMode::Human);
+        let (mut output, written) = capture_with_status();
         let outcome = run_import_addons(
             sandbox.paths.clone(),
             runtime(None),
@@ -3808,6 +3932,8 @@ mod addon_dir_binding_tests {
         .expect("the run finishes");
         assert_eq!(outcome, CommandOutcome::Failures(1));
         assert_eq!(outcome.exit_status(), 1);
+        // The status line named the addon while it was its turn, and is gone.
+        assert_eq!(said(&output, &written), ["Installing 1 of 1: BadLink"]);
         let (stdout, _) = streams(output);
         let lines = stdout.lines().collect::<Vec<_>>();
         let failed = lines
@@ -4100,6 +4226,23 @@ mod addon_dir_binding_tests {
         output: &mut Captured,
     ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         let sources = [lemonup_core::find::FindSource::Wago];
+        find_on(sandbox, runtime, &sources, link, plain, output).await
+    }
+
+    /// `lemonup find --source ...` in the sandbox, for sources that are sent nothing here:
+    /// Wago.io with nothing to look up, and WoWInterface with its list cached.
+    async fn find_on(
+        sandbox: &Sandbox,
+        runtime: AppRuntime,
+        sources: &[lemonup_core::find::FindSource],
+        link: bool,
+        plain: bool,
+        output: &mut Captured,
+    ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+        assert!(!sources.contains(&lemonup_core::find::FindSource::Tukui));
+        if sources.contains(&lemonup_core::find::FindSource::WowInterface) {
+            crate::find::tests::fresh_wowi_cache(&sandbox.paths.cache_dir);
+        }
         let _ = fs::remove_dir_all(sandbox.retail.join("SharedAddon"));
         // With a key in the environment, a folder to look up would go to Wago.io: stop
         // here if the sandbox ever has one.
@@ -4123,7 +4266,7 @@ mod addon_dir_binding_tests {
             link,
             false,
             plain,
-            &sources,
+            sources,
             output,
         )
         .await;
@@ -4222,6 +4365,205 @@ mod addon_dir_binding_tests {
             "Run `lemonup` to configure your game first"
         );
         assert_eq!(streams(output), (String::new(), String::new()));
+    }
+
+    /// An output with a status line a test can read, and what it wrote.
+    fn capture_with_status() -> (Captured, crate::output::progress::testing::Buffer) {
+        let (status_line, written) =
+            crate::output::progress::testing::progress(Paint::PLAIN, false, 80);
+        (
+            capture(OutputMode::Human).with_progress(Some(status_line)),
+            written,
+        )
+    }
+
+    /// What the command said on the status line. The line must be gone by the time the
+    /// command is done: a frame drawn now shows nothing.
+    fn said(output: &Captured, written: &crate::output::progress::testing::Buffer) -> Vec<String> {
+        let status_line = output.progress().expect("status line");
+        written.take();
+        status_line.tick();
+        assert_eq!(written.take(), "", "the status line is still showing");
+        status_line.said()
+    }
+
+    #[tokio::test]
+    async fn the_commands_that_wait_say_what_they_wait_for_and_stop_saying_it() {
+        use lemonup_core::find::FindSource;
+        let sandbox = sandbox();
+
+        // find says which sources it asks. WoWInterface answers from its cached list here.
+        let (mut output, written) = capture_with_status();
+        find_on(
+            &sandbox,
+            runtime(None),
+            &[FindSource::WowInterface],
+            false,
+            false,
+            &mut output,
+        )
+        .await
+        .expect("found");
+        assert_eq!(said(&output, &written), ["Asking WoWInterface"]);
+        // Wago.io with nothing to send it is not asked, with a key or without one.
+        let (mut output, written) = capture_with_status();
+        find(&sandbox, runtime(None), false, false, &mut output)
+            .await
+            .expect("found");
+        assert_eq!(said(&output, &written), Vec::<String>::new());
+        // `--plain` never has a status line.
+        let (mut output, written) = capture_with_status();
+        find_on(
+            &sandbox,
+            runtime(None),
+            &[FindSource::WowInterface],
+            false,
+            true,
+            &mut output,
+        )
+        .await
+        .expect("found");
+        assert_eq!(said(&output, &written), Vec::<String>::new());
+
+        // An install says so once it has passed its own checks, and stops when it fails.
+        // This target is turned down before any request is made.
+        let (mut output, written) = capture_with_status();
+        let outcome = super::run_install_tukui(
+            sandbox.paths.clone(),
+            runtime(None),
+            "nope",
+            true,
+            &mut output,
+        )
+        .await
+        .expect("said");
+        assert_eq!(outcome, CommandOutcome::Failed);
+        assert_eq!(said(&output, &written), ["Downloading nope"]);
+
+        // With no addon to ask a source about, check and update wait for nothing.
+        unlink_tracked(&sandbox.paths);
+        let (mut output, written) = capture_with_status();
+        run_check(
+            sandbox.paths.clone(),
+            runtime(None),
+            Vec::new(),
+            &mut output,
+        )
+        .await
+        .expect("checked");
+        assert_eq!(said(&output, &written), Vec::<String>::new());
+        let (mut output, written) = capture_with_status();
+        run_update(
+            sandbox.paths.clone(),
+            runtime(None),
+            Vec::new(),
+            false,
+            true,
+            false,
+            &mut output,
+        )
+        .await
+        .expect("updated");
+        assert_eq!(said(&output, &written), Vec::<String>::new());
+
+        // An install that is refused never got as far as waiting.
+        fs::remove_file(&sandbox.paths.config_file).expect("remove config");
+        let (mut output, written) = capture_with_status();
+        super::run_install_tukui(
+            sandbox.paths.clone(),
+            runtime(None),
+            "elvui",
+            true,
+            &mut output,
+        )
+        .await
+        .expect_err("no AddOns folder");
+        assert_eq!(said(&output, &written), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_check_and_an_update_count_through_their_addons_on_the_status_line() {
+        use crate::update::{CheckEvent, LiveUpdateResult, LiveUpdateStatus, UpdateEvent};
+        let rows = [
+            AddonRecord::new("Deadly Boss Mods", "DBM-Core", SourceKind::Tukui),
+            AddonRecord::new("Pawn", "Pawn", SourceKind::WowInterface),
+            AddonRecord::new("Plater", "Plater", SourceKind::Wago),
+            AddonRecord::new("Mine", "Mine", SourceKind::Manual),
+        ];
+        let started = |folder: &str| folder.to_string();
+
+        // A check without a Wago.io key asks about two of the four.
+        let (output, written) = capture_with_status();
+        let status = output.status();
+        let selected = rows.iter().collect::<Vec<_>>();
+        let mut tally = crate::output::Tally::new("Checking", &selected, false);
+        {
+            let mut heard = super::check_progress(&mut tally, &status);
+            heard(CheckEvent::Finished {
+                folder: started("Plater"),
+                result: None,
+            });
+            heard(CheckEvent::Started {
+                folder: started("DBM-Core"),
+            });
+            heard(CheckEvent::Finished {
+                folder: started("DBM-Core"),
+                result: None,
+            });
+            heard(CheckEvent::Started {
+                folder: started("Pawn"),
+            });
+        }
+        assert_eq!(
+            output.progress().expect("status line").said(),
+            [
+                "Checking 1 of 2",
+                "Checking 1 of 2: Deadly Boss Mods",
+                "Checking 2 of 2",
+                "Checking 2 of 2: Pawn",
+            ]
+        );
+        status.clear();
+        said(&output, &written);
+
+        // An update says it is updating, and a dry run that it is checking.
+        let result = |folder: &str| LiveUpdateResult {
+            addon_name: folder.to_string(),
+            source: SourceKind::Tukui,
+            status: LiveUpdateStatus::UpToDate,
+            previous_version: None,
+            remote_version: None,
+            message: None,
+            not_linked: Vec::new(),
+            dev_copies: Vec::new(),
+        };
+        for (dry_run, label) in [(false, "Updating"), (true, "Checking")] {
+            let (output, _) = capture_with_status();
+            let status = output.status();
+            let mut tally = super::update_tally(&rows, &[], true, dry_run);
+            {
+                let mut heard = super::update_progress(&mut tally, &status);
+                heard(UpdateEvent::Started {
+                    folder: started("Plater"),
+                });
+                heard(UpdateEvent::Finished {
+                    folder: started("Plater"),
+                    result: result("Plater"),
+                });
+            }
+            assert_eq!(
+                output.progress().expect("status line").said(),
+                [format!("{label} 1 of 3: Plater"), format!("{label} 2 of 3")]
+            );
+        }
+        // Names that match nothing count nothing: the update itself turns them down.
+        let (output, _) = capture_with_status();
+        let none = super::update_tally(&rows, &["Nope".to_string()], true, false);
+        none.show(&output.status());
+        assert_eq!(
+            output.progress().expect("status line").said(),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]
