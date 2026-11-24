@@ -55,13 +55,19 @@ impl AddonDirMismatch {
         } else {
             format!("--profile {} ", self.profile)
         };
-        // The folder goes into the command only when it can sit between single quotes as it
-        // is. One with a quote, a backtick or a control character in it would end the quotes
-        // or the command early; the reason has named the folder already.
+        // The folder goes into the command only when every character of it is one no shell
+        // reads as more than text between single quotes: ASCII letters and digits, spaces,
+        // the path separators, and `. _ - ( )`. Anything else (a quote of any kind, a backtick,
+        // `%`, `&`, a line break, another alphabet) is left for the reader to pass; the reason
+        // has named the folder already.
         let requested = self.requested.display().to_string();
-        let quotable = !requested
-            .chars()
-            .any(|character| matches!(character, '\'' | '`') || character.is_control());
+        let quotable = requested.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    ' ' | '/' | '\\' | ':' | '.' | '_' | '-' | '(' | ')'
+                )
+        });
         let own_profile = if quotable {
             format!(
                 "`lemonup --profile {} --addon-dir '{requested}' sync`",
@@ -285,8 +291,14 @@ mod tests {
     fn a_folder_that_cannot_sit_in_quotes_is_left_out_of_the_command() {
         for folder in [
             "/games/O'Brien/_retail_/Interface/AddOns",
+            "/games/O\u{2019}Brien;calc/_retail_/Interface/AddOns",
             "/games/x` and `lemonup update-all --force`/_retail_/Interface/AddOns",
             "/games/two\nlines/_retail_/Interface/AddOns",
+            r"C:\WoW\A&calc\_retail_\Interface\AddOns",
+            r"C:\WoW\%TEMP%\_retail_\Interface\AddOns",
+            "/games/say \"hi\"/_retail_/Interface/AddOns",
+            "/games/$HOME/_retail_/Interface/AddOns",
+            "/games/j\u{fc}rgen/_retail_/Interface/AddOns",
         ] {
             let mismatch = super::AddonDirMismatch {
                 profile: crate::DEFAULT_PROFILE.to_string(),
@@ -294,15 +306,34 @@ mod tests {
                 requested: PathBuf::from(folder),
             };
             let hint = mismatch.hint();
+            // The profile it suggests is named after the game the folder belongs to, which a
+            // Windows path doesn't say on another system.
             assert!(
                 hint.starts_with(
-                    "to manage that install, give it its own profile: `lemonup --profile retail sync` with the same `--addon-dir` | to move this profile"
-                ),
+                    "to manage that install, give it its own profile: `lemonup --profile "
+                ) && hint.contains(" sync` with the same `--addon-dir` | to move this profile"),
                 "{hint}"
             );
             assert!(!hint.contains(folder), "{hint}");
             // What is wrong still names the folder.
             assert!(mismatch.reason().contains(folder));
+        }
+        // An ordinary folder, also one of Windows, goes into the command.
+        for folder in [
+            "/home/me/Games/World of Warcraft/_retail_/Interface/AddOns",
+            r"C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
+        ] {
+            let mismatch = super::AddonDirMismatch {
+                profile: crate::DEFAULT_PROFILE.to_string(),
+                bound: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+                requested: PathBuf::from(folder),
+            };
+            assert!(
+                mismatch
+                    .hint()
+                    .contains(&format!("--addon-dir '{folder}' sync`")),
+                "{folder}"
+            );
         }
     }
 
