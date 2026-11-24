@@ -57,11 +57,14 @@ pub(crate) fn collect_existing_import_folders(
     Ok(folders)
 }
 
+/// Installs the addons of `analysis` one after another. `on_start` hears which one is next,
+/// by its place in the list, before its request goes out.
 pub(crate) async fn install_transfer_addons(
     database: &mut StateDatabase,
     addon_dir: &Path,
     analysis: &ImportAnalysis,
     wago_api_key: Option<&str>,
+    mut on_start: impl FnMut(usize, &TransferAddon),
 ) -> TransferInstallSummary {
     let mut summary = TransferInstallSummary {
         installed: 0,
@@ -70,7 +73,8 @@ pub(crate) async fn install_transfer_addons(
         outcomes: Vec::new(),
     };
 
-    for addon in &analysis.to_install {
+    for (index, addon) in analysis.to_install.iter().enumerate() {
+        on_start(index, addon);
         let result = match install_transfer_addon(database, addon_dir, addon, wago_api_key).await {
             Ok(warning) => {
                 summary.installed += 1;
@@ -183,7 +187,26 @@ mod tests {
             duplicate_addons: Vec::new(),
             unsupported_addons: Vec::new(),
         };
-        let summary = install_transfer_addons(&mut database, &addon_dir, &analysis, None).await;
+        let mut started = Vec::new();
+        let summary = install_transfer_addons(
+            &mut database,
+            &addon_dir,
+            &analysis,
+            None,
+            |index, addon| {
+                started.push((index, addon.name.clone()));
+            },
+        )
+        .await;
+        // Each addon is announced before its turn, in the order of the list.
+        assert_eq!(
+            started,
+            [
+                (0, "NoLink".to_string()),
+                (1, "WagoOne".to_string()),
+                (2, "Mine".to_string()),
+            ]
+        );
         assert_eq!(summary.installed, 0);
         assert_eq!(
             summary.errors,
