@@ -432,12 +432,14 @@ async fn download_tukui_release_bytes(
     addon: &TukuiAddon,
 ) -> Result<Vec<u8>, SourceError> {
     let download_url = validate_tukui_download_url(&addon.url)?;
-    client
+    let response = client
         .get(download_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(SourceError::from_keyless_reqwest)?
+        .map_err(SourceError::from_keyless_reqwest)?;
+    crate::http::follow_download_redirects(response, SourceError::from_keyless_reqwest)
+        .await?
         .error_for_status()
         .map_err(SourceError::from_keyless_reqwest)?
         .bytes()

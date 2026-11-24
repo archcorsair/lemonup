@@ -321,12 +321,14 @@ async fn download_wowinterface_release_bytes(
     addon: &WowinterfaceAddon,
 ) -> Result<Vec<u8>, SourceError> {
     let download_url = validate_wowinterface_download_url(&addon.ui_download)?;
-    client
+    let response = client
         .get(download_url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(SourceError::from_keyless_reqwest)?
+        .map_err(SourceError::from_keyless_reqwest)?;
+    crate::http::follow_download_redirects(response, SourceError::from_keyless_reqwest)
+        .await?
         .error_for_status()
         .map_err(SourceError::from_keyless_reqwest)?
         .bytes()

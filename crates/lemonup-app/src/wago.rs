@@ -878,13 +878,15 @@ async fn download_wago_release_bytes(
     download_url: &Url,
     api_key: &str,
 ) -> Result<Vec<u8>, SourceError> {
-    client
+    let response = client
         .get(download_url.clone())
         .bearer_auth(api_key)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
-        .map_err(SourceError::from_reqwest)?
+        .map_err(SourceError::from_reqwest)?;
+    crate::http::follow_download_redirects(response, SourceError::from_reqwest)
+        .await?
         .error_for_status()
         .map_err(SourceError::from_reqwest)?
         .bytes()
@@ -1275,6 +1277,39 @@ mod tests {
     use tempfile::tempdir;
     use zip::CompressionMethod;
     use zip::write::SimpleFileOptions;
+
+    #[tokio::test]
+    async fn a_download_redirected_to_an_address_with_a_space_gets_the_zip() {
+        // Wago.io sends OmniCD's download on to `cdn.wago.io/.../omnicd-v2.8.35 (1).zip`.
+        let server = crate::http::test_server::serve(vec![
+            crate::http::test_server::redirect("/files/omnicd-v2.8.35 (1).zip"),
+            crate::http::test_server::ok(b"PK\x03\x04 the zip"),
+        ]);
+        let client = crate::http::client_builder().build().expect("client");
+        let url = reqwest::Url::parse(&server.url("/external/download/omnicd")).expect("url");
+
+        let bytes = super::download_wago_release_bytes(&client, &url, "wago-key")
+            .await
+            .expect("the zip");
+        assert_eq!(bytes, b"PK\x03\x04 the zip");
+    }
+
+    #[tokio::test]
+    async fn a_download_that_ends_at_a_redirect_page_fails() {
+        let server = crate::http::test_server::serve(vec![crate::http::test_server::response(
+            "302 Found",
+            &["Content-Type: text/html"],
+            b"Redirecting to...",
+        )]);
+        let client = crate::http::client_builder().build().expect("client");
+        let url = reqwest::Url::parse(&server.url("/external/download/omnicd")).expect("url");
+
+        let error = super::download_wago_release_bytes(&client, &url, "wago-key")
+            .await
+            .expect_err("a redirect page is not the zip");
+        assert_eq!(error.kind, SourceErrorKind::Other);
+        assert!(error.detail.contains("redirect"), "{}", error.detail);
+    }
 
     fn sample_addon() -> WagoAddonSummary {
         WagoAddonSummary {
