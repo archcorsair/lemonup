@@ -24,7 +24,9 @@ foreach ($target in $matrix | Where-Object { $_.requires_api_key }) {
     }
     # A sandbox seeded before still has the addon, so its dry run is refused. The reset below
     # removes it; anything else that fails is worth knowing before the sandbox is wiped.
-    if ($preflight.Output -notmatch 'is already installed|already in your AddOns folder') {
+    # Output is a list of lines: -match keeps the lines that match, so no match is an empty list.
+    $alreadyThere = $preflight.Output -match 'is already installed|already in your AddOns folder'
+    if ($preflight.ExitCode -eq 0 -or -not $alreadyThere) {
         Assert-ProcessSucceeded -Result $preflight -Context "preflight $($target.selector)"
     }
 }

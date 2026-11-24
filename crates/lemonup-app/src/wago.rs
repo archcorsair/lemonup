@@ -1782,7 +1782,32 @@ mod tests {
         // And nothing was touched.
         assert!(addon_dir.join("Details").join("old.lua").exists());
         assert!(!addon_dir.join("Details").join("Details.toc").exists());
-        assert_eq!(database.list_addons().expect("list addons").len(), 1);
+        let rows = database.list_addons().expect("list addons");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, SourceKind::GitHub);
+
+        // The same addon linked to Wago.io already: its own folders are in the way, and the
+        // refusal says it is that addon, already installed.
+        let mut own = lemonup_core::AddonRecord::new("Details", "Details", SourceKind::Wago);
+        own.source_url = Some(format!(
+            "https://addons.wago.io/addons/{}",
+            sample_addon().id
+        ));
+        database.upsert_addon(&own).expect("the same addon, linked");
+        let refused = dry_run(&mut database).expect_err("already installed");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersInTheWay);
+        assert_eq!(
+            refused
+                .clash
+                .expect("clash")
+                .installed
+                .map(|installed| installed.folder),
+            Some("Details".to_string())
+        );
+        assert!(addon_dir.join("Details").join("old.lua").exists());
+        let rows = database.list_addons().expect("list addons");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].version, own.version);
     }
 
     #[test]

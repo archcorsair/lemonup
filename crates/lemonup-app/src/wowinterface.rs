@@ -1210,6 +1210,37 @@ mod tests {
         );
         assert!(database.list_addons().expect("list").is_empty());
 
+        // A folder of an addon linked to another source: the real install refuses.
+        let linked = lemonup_core::AddonRecord::new(
+            "ElvUI WindTools",
+            "ElvUI_WindTools",
+            lemonup_core::SourceKind::GitHub,
+        );
+        database.upsert_addon(&linked).expect("linked addon");
+        let refused = install_downloaded_wowinterface_addon(
+            &mut database,
+            &addon_dir,
+            &addon,
+            &bytes,
+            true,
+            &[],
+        )
+        .expect_err("a dry run over a linked addon");
+        assert_eq!(
+            refused.kind,
+            crate::source_error::SourceErrorKind::FoldersOfLinkedAddon
+        );
+        let rows = database.list_addons().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, lemonup_core::SourceKind::GitHub);
+        assert!(
+            !addon_dir
+                .join("ElvUI_WindTools")
+                .join("ElvUI_WindTools.toc")
+                .exists()
+        );
+        database.remove_addon("ElvUI_WindTools").expect("unlink");
+
         // With nothing in the way the dry run says what it would install, and installs nothing.
         std::fs::remove_dir_all(addon_dir.join("ElvUI_WindTools")).expect("remove");
         let summary = install_downloaded_wowinterface_addon(
@@ -1223,6 +1254,7 @@ mod tests {
         .expect("dry run");
         assert!(summary.dry_run);
         assert!(!addon_dir.join("ElvUI_WindTools").exists());
+        assert!(database.list_addons().expect("list").is_empty());
     }
 
     #[test]

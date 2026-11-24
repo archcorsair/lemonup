@@ -3430,6 +3430,8 @@ games = ["forever"]
             crate::source_error::SourceErrorKind::FoldersInTheWay
         );
         assert!(addon_dir.join("AdiBags").join("old.lua").exists());
+        assert!(!addon_dir.join("AdiBags").join("AdiBags.toc").exists());
+        assert!(!addon_dir.join("AdiBags_Config").exists());
         assert!(database.list_addons().expect("list").is_empty());
 
         let refused = install_downloaded_github_addon(
@@ -3485,6 +3487,23 @@ games = ["forever"]
         let mut linked = AddonRecord::new("AdiBags", "AdiBags", SourceKind::Wago);
         linked.source_url = Some("https://addons.wago.io/addons/adibags".to_string());
         database.upsert_addon(&linked).expect("linked row");
+
+        // A dry run is refused as the install it stands for would be.
+        let dry_run = install_downloaded_github_addon(
+            &mut database,
+            &addon_dir,
+            &resolved_repo("AdiAddons", "AdiBags"),
+            &adibags_shaped_zip("-- v1"),
+            true,
+            &[],
+        )
+        .expect_err("a dry run over a linked addon");
+        assert_eq!(
+            dry_run.kind,
+            crate::source_error::SourceErrorKind::FoldersOfLinkedAddon
+        );
+        assert!(addon_dir.join("AdiBags").join("old.lua").exists());
+        assert!(!addon_dir.join("AdiBags_Config").exists());
 
         let refused = install_downloaded_github_addon(
             &mut database,

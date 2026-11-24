@@ -977,6 +977,16 @@ mod tests {
         let summary = dry_run(&mut database).expect("dry run");
         assert!(summary.dry_run);
         assert!(!addon_dir.join("Tukui").exists());
+        assert!(database.list_addons().expect("list").is_empty());
+
+        // A Not linked folder in the way: the real install would ask first.
+        std::fs::create_dir_all(addon_dir.join("Tukui")).expect("not linked copy");
+        std::fs::write(addon_dir.join("Tukui").join("old.lua"), "-- old").expect("old file");
+        let refused = dry_run(&mut database).expect_err("folder in the way");
+        assert_eq!(refused.kind, SourceErrorKind::FoldersInTheWay);
+        assert!(addon_dir.join("Tukui").join("old.lua").exists());
+        assert!(!addon_dir.join("Tukui").join("Tukui.toc").exists());
+        assert!(database.list_addons().expect("list").is_empty());
 
         // A folder of a linked addon: the real install refuses, so the dry run does too.
         let linked = AddonRecord::new("Tukui", "Tukui", SourceKind::Tukui);
@@ -991,6 +1001,9 @@ mod tests {
                 .map(|installed| installed.folder),
             Some("Tukui".to_string())
         );
+        assert!(addon_dir.join("Tukui").join("old.lua").exists());
+        assert!(!addon_dir.join("Tukui").join("Tukui.toc").exists());
+        assert_eq!(database.list_addons().expect("list").len(), 1);
     }
 
     #[test]
