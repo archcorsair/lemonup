@@ -4,8 +4,25 @@ use std::path::PathBuf;
 use lemonup_core::find::{FindInputs, LikelyReason, match_addons};
 use lemonup_core::{OwnedFolder, SourceKind, UpdateStatus};
 
+use super::human::{Rerun, closing_text, draw_closing};
 use super::*;
 use crate::output::Paint;
+
+/// The closing lines as `lemonup find` draws them.
+fn human_closing(
+    report: &FindReport,
+    names: &LocalNames,
+    link: Option<LinkOutcome>,
+    paint: Paint,
+) -> Vec<String> {
+    draw_closing(&closing_text(report, names, link, HERE), paint)
+}
+
+/// A run on the default profile's own AddOns folder.
+const HERE: Rerun<'static> = Rerun {
+    profile: "default",
+    addon_dir_given: false,
+};
 
 /// A WoWInterface file list of `count` files, numbered from `first`.
 fn wowi_list(first: usize, count: usize) -> String {
@@ -1088,8 +1105,11 @@ fn the_last_line_always_says_what_happened() {
     let names = full_names();
 
     assert_eq!(
-        human_closing(&report, &names, None, Paint::PLAIN).expect("closing"),
-        ["Nothing was changed. `lemonup find --link` links the 5 addons ready to link."]
+        human_closing(&report, &names, None, Paint::PLAIN),
+        [
+            "Nothing changed - 5 addons ready to link",
+            "Run `lemonup find --link` to link them"
+        ]
     );
     let nothing_ready = FindReport {
         results: vec![only(FindLabel::NotFound, "Spy")],
@@ -1098,8 +1118,8 @@ fn the_last_line_always_says_what_happened() {
         not_asked: Vec::new(),
     };
     assert_eq!(
-        human_closing(&nothing_ready, &names, None, Paint::PLAIN).expect("closing"),
-        ["Nothing was changed."]
+        human_closing(&nothing_ready, &names, None, Paint::PLAIN),
+        ["Nothing changed"]
     );
     assert_eq!(
         human_closing(
@@ -1107,9 +1127,8 @@ fn the_last_line_always_says_what_happened() {
             &names,
             Some(LinkOutcome::NothingToLink),
             Paint::PLAIN,
-        )
-        .expect("closing"),
-        ["Nothing was linked. No addon is ready to link."]
+        ),
+        ["Nothing linked - no addon is ready to link"]
     );
 }
 
@@ -1129,17 +1148,19 @@ fn find_link_without_yes_prints_a_refusal_that_says_what_moves() {
     )
     .expect("a refusal is an outcome");
 
-    let error = human_closing(&report, &names, Some(outcome), Paint::PLAIN).expect_err("refused");
+    let LinkOutcome::NeedsYes(regrouping) = outcome else {
+        panic!("{outcome:?}");
+    };
 
-    assert!(matches!(error, LemonupError::Refused(_)), "{error:?}");
     assert_eq!(
-        error.to_string(),
-        "1 of these moves folders between addons: GatherMate2 also takes \
-         GatherMate2Storage_Midnight. Nothing was linked. Run `lemonup find --link --yes` \
-         to link the 2 addons ready to link."
+        needs_yes_refusal(&report, &names, &regrouping, HERE),
+        (
+            "Nothing linked - 1 match moves folders between addons: GatherMate2 also takes \
+             GatherMate2Storage_Midnight"
+                .to_string(),
+            "Run `lemonup find --link --yes` to link the 2 addons ready to link".to_string()
+        )
     );
-    assert!(!error.to_string().contains("invalid argument"));
-    assert!(!error.to_string().contains("joins from"));
 }
 
 #[test]
@@ -1161,19 +1182,14 @@ fn a_refusal_names_folders_that_become_their_own_addon() {
         not_asked: Vec::new(),
     };
 
-    let error = human_closing(
-        &report,
-        &names,
-        Some(LinkOutcome::NeedsYes(vec![gather])),
-        Paint::PLAIN,
-    )
-    .expect_err("refused");
-
     assert_eq!(
-        error.to_string(),
-        "1 of these moves folders between addons: GatherMate2 also takes \
-         GatherMate2Storage_Midnight; GatherMate2_Data becomes its own addon. Nothing was \
-         linked. Run `lemonup find --link --yes` to link the addon ready to link."
+        needs_yes_refusal(&report, &names, &[gather], HERE),
+        (
+            "Nothing linked - 1 match moves folders between addons: GatherMate2 also takes \
+             GatherMate2Storage_Midnight; GatherMate2_Data becomes its own addon"
+                .to_string(),
+            "Run `lemonup find --link --yes` to link the addon ready to link".to_string()
+        )
     );
 }
 
@@ -1193,10 +1209,10 @@ fn find_link_with_yes_ends_with_what_was_linked_and_what_is_ready_to_update() {
     .expect("linked");
 
     assert_eq!(
-        human_closing(&report, &names, Some(outcome), Paint::PLAIN).expect("closing"),
+        human_closing(&report, &names, Some(outcome), Paint::PLAIN),
         [
-            "Linked 2 addons: 1 up to date, 1 with an update ready (Pawn). \
-          `lemonup update-all` updates it."
+            "✓ Linked 2 addons - 1 up to date, 1 update ready",
+            "Run `lemonup update-all` to update it"
         ]
     );
 }
@@ -1240,15 +1256,16 @@ fn find_link_closing_names_the_linked_addons_curseforge_also_manages() {
         panic!("{outcome:?}");
     };
     assert_eq!(curseforge, &["Pawn"]);
-    let lines =
-        human_closing(&report, &full_names(), Some(outcome), Paint::PLAIN).expect("closing");
+    let lines = human_closing(&report, &full_names(), Some(outcome), Paint::PLAIN);
     assert_eq!(
         lines.last().map(String::as_str),
         Some("CurseForge also manages Pawn. Mark it Ignored there (Install Settings).")
     );
 
+    let pawn = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+    let spy = AddonRecord::new("Spy", "Spy", SourceKind::Wago);
     let plain = plain_link_lines(LinkOutcome::Linked {
-        rows: Vec::new(),
+        rows: vec![pawn.clone(), spy.clone()],
         unconfirmed: Vec::new(),
         curseforge: vec!["Pawn".to_string()],
     })
@@ -1261,7 +1278,7 @@ fn find_link_closing_names_the_linked_addons_curseforge_also_manages() {
         )
     );
     let plain = plain_link_lines(LinkOutcome::Linked {
-        rows: Vec::new(),
+        rows: vec![pawn, spy],
         unconfirmed: Vec::new(),
         curseforge: vec!["Pawn".to_string(), "Spy".to_string()],
     })
@@ -1280,18 +1297,19 @@ fn a_link_the_database_does_not_hold_is_said_not_claimed() {
     let linked = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
     let outcome = LinkOutcome::Linked {
         rows: vec![linked],
-        unconfirmed: vec!["Spy".to_string()],
+        unconfirmed: vec![AddonRecord::new("Spy", "Spy", SourceKind::WowInterface)],
         curseforge: Vec::new(),
     };
 
-    let lines =
-        human_closing(&full_report(), &full_names(), Some(outcome), Paint::PLAIN).expect("closing");
+    let lines = human_closing(&full_report(), &full_names(), Some(outcome), Paint::PLAIN);
 
-    assert!(lines[0].starts_with("Linked 1 addon: "), "{lines:?}");
+    assert!(lines[0].starts_with("✓ Linked 1 addon - "), "{lines:?}");
     assert_eq!(
-        lines[1],
-        "LemonUp could not confirm that these were also linked: Spy. \
-         Run `lemonup find` again to see where they stand."
+        lines[1..],
+        [
+            "Could not confirm these were also linked: Spy",
+            "Run `lemonup find` again to see where they stand"
+        ]
     );
 }
 
@@ -1476,86 +1494,43 @@ fn colored_detail_lines_are_muted_and_the_note_is_muted() {
 }
 
 #[test]
-fn the_closing_line_and_the_refusal_are_bold() {
-    let closing =
-        human_closing(&full_report(), &full_names(), None, Paint::terminal()).expect("closing");
+fn the_closing_lines_draw_the_done_mark_and_the_command_to_run() {
+    let closing = human_closing(&full_report(), &full_names(), None, Paint::terminal());
     assert_eq!(
         closing,
-        [format!(
-            "{BOLD}Nothing was changed. {END}{COMMAND}lemonup find --link{END}{BOLD} links the 5 \
-             addons ready to link.{END}"
-        )]
-    );
-    let plain = human_closing(&full_report(), &full_names(), None, Paint::PLAIN).expect("closing");
-    assert_eq!(
-        plain,
-        ["Nothing was changed. `lemonup find --link` links the 5 addons ready to link."]
+        [
+            "Nothing changed - 5 addons ready to link".to_string(),
+            format!("Run {COMMAND}lemonup find --link{END} to link them"),
+        ]
     );
 
-    let linked = LinkOutcome::Linked {
+    let linked = || LinkOutcome::Linked {
         rows: vec![AddonRecord::new("Pawn", "Pawn", SourceKind::Wago)],
         unconfirmed: Vec::new(),
         curseforge: Vec::new(),
     };
-    let lines = human_closing(
-        &full_report(),
-        &full_names(),
-        Some(linked),
-        Paint::terminal(),
-    )
-    .expect("closing");
-    assert!(
-        lines[0].starts_with(&format!("{BOLD}Linked 1 addon: ")),
-        "{lines:?}"
-    );
-    assert!(lines[0].ends_with(END));
-
-    let mut gather = found(FindSource::Wago, "GatherMate2", "GatherMate2", "1.0", "1.0");
-    gather.joining = vec![folder_move("GatherMate2Storage_Midnight", "Other")];
-    let report = FindReport {
-        results: vec![exact(gather.clone())],
-        failed: Vec::new(),
-        skipped: Vec::new(),
-        not_asked: Vec::new(),
-    };
-    let refused = |error_paint| {
-        let error = human_closing(
-            &report,
+    // Something was done: the line starts with the done mark, green on a terminal.
+    assert_eq!(
+        human_closing(
+            &full_report(),
             &full_names(),
-            Some(LinkOutcome::NeedsYes(vec![gather.clone()])),
+            Some(linked()),
             Paint::terminal(),
-        )
-        .expect_err("refused")
-        .to_string();
-        // Kept in plain words, however the report is drawn, and drawn only when printed.
-        assert!(!error.contains('\x1b'), "{error:?}");
-        human_refusal(&error, error_paint)
-    };
-    let bold = refused(Paint::terminal());
-    assert!(bold.starts_with(BOLD) && bold.ends_with(END), "{bold:?}");
-    assert!(
-        bold.contains(&format!(
-            " Run {END}{COMMAND}lemonup find --link --yes{END}{BOLD} to link the "
-        )),
-        "{bold:?}"
-    );
-    let plain = refused(Paint::PLAIN);
-    assert!(!plain.contains('\x1b'));
-    assert!(
-        plain.contains(" Run `lemonup find --link --yes` to link the "),
-        "{plain:?}"
-    );
-    // The refusal names addons and folders, so an escape code in a name never gets through.
-    let named = "Evil\x1b]0;x\x07 moves folders. Run `lemonup find --link --yes`.";
-    assert_eq!(
-        human_refusal(named, Paint::terminal()),
-        format!(
-            "{BOLD}Evil ]0;x  moves folders. Run {END}{COMMAND}lemonup find --link --yes{END}{BOLD}.{END}"
-        )
+        ),
+        [format!("{GREEN}✓{END} Linked 1 addon - 1 not checked yet")]
     );
     assert_eq!(
-        human_refusal(named, Paint::PLAIN),
-        "Evil ]0;x  moves folders. Run `lemonup find --link --yes`."
+        human_closing(&full_report(), &full_names(), Some(linked()), Paint::PLAIN),
+        ["✓ Linked 1 addon - 1 not checked yet"]
+    );
+    assert_eq!(
+        human_closing(
+            &full_report(),
+            &full_names(),
+            Some(linked()),
+            Paint::PLAIN.with_symbols(crate::theme::Symbols::SIMPLE),
+        ),
+        ["ok Linked 1 addon - 1 not checked yet"]
     );
 }
 
@@ -1569,8 +1544,7 @@ fn uncolored_output_has_no_escape_codes() {
         Paint::PLAIN,
     );
     assert!(lines.iter().all(|line| !line.contains('\x1b')), "{lines:?}");
-    let closing =
-        human_closing(&full_report(), &full_names(), None, Paint::PLAIN).expect("closing");
+    let closing = human_closing(&full_report(), &full_names(), None, Paint::PLAIN);
     assert!(closing.iter().all(|line| !line.contains('\x1b')));
 
     // Colors only add escape codes: with them stripped, the text is the same.
@@ -1628,20 +1602,13 @@ fn a_refusal_says_an_addon_moves_out_of_the_row_that_holds_its_folder() {
         not_asked: Vec::new(),
     };
 
-    let error = human_closing(
-        &report,
-        &full_names(),
-        Some(LinkOutcome::NeedsYes(vec![data])),
-        Paint::PLAIN,
-    )
-    .expect_err("refused")
-    .to_string();
+    let (reason, _) = needs_yes_refusal(&report, &full_names(), &[data], HERE);
 
-    assert!(
-        error.contains("GatherMate2Data moves out of GatherMate2"),
-        "{error}"
+    assert_eq!(
+        reason,
+        "Nothing linked - 1 match moves folders between addons: GatherMate2Data moves out \
+         of GatherMate2"
     );
-    assert!(!error.contains("also takes"), "{error}");
 }
 
 #[test]
@@ -2185,4 +2152,651 @@ fn the_key_value_lines_keep_other_for_kinds_a_lookup_never_ends_in() {
         "no_connection"
     );
     assert_eq!(super::problem_name(SourceErrorKind::SlowDown), "slow_down");
+}
+
+fn find_target() -> FindTarget {
+    FindTarget {
+        game: "Forever".to_string(),
+        profile: "default".to_string(),
+        addon_dir: PathBuf::from("/games/wow/_forever_/Interface/AddOns"),
+    }
+}
+
+type Captured = crate::output::Output<Vec<u8>, Vec<u8>>;
+
+fn capture(mode: crate::output::OutputMode, paint: Paint) -> Captured {
+    crate::output::Output::new(mode, paint, paint, "default", Vec::new(), Vec::new())
+}
+
+fn streams(output: Captured) -> (String, String) {
+    let (stdout, stderr) = output.into_writers();
+    (
+        String::from_utf8(stdout).expect("utf-8"),
+        String::from_utf8(stderr).expect("utf-8"),
+    )
+}
+
+/// `lemonup find` from the answers on, as [`crate::finish_find`] ends it: what stdout and
+/// stderr got, and how the run ended.
+fn finish(
+    mode: crate::output::OutputMode,
+    report: &FindReport,
+    problems: &[SourceProblem],
+    link: Option<Result<LinkOutcome, LemonupError>>,
+) -> (Result<crate::CommandOutcome, String>, String, String) {
+    let target = find_target();
+    let names = full_names();
+    let found = Found {
+        target: &target,
+        report,
+        problems,
+        names: &names,
+        folders_read: 52,
+        wago_folders: 44,
+        addon_dir_given: false,
+    };
+    let mut output = capture(mode, Paint::PLAIN);
+    let ended = crate::finish_find(found, link.map(|linked| || linked), &mut output)
+        .map_err(|error| error.to_string());
+    let (stdout, stderr) = streams(output);
+    (ended, stdout, stderr)
+}
+
+#[test]
+fn find_ends_its_report_with_what_happened_and_exits_1_when_a_source_failed() {
+    use crate::output::OutputMode;
+    let (ended, stdout, stderr) = finish(
+        OutputMode::Human,
+        &full_report(),
+        &wowinterface_down(),
+        None,
+    );
+
+    assert_eq!(ended, Ok(crate::CommandOutcome::Failures(1)));
+    assert_eq!(stderr, "");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "Forever  /games/wow/_forever_/Interface/AddOns");
+    assert_eq!(lines[1], "Sent 44 folder names and file hashes to Wago.io.");
+    // The report, a blank line, then what happened.
+    assert_eq!(
+        &lines[lines.len() - 3..],
+        [
+            "",
+            "Nothing changed - 5 addons ready to link",
+            "Run `lemonup find --link` to link them"
+        ]
+    );
+    let report = human_report(
+        &full_report(),
+        &wowinterface_down(),
+        &full_names(),
+        44,
+        Paint::PLAIN,
+    );
+    assert_eq!(lines[1..lines.len() - 3], report);
+
+    let (ended, _, _) = finish(OutputMode::Human, &full_report(), &[], None);
+    assert_eq!(ended, Ok(crate::CommandOutcome::Success));
+}
+
+#[test]
+fn find_json_is_one_document_with_every_result() {
+    use crate::output::OutputMode;
+    let (ended, stdout, stderr) =
+        finish(OutputMode::Json, &full_report(), &wowinterface_down(), None);
+
+    assert_eq!(ended, Ok(crate::CommandOutcome::Failures(1)));
+    assert_eq!(stderr, "");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        stdout.starts_with(concat!(
+            r#"{"schema":1,"command":"find","profile":"default","#,
+            r#""addon_dir":"/games/wow/_forever_/Interface/AddOns","#,
+            r#""sources_asked":["wago","wowinterface","tukui"],"#,
+            r#""sources_without_key":[],"#,
+            r#""problems":[{"source":"wowinterface","error_kind":"no_connection","message":"timed out"}],"#,
+            r#""summary":{"folders":52,"addons":24,"exact":6,"likely":1,"partial":1,"choose_one":1,"#,
+            r#""not_checked":1,"curseforge_only":11,"not_found":2,"developer_copy":1},"#,
+            r#""addons":[{"name":"Ask Mr. Robot Classic","folder":"AskMrRobot","label":"exact","#,
+            r#""folders":null,"match":{"label":"exact","name":"Ask Mr Robot","#,
+            r#""source":"wago","id":"1","url":null,"author":null,"installed_version":"v1003","#,
+            r#""remote_version":"v1003","folder":"AskMrRobot","folders":["AskMrRobot"],"joining":[],"#,
+            r#""leaving":[],"missing":[],"differing":[],"linkable":true,"blocked":[]},"#,
+            r#""candidates":[],"not_checked_by":[],"curseforge_id":null},"#,
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("\"link\":null,\"warnings\":[]}\n"),
+        "{stdout}"
+    );
+
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let addon = |name: &str| {
+        document["addons"]
+            .as_array()
+            .expect("addons")
+            .iter()
+            .find(|addon| addon["name"] == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .clone()
+    };
+    // A match that takes folders from other addons says where each comes from: `null` for a
+    // folder that is an addon of its own now.
+    // An addon has the name LemonUp shows; its match has the source's.
+    let gather = addon("GatherMate2");
+    assert_eq!(gather["match"]["name"], "GatherMate 2");
+    assert_eq!(
+        gather["match"]["joining"][0],
+        serde_json::json!({ "folder": "GatherMate2Storage_Dragonflight", "from": null })
+    );
+    assert_eq!(
+        gather["match"]["leaving"],
+        serde_json::json!(["GatherMate2_Data"])
+    );
+    assert_eq!(
+        gather["match"]["missing"],
+        serde_json::json!(["GatherMate2Storage_Gone"])
+    );
+    assert_eq!(
+        addon("GatherMate2Data")["match"]["joining"],
+        serde_json::json!([{ "folder": "GatherMate2_Data", "from": "GatherMate2" }])
+    );
+    // An exact match that can't be linked says so, and why.
+    let details = addon("Details");
+    assert_eq!(details["label"], "exact");
+    assert_eq!(details["match"]["linkable"], false);
+    assert_eq!(
+        details["match"]["blocked"],
+        serde_json::json!([
+            { "folder": "Details_Shared", "reason": "linked", "addon": "Details Core" }
+        ])
+    );
+    // A result with a match lists its folders there. Without one, the addon's own.
+    assert_eq!(gather["folders"], serde_json::Value::Null);
+    assert_eq!(
+        gather["match"]["folders"],
+        serde_json::json!(["GatherMate2"])
+    );
+    // Only "choose one" lists candidates, each with its own label.
+    let questie = addon("Questie");
+    assert_eq!(questie["label"], "choose_one");
+    assert_eq!(questie["match"], serde_json::Value::Null);
+    let labels = questie["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .map(|candidate| (candidate["folder"].clone(), candidate["label"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        [
+            (serde_json::json!("QuestieDev"), serde_json::json!("likely")),
+            (serde_json::json!("Questie"), serde_json::json!("partial")),
+        ]
+    );
+    assert_eq!(questie["folders"], serde_json::Value::Null);
+    let spy = addon("Spy");
+    assert_eq!(spy["label"], "not_checked");
+    assert_eq!(spy["folders"], serde_json::json!(["Spy"]));
+    assert_eq!(spy["not_checked_by"], serde_json::json!(["wowinterface"]));
+    assert_eq!(addon("ForeverAuras")["curseforge_id"], "9001");
+}
+
+#[test]
+fn find_json_says_which_sources_were_asked_and_which_had_no_key() {
+    use crate::output::OutputMode;
+    let document = |report: &FindReport, problems: &[SourceProblem]| {
+        let (_, stdout, _) = finish(OutputMode::Json, report, problems, None);
+        serde_json::from_str::<serde_json::Value>(&stdout).expect("json")
+    };
+    let mut report = full_report();
+    report.failed.clear();
+
+    let rejected = [SourceProblem {
+        source: FindSource::Wago,
+        error: SourceError::new(SourceErrorKind::KeyRejected, "401"),
+    }];
+    let answered = document(&report, &rejected);
+    assert_eq!(
+        answered["problems"],
+        serde_json::json!([
+            { "source": "wago", "error_kind": "key_rejected", "message": "401" }
+        ])
+    );
+    assert_eq!(
+        answered["sources_asked"],
+        serde_json::json!(["wago", "wowinterface", "tukui"])
+    );
+
+    // A source without its key was not asked, and neither was one that was left out.
+    report.skipped = vec![FindSource::Wago];
+    report.not_asked = vec![FindSource::Wago, FindSource::Tukui];
+    let skipped = document(&report, &[]);
+    assert_eq!(skipped["sources_without_key"], serde_json::json!(["wago"]));
+    assert_eq!(
+        skipped["sources_asked"],
+        serde_json::json!(["wowinterface"])
+    );
+}
+
+#[test]
+fn find_link_json_lists_what_was_linked() {
+    use crate::output::OutputMode;
+    let mut linked = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+    linked.version = Some("1.0".to_string());
+    let outcome = LinkOutcome::Linked {
+        // Two addons can share a name: the folder says which one CurseForge manages.
+        rows: vec![
+            linked,
+            AddonRecord::new("Pawn", "PawnClassic", SourceKind::Wago),
+        ],
+        unconfirmed: vec![AddonRecord::new("Spy", "Spy", SourceKind::WowInterface)],
+        curseforge: vec!["Pawn".to_string()],
+    };
+    let (ended, stdout, stderr) = finish(OutputMode::Json, &full_report(), &[], Some(Ok(outcome)));
+
+    assert_eq!(ended, Ok(crate::CommandOutcome::Success));
+    assert_eq!(stderr, "");
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(
+        document["link"],
+        serde_json::json!({
+            "linked": [
+                { "name": "Pawn", "folder": "Pawn", "source": "wago", "also_on_curseforge": true },
+                {
+                    "name": "Pawn",
+                    "folder": "PawnClassic",
+                    "source": "wago",
+                    "also_on_curseforge": false,
+                },
+            ],
+            "unconfirmed": [{ "name": "Spy", "folder": "Spy", "source": "wowinterface" }],
+        })
+    );
+
+    // `--link` with nothing to link is a run that worked and linked nothing.
+    let (ended, stdout, _) = finish(
+        OutputMode::Json,
+        &full_report(),
+        &[],
+        Some(Ok(LinkOutcome::NothingToLink)),
+    );
+    assert_eq!(ended, Ok(crate::CommandOutcome::Success));
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(
+        document["link"],
+        serde_json::json!({ "linked": [], "unconfirmed": [] })
+    );
+
+    let (_, stdout, _) = finish(
+        OutputMode::Human,
+        &full_report(),
+        &[],
+        Some(Ok(LinkOutcome::NothingToLink)),
+    );
+    assert!(
+        stdout.ends_with("\n\nNothing linked - no addon is ready to link\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn find_link_without_yes_leaves_the_report_and_refuses_on_stderr() {
+    use crate::output::OutputMode;
+    let mut gather = found(FindSource::Wago, "GatherMate2", "GatherMate2", "1.0", "1.0");
+    gather.joining = vec![folder_move("GatherMate2Storage_Midnight", "Other")];
+    let report = FindReport {
+        results: vec![exact(gather.clone())],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        not_asked: Vec::new(),
+    };
+    let refusal = "Nothing linked - 1 match moves folders between addons: GatherMate2 also \
+                   takes GatherMate2Storage_Midnight\nRun `lemonup find --link --yes` to link \
+                   the addon ready to link\n";
+    let needs_yes = || Some(Ok(LinkOutcome::NeedsYes(vec![gather.clone()])));
+
+    let (ended, stdout, stderr) = finish(OutputMode::Human, &report, &[], needs_yes());
+    assert_eq!(ended, Ok(crate::CommandOutcome::Failed));
+    assert_eq!(stderr, refusal);
+    // The report stays, and ends where the closing line would be.
+    assert!(
+        stdout.starts_with("Forever  /games/wow/_forever_/Interface/AddOns\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Ready to link (1)\n"), "{stdout}");
+    assert!(
+        stdout.ends_with("also takes GatherMate2Storage_Midnight\n\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Nothing "), "{stdout}");
+
+    // A run that refuses prints no document.
+    let (ended, stdout, stderr) = finish(OutputMode::Json, &report, &[], needs_yes());
+    assert_eq!(ended, Ok(crate::CommandOutcome::Failed));
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, refusal);
+}
+
+#[test]
+fn a_link_that_fails_leaves_the_report_and_ends_in_its_error() {
+    use crate::output::OutputMode;
+    let failed = || {
+        Some(Err(LemonupError::InvalidArgument(
+            "the list could not be saved".to_string(),
+        )))
+    };
+
+    let (ended, stdout, stderr) = finish(OutputMode::Human, &full_report(), &[], failed());
+    assert_eq!(
+        ended,
+        Err("invalid argument: the list could not be saved".to_string())
+    );
+    assert!(stdout.contains("Ready to link (5)\n"), "{stdout}");
+    assert!(stdout.ends_with("\n\n"), "{stdout}");
+    assert!(!stdout.contains("Nothing "), "{stdout}");
+    // The caller says what failed, in the run's last lines.
+    assert_eq!(stderr, "");
+
+    let (ended, stdout, _) = finish(OutputMode::Json, &full_report(), &[], failed());
+    assert!(ended.is_err());
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn names_and_messages_never_carry_escape_codes_into_the_report() {
+    const EVIL: &str = "Evil\x1b]0;x\x07";
+    let evil = |folder: &str| format!("{EVIL}{folder}");
+    // A match in each table section, with the name in every place a row or its notes show
+    // one: the folders it takes, leaves, misses and can't have.
+    let mut ready = found(FindSource::Wago, "Ready", "Ready", "1.0", "1.0");
+    ready.joining = vec![folder_move(&evil("Joins"), &evil("Joins"))];
+    ready.leaving = vec![evil("Leaves")];
+    ready.missing = vec![evil("Missing")];
+    let mut blocked = found(FindSource::Wago, "Blocked", "Blocked", "1.0", "1.0");
+    blocked.blocked = vec![lemonup_core::find::BlockedFolder {
+        folder: evil("Held"),
+        reason: lemonup_core::find::BlockReason::Linked {
+            addon: evil("Owner"),
+        },
+    }];
+    let mut likely = found(FindSource::Wago, "Likely", "Likely", "1.0", "1.0");
+    likely.label = FindLabel::Likely;
+    likely.matched_version = None;
+    likely.likely_reason = Some(LikelyReason::VersionDiffers {
+        folder: evil("Differs"),
+        installed: Some(evil("1")),
+        listed: Some(evil("2")),
+    });
+    let mut partial = found(FindSource::Wago, "Partial", "Partial", "1.0", "1.0");
+    partial.label = FindLabel::Partial;
+    partial.differing = vec![evil("Changed")];
+
+    let mut choice = found(FindSource::Wago, "Questie Dev", EVIL, "9.0", "9.0");
+    choice.label = FindLabel::Likely;
+    let mut other = found(FindSource::Wago, "Questie", "Questie", "9.0", "9.0");
+    other.label = FindLabel::Likely;
+    let mut unchecked = only(FindLabel::NotChecked, EVIL);
+    unchecked.not_checked_by = vec![FindSource::WowInterface];
+    let report = FindReport {
+        results: vec![
+            exact(ready),
+            exact(blocked),
+            result_of(FindLabel::Likely, "Likely", "Likely", vec![likely]),
+            result_of(FindLabel::Partial, "Partial", "Partial", vec![partial]),
+            result_of(
+                FindLabel::ChooseOne,
+                "Questie",
+                "Questie",
+                vec![choice, other],
+            ),
+            unchecked,
+            only(FindLabel::CurseForgeOnly, EVIL),
+            only(FindLabel::NotFound, EVIL),
+            only(FindLabel::DeveloperCopy, EVIL),
+        ],
+        failed: vec![FindSource::WowInterface],
+        skipped: Vec::new(),
+        not_asked: Vec::new(),
+    };
+    let problems = [
+        SourceProblem {
+            source: FindSource::WowInterface,
+            error: SourceError::new(SourceErrorKind::Other, EVIL),
+        },
+        SourceProblem {
+            source: FindSource::Tukui,
+            error: SourceError::new(SourceErrorKind::Other, EVIL),
+        },
+    ];
+    let names = LocalNames::new(
+        &[],
+        &FindInputs {
+            flavor: GameFlavor::Forever,
+            folders: Vec::new(),
+        },
+    );
+
+    for paint in [Paint::PLAIN, Paint::terminal()] {
+        let lines = human_report(&report, &problems, &names, 0, paint);
+        let text = lines.join("\n");
+        // The table sections name the folder of every note; then the four name lists, the
+        // choices, and both kinds of problem line.
+        for folder in [
+            "Joins", "Leaves", "Missing", "Held", "Owner", "Differs", "Changed",
+        ] {
+            assert!(
+                text.contains(&format!("Evil ]0;x {folder}")),
+                "{folder}: {text:?}"
+            );
+        }
+        assert!(text.matches("Evil ]0;x ").count() >= 7 + 7, "{text:?}");
+        assert!(!text.contains("\x1b]"), "{text:?}");
+        assert!(!text.contains('\x07'), "{text:?}");
+    }
+}
+
+#[test]
+fn a_name_that_reads_like_a_command_is_never_drawn_as_one() {
+    // A folder can have any name a zip gave it. The notes under a row name folders, and no
+    // note of the find report names a command.
+    const NAMED: &str = "`lemonup update --force`";
+    let mut ready = found(FindSource::Wago, "Ready", "Ready", "1.0", "1.0");
+    ready.joining = vec![folder_move(NAMED, NAMED)];
+    ready.missing = vec![NAMED.to_string()];
+    let mut blocked = found(FindSource::Wago, "Blocked", "Blocked", "1.0", "1.0");
+    blocked.blocked = vec![lemonup_core::find::BlockedFolder {
+        folder: NAMED.to_string(),
+        reason: lemonup_core::find::BlockReason::DeveloperCopy,
+    }];
+    let report = FindReport {
+        results: vec![
+            exact(ready),
+            exact(blocked),
+            only(FindLabel::NotFound, NAMED),
+        ],
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        not_asked: Vec::new(),
+    };
+
+    let lines = human_report(&report, &[], &full_names(), 0, Paint::terminal());
+    let text = lines.join("\n");
+    assert_eq!(text.matches(NAMED).count(), 4, "{text:?}");
+    assert!(!text.contains(COMMAND), "{text:?}");
+}
+
+#[test]
+fn the_commands_find_suggests_are_for_the_same_game() {
+    // A command without the profile would link or update another game's addons.
+    let forever = Rerun {
+        profile: "forever",
+        addon_dir_given: true,
+    };
+    let report = full_report();
+    let names = full_names();
+    let closing = |link| draw_closing(&closing_text(&report, &names, link, forever), Paint::PLAIN);
+
+    assert_eq!(
+        closing(None)[1],
+        "Run `lemonup --profile forever find --link` with the same `--addon-dir` to link them"
+    );
+    let mut pawn = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+    pawn.version = Some("1.0".to_string());
+    pawn.remote_version = Some("1.1".to_string());
+    let linked = LinkOutcome::Linked {
+        rows: vec![pawn],
+        unconfirmed: vec![AddonRecord::new("Spy", "Spy", SourceKind::Wago)],
+        curseforge: Vec::new(),
+    };
+    assert_eq!(
+        closing(Some(linked)),
+        [
+            "✓ Linked 1 addon - 1 update ready",
+            "Run `lemonup --profile forever update-all` with the same `--addon-dir` to update it",
+            "Could not confirm these were also linked: Spy",
+            "Run `lemonup --profile forever find` with the same `--addon-dir` again to see \
+             where they stand",
+        ]
+    );
+    let (_, hint) = needs_yes_refusal(&report, &names, &[], forever);
+    assert_eq!(
+        hint,
+        "Run `lemonup --profile forever find --link --yes` with the same `--addon-dir` to link \
+         the 5 addons ready to link"
+    );
+}
+
+/// A stdout that takes nothing, as a full disk does.
+struct Full;
+
+impl std::io::Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("no space left on device"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn find_link_shows_the_report_before_it_links_and_links_nothing_when_it_cant() {
+    use crate::output::{Output, OutputMode};
+    let target = find_target();
+    let names = full_names();
+    let report = full_report();
+    let found = Found {
+        target: &target,
+        report: &report,
+        problems: &[],
+        names: &names,
+        folders_read: 52,
+        wago_folders: 0,
+        addon_dir_given: false,
+    };
+    let linked = std::cell::Cell::new(false);
+    let link = || {
+        linked.set(true);
+        Ok(LinkOutcome::NothingToLink)
+    };
+
+    let mut output = Output::new(
+        OutputMode::Human,
+        Paint::PLAIN,
+        Paint::PLAIN,
+        "default",
+        Full,
+        Vec::new(),
+    );
+    let ended = crate::finish_find(found, Some(link), &mut output);
+
+    assert!(
+        !linked.get(),
+        "nothing is linked behind a report nobody saw"
+    );
+    // The run failed before its work was done, so it is called failed like any other.
+    assert!(!output.report_failed());
+    let ended = crate::or_failed(Some("Find failed"), ended, &mut output).expect("said");
+    assert_eq!(ended, crate::CommandOutcome::Failed);
+    let (_, stderr) = output.into_writers();
+    assert_eq!(
+        String::from_utf8(stderr).expect("utf-8"),
+        "✗ Find failed\n  no space left on device\n"
+    );
+
+    // A link that fails after the report was shown is called failed too.
+    let mut output = capture(OutputMode::Human, Paint::PLAIN);
+    let failing = || {
+        Err::<LinkOutcome, _>(LemonupError::InvalidArgument(
+            "the list could not be saved".to_string(),
+        ))
+    };
+    let ended = crate::finish_find(found, Some(failing), &mut output);
+    let ended = crate::or_failed(Some("Find failed"), ended, &mut output).expect("said");
+    assert_eq!(ended, crate::CommandOutcome::Failed);
+    let (stdout, stderr) = streams(output);
+    assert!(stdout.contains("Ready to link (5)\n"), "{stdout}");
+    assert_eq!(stderr, "✗ Find failed\n  the list could not be saved\n");
+}
+
+#[test]
+fn a_closing_line_draws_only_its_hint_as_a_command() {
+    // An addon that could not be confirmed is named in the closing lines. Its name is the
+    // source's: one that reads like a command is not drawn as one.
+    let mut named = AddonRecord::new("Pawn", "Pawn", SourceKind::Wago);
+    named.version = Some("1.0".to_string());
+    named.remote_version = Some("1.1".to_string());
+    let linked = || LinkOutcome::Linked {
+        rows: vec![named.clone()],
+        unconfirmed: vec![AddonRecord::new("`lemonup sync`", "Sync", SourceKind::Wago)],
+        curseforge: Vec::new(),
+    };
+
+    assert_eq!(
+        human_closing(&full_report(), &full_names(), Some(linked()), Paint::PLAIN),
+        [
+            "✓ Linked 1 addon - 1 update ready",
+            "Run `lemonup update-all` to update it",
+            "Could not confirm these were also linked: `lemonup sync`",
+            "Run `lemonup find` again to see where they stand",
+        ]
+    );
+    assert_eq!(
+        human_closing(
+            &full_report(),
+            &full_names(),
+            Some(linked()),
+            Paint::terminal(),
+        ),
+        [
+            format!("{GREEN}✓{END} Linked 1 addon - 1 update ready"),
+            format!("Run {COMMAND}lemonup update-all{END} to update it"),
+            "Could not confirm these were also linked: `lemonup sync`".to_string(),
+            format!("Run {COMMAND}lemonup find{END} again to see where they stand"),
+        ]
+    );
+
+    // The CurseForge hint names addons too: an escape code in a name never gets through.
+    let curseforge = LinkOutcome::Linked {
+        rows: vec![AddonRecord::new(
+            "Evil\x1b]0;x\x07",
+            "Evil",
+            SourceKind::Wago,
+        )],
+        unconfirmed: Vec::new(),
+        curseforge: vec!["Evil".to_string()],
+    };
+    assert_eq!(
+        human_closing(
+            &full_report(),
+            &full_names(),
+            Some(curseforge),
+            Paint::terminal(),
+        )
+        .last()
+        .map(String::as_str),
+        Some("CurseForge also manages Evil ]0;x . Mark it Ignored there (Install Settings).")
+    );
 }

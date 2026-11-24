@@ -232,26 +232,30 @@ fn entry(row: &UpdateRow, version: String, notes: Vec<String>) -> Entry {
         version,
         update: None,
         notes,
+        hint: None,
         from: None,
         done: false,
     }
 }
 
 /// What a held row says: every "Not linked" folder the update would replace, with developer
-/// copies marked.
-fn held_note(row: &UpdateRow) -> Option<String> {
+/// copies marked, and what to run to replace them.
+fn held_note(row: &UpdateRow) -> (Option<String>, Option<String>) {
     if row.replaces.is_empty() {
-        return row.message.clone();
+        return (row.message.clone(), None);
     }
-    Some(format!(
-        "Would replace Not linked {}: {}. Run again with `--replace`.",
-        if row.replaces.len() == 1 {
-            "folder"
-        } else {
-            "folders"
-        },
-        crate::update::describe_not_linked_folders(&row.replaces, &row.dev_copies)
-    ))
+    (
+        Some(format!(
+            "Would replace Not linked {}: {}.",
+            if row.replaces.len() == 1 {
+                "folder"
+            } else {
+                "folders"
+            },
+            crate::update::describe_not_linked_folders(&row.replaces, &row.dev_copies)
+        )),
+        Some("Run again with `--replace`.".to_string()),
+    )
 }
 
 impl Report for UpdateReport {
@@ -325,7 +329,13 @@ impl Report for UpdateReport {
             "Held",
             shown(LiveUpdateStatus::Held)
                 .iter()
-                .map(|row| change(row, held_note(row).into_iter().collect()))
+                .map(|row| {
+                    let (note, hint) = held_note(row);
+                    Entry {
+                        hint,
+                        ..change(row, note.into_iter().collect())
+                    }
+                })
                 .collect(),
         );
         add(
@@ -341,8 +351,10 @@ impl Report for UpdateReport {
                         source_label(row.source),
                         remote(row)
                     );
-                    let note = "Run again with `--force` to install it.".to_string();
-                    entry(row, version, vec![note])
+                    Entry {
+                        hint: Some("Run again with `--force` to install it.".to_string()),
+                        ..entry(row, version, Vec::new())
+                    }
                 })
                 .collect(),
         );
@@ -575,8 +587,8 @@ mod tests {
                 "",
                 "Held (1)",
                 "  ElvUI  TukUI  14.04 → 14.05",
-                "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries. Run",
-                "      again with `--replace`.",
+                "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries.",
+                "      Run again with `--replace`.",
                 "",
                 "Newer than source (1)",
                 "  Pawn  WoWInterface  2.11.4, WoWInterface has 2.11.2",
@@ -787,11 +799,11 @@ mod tests {
                 .position(|line| line == "Held (1)")
                 .expect("held");
             assert_eq!(
-                lines[at + 1..at + 3],
+                lines[at + 1..at + 4],
                 [
                     "  ElvUI  TukUI  14.04 → 14.05",
-                    "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries. Run again \
-                     with `--replace`.",
+                    "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries.",
+                    "      Run again with `--replace`.",
                 ]
             );
         }
@@ -805,12 +817,16 @@ mod tests {
         }
         let lines = UpdateReport::new(None, ALL, BackupLine::Disabled, &summary, &results, &addons)
             .human(Paint::PLAIN.with_width(200));
-        assert!(
-            lines.contains(
-                &"      Would replace Not linked folder: ElvUI_Options. Run again with `--replace`."
-                    .to_string()
-            ),
-            "{lines:?}"
+        let at = lines
+            .iter()
+            .position(|line| line == "Held (1)")
+            .expect("held");
+        assert_eq!(
+            lines[at + 2..at + 4],
+            [
+                "      Would replace Not linked folder: ElvUI_Options.",
+                "      Run again with `--replace`.",
+            ]
         );
     }
 
@@ -928,9 +944,12 @@ mod tests {
             .position(|line| line == "Held (1)")
             .expect("held");
         assert_eq!(
-            lines[at + 2],
-            "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries (has .git, \
-             likely a dev copy). Run again with `--replace`."
+            lines[at + 2..at + 4],
+            [
+                "      Would replace Not linked folders: ElvUI_Options, ElvUI_Libraries (has .git, \
+                 likely a dev copy).",
+                "      Run again with `--replace`.",
+            ]
         );
     }
 

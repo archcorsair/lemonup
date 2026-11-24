@@ -577,14 +577,23 @@ pub(crate) enum LinkOutcome {
     /// Some exact matches move folders between addons and `--yes` was not given. Nothing was
     /// linked; these are the matches that move folders.
     NeedsYes(Vec<FoundAddon>),
-    /// The rows the database holds after linking, the names of linked addons it doesn't
-    /// hold after all (a read of the AddOns folder after linking can drop one), and the names
-    /// of linked addons the CurseForge app also manages.
+    /// The rows the database holds after linking, the linked addons it doesn't hold after
+    /// all (a read of the AddOns folder after linking can drop one), and the folders of the
+    /// `rows` the CurseForge app also manages. A folder says which row; two can share a name.
     Linked {
         rows: Vec<AddonRecord>,
-        unconfirmed: Vec<String>,
+        unconfirmed: Vec<AddonRecord>,
         curseforge: Vec<String>,
     },
+}
+
+/// The names of the `rows` the CurseForge app also manages, given their `folders` as
+/// [`LinkOutcome::Linked`] has them.
+pub(crate) fn curseforge_names(rows: &[AddonRecord], folders: &[String]) -> Vec<String> {
+    rows.iter()
+        .filter(|row| folders.contains(&row.folder))
+        .map(|row| row.name.clone())
+        .collect()
 }
 
 /// `lemonup find --link`: links the exact matches, then reads the AddOns folder again so
@@ -632,11 +641,15 @@ pub(crate) fn link_exact_matches(
             .find(|row| row.folder == linked.folder && row.source == linked.source)
         {
             Some(row) => stored.push(row.clone()),
-            None => unconfirmed.push(linked.name.clone()),
+            None => unconfirmed.push(linked.clone()),
         }
     }
     let managed = CurseForgeManaged::read(addon_dir, curseforge_files);
-    let curseforge = managed.managed_row_names(&stored);
+    let curseforge = managed.managed_names(stored.iter().map(|row| {
+        let folders = std::iter::once(row.folder.as_str())
+            .chain(row.owned_folders.iter().map(|owned| owned.name.as_str()));
+        (row.folder.clone(), folders)
+    }));
     Ok(LinkOutcome::Linked {
         rows: stored,
         unconfirmed,
@@ -717,14 +730,19 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
             if !unconfirmed.is_empty() {
                 lines.push(format!(
                     "find link warning: not_confirmed={}",
-                    join(&unconfirmed)
+                    join(
+                        &unconfirmed
+                            .iter()
+                            .map(|row| row.name.clone())
+                            .collect::<Vec<_>>()
+                    )
                 ));
             }
             if !curseforge.is_empty() {
                 lines.push(format!(
                     "find link note: curseforge_manages={}, mark {} Ignored in CurseForge \
                      (Install Settings)",
-                    join(&curseforge),
+                    join(&curseforge_names(&rows, &curseforge)),
                     if curseforge.len() == 1 { "it" } else { "them" }
                 ));
             }
@@ -735,9 +753,12 @@ fn plain_link_lines(outcome: LinkOutcome) -> Result<Vec<String>, LemonupError> {
 
 mod human;
 pub(crate) use human::{
-    LocalNames, capitalize, choice_text, human_closing, human_refusal, human_report, linked_parts,
-    listed_names, problem_text, result_entry, target_line,
+    LocalNames, capitalize, choice_text, human_report, linked_parts, listed_names,
+    needs_yes_refusal, problem_text, result_entry, target_line,
 };
+
+mod printout;
+pub(crate) use printout::{FindPrintout, Found};
 
 #[cfg(test)]
 mod tests;

@@ -142,8 +142,8 @@ pub enum Commands {
         /// With --link, also link exact matches that take over folders of other addons
         #[arg(long, requires = "link")]
         yes: bool,
-        /// Print one key=value line per result, for scripts
-        #[arg(long)]
+        /// Print one key=value line per result. Scripts read `--json` instead
+        #[arg(long, hide = true)]
         plain: bool,
         /// Look only at these sources: wago, wowinterface, tukui (comma separated; default all)
         #[arg(
@@ -182,15 +182,15 @@ pub enum Commands {
 /// Why `--json` can't be used for `command`, or `None` when it can. A command leaves this list
 /// once it prints through `crate::output`.
 pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
-    let name = match command {
+    match command {
         None => {
-            return Some(
-                "`--json` needs a command, for example `lemonup --json profiles`.".to_string(),
-            );
+            Some("`--json` needs a command, for example `lemonup --json profiles`.".to_string())
         }
         // The TUI prints no result, so this one stays.
-        Some(Commands::Tui) => {
-            return Some("`--json` is not available for `lemonup tui`.".to_string());
+        Some(Commands::Tui) => Some("`--json` is not available for `lemonup tui`.".to_string()),
+        // Two formats for one result: `--plain` is the older one.
+        Some(Commands::Find { plain: true, .. }) => {
+            Some("`--json` and `--plain` are two formats. Leave `--plain` out.".to_string())
         }
         Some(
             Commands::Profiles
@@ -205,13 +205,10 @@ pub(crate) fn json_refusal(command: Option<&Commands>) -> Option<String> {
             | Commands::InstallWago { .. }
             | Commands::InstallTukui { .. }
             | Commands::InstallWowinterface { .. }
-            | Commands::InstallGithub { .. },
-        ) => return None,
-        Some(Commands::Find { .. }) => "find",
-    };
-    Some(format!(
-        "`--json` is not available for `lemonup {name}` yet."
-    ))
+            | Commands::InstallGithub { .. }
+            | Commands::Find { plain: false, .. },
+        ) => None,
+    }
 }
 
 fn parse_addon_selector(value: &str) -> Result<String, String> {
@@ -407,15 +404,23 @@ mod tests {
     }
 
     #[test]
-    fn json_is_refused_for_commands_that_dont_print_it_yet() {
+    fn json_is_refused_where_there_is_no_document_to_print() {
         let refusal = |args: &[&str]| {
             let cli = Cli::try_parse_from(args).expect("parses");
             assert!(cli.json, "{args:?}");
             json_refusal(cli.command.as_ref())
         };
+        for args in [
+            &["lemonup", "find", "--json"][..],
+            &["lemonup", "find", "--json", "--link", "--yes"][..],
+            &["lemonup", "--json", "find", "--source", "wago"][..],
+        ] {
+            assert_eq!(refusal(args), None, "{args:?}");
+        }
+        // `--plain` is the older format for scripts: one run prints one format.
         assert_eq!(
-            refusal(&["lemonup", "find", "--json", "--link"]).as_deref(),
-            Some("`--json` is not available for `lemonup find` yet.")
+            refusal(&["lemonup", "find", "--json", "--plain"]).as_deref(),
+            Some("`--json` and `--plain` are two formats. Leave `--plain` out.")
         );
         assert_eq!(
             refusal(&["lemonup", "--json"]).as_deref(),
@@ -425,6 +430,23 @@ mod tests {
             refusal(&["lemonup", "--json", "tui"]).as_deref(),
             Some("`--json` is not available for `lemonup tui`.")
         );
+    }
+
+    #[test]
+    fn find_plain_still_parses_and_is_left_out_of_help() {
+        let cli = Cli::try_parse_from(["lemonup", "find", "--plain"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Find { plain: true, .. })
+        ));
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let help = command
+            .find_subcommand_mut("find")
+            .expect("find")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--link"), "{help}");
+        assert!(!help.contains("--plain"), "{help}");
     }
 
     #[test]

@@ -281,7 +281,7 @@ fn only_lemonup_commands_and_flags_are_drawn_as_commands() {
 }
 
 #[test]
-fn warnings_notes_and_table_notes_draw_their_commands() {
+fn warnings_notes_and_table_hints_draw_their_commands() {
     let mut colored = output(OutputMode::Human, Paint::terminal());
     colored.warn("Run `lemonup sync` first").expect("warn");
     colored.note("Then `lemonup check`").expect("note");
@@ -310,25 +310,35 @@ fn warnings_notes_and_table_notes_draw_their_commands() {
         source: "Wago.io".to_string(),
         version: "1.0".to_string(),
         update: None,
-        notes: vec!["Run again with `--force` to install it.".to_string()],
+        // A note names folders and holds a source's words: one that reads like a command is
+        // not drawn as one, and an escape code in it never gets through.
+        notes: vec!["Would replace `lemonup sync`\x1b[31m and `--yes`.".to_string()],
+        hint: Some("Run again with `--force` to install it.".to_string()),
         from: None,
         done: false,
     };
     let lines = table(vec![entry.clone()], Paint::terminal());
     assert_eq!(
-        lines[1],
-        format!(
-            "\x1b[2m      Run again with \x1b[0m{}\x1b[2m to install it.\x1b[0m",
-            command("--force")
-        )
+        lines[1..],
+        [
+            "\x1b[2m      Would replace `lemonup sync` [31m and `--yes`.\x1b[0m".to_string(),
+            format!(
+                "\x1b[2m      Run again with \x1b[0m{}\x1b[2m to install it.\x1b[0m",
+                command("--force")
+            ),
+        ]
     );
     assert_eq!(
-        table(vec![entry.clone()], Paint::PLAIN)[1],
-        "      Run again with `--force` to install it."
+        table(vec![entry.clone()], Paint::PLAIN)[1..],
+        [
+            "      Would replace `lemonup sync` [31m and `--yes`.",
+            "      Run again with `--force` to install it."
+        ]
     );
-    // A command of several words stays on one line when the note wraps.
+    // A command of several words stays on one line when the hint wraps.
     let long = Entry {
-        notes: vec!["Run `lemonup update-all --dry-run --replace` first, then again.".to_string()],
+        notes: Vec::new(),
+        hint: Some("Run `lemonup update-all --dry-run --replace` first, then again.".to_string()),
         ..entry
     };
     assert_eq!(
@@ -649,6 +659,7 @@ fn wide_characters_count_as_two_columns() {
                 version: "1.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                hint: None,
                 from: None,
                 done: false,
             },
@@ -658,6 +669,7 @@ fn wide_characters_count_as_two_columns() {
                 version: "2.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                hint: None,
                 from: None,
                 done: false,
             },
@@ -865,6 +877,7 @@ fn widths_are_measured_on_the_text_as_it_is_printed() {
                 version: "1.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                hint: None,
                 from: None,
                 done: false,
             },
@@ -874,6 +887,7 @@ fn widths_are_measured_on_the_text_as_it_is_printed() {
                 version: "2.0".to_string(),
                 update: None,
                 notes: Vec::new(),
+                hint: None,
                 from: None,
                 done: false,
             },
@@ -978,4 +992,56 @@ pub(super) fn json_document<R: Report>(
     // Warnings are on stderr as well; the document is what stdout got.
     let (stdout, _) = output.into_writers();
     String::from_utf8(stdout).expect("utf-8")
+}
+
+#[test]
+fn a_readable_only_report_prints_nothing_with_json() {
+    let mut out = output(OutputMode::Human, Paint::PLAIN);
+    out.print_readable(&sample()).expect("print");
+    let (stdout, stderr) = out.into_writers();
+    assert_eq!(text(stdout), "Questie\nPawn\n");
+    assert_eq!(text(stderr), "");
+
+    // A run that ends in a refusal or a failure prints no document.
+    let mut out = output(OutputMode::Json, Paint::PLAIN);
+    out.warn("WoWInterface didn't answer").expect("warn");
+    out.print_readable(&sample()).expect("print");
+    assert!(!out.report_failed());
+    let (stdout, stderr) = out.into_writers();
+    assert_eq!(text(stdout), "");
+    assert_eq!(text(stderr), "warning: WoWInterface didn't answer\n");
+}
+
+#[test]
+fn a_refusal_is_two_lines_on_stderr_and_only_its_hint_names_commands() {
+    const END: &str = "\x1b[0m";
+    const COMMAND: &str = "\x1b[1m\x1b[38;5;6m";
+    // The reason names addons and folders: an escape code in one never gets through, a line
+    // break in one does not start a new line, and a name that reads like a command is not
+    // drawn as one.
+    let reason = "Nothing linked - Evil\x1b]0;x\x07 also takes `lemonup update --force`,\nOther";
+    let hint = "Run `lemonup find --link --yes` to link the addon ready to link";
+
+    for mode in [OutputMode::Human, OutputMode::Json] {
+        let mut plain = output(mode, Paint::PLAIN);
+        plain.refuse(reason, hint).expect("refuse");
+        let (stdout, stderr) = plain.into_writers();
+        assert_eq!(text(stdout), "");
+        assert_eq!(
+            text(stderr),
+            "Nothing linked - Evil ]0;x  also takes `lemonup update --force`, Other\n\
+             Run `lemonup find --link --yes` to link the addon ready to link\n"
+        );
+    }
+
+    let mut colored = output(OutputMode::Human, Paint::terminal());
+    colored.refuse(reason, hint).expect("refuse");
+    let (_, stderr) = colored.into_writers();
+    assert_eq!(
+        text(stderr),
+        format!(
+            "Nothing linked - Evil ]0;x  also takes `lemonup update --force`, Other\n\
+             Run {COMMAND}lemonup find --link --yes{END} to link the addon ready to link\n"
+        )
+    );
 }

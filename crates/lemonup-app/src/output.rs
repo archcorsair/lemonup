@@ -403,7 +403,12 @@ pub(crate) struct Entry {
     pub(crate) version: String,
     /// "update ready (x)", shown after the version in its own color.
     pub(crate) update: Option<String>,
+    /// Lines under the row. A note can hold names, folders or a source's own words, so
+    /// nothing in it is drawn as a command.
     pub(crate) notes: Vec<String>,
+    /// What to run next, on a line of its own under the notes. LemonUp writes it, so the
+    /// commands it names are drawn as commands.
+    pub(crate) hint: Option<String>,
     /// The version the addon moves on from. With it the row reads `from → version`, the old
     /// version in red and the new one in green.
     pub(crate) from: Option<String>,
@@ -468,7 +473,14 @@ pub(crate) fn table(mut entries: Vec<Entry>, paint: Paint) -> Vec<String> {
         ));
         for note in &entry.notes {
             lines.extend(
-                wrap_sentence(&note_indent, note, paint.width)
+                wrap_words(&note_indent, note, paint.width)
+                    .iter()
+                    .map(|line| paint.muted(line)),
+            );
+        }
+        if let Some(hint) = &entry.hint {
+            lines.extend(
+                wrap_sentence(&note_indent, hint, paint.width)
                     .iter()
                     .map(|line| paint.commands(line, Paint::muted)),
             );
@@ -872,6 +884,36 @@ impl<O: Write, E: Write> Output<O, E> {
         let written = ignore_closed(written);
         self.report_failed |= written.is_err();
         written
+    }
+
+    /// Prints only the readable `report`, and nothing with `--json`. It is for what a run
+    /// has to show before its work is done: the run can still end in a refusal or a failure,
+    /// which prints no JSON document. Because the work is not done, a write that fails here
+    /// is not a report that could not be printed.
+    pub(crate) fn print_readable<R: Report>(&mut self, report: &R) -> std::io::Result<()> {
+        if self.mode == OutputMode::Json {
+            return Ok(());
+        }
+        ignore_closed(
+            report
+                .human(self.stdout_paint)
+                .iter()
+                .try_for_each(|line| writeln!(self.stdout, "{line}"))
+                .and_then(|()| self.stdout.flush()),
+        )
+    }
+
+    /// A refusal, on stderr in both modes: why, then on the next line what to run instead.
+    /// `reason` can hold names and folders: it is one line, and nothing in it is drawn as a
+    /// command. Only `hint`, which LemonUp wrote, has its commands drawn.
+    pub(crate) fn refuse(&mut self, reason: &str, hint: &str) -> std::io::Result<()> {
+        let paint = self.stderr_paint;
+        ignore_closed(writeln!(
+            self.stderr,
+            "{}\n{}",
+            paint.text(reason),
+            paint.commands(hint, Paint::text)
+        ))
     }
 
     /// A warning: on stderr in both modes, and also in the `warnings` of the JSON document.
