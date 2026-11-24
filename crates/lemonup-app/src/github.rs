@@ -1693,6 +1693,29 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use tempfile::tempdir;
 
+    #[tokio::test]
+    async fn a_release_zip_redirected_to_an_address_with_a_space_comes_without_the_token() {
+        use crate::http::test_server;
+        let server = test_server::serve(vec![
+            test_server::redirect("/files/Addon v1 (1).zip"),
+            test_server::ok(b"PK\x03\x04 the zip"),
+        ]);
+        let client = build_github_client_with_token(Some("ghp_test_token")).expect("client");
+        let asset = lemonup_core::github_release::ReleaseAsset {
+            name: "Addon v1.zip".to_string(),
+            download_url: server.url("/owner/addon/releases/download/v1/Addon.zip"),
+        };
+
+        let bytes = super::download_github_asset_bytes(&client, &asset)
+            .await
+            .expect("the zip");
+        assert_eq!(bytes, b"PK\x03\x04 the zip");
+        let requests = server.requests();
+        assert!(test_server::has_header(&requests[0], "authorization"));
+        assert!(requests[1].starts_with("GET /files/Addon%20v1%20(1).zip HTTP/1.1\r\n"));
+        assert!(!test_server::has_header(&requests[1], "authorization"));
+    }
+
     fn env_lookup(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         let pairs = pairs.to_vec();
         move |name| {

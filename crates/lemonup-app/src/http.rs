@@ -25,8 +25,8 @@ fn client_builder_with(connect: Duration, read: Duration) -> ClientBuilder {
         .read_timeout(read)
 }
 
-/// How many redirects `follow_download_redirects` follows itself.
-const MAX_FOLLOWED_REDIRECTS: usize = 5;
+/// How many redirects `follow_download_redirects` follows itself, as many as reqwest does.
+const MAX_FOLLOWED_REDIRECTS: usize = 10;
 
 /// The download `response` once every redirect is followed, so a redirect page is never taken
 /// for the file.
@@ -34,8 +34,9 @@ const MAX_FOLLOWED_REDIRECTS: usize = 5;
 /// reqwest follows a redirect only when its `Location` is a valid address. Wago.io's file
 /// server sends one with raw spaces (`omnicd-v2.8.35 (1).zip`), so reqwest hands back the 3xx
 /// with its small "Redirecting to..." page. This reads `Location` the way a browser does, which
-/// encodes the spaces, and fetches it with a new client, so no key or token goes to the new
-/// address. A redirect still left after that is an error.
+/// encodes the spaces, and fetches it with a new client that follows no redirects on its own,
+/// so every later hop is checked here too and no key or token goes to the new address. A
+/// redirect still left after that is an error.
 pub(crate) async fn follow_download_redirects(
     mut response: Response,
     map_error: fn(reqwest::Error) -> SourceError,
@@ -45,12 +46,21 @@ pub(crate) async fn follow_download_redirects(
         if !response.status().is_redirection() {
             return checked_after_redirect(response, client.is_some());
         }
-        let Some(next) = redirect_target(response.url(), response.headers().get(LOCATION)) else {
+        let Some(next) = redirect_target(
+            response.status(),
+            response.url(),
+            response.headers().get(LOCATION),
+        ) else {
             return Err(stopped_at_redirect(response.status()));
         };
         let client = match &client {
             Some(client) => client,
-            None => client.insert(client_builder().build().map_err(map_error)?),
+            None => client.insert(
+                client_builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(map_error)?,
+            ),
         };
         response = client.get(next).send().await.map_err(map_error)?;
     }
@@ -73,17 +83,28 @@ fn checked_after_redirect(response: Response, followed: bool) -> Result<Response
     Ok(response)
 }
 
-/// Where a redirect from `current` points, resolved and encoded the way a browser does. `None`
-/// when there is no usable address, or when it would leave HTTPS.
-fn redirect_target(current: &Url, location: Option<&HeaderValue>) -> Option<Url> {
+/// Where a `status` redirect from `current` points, resolved and encoded the way a browser
+/// does. `None` for a status that is not a redirect to follow (300, 304, 305), when there is no
+/// usable address or it is `current` again, and when it would leave HTTPS.
+fn redirect_target(
+    status: StatusCode,
+    current: &Url,
+    location: Option<&HeaderValue>,
+) -> Option<Url> {
+    if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
     let location = std::str::from_utf8(location?.as_bytes()).ok()?;
-    let next = current.join(location).ok()?;
+    let mut next = current.join(location).ok()?;
+    next.set_fragment(None);
+    let mut here = current.clone();
+    here.set_fragment(None);
     let allowed = match next.scheme() {
         "https" => true,
         "http" => current.scheme() == "http",
         _ => false,
     };
-    allowed.then_some(next)
+    (allowed && next != here).then_some(next)
 }
 
 fn stopped_at_redirect(status: StatusCode) -> SourceError {
@@ -171,6 +192,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_hop_after_a_followed_redirect_is_followed_and_checked_here() {
+        let server = test_server::serve(vec![
+            test_server::redirect("/files/a b.zip"),
+            test_server::redirect("/files/final.zip"),
+            test_server::ok(b"PK\x03\x04 the zip"),
+        ]);
+        let client = client_builder().build().expect("client builds");
+        let response = client
+            .get(server.url("/download"))
+            .send()
+            .await
+            .expect("send");
+
+        let response = follow_download_redirects(response, SourceError::from_reqwest)
+            .await
+            .expect("followed");
+        assert_eq!(
+            response.bytes().await.expect("body").as_ref(),
+            b"PK\x03\x04 the zip"
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("GET /files/final.zip HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
     async fn a_redirect_without_an_address_is_an_error_not_the_file() {
         let server = test_server::serve(vec![test_server::response(
             "302 Found",
@@ -216,7 +263,7 @@ mod tests {
     async fn redirects_that_never_end_are_an_error() {
         let server = test_server::serve(
             (0..=MAX_FOLLOWED_REDIRECTS)
-                .map(|_| test_server::redirect("/again and again"))
+                .map(|hop| test_server::redirect(&format!("/again and again {hop}")))
                 .collect(),
         );
         let client = client_builder().build().expect("client builds");
@@ -238,6 +285,7 @@ mod tests {
         let https = Url::parse("https://addons.wago.io/external/download/1?x=1").expect("url");
         let target = |location: &str| {
             redirect_target(
+                StatusCode::FOUND,
                 &https,
                 Some(&HeaderValue::from_str(location).expect("header")),
             )
@@ -253,11 +301,25 @@ mod tests {
         );
         assert_eq!(target("http://cdn.wago.io/a.zip"), None);
         assert_eq!(target("ftp://cdn.wago.io/a.zip"), None);
-        assert_eq!(redirect_target(&https, None), None);
+        assert_eq!(redirect_target(StatusCode::FOUND, &https, None), None);
+        // An empty or fragment-only address is the same one again.
+        assert_eq!(target(""), None);
+        assert_eq!(target("#top"), None);
+        // Only 301, 302, 303, 307 and 308 are followed.
+        let elsewhere = HeaderValue::from_static("https://cdn.wago.io/a.zip");
+        for status in [300, 304, 305] {
+            let status = StatusCode::from_u16(status).expect("status");
+            assert_eq!(redirect_target(status, &https, Some(&elsewhere)), None);
+        }
+        for status in [301, 303, 307, 308] {
+            let status = StatusCode::from_u16(status).expect("status");
+            assert!(redirect_target(status, &https, Some(&elsewhere)).is_some());
+        }
 
         let http = Url::parse("http://127.0.0.1:1/download").expect("url");
         assert_eq!(
             redirect_target(
+                StatusCode::FOUND,
                 &http,
                 Some(&HeaderValue::from_static("http://127.0.0.1:1/a.zip"))
             )
