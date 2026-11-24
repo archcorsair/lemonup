@@ -18901,9 +18901,16 @@ games = ["forever"]
         }
 
         #[test]
-        fn settings_title_drops_the_version_when_it_does_not_fit() {
+        fn settings_title_drops_the_version_before_the_note() {
             let version = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
-            for (width, shown) in [(30, false), (50, true)] {
+            let note = "changes save right away";
+            // The note and "esc close" keep their room; the version takes what is left.
+            for (width, shown, noted) in [
+                (30, false, false),
+                (40, true, false),
+                (50, false, true),
+                (70, true, true),
+            ] {
                 let mut app = app_for_tests(ShellMode::Dashboard);
                 open_config(&mut app);
                 let rows = render_rows(&mut app, width, 24);
@@ -18913,6 +18920,7 @@ games = ["forever"]
                     .unwrap_or_else(|| panic!("no title row:\n{}", rows.join("\n")));
                 assert!(row.contains("Settings"), "{width}: {row}");
                 assert_eq!(row.contains(&version), shown, "{width}: {row}");
+                assert_eq!(row.contains(note), noted, "{width}: {row}");
                 if !shown {
                     assert!(!row.contains("LemonUp"), "{width}: {row}");
                 }
