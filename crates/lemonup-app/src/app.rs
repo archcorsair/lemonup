@@ -18905,12 +18905,23 @@ games = ["forever"]
             let version = format!("Settings · LemonUp {}", env!("CARGO_PKG_VERSION"));
             let note = "changes save right away";
             // The note and "esc close" keep their room; the version takes what is left.
-            for (width, shown, noted) in [
+            // " Settings" and " esc close" use 19 columns and one more stays free; the
+            // note needs 26 more and fits from 46 columns.
+            let subtitle = u16::try_from(
+                format!(" · LemonUp {}", env!("CARGO_PKG_VERSION"))
+                    .chars()
+                    .count(),
+            )
+            .expect("short version");
+            let mut cases = vec![
                 (30, false, false),
-                (40, true, false),
                 (50, false, true),
-                (70, true, true),
-            ] {
+                (46 + subtitle, true, true),
+            ];
+            if 20 + subtitle < 46 {
+                cases.push((20 + subtitle, true, false));
+            }
+            for (width, shown, noted) in cases {
                 let mut app = app_for_tests(ShellMode::Dashboard);
                 open_config(&mut app);
                 let rows = render_rows(&mut app, width, 24);

@@ -395,7 +395,7 @@ pub(super) struct SheetChrome {
     pub(super) title: String,
     /// Muted text after the title, such as Settings' "LemonUp 2.9.0". It
     /// goes when the title row has no room for it.
-    pub(super) subtitle: Option<String>,
+    pub(super) subtitle: Option<&'static str>,
     /// A muted note before "esc close", such as "changes save right away".
     pub(super) note: Option<&'static str>,
     /// A delete or another step that cannot be undone: the outline is red.
@@ -770,7 +770,7 @@ impl App {
     /// " · LemonUp 2.9.0" after the title, when the title is whole and this
     /// fits in the `room` columns the rest of the row leaves.
     fn sheet_subtitle(chrome: &SheetChrome, title: &str, room: usize) -> Option<String> {
-        let subtitle = format!(" · {}", chrome.subtitle.as_deref()?);
+        let subtitle = format!(" · {}", chrome.subtitle?);
         (title == chrome.title && subtitle.chars().count() <= room).then_some(subtitle)
     }
 
