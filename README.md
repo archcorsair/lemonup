@@ -120,7 +120,7 @@ lemonup find --link
 ```
 
 `lemonup find` prints a report: what is ready to link, what is only a likely match, and what was
-not found. Add `--plain` for one `key=value` line per result.
+not found. Add `--json` to get it as one JSON object, for scripts.
 
 `--source` limits which sources are asked, as a comma separated list of `wago`, `wowinterface` and
 `tukui` (default: all of them; the choice the TUI remembers is not used):

@@ -295,7 +295,11 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
             yes,
             plain,
             source,
-        } => run_find(paths, runtime, link, yes, plain, &source).await?,
+        } => {
+            let mut output = command_output(&paths, &runtime, json);
+            let found = run_find(paths, runtime, link, yes, plain, &source, &mut output).await;
+            or_failed(what, found, &mut output)?
+        }
     };
 
     Ok(outcome)
@@ -486,15 +490,17 @@ fn run_toc<O: std::io::Write, E: std::io::Write>(
 /// `lemonup find`: lists where the Not linked addons come from, grouped by label, and changes
 /// nothing. `--link` links the exact matches (no download); the CLI never asks, so matches that
 /// take over folders beyond their own need `--yes`. `--plain` prints one key=value line per
-/// result instead of the readable report. `--source` limits the sources asked (all without it;
-/// the choice the TUI remembers is not used). Exits 1 when a source failed.
-async fn run_find(
+/// result instead of the report, as it always has, and never through `output`. `--source`
+/// limits the sources asked (all without it; the choice the TUI remembers is not used).
+/// Exits 1 when a source failed.
+async fn run_find<O: std::io::Write, E: std::io::Write>(
     paths: AppPaths,
     runtime: AppRuntime,
     link: bool,
     yes: bool,
     plain: bool,
     sources: &[lemonup_core::find::FindSource],
+    output: &mut output::Output<O, E>,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let (config_store, config_state) = load_profile_config(&paths)?;
     let configured_addon_dir = match &config_state {
@@ -506,6 +512,9 @@ async fn run_find(
         .clone()
         .or(configured_addon_dir.clone())
     else {
+        if !plain {
+            return Err(Box::new(no_addon_dir_refusal(&runtime.profile_name)));
+        }
         println!(
             "find skipped: profile={}, addon_dir=<unconfigured>",
             runtime.profile_name
@@ -580,45 +589,70 @@ async fn run_find(
             &curseforge_files,
         )
     };
-    if plain {
-        for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
-            println!("{line}");
-        }
-        let outcome = if link { Some(link_now()?) } else { None };
-        for line in crate::find::plain_closing(&report, outcome)? {
-            println!("{line}");
-        }
-    } else {
-        let wago_folders = if sends_to_wago { wago_lookups.len() } else { 0 };
-        // Colors only on a terminal, never in a pipe; the refusal goes to stderr, so it asks
-        // about stderr.
-        let theme_config = config_store.effective(&config_state)?;
-        let paint = crate::output::Paint::for_stdout(&theme_config, runtime.display);
-        println!("{}", crate::find::target_line(&target, paint));
-        for line in
-            crate::find::human_report(&report, &lookups.problems, &names, wago_folders, paint)
-        {
-            println!("{line}");
-        }
-        println!();
-        let outcome = if link { Some(link_now()?) } else { None };
-        // A refusal leaves the report on screen and ends the run with what happened, bold
-        // like the closing line it takes the place of.
-        match crate::find::human_closing(&report, &names, outcome, paint) {
-            Ok(lines) => {
-                for line in lines {
-                    println!("{line}");
-                }
-            }
-            Err(LemonupError::Refused(message)) => {
-                let error_paint = crate::output::Paint::for_stderr(&theme_config, runtime.display);
-                eprintln!("{}", crate::find::human_refusal(&message, error_paint));
-                return Ok(CommandOutcome::Failed);
-            }
-            Err(error) => return Err(Box::new(error)),
-        }
+    if !plain {
+        let found = crate::find::Found {
+            target: &target,
+            report: &report,
+            problems: &lookups.problems,
+            names: &names,
+            folders_read: inputs.folders.len(),
+            wago_folders: if sends_to_wago { wago_lookups.len() } else { 0 },
+            addon_dir_given: runtime.addon_dir_override.is_some(),
+        };
+        return finish_find(found, link.then_some(link_now), output);
+    }
+    for line in crate::find::report_lines(&report, &lookups.problems, inputs.folders.len()) {
+        println!("{line}");
+    }
+    let outcome = if link { Some(link_now()?) } else { None };
+    for line in crate::find::plain_closing(&report, outcome)? {
+        println!("{line}");
     }
     Ok(CommandOutcome::from_error_count(lookups.problems.len()))
+}
+
+/// How `lemonup find` ends once the sources have answered: the report with what happened,
+/// or with `--json` the document. `link` links the exact matches, `None` without `--link`.
+///
+/// `--link` shows the report before it links anything, as it was found. A run that links
+/// nothing after all (it needs `--yes`, or linking failed) then says how it ended on stderr
+/// and prints no JSON document. Exits 1 when a source failed.
+fn finish_find<O, E, L>(
+    found: crate::find::Found<'_>,
+    link: Option<L>,
+    output: &mut output::Output<O, E>,
+) -> Result<CommandOutcome, Box<dyn std::error::Error>>
+where
+    O: std::io::Write,
+    E: std::io::Write,
+    L: FnOnce() -> Result<crate::find::LinkOutcome, LemonupError>,
+{
+    use crate::find::{FindPrintout, LinkOutcome};
+    let addon_dir = &found.target.addon_dir;
+    let ended = CommandOutcome::from_error_count(found.problems.len());
+    let Some(link) = link else {
+        output.print(&FindPrintout::finished(found, None), Some(addon_dir))?;
+        return Ok(ended);
+    };
+    // A report that can't be shown stops the run before anything is linked.
+    output.print_readable(&FindPrintout::report(found))?;
+    match link()? {
+        LinkOutcome::NeedsYes(regrouping) => {
+            let (reason, hint) = crate::find::needs_yes_refusal(
+                found.report,
+                found.names,
+                &regrouping,
+                found.rerun(),
+            );
+            output.refuse(&reason, &hint)?;
+            Ok(CommandOutcome::Failed)
+        }
+        outcome => {
+            let printout = FindPrintout::finished(found, Some(outcome)).after_report();
+            output.print(&printout, Some(addon_dir))?;
+            Ok(ended)
+        }
+    }
 }
 
 /// The fields of the addon in `folder` as its .toc files have them, and where each comes from
@@ -1173,7 +1207,7 @@ fn say_failed<O: std::io::Write, E: std::io::Write>(
 
 /// What a command says failed when its own work fails, in its last lines. `None` for the
 /// commands that don't end that way here: `sync` and the install commands say theirs where
-/// they run, and the TUI, `profiles` and `find` end with a plain error.
+/// they run, and the TUI, `profiles` and `find --plain` end with a plain error.
 fn failed_title(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Check { .. } => Some("Check failed"),
@@ -1184,6 +1218,7 @@ fn failed_title(command: &Commands) -> Option<&'static str> {
         // Asked to change a field, the command saves; else it only looks the addon up.
         Commands::Toc { field: Some(_), .. } => Some("Save failed"),
         Commands::Toc { field: None, .. } => Some("Lookup failed"),
+        Commands::Find { plain: false, .. } => Some("Find failed"),
         Commands::Sync
         | Commands::InstallWago { .. }
         | Commands::InstallTukui { .. }
@@ -1191,7 +1226,7 @@ fn failed_title(command: &Commands) -> Option<&'static str> {
         | Commands::InstallGithub { .. }
         | Commands::Tui
         | Commands::Profiles
-        | Commands::Find { .. } => None,
+        | Commands::Find { plain: true, .. } => None,
     }
 }
 
@@ -4039,7 +4074,13 @@ mod addon_dir_binding_tests {
             (&["lemonup", "sync"][..], None),
             (&["lemonup", "install-tukui", "elvui"][..], None),
             (&["lemonup", "profiles"][..], None),
-            (&["lemonup", "find"][..], None),
+            (&["lemonup", "find"][..], Some("Find failed")),
+            (
+                &["lemonup", "find", "--link", "--yes"][..],
+                Some("Find failed"),
+            ),
+            // `--plain` ends as it always has.
+            (&["lemonup", "find", "--plain"][..], None),
         ] {
             let command = crate::cli::Cli::try_parse_from(args)
                 .expect("parses")
@@ -4047,6 +4088,173 @@ mod addon_dir_binding_tests {
                 .expect("a command");
             assert_eq!(super::failed_title(&command), what, "{args:?}");
         }
+    }
+
+    /// `lemonup find --source wago` in the sandbox without its Not linked addon: with nothing
+    /// to look up no source is sent anything, with a Wago.io key or without one.
+    async fn find(
+        sandbox: &Sandbox,
+        runtime: AppRuntime,
+        link: bool,
+        plain: bool,
+        output: &mut Captured,
+    ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
+        let sources = [lemonup_core::find::FindSource::Wago];
+        let _ = fs::remove_dir_all(sandbox.retail.join("SharedAddon"));
+        // With a key in the environment, a folder to look up would go to Wago.io: stop
+        // here if the sandbox ever has one.
+        let addon_dir = runtime
+            .addon_dir_override
+            .clone()
+            .unwrap_or_else(|| sandbox.retail.clone());
+        let flavor = crate::GameFlavor::for_addons_dir(&addon_dir);
+        if let Ok(inputs) = lemonup_core::find::FindInputs::read(&addon_dir, flavor) {
+            let rows = StateDatabase::open(&sandbox.paths.state_db_file)
+                .and_then(|database| database.list_addons())
+                .expect("rows");
+            assert!(
+                inputs.wago_lookups(&rows, None).is_empty(),
+                "this run must have nothing to send to Wago.io"
+            );
+        }
+        let found = super::run_find(
+            sandbox.paths.clone(),
+            runtime,
+            link,
+            false,
+            plain,
+            &sources,
+            output,
+        )
+        .await;
+        let command = crate::cli::Commands::Find {
+            link,
+            yes: false,
+            plain,
+            source: sources.to_vec(),
+        };
+        super::or_failed(super::failed_title(&command), found, output)
+    }
+
+    #[tokio::test]
+    async fn find_prints_its_report_or_one_json_document() {
+        let sandbox = sandbox();
+
+        let mut output = capture(OutputMode::Human);
+        let outcome = find(&sandbox, runtime(None), false, false, &mut output)
+            .await
+            .expect("found");
+        assert_eq!(outcome, CommandOutcome::Success);
+        let (stdout, stderr) = streams(output);
+        assert_eq!(stderr, "");
+        assert!(stdout.starts_with("Retail  "), "{stdout}");
+        assert!(
+            stdout.ends_with("No addons to look up.\n\nNothing changed\n"),
+            "{stdout}"
+        );
+
+        for link in [false, true] {
+            let mut output = capture(OutputMode::Json);
+            let outcome = find(&sandbox, runtime(None), link, false, &mut output)
+                .await
+                .expect("found");
+            assert_eq!(outcome, CommandOutcome::Success);
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stderr, "");
+            assert_eq!(stdout.lines().count(), 1, "{stdout}");
+            let document: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+            assert_eq!(document["schema"], 1);
+            assert_eq!(document["command"], "find");
+            assert_eq!(
+                document["addon_dir"],
+                sandbox.retail.to_string_lossy().as_ref()
+            );
+            // Only Wago.io was named: it was asked, or it has no key.
+            let named = [&document["sources_asked"], &document["sources_without_key"]]
+                .iter()
+                .flat_map(|sources| sources.as_array().expect("sources").clone())
+                .collect::<Vec<_>>();
+            assert_eq!(named, [serde_json::json!("wago")]);
+            assert_eq!(document["summary"]["addons"], 0);
+            assert_eq!(document["addons"], serde_json::json!([]));
+            // `--link` with nothing to link linked nothing; without it there is no link.
+            if link {
+                assert_eq!(document["link"]["linked"], serde_json::json!([]));
+            } else {
+                assert_eq!(document["link"], serde_json::Value::Null);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn find_ends_a_failure_and_a_refusal_like_every_other_command() {
+        let sandbox = sandbox();
+
+        // A folder that is not an AddOns folder: the run fails before any source is asked.
+        for mode in [OutputMode::Human, OutputMode::Json] {
+            let mut output = capture(mode);
+            let elsewhere = sandbox.paths.data_dir.clone();
+            let outcome = find(
+                &sandbox,
+                runtime(Some(&elsewhere)),
+                false,
+                false,
+                &mut output,
+            )
+            .await
+            .expect("said");
+            assert_eq!(outcome, CommandOutcome::Failed);
+            let (stdout, stderr) = streams(output);
+            assert_eq!(stdout, "");
+            assert!(stderr.starts_with("✗ Find failed\n  "), "{stderr}");
+            assert_eq!(stderr.lines().count(), 2, "{stderr}");
+        }
+
+        // No AddOns folder set: the refusal every command gives, and nothing on stdout.
+        fs::remove_file(&sandbox.paths.config_file).expect("remove config");
+        let mut output = capture(OutputMode::Human);
+        let refused = find(&sandbox, runtime(None), false, false, &mut output)
+            .await
+            .expect_err("refused");
+        assert!(super::is_refusal(refused.as_ref()), "{refused}");
+        assert_eq!(
+            refused.to_string(),
+            "Run `lemonup` to configure your game first"
+        );
+        assert_eq!(streams(output), (String::new(), String::new()));
+    }
+
+    #[tokio::test]
+    async fn find_plain_ends_as_it_always_has() {
+        let sandbox = sandbox();
+
+        // A failure is the plain error, without the failed mark.
+        let mut output = capture(OutputMode::Human);
+        let elsewhere = sandbox.paths.data_dir.clone();
+        let failed = find(
+            &sandbox,
+            runtime(Some(&elsewhere)),
+            false,
+            true,
+            &mut output,
+        )
+        .await
+        .expect_err("the error as it is");
+        assert!(
+            failed.to_string().starts_with("invalid argument: "),
+            "{failed}"
+        );
+        assert_eq!(streams(output), (String::new(), String::new()));
+
+        // No AddOns folder set: its own line on stdout and exit 1, never the refusal.
+        fs::remove_file(&sandbox.paths.config_file).expect("remove config");
+        let mut output = capture(OutputMode::Human);
+        let skipped = find(&sandbox, runtime(None), false, true, &mut output)
+            .await
+            .expect("skipped");
+        assert_eq!(skipped, CommandOutcome::Skipped);
+        assert_eq!(skipped.exit_status(), 1);
+        assert_eq!(streams(output), (String::new(), String::new()));
     }
 
     #[test]
@@ -4067,6 +4275,7 @@ mod addon_dir_binding_tests {
             "        Commands::ImportAddons {",
             "        Commands::RestoreBackup {",
             "        Commands::Toc {",
+            "        Commands::Find {",
         ] {
             let at = dispatch.find(arm).unwrap_or_else(|| panic!("{arm}"));
             let body = &dispatch[at + arm.len()..];
@@ -4625,7 +4834,7 @@ mod profile_tests {
         let source = include_str!("main.rs");
         let commands = [
             "fn run_toc<",
-            "async fn run_find(",
+            "async fn run_find<",
             "async fn run_check<",
             "async fn run_update<",
             "fn sync_report(",

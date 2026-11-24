@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use lemonup_core::find::{
     FindInputs, FindLabel, FindReport, FindResult, FindSource, FolderMove, FoundAddon, LikelyReason,
 };
-use lemonup_core::{AddonRecord, LemonupError, UpdateStatus, toc_edit};
+use lemonup_core::{AddonRecord, UpdateStatus, toc_edit};
 
 use super::{FindTarget, LinkOutcome, SourceProblem, exact_picks};
 use crate::output::{Entry, INDENT, Paint, Tone, section, table, wrap_units, wrap_words};
@@ -111,8 +111,9 @@ pub(crate) fn problem_text(problem: &SourceProblem) -> String {
     text
 }
 
-/// `items` as a wrapped, comma separated list.
-fn wrapped_list(items: Vec<String>, width: usize) -> Vec<String> {
+/// `items` as a wrapped, comma separated list. The items are names from files and from the
+/// sources, so each line is drawn as text.
+fn wrapped_list(items: Vec<String>, paint: Paint) -> Vec<String> {
     let last = items.len().saturating_sub(1);
     let units = items
         .into_iter()
@@ -125,11 +126,18 @@ fn wrapped_list(items: Vec<String>, width: usize) -> Vec<String> {
             }
         })
         .collect::<Vec<_>>();
-    wrap_units(INDENT, &units, width)
+    wrap_units(INDENT, &units, paint.width())
+        .iter()
+        .map(|line| paint.text(line))
+        .collect()
 }
 
-fn wrapped_text(text: &str, width: usize) -> Vec<String> {
-    wrap_words(INDENT, text, width)
+/// `text` wrapped and drawn as text: it can hold names, or a source's own words.
+fn wrapped_text(text: &str, paint: Paint) -> Vec<String> {
+    wrap_words(INDENT, text, paint.width())
+        .iter()
+        .map(|line| paint.text(line))
+        .collect()
 }
 
 pub(crate) fn capitalize(text: &str) -> String {
@@ -215,6 +223,7 @@ fn ready_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         update: update_ready(found)
             .map(|latest| format!("update ready ({})", collapse_spaces(latest))),
         notes,
+        hint: None,
         from: None,
         done: false,
     }
@@ -281,6 +290,7 @@ fn likely_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         },
         update: None,
         notes,
+        hint: None,
         from: None,
         done: false,
     }
@@ -311,6 +321,7 @@ fn partial_entry(found: &FoundAddon, names: &LocalNames) -> Entry {
         version,
         update: None,
         notes,
+        hint: None,
         from: None,
         done: false,
     }
@@ -334,7 +345,7 @@ fn choice_why(candidate: &FoundAddon) -> Option<String> {
 
 /// `QuestieDev (likely, same Wago.io project) or Questie (QuestieDB differs from the release)`,
 /// wrapped. The choices are named by their folders.
-fn choose_one_lines(result: &FindResult, width: usize) -> Vec<String> {
+fn choose_one_lines(result: &FindResult, paint: Paint) -> Vec<String> {
     let candidates = result
         .candidates
         .iter()
@@ -345,7 +356,7 @@ fn choose_one_lines(result: &FindResult, width: usize) -> Vec<String> {
         [only] => only.clone(),
         [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     };
-    wrap_words(INDENT, &joined, width)
+    wrapped_text(&joined, paint)
 }
 
 /// The names of name-only results, sorted. Results that share one CurseForge project are one
@@ -389,8 +400,8 @@ fn name_list(results: &[&FindResult], names: &LocalNames) -> Vec<String> {
 }
 
 /// What a failed source means for the addons it couldn't check.
-fn problem_line(problem: &SourceProblem, width: usize) -> Vec<String> {
-    wrapped_text(&problem_text(problem), width)
+fn problem_line(problem: &SourceProblem, paint: Paint) -> Vec<String> {
+    wrapped_text(&problem_text(problem), paint)
 }
 
 fn found_of<'a>(results: &[&'a FindResult]) -> Vec<&'a FoundAddon> {
@@ -505,7 +516,7 @@ pub(crate) fn human_report(
             .map(|result| {
                 (
                     names.name(&result.folder, &result.name).to_lowercase(),
-                    choose_one_lines(result, paint.width()),
+                    choose_one_lines(result, paint),
                 )
             })
             .collect::<Vec<_>>();
@@ -525,12 +536,12 @@ pub(crate) fn human_report(
         .flat_map(|result| result.not_checked_by.iter().copied())
         .collect::<HashSet<_>>();
     if !not_checked.is_empty() {
-        let mut body = wrapped_list(name_list(&not_checked, names), paint.width());
+        let mut body = wrapped_list(name_list(&not_checked, names), paint);
         for problem in problems
             .iter()
             .filter(|problem| asked_in_vain.contains(&problem.source))
         {
-            body.extend(problem_line(problem, paint.width()));
+            body.extend(problem_line(problem, paint));
         }
         section(
             &mut lines,
@@ -548,7 +559,7 @@ pub(crate) fn human_report(
     if !unexplained.is_empty() {
         let body = unexplained
             .iter()
-            .flat_map(|problem| problem_line(problem, paint.width()))
+            .flat_map(|problem| problem_line(problem, paint))
             .collect();
         section(
             &mut lines,
@@ -578,38 +589,60 @@ pub(crate) fn human_report(
                 Tone::Quiet,
                 &title,
                 results.len(),
-                wrapped_list(name_list(&results, names), paint.width()),
+                wrapped_list(name_list(&results, names), paint),
             );
         }
     }
     if report.results.is_empty() {
-        let text = "No addons to look up.".to_string();
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        lines.push(text);
+        lines.push(paint.text("No addons to look up."));
     }
     lines
+}
+
+/// How the linked addons stand, as the database holds them.
+struct LinkedStatus {
+    up_to_date: usize,
+    /// The names of the addons with an update ready, sorted.
+    ready: Vec<String>,
+    newer: usize,
+    unchecked: usize,
+    failed: usize,
+}
+
+fn linked_status(rows: &[AddonRecord]) -> LinkedStatus {
+    let mut status = LinkedStatus {
+        up_to_date: 0,
+        ready: Vec::new(),
+        newer: 0,
+        unchecked: 0,
+        failed: 0,
+    };
+    for row in rows {
+        match crate::update::determine_update_status(row).0 {
+            UpdateStatus::UpToDate => status.up_to_date += 1,
+            UpdateStatus::UpdateAvailable => status.ready.push(row.name.clone()),
+            UpdateStatus::RemoteOlder => status.newer += 1,
+            UpdateStatus::Unknown => status.unchecked += 1,
+            UpdateStatus::Error => status.failed += 1,
+        }
+    }
+    status.ready.sort_by_key(|name| name.to_lowercase());
+    status
 }
 
 /// How the linked addons stand, as the database holds them: "2 up to date", "1 with an update
 /// ready (X)", and the rest; and how many have an update ready.
 pub(crate) fn linked_parts(rows: &[AddonRecord]) -> (Vec<String>, usize) {
-    let mut up_to_date = 0;
-    let mut newer = 0;
-    let mut unchecked = 0;
-    let mut failed = 0;
-    let mut ready = Vec::new();
-    for row in rows {
-        match crate::update::determine_update_status(row).0 {
-            UpdateStatus::UpToDate => up_to_date += 1,
-            UpdateStatus::UpdateAvailable => ready.push(row.name.clone()),
-            UpdateStatus::RemoteOlder => newer += 1,
-            UpdateStatus::Unknown => unchecked += 1,
-            UpdateStatus::Error => failed += 1,
-        }
-    }
-    ready.sort_by_key(|name| name.to_lowercase());
+    let LinkedStatus {
+        up_to_date,
+        ready,
+        newer,
+        unchecked,
+        failed,
+    } = linked_status(rows);
     let mut parts = Vec::new();
     if up_to_date > 0 {
         parts.push(format!("{up_to_date} up to date"));
@@ -633,34 +666,112 @@ pub(crate) fn linked_parts(rows: &[AddonRecord]) -> (Vec<String>, usize) {
     (parts, ready.len())
 }
 
-/// The words for what a link did to the addons that were linked.
-fn linked_summary(rows: &[AddonRecord], unconfirmed: &[String]) -> Vec<String> {
-    let (parts, ready) = linked_parts(rows);
+/// One thing the report ends with: what happened, and under it what to run next. `said` can
+/// name addons, so nothing in it is shown as a command. Only `hint`, which LemonUp wrote,
+/// names commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Closing {
+    /// Something was done: the line starts with the done mark.
+    done: bool,
+    said: String,
+    hint: Option<String>,
+}
+
+impl Closing {
+    fn said(said: impl Into<String>) -> Self {
+        Self {
+            done: false,
+            said: said.into(),
+            hint: None,
+        }
+    }
+
+    fn with_hint(said: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            hint: Some(hint.into()),
+            ..Self::said(said)
+        }
+    }
+}
+
+/// How to run LemonUp again on the same game: `--profile` unless it is the default one, and
+/// `--addon-dir` again when the run was given one. A command for another game would link or
+/// update the wrong addons.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Rerun<'a> {
+    pub(crate) profile: &'a str,
+    pub(crate) addon_dir_given: bool,
+}
+
+impl Rerun<'_> {
+    /// "Run `lemonup find --link`", for the same game.
+    fn run(self, command: &str) -> String {
+        let lemonup = if self.profile == lemonup_core::DEFAULT_PROFILE {
+            "lemonup".to_string()
+        } else {
+            format!("lemonup --profile {}", self.profile)
+        };
+        let with = if self.addon_dir_given {
+            " with the same `--addon-dir`"
+        } else {
+            ""
+        };
+        format!("Run `{lemonup} {command}`{with}")
+    }
+}
+
+/// The words for what a link did to the addons that were linked: how many, and how they
+/// stand, as `lemonup check` counts them. The report above names the ones with an update.
+fn linked_summary(
+    rows: &[AddonRecord],
+    unconfirmed: &[AddonRecord],
+    rerun: Rerun<'_>,
+) -> Vec<Closing> {
     let mut lines = Vec::new();
     if !rows.is_empty() {
-        let mut line = format!(
-            "Linked {} {}: {}.",
-            rows.len(),
-            plural(rows.len(), "addon", "addons"),
-            parts.join(", ")
-        );
-        if ready > 0 {
-            line.push_str(&format!(
-                " `lemonup update-all` updates {}.",
-                plural(ready, "it", "them")
-            ));
-        }
-        lines.push(line);
+        let status = linked_status(rows);
+        let ready = status.ready.len();
+        let parts = [
+            (status.up_to_date, "up to date", "up to date"),
+            (ready, "update ready", "updates ready"),
+            (status.newer, "newer than source", "newer than source"),
+            (status.unchecked, "not checked yet", "not checked yet"),
+            (status.failed, "check failed", "checks failed"),
+        ]
+        .into_iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, one, many)| format!("{count} {}", plural(count, one, many)))
+        .collect::<Vec<_>>();
+        lines.push(Closing {
+            done: true,
+            said: format!(
+                "Linked {} {} - {}",
+                rows.len(),
+                plural(rows.len(), "addon", "addons"),
+                parts.join(", ")
+            ),
+            hint: (ready > 0).then(|| {
+                format!(
+                    "{} to update {}",
+                    rerun.run("update-all"),
+                    plural(ready, "it", "them")
+                )
+            }),
+        });
     }
     if !unconfirmed.is_empty() {
         let leading = if rows.is_empty() {
-            "LemonUp could not confirm that these were linked"
+            "Could not confirm these were linked"
         } else {
-            "LemonUp could not confirm that these were also linked"
+            "Could not confirm these were also linked"
         };
-        lines.push(format!(
-            "{leading}: {}. Run `lemonup find` again to see where they stand.",
-            unconfirmed.join(", ")
+        let names = unconfirmed
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>();
+        lines.push(Closing::with_hint(
+            format!("{leading}: {}", names.join(", ")),
+            format!("{} again to see where they stand", rerun.run("find")),
         ));
     }
     lines
@@ -697,75 +808,99 @@ fn moves_text(regrouping: &[FoundAddon], names: &LocalNames) -> String {
     clauses.join("; ")
 }
 
-/// The lines that end the report, saying what happened: nothing was changed, nothing was
-/// linked, or what was linked. A refusal (`--link` without `--yes` when matches move folders)
-/// is an error in plain words; [`human_refusal`] draws it.
-pub(crate) fn human_closing(
+/// The closing lines as stdout gets them: the done mark before something that was done,
+/// and each hint on a line of its own with the commands it names drawn as commands.
+pub(super) fn draw_closing(lines: &[Closing], paint: Paint) -> Vec<String> {
+    let mut drawn = Vec::new();
+    for line in lines {
+        drawn.push(if line.done {
+            format!("{} {}", paint.done(), paint.text(&line.said))
+        } else {
+            paint.text(&line.said)
+        });
+        if let Some(hint) = &line.hint {
+            drawn.push(paint.commands(hint, Paint::text));
+        }
+    }
+    drawn
+}
+
+/// How many addons are ready to link, in words: "the addon ready to link".
+fn ready_to_link(ready: usize) -> String {
+    if ready == 1 {
+        "the addon ready to link".to_string()
+    } else {
+        format!("the {ready} addons ready to link")
+    }
+}
+
+/// Why `find --link` refuses without `--yes`, and what to run instead. The first names addons
+/// and folders, so only the second is shown as naming a command.
+pub(crate) fn needs_yes_refusal(
+    report: &FindReport,
+    names: &LocalNames,
+    regrouping: &[FoundAddon],
+    rerun: Rerun<'_>,
+) -> (String, String) {
+    (
+        format!(
+            "Nothing linked - {} {} folders between addons: {}",
+            regrouping.len(),
+            plural(regrouping.len(), "match moves", "matches move"),
+            moves_text(regrouping, names),
+        ),
+        format!(
+            "{} to link {}",
+            rerun.run("find --link --yes"),
+            ready_to_link(exact_picks(report).len())
+        ),
+    )
+}
+
+/// What ends the report, saying what happened: nothing changed, nothing was linked, or what
+/// was linked. `--link` without `--yes` when matches move folders is a refusal: its words
+/// are those of [`needs_yes_refusal`], which `lemonup find` prints on stderr instead.
+pub(super) fn closing_text(
     report: &FindReport,
     names: &LocalNames,
     link: Option<LinkOutcome>,
-    paint: Paint,
-) -> Result<Vec<String>, LemonupError> {
-    let lines = closing_text(report, names, link)?;
-    Ok(lines
-        .iter()
-        .map(|line| paint.commands(line, Paint::bold))
-        .collect())
-}
-
-/// The refusal of `find --link` as stderr gets it: bold, like the closing line it takes the
-/// place of. Its words name addons and folders, so it is drawn here and never kept drawn.
-pub(crate) fn human_refusal(message: &str, error_paint: Paint) -> String {
-    error_paint.commands(message, Paint::bold)
-}
-
-/// The closing lines as text.
-fn closing_text(
-    report: &FindReport,
-    names: &LocalNames,
-    link: Option<LinkOutcome>,
-) -> Result<Vec<String>, LemonupError> {
+    rerun: Rerun<'_>,
+) -> Vec<Closing> {
     let ready = exact_picks(report).len();
     let Some(outcome) = link else {
-        let mut line = "Nothing was changed.".to_string();
-        if ready > 0 {
-            line.push_str(&format!(
-                " `lemonup find --link` links the {}ready to link.",
-                if ready == 1 {
-                    "addon ".to_string()
-                } else {
-                    format!("{ready} addons ")
-                }
-            ));
-        }
-        return Ok(vec![line]);
+        let link = rerun.run("find --link");
+        return vec![match ready {
+            0 => Closing::said("Nothing changed"),
+            1 => Closing::with_hint(
+                "Nothing changed - 1 addon ready to link",
+                format!("{link} to link it"),
+            ),
+            ready => Closing::with_hint(
+                format!("Nothing changed - {ready} addons ready to link"),
+                format!("{link} to link them"),
+            ),
+        }];
     };
     match outcome {
-        LinkOutcome::NothingToLink => Ok(vec![
-            "Nothing was linked. No addon is ready to link.".to_string(),
-        ]),
-        LinkOutcome::NeedsYes(regrouping) => Err(LemonupError::Refused(format!(
-            "{} of these {} folders between addons: {}. Nothing was linked. \
-             Run `lemonup find --link --yes` to link the {}.",
-            regrouping.len(),
-            plural(regrouping.len(), "moves", "move"),
-            moves_text(&regrouping, names),
-            if ready == 1 {
-                "addon ready to link".to_string()
-            } else {
-                format!("{ready} addons ready to link")
-            }
-        ))),
+        LinkOutcome::NothingToLink => {
+            vec![Closing::said("Nothing linked - no addon is ready to link")]
+        }
+        LinkOutcome::NeedsYes(regrouping) => {
+            let (reason, hint) = needs_yes_refusal(report, names, &regrouping, rerun);
+            vec![Closing::with_hint(reason, hint)]
+        }
         LinkOutcome::Linked {
             rows,
             unconfirmed,
             curseforge,
         } => {
-            let mut lines = linked_summary(&rows, &unconfirmed);
+            let mut lines = linked_summary(&rows, &unconfirmed, rerun);
             if !curseforge.is_empty() {
-                lines.push(lemonup_core::curseforge::hint_naming(&curseforge));
+                lines.push(Closing::said(lemonup_core::curseforge::hint_naming(
+                    &super::curseforge_names(&rows, &curseforge),
+                )));
             }
-            Ok(lines)
+            lines
         }
     }
 }

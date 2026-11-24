@@ -231,6 +231,7 @@ fn entry(row: &CheckRow, version: String, notes: Vec<String>) -> Entry {
         version,
         update: None,
         notes,
+        hint: None,
         from: None,
         done: false,
     }

@@ -185,6 +185,7 @@ impl Report for ImportReport {
                     version: String::new(),
                     update: None,
                     notes: row.message.iter().cloned().collect(),
+                    hint: None,
                     from: None,
                     done: status == ImportStatus::Installed,
                 })
