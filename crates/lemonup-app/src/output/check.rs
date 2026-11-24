@@ -8,6 +8,7 @@ use super::{
     section, source_label, table,
 };
 use crate::find::FindTarget;
+use crate::github::GithubTokenSource;
 use crate::source_error::SourceErrorKind;
 use crate::update::{CheckResult, serialize_update_status};
 
@@ -26,6 +27,9 @@ pub(crate) struct CheckReport {
     /// Whether, and how, the closing line names the command that installs the updates.
     #[serde(skip)]
     hint: UpdateHint,
+    /// Where the GitHub token the check sent comes from, if it sent one.
+    #[serde(skip)]
+    github_token: Option<GithubTokenSource>,
     summary: CheckSummary,
     addons: Vec<CheckRow>,
 }
@@ -151,9 +155,16 @@ impl CheckReport {
             profile_name: profile.to_string(),
             named,
             hint: UpdateHint::Plain,
+            github_token: None,
             summary,
             addons: rows,
         }
+    }
+
+    /// The same report for a check that sent the GitHub token from `source`.
+    pub(crate) fn with_github_token(mut self, source: Option<GithubTokenSource>) -> Self {
+        self.github_token = source;
+        self
     }
 
     /// The same report with another hint: `update-all` alone would act on the profile's saved
@@ -227,7 +238,8 @@ fn entry(row: &CheckRow, version: String, notes: Vec<String>) -> Entry {
 
 /// What a failed check says: the cause in plain words when LemonUp knows it, as Details says
 /// it in the TUI, else its message. The kind decides, never the message's text.
-fn failure_note(row: &CheckRow) -> Option<String> {
+/// `github_token` is where the GitHub token the check sent comes from, if it sent one.
+fn failure_note(row: &CheckRow, github_token: Option<GithubTokenSource>) -> Option<String> {
     let Some(kind) = row.error_kind else {
         return row.message.clone();
     };
@@ -242,9 +254,16 @@ fn failure_note(row: &CheckRow) -> Option<String> {
                 .to_string()
         }
         SourceErrorKind::KeyRejected if row.source == Some(SourceKind::GitHub) => {
-            "GitHub turned down LemonUp's request. If you set a GitHub token, check it and try \
-             again."
-                .to_string()
+            match github_token {
+                Some(GithubTokenSource::Settings) => {
+                    "GitHub didn't accept your GitHub token. Check it in Settings and try again."
+                        .to_string()
+                }
+                Some(GithubTokenSource::Environment(name)) => {
+                    format!("GitHub didn't accept the token in {name}. Replace or unset it.")
+                }
+                None => "GitHub turned down LemonUp's request. Try again later.".to_string(),
+            }
         }
         SourceErrorKind::KeyRejected => {
             format!("{first} turned down LemonUp's request. Try again later.")
@@ -253,6 +272,13 @@ fn failure_note(row: &CheckRow) -> Option<String> {
             format!(
                 "{first} doesn't list this addon anymore. It may have moved or been taken down."
             )
+        }
+        SourceErrorKind::SlowDown
+            if row.source == Some(SourceKind::GitHub) && github_token.is_none() =>
+        {
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings or \
+             set GITHUB_TOKEN to raise it, or try again later."
+                .to_string()
         }
         SourceErrorKind::SlowDown => {
             format!("{first} asked LemonUp to slow down. Wait a few minutes and try again.")
@@ -381,7 +407,13 @@ impl Report for CheckReport {
             "Check failed",
             failed
                 .iter()
-                .map(|row| entry(row, installed(row), failure_note(row).into_iter().collect()))
+                .map(|row| {
+                    entry(
+                        row,
+                        installed(row),
+                        failure_note(row, self.github_token).into_iter().collect(),
+                    )
+                })
                 .collect(),
         );
         let not_checked = shown(UpdateStatus::Unknown);
@@ -736,6 +768,63 @@ mod tests {
                 "      LemonUp couldn't check GitHub for a newer version. Details: bad gateway",
             ]
         );
+    }
+
+    #[test]
+    fn a_github_failure_says_what_the_token_has_to_do_with_it() {
+        use crate::github::GithubTokenSource;
+        let addons = vec![addon("Postal", "Postal", SourceKind::GitHub, Some("3.0"))];
+        let note = |kind, token| {
+            let mut failed = check("Postal", UpdateStatus::Error, None);
+            failed.error_kind = Some(kind);
+            failed.message = Some("raw words".to_string());
+            let report = CheckReport::new(None, "default", false, &[failed], &addons)
+                .with_github_token(token);
+            report.human(Paint::PLAIN.with_width(200))[2]
+                .trim()
+                .to_string()
+        };
+        // No token sent: one raises the limit.
+        assert_eq!(
+            note(SourceErrorKind::SlowDown, None),
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings or \
+             set GITHUB_TOKEN to raise it, or try again later."
+        );
+        // A token sent: never ask for one.
+        assert_eq!(
+            note(SourceErrorKind::SlowDown, Some(GithubTokenSource::Settings)),
+            "GitHub asked LemonUp to slow down. Wait a few minutes and try again."
+        );
+        assert_eq!(
+            note(
+                SourceErrorKind::KeyRejected,
+                Some(GithubTokenSource::Settings)
+            ),
+            "GitHub didn't accept your GitHub token. Check it in Settings and try again."
+        );
+        assert_eq!(
+            note(
+                SourceErrorKind::KeyRejected,
+                Some(GithubTokenSource::Environment("GITHUB_TOKEN"))
+            ),
+            "GitHub didn't accept the token in GITHUB_TOKEN. Replace or unset it."
+        );
+        assert_eq!(
+            note(
+                SourceErrorKind::KeyRejected,
+                Some(GithubTokenSource::Environment("GH_TOKEN"))
+            ),
+            "GitHub didn't accept the token in GH_TOKEN. Replace or unset it."
+        );
+        // JSON never says where the token came from.
+        let mut failed = check("Postal", UpdateStatus::Error, None);
+        failed.error_kind = Some(SourceErrorKind::KeyRejected);
+        let report = CheckReport::new(None, "default", false, &[failed], &addons);
+        let plain = serde_json::to_string(&report).expect("json");
+        let with_token =
+            serde_json::to_string(&report.with_github_token(Some(GithubTokenSource::Settings)))
+                .expect("json");
+        assert_eq!(plain, with_token);
     }
 
     #[test]

@@ -477,6 +477,11 @@ impl App {
             roles.muted,
             width,
         ));
+        lines.extend(self.setup_prose(
+            "A GitHub token in Settings raises GitHub's limit of 60 requests an hour.",
+            roles.muted,
+            width,
+        ));
         lines.push(Line::from(""));
         lines.extend(self.setup_box_lines(
             "Wago.io key",

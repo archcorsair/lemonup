@@ -99,7 +99,11 @@ pub(crate) fn problem_text(problem: &SourceProblem) -> String {
     let provider = problem.source.name();
     let mut text = format!(
         "{provider}: {}",
-        crate::app::render_install_search::source_error_advice(problem.error.kind, provider)
+        crate::app::render_install_search::source_error_advice(
+            problem.error.kind,
+            provider,
+            crate::github::github_token_source()
+        )
     );
     if problem.error.kind == SourceErrorKind::Other && !problem.error.detail.is_empty() {
         text.push_str(&format!(" Details: {}", problem.error.detail));

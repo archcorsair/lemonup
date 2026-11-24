@@ -4,6 +4,7 @@ use ratatui::widgets::Widget;
 use super::direct_install::DirectInstallProvider;
 use super::sheet::{SheetBody, SheetRoom, render_stateful, text_height, wrap_lines_hanging};
 use super::*;
+use crate::github::GithubTokenSource;
 use crate::source_error::FolderClash;
 
 /// The Addon column never gets narrower than this to make room for the
@@ -72,7 +73,13 @@ fn marquee_steps(text: &str, width: usize) -> usize {
 
 /// What the sheet says for each kind of source error: what happened and
 /// what to do. The raw error is shown under it as a technical detail.
-pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> String {
+/// `github_token` is where the GitHub token in use comes from, if one is sent.
+pub(crate) fn source_error_advice(
+    kind: SourceErrorKind,
+    provider: &str,
+    github_token: Option<GithubTokenSource>,
+) -> String {
+    let github = provider == "GitHub";
     match kind {
         SourceErrorKind::NoConnection => format!(
             "LemonUp couldn't reach {provider}. Check your internet connection and try again."
@@ -80,12 +87,26 @@ pub(crate) fn source_error_advice(kind: SourceErrorKind, provider: &str) -> Stri
         SourceErrorKind::KeyRejected if provider == "Wago.io" => {
             "Wago.io didn't accept your Wago.io key. Check it and paste it again.".to_string()
         }
-        SourceErrorKind::KeyRejected => format!(
-            "{provider} didn't accept the token LemonUp sent (GITHUB_TOKEN or GH_TOKEN). \
-             Fix it or unset it, then try again."
-        ),
+        SourceErrorKind::KeyRejected if github => match github_token {
+            Some(GithubTokenSource::Settings) => "GitHub didn't accept your GitHub token. Check \
+                                                  it in Settings, then try again."
+                .to_string(),
+            // A new value in the variable counts only once LemonUp starts again.
+            Some(GithubTokenSource::Environment(name)) => {
+                format!("GitHub didn't accept the token in {name}. Replace or unset it.")
+            }
+            None => "GitHub turned down LemonUp's request. Try again later.".to_string(),
+        },
+        SourceErrorKind::KeyRejected => {
+            format!("{provider} turned down LemonUp's request. Try again later.")
+        }
         SourceErrorKind::NotFound => {
             format!("{provider} doesn't have that addon. Check the name or the link and try again.")
+        }
+        SourceErrorKind::SlowDown if github && github_token.is_none() => {
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings to \
+             raise it, or try again later."
+                .to_string()
         }
         SourceErrorKind::SlowDown => {
             format!("{provider} asked LemonUp to slow down. Wait a few minutes, then try again.")
@@ -112,6 +133,7 @@ pub(crate) fn install_error_advice(
     kind: SourceErrorKind,
     provider: &str,
     clash: Option<&FolderClash>,
+    github_token: Option<GithubTokenSource>,
 ) -> String {
     let linked = clash.map_or(&[][..], |clash| clash.linked.as_slice());
     // An addon a newer LemonUp linked shows as "Not linked" here, so this version does not
@@ -139,7 +161,7 @@ pub(crate) fn install_error_advice(
                 rest.len()
             )
         }
-        _ => source_error_advice(kind, provider),
+        _ => source_error_advice(kind, provider, github_token),
     }
 }
 
@@ -577,7 +599,12 @@ impl App {
                     Line::from(""),
                     Line::from(format!(
                         "  {}",
-                        install_error_advice(*kind, provider, clash.as_ref())
+                        install_error_advice(
+                            *kind,
+                            provider,
+                            clash.as_ref(),
+                            self.github_token_source()
+                        )
                     )),
                     Line::from(""),
                     keys,

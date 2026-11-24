@@ -173,6 +173,10 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         ));
     }
 
+    // Every GitHub request this run makes sends the token saved in Settings, if any. The TUI
+    // sets it again whenever its settings change.
+    crate::github::use_saved_github_token(output_config(&paths).github_token.as_deref());
+
     let outcome = match command {
         Commands::Tui => {
             run_tui(paths, runtime, startup_notice).await?;
@@ -940,7 +944,8 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         &checks,
         &rows,
     )
-    .with_hint(hint);
+    .with_hint(hint)
+    .with_github_token(crate::github::github_token_source());
     output.print(&report, effective_addon_dir.as_deref())?;
     Ok(CommandOutcome::from_error_count(count_check_errors(
         &checks,
@@ -1386,6 +1391,7 @@ fn install_request<'a>(
         target,
         profile: &runtime.profile_name,
         addon_dir_given: runtime.addon_dir_override.is_some(),
+        github_token: crate::github::github_token_source(),
     }
 }
 
@@ -3322,6 +3328,7 @@ mod addon_dir_binding_tests {
             target: "https://github.com/a/b",
             profile: DEFAULT_PROFILE,
             addon_dir_given: false,
+            github_token: None,
         };
         for mode in [OutputMode::Human, OutputMode::Json] {
             // A failure: one line on stderr, nothing on stdout, exit 1.

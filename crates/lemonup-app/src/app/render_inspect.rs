@@ -243,6 +243,7 @@ impl App {
                     .check_failure(&item.folder)
                     .map(|failure| failure.kind),
                 item.source,
+                self.github_token_source(),
             )
             .into_iter()
             .map(|(part, is_key)| {
@@ -647,11 +648,14 @@ fn spans_text_width(spans: &[Span<'_>]) -> usize {
 
 /// The Details sentence for "Check failed", as text parts and the key `c`
 /// (`true`): the cause in plain words when LemonUp knows it, otherwise the
-/// plain fact.
+/// plain fact. `github_token` is where the GitHub token in use comes from, if
+/// one is sent.
 pub(super) fn check_failed_sentence(
     kind: Option<SourceErrorKind>,
     source: SourceKind,
+    github_token: Option<crate::github::GithubTokenSource>,
 ) -> Vec<(String, bool)> {
+    use crate::github::GithubTokenSource;
     let name = dashboard_source_name(source, true);
     let try_again = |before: String, after: &str| {
         vec![
@@ -670,11 +674,22 @@ pub(super) fn check_failed_sentence(
                 .to_string(),
             " to try again.",
         ),
-        Some(SourceErrorKind::KeyRejected) if source == SourceKind::GitHub => try_again(
-            "GitHub turned down LemonUp's request. If you set a GitHub token, check it, then press "
-                .to_string(),
-            " to try again.",
-        ),
+        Some(SourceErrorKind::KeyRejected) if source == SourceKind::GitHub => match github_token {
+            Some(GithubTokenSource::Settings) => try_again(
+                "GitHub didn't accept your GitHub token. Check it in Settings, then press "
+                    .to_string(),
+                " to try again.",
+            ),
+            // A new value in the variable counts only once LemonUp starts again, so no key.
+            Some(GithubTokenSource::Environment(name)) => vec![(
+                format!("GitHub didn't accept the token in {name}. Replace or unset it."),
+                false,
+            )],
+            None => try_again(
+                "GitHub turned down LemonUp's request. Press ".to_string(),
+                " to try again later.",
+            ),
+        },
         Some(SourceErrorKind::KeyRejected) => try_again(
             format!("{name} turned down LemonUp's request. Press "),
             " to try again later.",
@@ -685,6 +700,14 @@ pub(super) fn check_failed_sentence(
             ),
             " to check again.",
         ),
+        Some(SourceErrorKind::SlowDown) if source == SourceKind::GitHub && github_token.is_none() => {
+            try_again(
+                "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings \
+                 to raise it, or press "
+                    .to_string(),
+                " to try again later.",
+            )
+        }
         Some(SourceErrorKind::SlowDown) => try_again(
             format!("{name} asked LemonUp to slow down. Wait a few minutes, then press "),
             " to try again.",

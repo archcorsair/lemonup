@@ -1127,6 +1127,7 @@ impl App {
             error.kind,
             "Wago.io",
             error.clash.as_ref(),
+            None,
         );
         let mut text = format!("{name} wasn't replaced: {advice} Its folders weren't changed.");
         if let Some(rest) = self.replacements_left() {

@@ -642,8 +642,8 @@ static SETTINGS_HELP: HelpPage = HelpPage {
                 ),
                 HelpRow::key(
                     "enter",
-                    "switch on or off, type your Wago.io key, or run a row such as \
-                     \"Change game folder…\"",
+                    "switch on or off, type your Wago.io key or GitHub token, or run a \
+                     row such as \"Change game folder…\"",
                     K_ENTER,
                 ),
                 HelpRow::key("PgUp PgDn", "scroll", K_PAGE),
@@ -651,7 +651,7 @@ static SETTINGS_HELP: HelpPage = HelpPage {
             ],
         },
         HelpSection {
-            title: "While you type your key",
+            title: "While you type your key or token",
             rows: &[
                 HelpRow::key("enter", "save", K_ENTER),
                 HelpRow::key("esc", "cancel", K_ESC),
