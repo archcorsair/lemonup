@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use super::{INDENT, Paint, Report, columns, context_line, display_version, wrap_units};
 use crate::find::FindTarget;
+use crate::github::GithubTokenSource;
 use crate::source_error::{SourceError, SourceErrorKind};
 
 /// What an install command was asked for, for the words of a failure.
@@ -16,6 +17,8 @@ pub(crate) struct InstallRequest<'a> {
     pub(crate) profile: &'a str,
     /// The run named its AddOns folder with `--addon-dir`.
     pub(crate) addon_dir_given: bool,
+    /// Where the GitHub token the run sends comes from, if it sends one.
+    pub(crate) github_token: Option<GithubTokenSource>,
 }
 
 /// Why an install failed, to stand under "Install failed", and the command to run next when
@@ -23,12 +26,18 @@ pub(crate) struct InstallRequest<'a> {
 /// install sheet uses. Where those don't say what was found, the source's own words are the
 /// reason. The reason can hold a source's or an addon's own words; the hint is LemonUp's.
 pub(crate) fn failure(error: &SourceError, request: InstallRequest) -> (String, Option<String>) {
-    let InstallRequest { source, target, .. } = request;
+    let InstallRequest {
+        source,
+        target,
+        github_token,
+        ..
+    } = request;
     let advice = || {
         crate::app::render_install_search::install_error_advice(
             error.kind,
             super::source_label(source),
             error.clash.as_ref(),
+            github_token,
         )
     };
     // The addon itself is there already, and linked: installing it again is an update. This
@@ -59,6 +68,14 @@ pub(crate) fn failure(error: &SourceError, request: InstallRequest) -> (String, 
     }
     let reason = match (error.kind, &error.clash) {
         (SourceErrorKind::Other, _) => error.detail.clone(),
+        // A command can also take the token from GITHUB_TOKEN, so it says so too.
+        (SourceErrorKind::SlowDown, _)
+            if source == SourceKind::GitHub && github_token.is_none() =>
+        {
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings or \
+             set GITHUB_TOKEN to raise it, or try again later."
+                .to_string()
+        }
         // No period after it: one would end up in a link that is copied or clicked.
         (SourceErrorKind::NotFound, _) if target.contains("://") => {
             format!("Couldn't find an addon at {target}")
@@ -493,7 +510,60 @@ mod tests {
             target,
             profile: "default",
             addon_dir_given: false,
+            github_token: None,
         }
+    }
+
+    #[test]
+    fn a_github_failure_says_what_the_token_has_to_do_with_it() {
+        use crate::github::GithubTokenSource;
+        use crate::source_error::{SourceError, SourceErrorKind};
+        let reason = |kind, github_token| {
+            let request = super::InstallRequest {
+                github_token,
+                ..request(SourceKind::GitHub, "owner/repo")
+            };
+            super::failure(&SourceError::new(kind, "raw words"), request).0
+        };
+        // No token sent: one raises the limit.
+        assert_eq!(
+            reason(SourceErrorKind::SlowDown, None),
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings or \
+             set GITHUB_TOKEN to raise it, or try again later."
+        );
+        // A token sent: never ask for one.
+        for source in [
+            GithubTokenSource::Settings,
+            GithubTokenSource::Environment("GITHUB_TOKEN"),
+        ] {
+            assert_eq!(
+                reason(SourceErrorKind::SlowDown, Some(source)),
+                "GitHub asked LemonUp to slow down. Wait a few minutes, then try again."
+            );
+        }
+        assert_eq!(
+            reason(
+                SourceErrorKind::KeyRejected,
+                Some(GithubTokenSource::Settings)
+            ),
+            "GitHub didn't accept your GitHub token. Check it in Settings, then try again."
+        );
+        assert_eq!(
+            reason(
+                SourceErrorKind::KeyRejected,
+                Some(GithubTokenSource::Environment("GH_TOKEN"))
+            ),
+            "GitHub didn't accept the token in GH_TOKEN. Replace or unset it."
+        );
+        // Another source's limit says nothing of GitHub.
+        let request = super::InstallRequest {
+            github_token: None,
+            ..request(SourceKind::Tukui, "elvui")
+        };
+        assert_eq!(
+            super::failure(&SourceError::new(SourceErrorKind::SlowDown, "x"), request).0,
+            "TukUI asked LemonUp to slow down. Wait a few minutes, then try again."
+        );
     }
 
     #[test]
@@ -513,13 +583,6 @@ mod tests {
         assert_eq!(
             reason(SourceErrorKind::KeyRejected, SourceKind::Wago),
             said("Wago.io didn't accept your Wago.io key. Check it and paste it again.")
-        );
-        assert_eq!(
-            reason(SourceErrorKind::KeyRejected, SourceKind::GitHub),
-            said(
-                "GitHub didn't accept the token LemonUp sent (GITHUB_TOKEN or GH_TOKEN). Fix it \
-                 or unset it, then try again."
-            )
         );
         assert_eq!(
             reason(SourceErrorKind::SlowDown, SourceKind::WowInterface),

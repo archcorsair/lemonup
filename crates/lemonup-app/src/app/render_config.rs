@@ -10,6 +10,7 @@ const CONFIG_SECTIONS: [(ConfigGroup, &[ConfigField]); 2] = [
         ConfigGroup::AllGames,
         &[
             ConfigField::WagoApiKey,
+            ConfigField::GithubToken,
             ConfigField::Theme,
             ConfigField::SimpleSymbols,
             ConfigField::ReduceMotion,
@@ -188,7 +189,7 @@ impl App {
         ));
 
         if let Some(edit) = edit {
-            // The key is a secret: every character shows as a dot.
+            // The key and the token are secrets: every character shows as a dot.
             spans.extend(
                 edit.value.masked('•').spans(
                     room,
@@ -200,7 +201,12 @@ impl App {
                 ),
             );
             if edit.value.is_empty() {
-                spans.push(Span::styled(" paste your key here", roles.muted));
+                let hint = if field == ConfigField::GithubToken {
+                    " paste your token here"
+                } else {
+                    " paste your key here"
+                };
+                spans.push(Span::styled(hint, roles.muted));
             }
             return Line::from(spans);
         }
@@ -266,8 +272,8 @@ impl App {
     fn config_reserved_rows(&self, width: u16) -> u16 {
         let mut rows = text_height(&self.config_description(width, true), width);
         for field in ConfigField::ALL {
-            // Only the key row reads differently while it is being edited.
-            let edits: &[bool] = if field == ConfigField::WagoApiKey {
+            // Only the key and token rows read differently while they are being edited.
+            let edits: &[bool] = if field.is_textual() {
                 &[false, true]
             } else {
                 &[false]
@@ -281,7 +287,7 @@ impl App {
         rows
     }
 
-    fn config_description_text(
+    pub(super) fn config_description_text(
         &self,
         field: ConfigField,
         editing: bool,
@@ -309,6 +315,17 @@ impl App {
                 }
                 ConfigField::WagoApiKey => {
                     "needed to search Wago.io and to update addons from it".to_string()
+                }
+                ConfigField::GithubToken if editing => "enter save, esc cancel".to_string(),
+                ConfigField::GithubToken => {
+                    match self.github_token_from_environment(&self.config_pane.draft) {
+                        Some(name) => {
+                            format!("from {name}, and a token you save here is used instead")
+                        }
+                        None => {
+                            "optional, raises GitHub's hourly limit from 60 to 5,000".to_string()
+                        }
+                    }
                 }
                 ConfigField::AutoCheckEnabled => {
                     "checks for updates in the background while LemonUp is open".to_string()
@@ -400,6 +417,46 @@ impl App {
                     muted,
                 ),
             ],
+            ConfigField::GithubToken if editing => vec![
+                Span::styled("Paste your token, then press ", muted),
+                Span::styled("enter", key),
+                Span::styled(" to save. An empty box removes the token. ", muted),
+                Span::styled("esc", key),
+                Span::styled(" cancel.", muted),
+            ],
+            ConfigField::GithubToken => {
+                match self.github_token_from_environment(&self.config_pane.draft) {
+                    Some(name) => vec![
+                        Span::styled(
+                            format!(
+                                "This token comes from the {name} environment variable. A token \
+                                 you save here is used instead. Press "
+                            ),
+                            muted,
+                        ),
+                        Span::styled("enter", key),
+                        Span::styled(" to type or paste one.", muted),
+                    ],
+                    None => vec![
+                        Span::styled(
+                            "Optional: raises GitHub's limit from 60 to 5,000 requests an hour. \
+                             How to make one: ",
+                            muted,
+                        ),
+                        Span::styled("lemonup.org/github-token", link),
+                        Span::styled(". Press ", muted),
+                        Span::styled("enter", key),
+                        Span::styled(
+                            if self.config_pane.draft.github_token.is_some() {
+                                " to change it."
+                            } else {
+                                " to type or paste it."
+                            },
+                            muted,
+                        ),
+                    ],
+                }
+            }
             ConfigField::AutoCheckEnabled => {
                 plain("While LemonUp is open, it checks your addons for updates in the background.")
             }

@@ -362,22 +362,151 @@ pub(crate) async fn prepare_github_update(
 
 const GITHUB_TOKEN_ENV_VARS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
 
-/// Resolves an optional GitHub API token. Checks `GITHUB_TOKEN`, then `GH_TOKEN`;
-/// values are trimmed and empty/whitespace-only values are skipped.
-fn resolve_github_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+/// Where the GitHub token in use comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubTokenSource {
+    /// Saved in Settings (`shared.toml`, shared by all games).
+    Settings,
+    /// The environment variable it was read from: `GITHUB_TOKEN` or `GH_TOKEN`.
+    Environment(&'static str),
+}
+
+/// A GitHub token and where it comes from. Debug output never shows the token.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct GithubToken {
+    value: String,
+    pub(crate) source: GithubTokenSource,
+}
+
+impl std::fmt::Debug for GithubToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GithubToken")
+            .field("value", &"<hidden>")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// The token to use: the one saved in Settings, else `GITHUB_TOKEN`, then `GH_TOKEN`. Values
+/// are trimmed and empty or whitespace-only ones are skipped.
+fn resolve_github_token(
+    saved: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<GithubToken> {
+    let saved = saved.map(str::trim).filter(|token| !token.is_empty());
+    if let Some(saved) = saved {
+        return Some(GithubToken {
+            value: saved.to_string(),
+            source: GithubTokenSource::Settings,
+        });
+    }
     GITHUB_TOKEN_ENV_VARS.iter().find_map(|name| {
         let value = lookup(name)?;
         let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        (!trimmed.is_empty()).then(|| GithubToken {
+            value: trimmed.to_string(),
+            source: GithubTokenSource::Environment(name),
+        })
     })
 }
 
-fn github_token_from_env() -> Option<String> {
-    resolve_github_token(|name| std::env::var(name).ok())
+/// The variable a GitHub token comes from when none is saved in Settings, as `lookup` sees
+/// the environment.
+pub(crate) fn environment_github_token_var(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<&'static str> {
+    match resolve_github_token(None, lookup)?.source {
+        GithubTokenSource::Environment(name) => Some(name),
+        GithubTokenSource::Settings => None,
+    }
+}
+
+/// Where the token in use comes from, given whether one is saved in Settings and the
+/// variable a token comes from otherwise.
+pub(crate) fn github_token_source_of(
+    saved: Option<&str>,
+    environment_var: Option<&'static str>,
+) -> Option<GithubTokenSource> {
+    if saved.is_some_and(|token| !token.trim().is_empty()) {
+        Some(GithubTokenSource::Settings)
+    } else {
+        environment_var.map(GithubTokenSource::Environment)
+    }
+}
+
+/// The token saved in Settings, for every GitHub client this process builds: the CLI sets it
+/// once after it reads the settings, the TUI whenever its settings are loaded or saved, so a
+/// change in Settings counts from the next check on.
+#[cfg(not(test))]
+static SAVED_GITHUB_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+// Each test thread has its own, so a test that saves a token never changes what another
+// test sends.
+#[cfg(test)]
+thread_local! {
+    static SAVED_GITHUB_TOKEN: std::sync::RwLock<Option<String>> =
+        const { std::sync::RwLock::new(None) };
+}
+
+#[cfg(not(test))]
+fn with_saved_github_token<R>(use_it: impl FnOnce(&std::sync::RwLock<Option<String>>) -> R) -> R {
+    use_it(&SAVED_GITHUB_TOKEN)
+}
+
+#[cfg(test)]
+fn with_saved_github_token<R>(use_it: impl FnOnce(&std::sync::RwLock<Option<String>>) -> R) -> R {
+    SAVED_GITHUB_TOKEN.with(use_it)
+}
+
+/// Makes `token` the one saved in Settings for the GitHub clients built from now on.
+pub(crate) fn use_saved_github_token(token: Option<&str>) {
+    let token = token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    with_saved_github_token(|saved| {
+        *saved
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = token;
+    });
+}
+
+fn saved_github_token() -> Option<String> {
+    with_saved_github_token(|saved| {
+        saved
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    })
+}
+
+/// The token every GitHub request sends now, if any.
+fn github_token_in_use() -> Option<GithubToken> {
+    resolve_github_token(saved_github_token().as_deref(), |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// Where the token every GitHub request sends now comes from, if one is sent.
+pub(crate) fn github_token_source() -> Option<GithubTokenSource> {
+    github_token_in_use().map(|token| token.source)
 }
 
 pub(crate) fn build_github_client() -> Result<Client, String> {
-    build_github_client_with_token(github_token_from_env().as_deref())
+    build_github_client_with_token(
+        github_token_in_use()
+            .as_ref()
+            .map(|token| token.value.as_str()),
+    )
+}
+
+/// Whether `token` can go in the header every GitHub request sends it in, as plain visible
+/// ASCII like every token GitHub makes. A control character fails the client itself; a
+/// character a copy can bring along, such as a smart quote or a zero-width space, would go
+/// out and be turned down. Asks nothing of GitHub.
+pub(crate) fn github_token_can_be_sent(token: &str) -> bool {
+    HeaderValue::from_str(&format!("Bearer {token}")).is_ok_and(|value| value.to_str().is_ok())
 }
 
 fn build_github_client_with_token(token: Option<&str>) -> Result<Client, String> {
@@ -406,7 +535,13 @@ fn unix_now() -> i64 {
 /// Returns a descriptive error when a response is a GitHub API rate-limit
 /// rejection (403/429 with `x-ratelimit-remaining: 0`, or 403/429 with `retry-after`,
 /// which is how GitHub sends a secondary rate limit).
-fn classify_rate_limit(status: StatusCode, headers: &HeaderMap, now_unix: i64) -> Option<String> {
+/// The hint to add a token is left off when `token_sent`: GitHub's higher limit is used up.
+fn classify_rate_limit(
+    status: StatusCode,
+    headers: &HeaderMap,
+    now_unix: i64,
+    token_sent: bool,
+) -> Option<String> {
     if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
         return None;
     }
@@ -429,8 +564,13 @@ fn classify_rate_limit(status: StatusCode, headers: &HeaderMap, now_unix: i64) -
         .map(|reset| format!(" and {}", describe_reset(reset, now_unix)))
         .unwrap_or_default();
 
+    let hint = if token_sent {
+        ""
+    } else {
+        "; add a GitHub token in Settings or set GITHUB_TOKEN to raise the limit"
+    };
     Some(format!(
-        "GitHub API rate limit reached (HTTP {}){reset_note}; set the GITHUB_TOKEN environment variable to a GitHub token to raise the limit",
+        "GitHub API rate limit reached (HTTP {}){reset_note}{hint}",
         status.as_u16()
     ))
 }
@@ -452,22 +592,35 @@ fn describe_reset(reset_unix: i64, now_unix: i64) -> String {
     }
 }
 
-/// A 401 while a token was sent means GitHub rejected that token. Never includes the token value.
-fn classify_rejected_token(status: StatusCode, token_sent: bool) -> Option<String> {
-    (status == StatusCode::UNAUTHORIZED && token_sent).then(|| {
-        "GitHub rejected the token from GITHUB_TOKEN/GH_TOKEN (HTTP 401); unset it or replace it with a valid token"
-            .to_string()
+/// A 401 while a token was sent means GitHub rejected that token. Names where the token came
+/// from (`sent`), never its value.
+fn classify_rejected_token(status: StatusCode, sent: Option<GithubTokenSource>) -> Option<String> {
+    let source = sent.filter(|_| status == StatusCode::UNAUTHORIZED)?;
+    Some(match source {
+        GithubTokenSource::Settings => "GitHub rejected the GitHub token saved in Settings (HTTP \
+                                        401); check it in Settings"
+            .to_string(),
+        GithubTokenSource::Environment(name) => format!(
+            "GitHub rejected the token from {name} (HTTP 401); unset it or replace it with a \
+             valid token"
+        ),
     })
 }
 
-/// Maps a non-success response to an error, with a dedicated message for rate limits.
+/// Maps a non-success response to an error, with a dedicated message for rate limits. The
+/// token named is the one in use now. That is usually the one the client was built with,
+/// but a token saved in Settings while the request was out makes them differ.
 pub(crate) fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
-    if let Some(message) =
-        classify_rejected_token(response.status(), github_token_from_env().is_some())
-    {
+    let sent = github_token_source();
+    if let Some(message) = classify_rejected_token(response.status(), sent) {
         return Err(SourceError::new(SourceErrorKind::KeyRejected, message));
     }
-    if let Some(message) = classify_rate_limit(response.status(), response.headers(), unix_now()) {
+    if let Some(message) = classify_rate_limit(
+        response.status(),
+        response.headers(),
+        unix_now(),
+        sent.is_some(),
+    ) {
         return Err(SourceError::new(SourceErrorKind::SlowDown, message));
     }
     response.error_for_status().map_err(|error| {
@@ -1519,11 +1672,14 @@ fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubRepoResponse, build_github_client_with_token, build_managed_github_record,
-        check_known_repository, classify_rate_limit, classify_rejected_token, commits_match,
-        determine_parent_folder, discover_extracted_folders, extract_zip_archive,
+        GithubRepoResponse, GithubToken, GithubTokenSource, build_github_client,
+        build_github_client_with_token, build_managed_github_record, check_known_repository,
+        classify_rate_limit, classify_rejected_token, commits_match, determine_parent_folder,
+        discover_extracted_folders, environment_github_token_var, extract_zip_archive,
+        github_token_can_be_sent, github_token_in_use, github_token_source, github_token_source_of,
         install_downloaded_github_addon, needs_known_repository_check, parse_github_repo_url,
         parse_github_target, resolve_github_token, update_downloaded_github_addon,
+        use_saved_github_token,
     };
     use lemonup_core::{
         AddonKind, AddonRecord, GameFlavor, ScannedAddon, SourceKind, StateDatabase,
@@ -1542,26 +1698,169 @@ mod tests {
         }
     }
 
+    fn token(saved: Option<&str>, pairs: &[(&'static str, &'static str)]) -> Option<GithubToken> {
+        resolve_github_token(saved, env_lookup(pairs))
+    }
+
+    fn value_and_source(token: Option<GithubToken>) -> Option<(String, GithubTokenSource)> {
+        token.map(|token| (token.value, token.source))
+    }
+
     #[test]
     fn token_resolution_prefers_github_token_over_gh_token() {
-        let lookup = env_lookup(&[("GITHUB_TOKEN", "primary"), ("GH_TOKEN", "secondary")]);
-        assert_eq!(resolve_github_token(lookup).as_deref(), Some("primary"));
+        let found = token(
+            None,
+            &[("GITHUB_TOKEN", "primary"), ("GH_TOKEN", "secondary")],
+        );
+        assert_eq!(
+            value_and_source(found),
+            Some((
+                "primary".to_string(),
+                GithubTokenSource::Environment("GITHUB_TOKEN")
+            ))
+        );
     }
 
     #[test]
     fn token_resolution_falls_back_to_gh_token() {
-        let lookup = env_lookup(&[("GH_TOKEN", "secondary")]);
-        assert_eq!(resolve_github_token(lookup).as_deref(), Some("secondary"));
+        let found = token(None, &[("GH_TOKEN", "secondary")]);
+        assert_eq!(
+            value_and_source(found),
+            Some((
+                "secondary".to_string(),
+                GithubTokenSource::Environment("GH_TOKEN")
+            ))
+        );
     }
 
     #[test]
     fn token_resolution_trims_and_skips_empty_values() {
-        let lookup = env_lookup(&[("GITHUB_TOKEN", "   "), ("GH_TOKEN", "  padded \n")]);
-        assert_eq!(resolve_github_token(lookup).as_deref(), Some("padded"));
+        let found = token(
+            None,
+            &[("GITHUB_TOKEN", "   "), ("GH_TOKEN", "  padded \n")],
+        );
+        assert_eq!(
+            value_and_source(found),
+            Some((
+                "padded".to_string(),
+                GithubTokenSource::Environment("GH_TOKEN")
+            ))
+        );
 
-        let lookup = env_lookup(&[("GITHUB_TOKEN", ""), ("GH_TOKEN", "\t")]);
-        assert_eq!(resolve_github_token(lookup), None);
-        assert_eq!(resolve_github_token(env_lookup(&[])), None);
+        assert_eq!(
+            token(None, &[("GITHUB_TOKEN", ""), ("GH_TOKEN", "\t")]),
+            None
+        );
+        assert_eq!(token(None, &[]), None);
+        // An empty saved token is no token: the environment's is used.
+        assert_eq!(
+            value_and_source(token(Some("  "), &[("GH_TOKEN", "env")])),
+            Some((
+                "env".to_string(),
+                GithubTokenSource::Environment("GH_TOKEN")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_token_saved_in_settings_wins_over_the_environment() {
+        let both = &[("GITHUB_TOKEN", "primary"), ("GH_TOKEN", "secondary")];
+        assert_eq!(
+            value_and_source(token(Some(" saved "), both)),
+            Some(("saved".to_string(), GithubTokenSource::Settings))
+        );
+        assert_eq!(
+            value_and_source(token(Some("saved"), &[])),
+            Some(("saved".to_string(), GithubTokenSource::Settings))
+        );
+        assert_eq!(
+            environment_github_token_var(env_lookup(both)),
+            Some("GITHUB_TOKEN")
+        );
+        assert_eq!(environment_github_token_var(env_lookup(&[])), None);
+        assert_eq!(
+            github_token_source_of(Some("saved"), Some("GH_TOKEN")),
+            Some(GithubTokenSource::Settings)
+        );
+        assert_eq!(
+            github_token_source_of(None, Some("GH_TOKEN")),
+            Some(GithubTokenSource::Environment("GH_TOKEN"))
+        );
+        assert_eq!(github_token_source_of(Some(" "), None), None);
+    }
+
+    #[test]
+    fn the_saved_token_reaches_the_next_client_and_is_never_printed() {
+        use_saved_github_token(Some(" ghp_saved_secret "));
+        let in_use = github_token_in_use().expect("a token");
+        assert_eq!(in_use.source, GithubTokenSource::Settings);
+        assert_eq!(in_use.value, "ghp_saved_secret");
+        assert!(!format!("{in_use:?}").contains("ghp_saved_secret"));
+        assert_eq!(github_token_source(), Some(GithubTokenSource::Settings));
+
+        // Removing it in Settings counts from the next client on.
+        use_saved_github_token(None);
+        assert_ne!(github_token_source(), Some(GithubTokenSource::Settings));
+        use_saved_github_token(Some("   "));
+        assert_ne!(github_token_source(), Some(GithubTokenSource::Settings));
+    }
+
+    #[tokio::test]
+    async fn the_client_sends_the_saved_token() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .expect("respond");
+            String::from_utf8(request).expect("utf8")
+        });
+
+        // The store is per test thread: the client is built here, on the test's own thread.
+        use_saved_github_token(Some("saved-test-token"));
+        let client = build_github_client();
+        use_saved_github_token(None);
+        let response = client
+            .expect("client")
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("send");
+        assert!(response.status().is_success());
+
+        let request = server.join().expect("server");
+        let authorization: Vec<&str> = request
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.trim())
+            .collect();
+        assert_eq!(authorization, ["Bearer saved-test-token"]);
+    }
+
+    #[test]
+    fn only_a_token_of_plain_visible_characters_can_be_sent() {
+        assert!(github_token_can_be_sent("ghp_AbC123"));
+        assert!(github_token_can_be_sent("github_pat_11AB_cd"));
+        for pasted in [
+            "ghp_\u{201c}abc\u{201d}",
+            "ghp_abc\u{200b}",
+            "ghp_\u{1}abc",
+            "ghp_\u{7f}",
+        ] {
+            assert!(!github_token_can_be_sent(pasted), "{pasted:?}");
+        }
     }
 
     #[test]
@@ -1584,18 +1883,33 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_with_token_reports_rejected_token() {
+    fn unauthorized_with_token_names_where_the_token_came_from() {
         let message =
-            classify_rejected_token(StatusCode::UNAUTHORIZED, true).expect("rejected token");
-        assert!(message.contains("GITHUB_TOKEN/GH_TOKEN"), "{message}");
+            classify_rejected_token(StatusCode::UNAUTHORIZED, Some(GithubTokenSource::Settings))
+                .expect("rejected token");
+        assert!(message.contains("saved in Settings"), "{message}");
+        assert!(message.contains("HTTP 401"), "{message}");
+
+        let message = classify_rejected_token(
+            StatusCode::UNAUTHORIZED,
+            Some(GithubTokenSource::Environment("GH_TOKEN")),
+        )
+        .expect("rejected token");
+        assert!(message.contains("from GH_TOKEN"), "{message}");
+        assert!(!message.contains("GITHUB_TOKEN"), "{message}");
         assert!(message.contains("HTTP 401"), "{message}");
     }
 
     #[test]
     fn unauthorized_without_token_keeps_generic_error() {
-        assert!(classify_rejected_token(StatusCode::UNAUTHORIZED, false).is_none());
-        assert!(classify_rejected_token(StatusCode::FORBIDDEN, true).is_none());
+        assert!(classify_rejected_token(StatusCode::UNAUTHORIZED, None).is_none());
+        assert!(
+            classify_rejected_token(StatusCode::FORBIDDEN, Some(GithubTokenSource::Settings))
+                .is_none()
+        );
     }
+
+    const HINT: &str = "add a GitHub token in Settings or set GITHUB_TOKEN to raise the limit";
 
     #[test]
     fn rate_limit_403_with_zero_remaining_is_classified() {
@@ -1606,12 +1920,31 @@ mod tests {
                 ("x-ratelimit-reset", "1700000600"),
             ]),
             1_700_000_000,
+            false,
         )
         .expect("rate limit error");
         assert!(message.contains("rate limit"), "{message}");
         assert!(message.contains("resets in 10 minutes"), "{message}");
         assert!(message.contains("22:23 UTC"), "{message}");
-        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+        assert!(message.ends_with(HINT), "{message}");
+    }
+
+    #[test]
+    fn rate_limit_with_a_token_sent_leaves_off_the_hint_to_add_one() {
+        let message = classify_rate_limit(
+            StatusCode::FORBIDDEN,
+            &headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1700000600"),
+            ]),
+            1_700_000_000,
+            true,
+        )
+        .expect("rate limit error");
+        assert!(message.contains("HTTP 403"), "{message}");
+        assert!(message.contains("resets in 10 minutes"), "{message}");
+        assert!(!message.contains("GITHUB_TOKEN"), "{message}");
+        assert!(!message.contains("Settings"), "{message}");
     }
 
     #[test]
@@ -1620,9 +1953,10 @@ mod tests {
             StatusCode::FORBIDDEN,
             &headers(&[("x-ratelimit-remaining", "0")]),
             1_700_000_000,
+            false,
         )
         .expect("rate limit error");
-        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+        assert!(message.contains(HINT), "{message}");
         assert!(!message.contains("resets"), "{message}");
     }
 
@@ -1632,10 +1966,11 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             &headers(&[("retry-after", "120")]),
             1_700_000_000,
+            false,
         )
         .expect("rate limit error");
         assert!(message.contains("resets in 2 minutes"), "{message}");
-        assert!(message.contains("GITHUB_TOKEN"), "{message}");
+        assert!(message.contains(HINT), "{message}");
     }
 
     #[test]
@@ -1645,22 +1980,27 @@ mod tests {
             classify_rate_limit(
                 StatusCode::FORBIDDEN,
                 &headers(&[("x-ratelimit-remaining", "42")]),
-                1_700_000_000
+                1_700_000_000,
+                false
             )
             .is_none()
         );
-        assert!(classify_rate_limit(StatusCode::FORBIDDEN, &HeaderMap::new(), 0).is_none());
+        assert!(classify_rate_limit(StatusCode::FORBIDDEN, &HeaderMap::new(), 0, false).is_none());
         // Other statuses are never rate-limit errors, even with a zero counter.
         assert!(
             classify_rate_limit(
                 StatusCode::NOT_FOUND,
                 &headers(&[("x-ratelimit-remaining", "0")]),
-                0
+                0,
+                false
             )
             .is_none()
         );
         // 429 without any rate-limit hint stays a normal error.
-        assert!(classify_rate_limit(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new(), 0).is_none());
+        assert!(
+            classify_rate_limit(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new(), 0, false)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1670,6 +2010,7 @@ mod tests {
             StatusCode::FORBIDDEN,
             &headers(&[("x-ratelimit-remaining", "42"), ("retry-after", "60")]),
             1_000,
+            false,
         )
         .expect("a 403 with retry-after is a rate limit");
         assert!(message.contains("HTTP 403"), "{message}");

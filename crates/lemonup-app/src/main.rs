@@ -173,6 +173,18 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
         ));
     }
 
+    // Every GitHub request this run makes sends the token saved in Settings, if any. The TUI
+    // sets it again whenever its settings change, and says itself when it can't read them.
+    let saved_token = startup_github_token(&paths, |notice| {
+        if !matches!(command, Commands::Tui) {
+            notice.print(output::Paint::for_stderr(
+                &lemonup_core::AppConfig::default(),
+                runtime.display,
+            ));
+        }
+    });
+    crate::github::use_saved_github_token(saved_token.as_deref());
+
     let outcome = match command {
         Commands::Tui => {
             run_tui(paths, runtime, startup_notice).await?;
@@ -353,6 +365,37 @@ fn output_config(paths: &AppPaths) -> lemonup_core::AppConfig {
             config
         }
     }
+}
+
+/// The GitHub token saved in Settings, read as [`output_config`] reads the settings. When
+/// they can't be read, `warn` gets the notice to show and the run goes on without one.
+fn startup_github_token(paths: &AppPaths, warn: impl FnOnce(&StartupNotice)) -> Option<String> {
+    match saved_github_token(paths) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(%error, "couldn't read the settings for the saved GitHub token");
+            warn(&StartupNotice {
+                text: "Couldn't read your settings, so GitHub requests go without the token \
+                       saved in Settings."
+                    .to_string(),
+                is_error: true,
+                details: Vec::new(),
+            });
+            None
+        }
+    }
+}
+
+/// The GitHub token saved in Settings, or why the settings can't be read.
+fn saved_github_token(paths: &AppPaths) -> lemonup_core::Result<Option<String>> {
+    let store = ConfigStore::for_profile(paths);
+    if let Ok(ConfigLoad::Loaded(config)) = store.load_without_writing() {
+        return Ok(config.github_token);
+    }
+    // Like `output_config`: a profile config that can't be read still has the shared token.
+    let mut config = lemonup_core::AppConfig::new_unconfigured();
+    store.refresh_shared(&mut config)?;
+    Ok(config.github_token)
 }
 
 /// A field and the change `lemonup toc` makes to it: a new value, or `None` to restore the
@@ -940,7 +983,8 @@ async fn run_check<O: std::io::Write, E: std::io::Write>(
         &checks,
         &rows,
     )
-    .with_hint(hint);
+    .with_hint(hint)
+    .with_github_token(crate::github::github_token_source());
     output.print(&report, effective_addon_dir.as_deref())?;
     Ok(CommandOutcome::from_error_count(count_check_errors(
         &checks,
@@ -1386,6 +1430,7 @@ fn install_request<'a>(
         target,
         profile: &runtime.profile_name,
         addon_dir_given: runtime.addon_dir_override.is_some(),
+        github_token: crate::github::github_token_source(),
     }
 }
 
@@ -3322,6 +3367,7 @@ mod addon_dir_binding_tests {
             target: "https://github.com/a/b",
             profile: DEFAULT_PROFILE,
             addon_dir_given: false,
+            github_token: None,
         };
         for mode in [OutputMode::Human, OutputMode::Json] {
             // A failure: one line on stderr, nothing on stdout, exit 1.
@@ -4065,7 +4111,7 @@ mod profile_tests {
     };
     use tempfile::tempdir;
 
-    use super::{command_profile, load_profile_config};
+    use super::{command_profile, load_profile_config, startup_github_token};
     use crate::cli::Commands;
     use crate::output::{Paint, ProfilesReport, Report};
 
@@ -4080,6 +4126,33 @@ mod profile_tests {
         fs::create_dir_all(root.join("Data")).expect("data dir");
         fs::write(root.join(".build.info"), "build").expect("build info");
         dir
+    }
+
+    #[test]
+    fn unreadable_settings_warn_and_send_no_saved_github_token() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let shared = roots.shared_settings_file();
+        fs::create_dir_all(shared.parent().expect("parent")).expect("config dir");
+        let mut notices = Vec::new();
+
+        fs::write(&shared, "github_token = \"ghp_saved\"\n").expect("write");
+        let token = startup_github_token(&paths, |notice| notices.push(notice.clone()));
+        assert!(token.as_deref() == Some("ghp_saved"));
+        assert!(notices.is_empty());
+
+        fs::write(&shared, "github_token = [not toml\n").expect("write");
+        let token = startup_github_token(&paths, |notice| notices.push(notice.clone()));
+        assert!(token.is_none());
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].lines(Paint::PLAIN),
+            [
+                "Couldn't read your settings, so GitHub requests go without the token saved in \
+              Settings."
+            ]
+        );
     }
 
     #[test]

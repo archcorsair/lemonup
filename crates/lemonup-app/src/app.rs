@@ -68,6 +68,7 @@ mod direct_install;
 mod find_sheet;
 mod games;
 mod keymap;
+mod links;
 mod newer_lemonup;
 mod render_backup;
 mod render_config;
@@ -787,6 +788,9 @@ pub(crate) struct CheckFailure {
     pub(crate) kind: SourceErrorKind,
     pub(crate) source: SourceKind,
     pub(crate) detail: String,
+    /// For a GitHub addon, where the GitHub token sent when the check failed came from, so
+    /// a token saved later doesn't change what the failure says.
+    pub(crate) github_token: Option<crate::github::GithubTokenSource>,
 }
 
 /// One step a running check or update reports, besides moving on.
@@ -818,6 +822,7 @@ pub(crate) enum DashboardJobStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigField {
     WagoApiKey,
+    GithubToken,
     AutoCheckEnabled,
     AutoCheckInterval,
     CheckInterval,
@@ -856,8 +861,9 @@ const TIME_STEPS_SECS: [u64; 9] = [60, 300, 900, 1_800, 3_600, 10_800, 21_600, 4
 impl ConfigField {
     /// Every row in the order Settings shows them: first the ones all
     /// games share, then the ones of the game in use.
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::WagoApiKey,
+        Self::GithubToken,
         Self::Theme,
         Self::SimpleSymbols,
         Self::ReduceMotion,
@@ -877,6 +883,7 @@ impl ConfigField {
     fn label(self) -> &'static str {
         match self {
             Self::WagoApiKey => "Wago.io key",
+            Self::GithubToken => "GitHub token",
             Self::AutoCheckEnabled => "Check for updates automatically",
             Self::AutoCheckInterval => "Check every",
             Self::CheckInterval => "Don't re-check an addon for",
@@ -896,7 +903,7 @@ impl ConfigField {
 
     fn kind(self) -> ConfigRowKind {
         match self {
-            Self::WagoApiKey => ConfigRowKind::Text,
+            Self::WagoApiKey | Self::GithubToken => ConfigRowKind::Text,
             Self::AutoCheckEnabled
             | Self::CheckLemonupUpdates
             | Self::BackupWtf
@@ -991,10 +998,27 @@ fn human_duration(secs: u64) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ConfigEditState {
     field: ConfigField,
     value: TextInput,
+}
+
+/// Debug output never shows a Wago.io key or GitHub token being typed.
+impl std::fmt::Debug for ConfigEditState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = formatter.debug_struct("ConfigEditState");
+        out.field("field", &self.field);
+        if matches!(
+            self.field,
+            ConfigField::WagoApiKey | ConfigField::GithubToken
+        ) {
+            out.field("value", &"<hidden>");
+        } else {
+            out.field("value", &self.value);
+        }
+        out.finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1039,6 +1063,7 @@ impl ConfigPaneState {
         let field = self.selected_field();
         let value = match field {
             ConfigField::WagoApiKey => self.draft.wago_api_key.clone().unwrap_or_default(),
+            ConfigField::GithubToken => self.draft.github_token.clone().unwrap_or_default(),
             _ => return self.clone(),
         };
         let mut next = self.clone();
@@ -1077,15 +1102,24 @@ impl ConfigPaneState {
             return Ok(self.clone());
         };
 
-        // The Wago.io key is the one setting typed in a box.
+        // The Wago.io key and the GitHub token are the settings typed in a box. An empty box
+        // removes the value.
         let mut next = self.clone();
-        if edit.field == ConfigField::WagoApiKey {
-            let trimmed = edit.value.value().trim().to_string();
-            next.draft.wago_api_key = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            };
+        let trimmed = edit.value.value().trim().to_string();
+        // Never name the token: the box stays open with it, so it can be fixed.
+        if edit.field == ConfigField::GithubToken
+            && !crate::github::github_token_can_be_sent(&trimmed)
+        {
+            return Err(
+                "That token has characters GitHub can't take. Copy it from GitHub again."
+                    .to_string(),
+            );
+        }
+        let typed = (!trimmed.is_empty()).then_some(trimmed);
+        match edit.field {
+            ConfigField::WagoApiKey => next.draft.wago_api_key = typed,
+            ConfigField::GithubToken => next.draft.github_token = typed,
+            _ => {}
         }
         next.edit = None;
         Ok(next)
@@ -1130,6 +1164,7 @@ impl ConfigPaneState {
                 draft.show_libs = !draft.show_libs;
             }
             ConfigField::WagoApiKey
+            | ConfigField::GithubToken
             | ConfigField::ChangeGameFolder
             | ConfigField::SaveAddonList
             | ConfigField::LoadAddonList => {}
@@ -2464,7 +2499,7 @@ enum SearchFocus {
     Results,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SearchPaneState {
     query: TextInput,
     presentation_mode: SearchPresentationMode,
@@ -2482,6 +2517,26 @@ pub struct SearchPaneState {
     /// The results are only known addons, shown without a Wago.io search
     /// because no Wago.io key is saved.
     known_only: bool,
+}
+
+/// Debug output never shows the Wago.io key in the key box.
+impl std::fmt::Debug for SearchPaneState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SearchPaneState")
+            .field("query", &self.query)
+            .field("presentation_mode", &self.presentation_mode)
+            .field("focus", &self.focus)
+            .field("key_box", &self.key_box.as_ref().map(|_| "<hidden>"))
+            .field("in_progress", &self.in_progress)
+            .field("results", &self.results)
+            .field("selected_result", &self.selected_result)
+            .field("last_query", &self.last_query)
+            .field("install_state", &self.install_state)
+            .field("known_rows", &self.known_rows)
+            .field("known_only", &self.known_only)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2532,6 +2587,9 @@ enum SearchInstallState {
         detail: String,
         /// The folders in the way, for a refused install.
         clash: Option<FolderClash>,
+        /// For GitHub, where the GitHub token sent when it failed came from, so a token
+        /// saved later doesn't change what the failure says.
+        github_token: Option<crate::github::GithubTokenSource>,
     },
 }
 
@@ -2816,6 +2874,7 @@ impl SearchPaneState {
             kind: error.kind,
             detail: error.detail.clone(),
             clash: None,
+            github_token: None,
         };
         next
     }
@@ -3046,6 +3105,9 @@ impl SearchPaneState {
             kind: error.kind,
             detail: error.detail.clone(),
             clash: error.clash.clone(),
+            github_token: (provider == "GitHub")
+                .then(crate::github::github_token_source)
+                .flatten(),
         };
         next
     }
@@ -3155,6 +3217,9 @@ pub struct App {
     /// A Wago.io key that comes from `WAGO_API_KEY` rather than the config. It is used while the
     /// config has no key, and is never written to the config.
     wago_env_key: Option<String>,
+    /// The variable (`GITHUB_TOKEN` or `GH_TOKEN`) a GitHub token comes from while none is
+    /// saved in Settings. Only its name is kept here; the clients read the token itself.
+    github_env_var: Option<&'static str>,
     config_store: ConfigStore,
     state_db_file: PathBuf,
     trash_dir: PathBuf,
@@ -3265,6 +3330,8 @@ impl App {
         let loaded_config = config_store.effective(&config_state)?;
         let wago_api_key =
             wago_api_key_in_use(loaded_config.wago_api_key.clone(), wago_env_key.clone());
+        let github_env_var = crate::github::environment_github_token_var(process_env);
+        crate::github::use_saved_github_token(loaded_config.github_token.as_deref());
         let configured_addon_dir = match &config_state {
             ConfigLoad::Loaded(config) => config.addon_dir.clone(),
             ConfigLoad::Missing(_) => None,
@@ -3388,6 +3455,7 @@ impl App {
             },
             wago_api_key,
             wago_env_key,
+            github_env_var,
             config_store,
             state_db_file,
             trash_dir,
@@ -3482,15 +3550,24 @@ impl App {
         terminal: &mut Terminal<Backend>,
         mut events: EventHandler,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // The links last written as links, so unchanged ones aren't written every frame.
+        let mut written_links = links::DrawnLinks::default();
         while !self.quit_requested {
             self.start_newer_lemonup_check(OffsetDateTime::now_utc());
             self.process_background_events();
             events.set_tick_rate(self.desired_tick_rate());
-            terminal.draw(|frame| self.draw(frame))?;
+            let drawn = terminal.draw(|frame| self.draw(frame))?;
+            if let Some(links) = self.changed_links(drawn.buffer, &written_links) {
+                // The old links' cells are written again from this frame, so keep a copy.
+                let buffer = drawn.buffer.clone();
+                links.write(&written_links, &buffer, terminal.backend_mut())?;
+                written_links = links;
+            }
 
             let Some(event) = events.next().await else {
                 break;
             };
+            written_links.forget_after(&event);
             self.key_read_at = events.last_read_at();
 
             self.clear_problem_on_key_press(&event);
@@ -5545,10 +5622,11 @@ impl App {
                         )),
                     ],
                 },
-                Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                // The box stays open with what was typed; the message says what to fix.
+                Err(problem) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Config,
-                    &format!("Couldn't save your settings: {error}"),
+                    &problem,
                 ))],
             },
             AppMessage::ConfigCancelEdit => {
@@ -6724,6 +6802,8 @@ impl App {
             AppAction::SetPersistedConfig(config) => {
                 self.wago_api_key =
                     wago_api_key_in_use(config.wago_api_key.clone(), self.wago_env_key.clone());
+                // The next check, update or install sends the token as saved now.
+                crate::github::use_saved_github_token(config.github_token.as_deref());
                 self.config_present = true;
                 self.ui_theme = self.look_theme(&config);
                 if config.show_libs != self.config_pane.persisted.show_libs {
@@ -7015,6 +7095,7 @@ impl App {
                             config.wago_api_key.clone(),
                             self.wago_env_key.clone(),
                         );
+                        crate::github::use_saved_github_token(config.github_token.as_deref());
                         self.effective_addon_dir = Some(path.clone());
                         let backup_store = backup_root(&self.data_dir);
                         if let Err(error) = adopt_legacy_backups(&backup_store, &path) {
@@ -7390,6 +7471,20 @@ impl App {
             self.draw_setup_frame(frame);
         }
         self.ui_theme.finish_frame(frame.buffer_mut());
+    }
+
+    /// The links in a drawn frame to write as links again: only where the terminal has links,
+    /// and only when they changed since `written`.
+    fn changed_links(
+        &self,
+        buffer: &ratatui::buffer::Buffer,
+        written: &links::DrawnLinks,
+    ) -> Option<links::DrawnLinks> {
+        if !self.runtime.display.hyperlinks {
+            return None;
+        }
+        let found = links::DrawnLinks::find(buffer);
+        (found != *written).then_some(found)
     }
 
     /// The theme for `config` in this terminal.
@@ -8093,6 +8188,10 @@ impl App {
             ConfigField::WagoApiKey if self.wago_key_from_environment(draft) => {
                 "From WAGO_API_KEY".to_string()
             }
+            ConfigField::GithubToken => match self.github_token_from_environment(draft) {
+                Some(name) => format!("From {name}"),
+                None => config_value_text(draft, field),
+            },
             _ => config_value_text(draft, field),
         }
     }
@@ -8194,6 +8293,27 @@ impl App {
         config.wago_api_key.is_none() && self.wago_env_key.is_some()
     }
 
+    /// The variable the GitHub token in use comes from, because `config` has none saved.
+    fn github_token_from_environment(&self, config: &AppConfig) -> Option<&'static str> {
+        match crate::github::github_token_source_of(
+            config.github_token.as_deref(),
+            self.github_env_var,
+        )? {
+            crate::github::GithubTokenSource::Environment(name) => Some(name),
+            crate::github::GithubTokenSource::Settings => None,
+        }
+    }
+
+    /// Where the GitHub token the next GitHub request sends comes from, if it sends one.
+    /// Failures keep the one they were sent with, so only tests ask for this.
+    #[cfg(test)]
+    pub(super) fn github_token_source(&self) -> Option<crate::github::GithubTokenSource> {
+        crate::github::github_token_source_of(
+            self.config_pane.persisted.github_token.as_deref(),
+            self.github_env_var,
+        )
+    }
+
     fn config_field_saved_message(&self, field: ConfigField, config: &AppConfig) -> String {
         if field == ConfigField::WagoApiKey {
             return if config.wago_api_key.is_some() {
@@ -8202,6 +8322,15 @@ impl App {
                 "Removed your Wago.io key. Using the one from WAGO_API_KEY.".to_string()
             } else {
                 "Removed your Wago.io key".to_string()
+            };
+        }
+        if field == ConfigField::GithubToken {
+            return if config.github_token.is_some() {
+                "Saved your GitHub token".to_string()
+            } else if let Some(name) = self.github_token_from_environment(config) {
+                format!("Removed your GitHub token. Using the one from {name}.")
+            } else {
+                "Removed your GitHub token".to_string()
             };
         }
         format!("{}: {}", field.label(), config_value_text(config, field))
@@ -8996,6 +9125,19 @@ fn without_url_queries(text: &str) -> String {
     out
 }
 
+/// A failed check of a `source` addon, with the GitHub token source as it is now for a
+/// GitHub addon.
+fn failure_of_check(kind: SourceErrorKind, source: SourceKind, detail: String) -> CheckFailure {
+    CheckFailure {
+        kind,
+        source,
+        detail,
+        github_token: (source == SourceKind::GitHub)
+            .then(crate::github::github_token_source)
+            .flatten(),
+    }
+}
+
 /// What one live check result means for its row: a version came back, the
 /// check failed, or nothing was asked (no Wago.io key, not linked).
 fn check_step_for_result(
@@ -9005,11 +9147,11 @@ fn check_step_for_result(
     let folder = result.addon_name.clone();
     if let Some(kind) = result.error_kind {
         return Some(DashboardJobStep::Checked {
-            result: Err(CheckFailure {
+            result: Err(failure_of_check(
                 kind,
-                source: sources.get(&folder).copied().unwrap_or(SourceKind::Manual),
-                detail: result.message.clone().unwrap_or_default(),
-            }),
+                sources.get(&folder).copied().unwrap_or(SourceKind::Manual),
+                result.message.clone().unwrap_or_default(),
+            )),
             folder,
         });
     }
@@ -9319,6 +9461,23 @@ fn check_failure_cause(failures: &[CheckFailure]) -> Option<String> {
         (SourceErrorKind::KeyRejected, Some("Wago.io")) => {
             Some("Wago.io didn't accept your key. Check it in Settings".to_string())
         }
+        // The token sent when they failed, the same for all of them.
+        (SourceErrorKind::KeyRejected, Some("GitHub"))
+            if failures
+                .iter()
+                .all(|failure| failure.github_token == first.github_token) =>
+        {
+            use crate::github::GithubTokenSource;
+            Some(match first.github_token {
+                Some(GithubTokenSource::Settings) => {
+                    "GitHub didn't accept your token. Check it in Settings".to_string()
+                }
+                Some(GithubTokenSource::Environment(name)) => {
+                    format!("GitHub didn't accept the token in {name}")
+                }
+                None => "GitHub turned down LemonUp's request".to_string(),
+            })
+        }
         (SourceErrorKind::KeyRejected, Some(name)) => {
             Some(format!("{name} turned down LemonUp's request"))
         }
@@ -9409,11 +9568,17 @@ pub(crate) fn friendly_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// A setting's value in `config`, in words. The Wago.io key itself is never
-/// shown.
+/// A setting's value in `config`, in words. The Wago.io key and the GitHub
+/// token themselves are never shown.
 fn config_value_text(draft: &AppConfig, field: ConfigField) -> String {
     match field {
         ConfigField::WagoApiKey => if draft.wago_api_key.is_some() {
+            "Saved"
+        } else {
+            "Not set"
+        }
+        .to_string(),
+        ConfigField::GithubToken => if draft.github_token.is_some() {
             "Saved"
         } else {
             "Not set"
@@ -9803,6 +9968,7 @@ mod tests {
             backup_pane: BackupPaneState::default(),
             wago_api_key: Some("test-wago-key".to_string()),
             wago_env_key: None,
+            github_env_var: None,
             config_store: ConfigStore::new(std::env::temp_dir().join("lemonup-test-config.toml")),
             state_db_file: std::env::temp_dir().join("lemonup-test-state.sqlite"),
             trash_dir: std::env::temp_dir().join("lemonup-test-trash"),
@@ -11242,24 +11408,41 @@ mod tests {
     #[test]
     fn error_kinds_lead_with_what_happened_and_keep_the_detail() {
         use crate::app::render_install_search::source_error_advice;
+        use crate::github::GithubTokenSource;
         assert_eq!(
-            source_error_advice(SourceErrorKind::NoConnection, "TukUI"),
+            source_error_advice(SourceErrorKind::NoConnection, "TukUI", None),
             "LemonUp couldn't reach TukUI. Check your internet connection and try again."
         );
         assert!(
-            source_error_advice(SourceErrorKind::KeyRejected, "Wago.io").contains("Wago.io key")
+            source_error_advice(SourceErrorKind::KeyRejected, "Wago.io", None)
+                .contains("Wago.io key")
         );
         assert!(
-            source_error_advice(SourceErrorKind::KeyRejected, "GitHub").contains("GITHUB_TOKEN")
+            source_error_advice(
+                SourceErrorKind::KeyRejected,
+                "GitHub",
+                Some(GithubTokenSource::Environment("GITHUB_TOKEN"))
+            )
+            .contains("GITHUB_TOKEN")
         );
         assert!(
-            source_error_advice(SourceErrorKind::NotFound, "WoWInterface")
+            source_error_advice(SourceErrorKind::NotFound, "WoWInterface", None)
                 .starts_with("WoWInterface doesn't have that addon")
         );
-        assert!(source_error_advice(SourceErrorKind::SlowDown, "GitHub").contains("slow down"));
-        assert!(source_error_advice(SourceErrorKind::Other, "GitHub").contains("technical detail"));
+        assert!(
+            source_error_advice(
+                SourceErrorKind::SlowDown,
+                "GitHub",
+                Some(GithubTokenSource::Settings)
+            )
+            .contains("slow down")
+        );
+        assert!(
+            source_error_advice(SourceErrorKind::Other, "GitHub", None)
+                .contains("technical detail")
+        );
         assert_eq!(
-            source_error_advice(SourceErrorKind::WrongRepository, "GitHub"),
+            source_error_advice(SourceErrorKind::WrongRepository, "GitHub", None),
             "The repository may have a new owner. LemonUp won't install it until its list is updated."
         );
 
@@ -11583,7 +11766,12 @@ mod tests {
             ..FolderClash::default()
         };
         assert_eq!(
-            install_error_advice(SourceErrorKind::FoldersOfLinkedAddon, "GitHub", Some(&many)),
+            install_error_advice(
+                SourceErrorKind::FoldersOfLinkedAddon,
+                "GitHub",
+                Some(&many),
+                None
+            ),
             "DBM-Core and 2 more belong to Deadly Boss Mods and other addons LemonUp already \
              keeps updated, so LemonUp won't replace them."
         );
@@ -11597,7 +11785,12 @@ mod tests {
             ..FolderClash::default()
         };
         assert_eq!(
-            install_error_advice(SourceErrorKind::FoldersOfLinkedAddon, "GitHub", Some(&one)),
+            install_error_advice(
+                SourceErrorKind::FoldersOfLinkedAddon,
+                "GitHub",
+                Some(&one),
+                None
+            ),
             "Pawn belongs to Pawn, which a newer LemonUp linked, so LemonUp won't replace it."
         );
 
@@ -11613,7 +11806,8 @@ mod tests {
             install_error_advice(
                 SourceErrorKind::FoldersOfLinkedAddon,
                 "GitHub",
-                Some(&mixed)
+                Some(&mixed),
+                None
             ),
             "Pawn and 1 more belong to Pawn and other linked addons, so LemonUp won't replace \
              them."
@@ -12749,9 +12943,11 @@ mod tests {
         let env_key = "ENVKEY1234567890";
         let (mut app, _temp) = app_with_environment_wago_key(env_key);
         for (width, height) in [(80, 24), (120, 36)] {
-            let text = render_rows(&mut app, width, height).join("\n");
+            let rows = render_rows(&mut app, width, height);
+            let text = rows.join("\n");
             assert!(text.contains("From WAGO_API_KEY"), "{text}");
-            assert!(!text.contains("Not set"), "{text}");
+            let wago_row = rows.iter().find(|row| row.contains("Wago.io key"));
+            assert!(!wago_row.expect("Wago row").contains("Not set"), "{text}");
             assert!(!text.contains(env_key), "{text}");
         }
 
@@ -12783,6 +12979,378 @@ mod tests {
         let narrow = render_rows(&mut app, 80, 24).join("\n");
         assert!(narrow.contains("WAGO_API_KEY"), "{narrow}");
         assert!(narrow.contains("used instead"), "{narrow}");
+    }
+
+    #[test]
+    fn settings_has_a_github_token_row_after_the_wago_row_that_never_shows_the_token() {
+        let secret = "ghp_SECRETTOKEN123";
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let wago = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::WagoApiKey);
+        let github = ConfigField::ALL
+            .iter()
+            .position(|field| *field == ConfigField::GithubToken);
+        assert_eq!(github, wago.map(|index| index + 1));
+        assert!(ConfigField::GithubToken.is_textual());
+
+        app.config_pane.draft.github_token = Some(secret.to_string());
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        for (width, height) in [(80, 24), (120, 36)] {
+            let rows = render_rows(&mut app, width, height);
+            let text = rows.join("\n");
+            let at = |label: &str| rows.iter().position(|row| row.contains(label));
+            let row = at("GitHub token").expect("the GitHub token row");
+            assert_eq!(Some(row), at("Wago.io key").map(|row| row + 1), "{text}");
+            assert!(rows[row].contains("Saved"), "{text}");
+            assert!(!text.contains(secret), "{text}");
+        }
+
+        // Editing shows a dot for each character, never the text.
+        select_config_field(&mut app, ConfigField::GithubToken);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        assert!(app.config_pane.edit.is_some());
+        type_text(&mut app, "XYZ");
+        for (width, height) in [(80, 24), (120, 36)] {
+            let text = render_rows(&mut app, width, height).join("\n");
+            assert!(!text.contains(secret), "{text}");
+            assert!(!text.contains("XYZ"), "{text}");
+            assert!(text.contains(&"•".repeat(secret.len() + 3)), "{text}");
+        }
+        let wide = render_rows(&mut app, 120, 36).join("\n");
+        assert!(wide.contains("An empty box removes the token."), "{wide}");
+
+        app.config_pane.draft.github_token = None;
+        app.config_pane.edit = None;
+        let rows = render_rows(&mut app, 120, 36);
+        let row = rows.iter().find(|row| row.contains("GitHub token"));
+        assert!(row.expect("row").contains("Not set"), "{rows:?}");
+    }
+
+    #[test]
+    fn settings_links_the_github_token_page_where_the_terminal_has_links() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.github_token = None;
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        // At 80x24 the row has room only for its one-line explanation, which has no link.
+        for (width, height) in [(120, 36), (160, 48)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+
+            app.runtime.display.hyperlinks = true;
+            let found = app
+                .changed_links(&buffer, &crate::app::links::DrawnLinks::default())
+                .expect("a link to write");
+            let urls: Vec<_> = found.links().iter().map(|link| link.url).collect();
+            assert_eq!(
+                urls,
+                vec!["https://lemonup.org/github-token"],
+                "{width}x{height}"
+            );
+            // Written once: the next frame with the same link writes nothing.
+            assert!(app.changed_links(&buffer, &found).is_none());
+
+            app.runtime.display.hyperlinks = false;
+            assert!(
+                app.changed_links(&buffer, &crate::app::links::DrawnLinks::default())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn settings_explains_the_github_token() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.github_token = None;
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        let wide = render_rows(&mut app, 120, 36).join("\n");
+        assert!(
+            wide.contains("Optional: raises GitHub's limit from 60 to 5,000 requests an hour."),
+            "{wide}"
+        );
+        assert!(wide.contains("How to make one:"), "{wide}");
+        assert!(wide.contains("lemonup.org/github-token"), "{wide}");
+        let long = app.config_description_text(ConfigField::GithubToken, false, 200, true);
+        assert_eq!(
+            long.last().map(line_text).as_deref(),
+            Some(
+                "Optional: raises GitHub's limit from 60 to 5,000 requests an hour. How to make \
+                 one: lemonup.org/github-token. Press enter to type or paste it."
+            )
+        );
+        let short = app
+            .config_description_text(ConfigField::GithubToken, false, 200, false)
+            .iter()
+            .map(line_text)
+            .collect::<String>();
+        assert_eq!(
+            short,
+            "GitHub token: optional, raises GitHub's hourly limit from 60 to 5,000."
+        );
+        let narrow = render_rows(&mut app, 80, 24).join("\n");
+        assert!(narrow.contains("GitHub token"), "{narrow}");
+        assert!(
+            narrow.contains("hourly limit from 60 to 5,000."),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn settings_explains_a_github_token_from_the_environment() {
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.draft.github_token = None;
+        app.config_pane.persisted.github_token = None;
+        app.github_env_var = Some("GH_TOKEN");
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        for (width, height) in [(80, 24), (120, 36)] {
+            let rows = render_rows(&mut app, width, height);
+            let row = rows.iter().find(|row| row.contains("GitHub token"));
+            assert!(row.expect("row").contains("From GH_TOKEN"), "{rows:?}");
+        }
+        let wide = render_rows(&mut app, 120, 36).join("\n");
+        assert!(wide.contains("GH_TOKEN environment variable"), "{wide}");
+        let long = app.config_description_text(ConfigField::GithubToken, false, 200, true);
+        assert_eq!(
+            long.last().map(line_text).as_deref(),
+            Some(
+                "This token comes from the GH_TOKEN environment variable. A token you save here \
+                 is used instead. Press enter to type or paste one."
+            )
+        );
+        let short = app
+            .config_description_text(ConfigField::GithubToken, false, 200, false)
+            .iter()
+            .map(line_text)
+            .collect::<String>();
+        assert_eq!(
+            short,
+            "GitHub token: from GH_TOKEN, and a token you save here is used instead."
+        );
+        assert_eq!(
+            app.github_token_source(),
+            Some(crate::github::GithubTokenSource::Environment("GH_TOKEN"))
+        );
+    }
+
+    #[test]
+    fn debug_never_shows_a_key_or_token_being_typed() {
+        for field in [ConfigField::GithubToken, ConfigField::WagoApiKey] {
+            let mut pane = ConfigPaneState::new(AppConfig::default());
+            pane.edit = Some(ConfigEditState {
+                field,
+                value: TextInput::new("planted-secret-value"),
+            });
+            for shown in [
+                format!("{:?}", pane.edit),
+                format!("{pane:?}"),
+                format!("{:?}", AppAction::SetConfigPaneState(pane.clone())),
+            ] {
+                assert!(!shown.contains("planted-secret-value"), "{shown}");
+                assert!(shown.contains("<hidden>"), "{shown}");
+            }
+        }
+        // Other boxes still show what they hold.
+        let other = ConfigEditState {
+            field: ConfigField::CheckInterval,
+            value: TextInput::new("plain-visible-value"),
+        };
+        assert!(format!("{other:?}").contains("plain-visible-value"));
+
+        let search = SearchPaneState {
+            key_box: Some(TextInput::new("planted-wago-secret")),
+            ..SearchPaneState::default()
+        };
+        for shown in [
+            format!("{search:?}"),
+            format!("{:?}", AppAction::SetSearchPaneState(search.clone())),
+        ] {
+            assert!(!shown.contains("planted-wago-secret"), "{shown}");
+            assert!(shown.contains("key_box: Some(\"<hidden>\")"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_github_token_that_cant_be_sent_is_not_saved() {
+        let temp = tempdir().expect("tempdir");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(temp.path().join("config.toml"));
+        app.config_pane.persisted.github_token = None;
+        app.config_pane.draft.github_token = None;
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        // A smart quote and a zero-width space, as a copy from a chat or a document brings.
+        type_text(&mut app, "ghp_\u{201c}pasted\u{200b}token");
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+
+        assert!(
+            app.status_line.text.contains(
+                "That token has characters GitHub can't take. Copy it from GitHub again."
+            ),
+            "{}",
+            app.status_line.text
+        );
+        assert!(!app.status_line.text.contains("pasted"));
+        let edit = app.config_pane.edit.as_ref().expect("the box stays open");
+        assert_eq!(edit.field, ConfigField::GithubToken);
+        assert_eq!(edit.value.value(), "ghp_\u{201c}pasted\u{200b}token");
+        assert!(app.config_pane.persisted.github_token.is_none());
+        assert!(!temp.path().join("config.toml").exists());
+
+        // Fixed, it saves.
+        apply_all(&mut app, AppMessage::ConfigCancelEdit);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        type_text(&mut app, "ghp_pastedtoken");
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+        assert!(app.config_pane.edit.is_none());
+        assert_eq!(
+            app.config_pane.persisted.github_token.as_deref(),
+            Some("ghp_pastedtoken")
+        );
+        crate::github::use_saved_github_token(None);
+    }
+
+    #[test]
+    fn saving_the_github_token_in_settings_counts_from_the_next_check() {
+        use crate::github::{GithubTokenSource, github_token_source};
+        let temp = tempdir().expect("tempdir");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(temp.path().join("config.toml"));
+        app.github_env_var = Some("GITHUB_TOKEN");
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        type_text(&mut app, " ghp_new ");
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+
+        assert_eq!(
+            app.config_pane.persisted.github_token.as_deref(),
+            Some("ghp_new")
+        );
+        match app.config_store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => {
+                assert_eq!(config.github_token.as_deref(), Some("ghp_new"));
+            }
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+        // The saved token wins over GITHUB_TOKEN, for the clients and the screen.
+        assert_eq!(github_token_source(), Some(GithubTokenSource::Settings));
+        assert_eq!(app.github_token_source(), Some(GithubTokenSource::Settings));
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Config,
+                "Saved your GitHub token"
+            )
+            .text
+        );
+
+        // An empty box removes it, and GITHUB_TOKEN is used again.
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        for _ in 0.."ghp_new".len() {
+            apply_all(&mut app, AppMessage::ConfigBackspace);
+        }
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+        assert_eq!(app.config_pane.persisted.github_token, None);
+        match app.config_store.load().expect("load config") {
+            ConfigLoad::Loaded(config) => assert_eq!(config.github_token, None),
+            ConfigLoad::Missing(_) => panic!("config should have been written"),
+        }
+        assert_ne!(github_token_source(), Some(GithubTokenSource::Settings));
+        assert_eq!(
+            app.github_token_source(),
+            Some(GithubTokenSource::Environment("GITHUB_TOKEN"))
+        );
+        assert_eq!(
+            app.status_line.text,
+            app.dashboard_status_for(
+                StatusKind::Done,
+                DetailMode::Config,
+                "Removed your GitHub token. Using the one from GITHUB_TOKEN."
+            )
+            .text
+        );
+    }
+
+    #[test]
+    fn details_and_install_say_what_the_github_token_has_to_do_with_a_failure() {
+        use crate::app::render_inspect::check_failed_sentence;
+        use crate::app::render_install_search::source_error_advice;
+        use crate::github::GithubTokenSource;
+        let details = |kind, token| {
+            check_failed_sentence(Some(kind), SourceKind::GitHub, token)
+                .into_iter()
+                .map(|(part, _)| part)
+                .collect::<String>()
+        };
+        let settings = Some(GithubTokenSource::Settings);
+        let gh_token = Some(GithubTokenSource::Environment("GH_TOKEN"));
+        // No token sent: one raises the limit.
+        assert_eq!(
+            details(SourceErrorKind::SlowDown, None),
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings to \
+             raise it, or press c to try again later."
+        );
+        assert_eq!(
+            source_error_advice(SourceErrorKind::SlowDown, "GitHub", None),
+            "GitHub's limit of 60 requests an hour is used up. Add a GitHub token in Settings to \
+             raise it, or try again later."
+        );
+        // A token sent: never ask for one.
+        for token in [settings, gh_token] {
+            assert_eq!(
+                details(SourceErrorKind::SlowDown, token),
+                "GitHub asked LemonUp to slow down. Wait a few minutes, then press c to try again."
+            );
+            assert_eq!(
+                source_error_advice(SourceErrorKind::SlowDown, "GitHub", token),
+                "GitHub asked LemonUp to slow down. Wait a few minutes, then try again."
+            );
+        }
+        assert_eq!(
+            details(SourceErrorKind::KeyRejected, settings),
+            "GitHub didn't accept your GitHub token. Check it in Settings, then press c to try \
+             again."
+        );
+        assert_eq!(
+            source_error_advice(SourceErrorKind::KeyRejected, "GitHub", settings),
+            "GitHub didn't accept your GitHub token. Check it in Settings, then try again."
+        );
+        // A token from the environment changes only when LemonUp starts again: no key.
+        assert_eq!(
+            check_failed_sentence(
+                Some(SourceErrorKind::KeyRejected),
+                SourceKind::GitHub,
+                gh_token
+            ),
+            vec![(
+                "GitHub didn't accept the token in GH_TOKEN. Replace or unset it.".to_string(),
+                false
+            )]
+        );
+        assert_eq!(
+            source_error_advice(SourceErrorKind::KeyRejected, "GitHub", gh_token),
+            "GitHub didn't accept the token in GH_TOKEN. Replace or unset it."
+        );
+        // Another source's limit says nothing of GitHub.
+        assert_eq!(
+            source_error_advice(SourceErrorKind::SlowDown, "TukUI", None),
+            "TukUI asked LemonUp to slow down. Wait a few minutes, then try again."
+        );
+
+        // The screen decides from what is saved now.
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_pane.persisted.github_token = None;
+        assert_eq!(app.github_token_source(), None);
+        app.config_pane.persisted.github_token = Some("ghp_x".to_string());
+        app.github_env_var = Some("GH_TOKEN");
+        assert_eq!(app.github_token_source(), settings);
     }
 
     #[test]
@@ -14860,6 +15428,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(
@@ -14879,6 +15448,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(
@@ -14894,6 +15464,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(answer_text(&app, now), "1 addon · 1 couldn't be checked");
@@ -15709,6 +16280,29 @@ games = ["forever"]
 
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.onboarding.phase, before);
+    }
+
+    #[test]
+    fn the_wago_setup_step_says_a_github_token_raises_the_limit() {
+        for (width, height) in [(80, 24), (120, 36)] {
+            let mut app = app_for_tests(ShellMode::Onboarding);
+            app.onboarding.step = OnboardingStep::Wago;
+            let rows = render_rows(&mut app, width, height);
+            let text = rows.join("\n");
+            let at = |words: &str| {
+                rows.iter()
+                    .position(|row| row.contains(words))
+                    .unwrap_or_else(|| panic!("{words:?} at {width}x{height}:\n{text}"))
+            };
+            let without = at("Addons from GitHub, WoWInterface and TukUI work without a key.");
+            let token =
+                at("A GitHub token in Settings raises GitHub's limit of 60 requests an hour.");
+            assert_eq!(token, without + 1, "{text}");
+            // The rest of the step still fits.
+            at("addons.wago.io/patreon");
+            at("Wago.io key");
+            at("You can add or change it later in Settings.");
+        }
     }
 
     #[test]
@@ -17578,6 +18172,7 @@ games = ["forever"]
                          lists for Known Raid Tools"
                     .to_string(),
                 clash: None,
+                github_token: None,
             };
         }
 
@@ -17910,6 +18505,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 detail: "connection refused".to_string(),
                 clash: None,
+                github_token: None,
             };
         }
 
@@ -19029,6 +19625,8 @@ games = ["forever"]
             // Settings on a setting that steps fits at 80, and scrolls at 24 rows.
             let mut app = app_for_tests(ShellMode::Dashboard);
             open_config(&mut app);
+            // Past the Wago.io key and the GitHub token, which have boxes to type in.
+            press_key(&mut app, KeyCode::Down);
             press_key(&mut app, KeyCode::Down);
             let line = key_line_at(&mut app, 80);
             assert_eq!(
@@ -19805,8 +20403,8 @@ games = ["forever"]
             }
             fn settings(app: &mut App) {
                 open_config(app);
-                // A setting with a value to change, not the key box.
-                app.config_pane.selected_field = 1;
+                // A setting with a value to change, not the key or token box.
+                app.config_pane.selected_field = 2;
             }
             fn settings_editing(app: &mut App) {
                 open_config(app);
@@ -19844,7 +20442,7 @@ games = ["forever"]
                     |app| questions_in(open_install_results, app)
                 }
                 (HelpContext::InstallSearch, _) => open_install_results,
-                (HelpContext::Config, "While you type your key") => settings_editing,
+                (HelpContext::Config, "While you type your key or token") => settings_editing,
                 (HelpContext::Config, _) => settings,
                 (HelpContext::Backup, "Questions") => |app| questions_in(open_backups, app),
                 (HelpContext::Backup, _) => open_backups,
@@ -21482,6 +22080,7 @@ games = ["forever"]
                     kind: SourceErrorKind::Other,
                     detail: refusal,
                     clash: None,
+                    github_token: None,
                 }
             );
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
@@ -22128,6 +22727,7 @@ games = ["forever"]
                 kind,
                 source: SourceKind::GitHub,
                 detail: "error sending request".to_string(),
+                github_token: None,
             }
         }
 
@@ -22737,6 +23337,153 @@ games = ["forever"]
         }
 
         #[test]
+        fn a_failed_check_keeps_the_github_token_it_was_sent_with() {
+            use crate::github::GithubTokenSource;
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.config_pane.persisted.github_token = None;
+            app.github_env_var = Some("GITHUB_TOKEN");
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Err(CheckFailure {
+                        github_token: Some(GithubTokenSource::Environment("GITHUB_TOKEN")),
+                        ..failure(SourceErrorKind::KeyRejected)
+                    }),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            // A token saved in Settings after it failed: the next request sends that one, but
+            // the failure was with the token in GITHUB_TOKEN.
+            app.config_pane.persisted.github_token = Some("ghp_new".to_string());
+            assert_eq!(app.github_token_source(), Some(GithubTokenSource::Settings));
+            let second = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Second");
+            app.apply(AppAction::SetDashboardSelection(second));
+            apply_all(&mut app, AppMessage::DashboardOpenInspect);
+            let rows = render_rows(&mut app, 160, 48);
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("GitHub didn't accept the token in GITHUB_TOKEN.")),
+                "{rows:#?}"
+            );
+            assert!(
+                !rows.iter().any(|row| row.contains("your GitHub token")),
+                "{rows:#?}"
+            );
+        }
+
+        #[test]
+        fn a_failure_records_the_github_token_sent_at_that_moment() {
+            use crate::github::{GithubTokenSource, use_saved_github_token};
+            use_saved_github_token(Some("saved-test-token"));
+            let github = super::super::failure_of_check(
+                SourceErrorKind::KeyRejected,
+                SourceKind::GitHub,
+                String::new(),
+            );
+            let wago = super::super::failure_of_check(
+                SourceErrorKind::KeyRejected,
+                SourceKind::Wago,
+                String::new(),
+            );
+            let error = SourceError::new(SourceErrorKind::KeyRejected, "HTTP 401");
+            let pane = SearchPaneState::default();
+            let install = pane
+                .fail_install(None, None, "GitHub", &error)
+                .install_state;
+            let tukui = pane.fail_install(None, None, "TukUI", &error).install_state;
+            use_saved_github_token(None);
+
+            assert_eq!(github.github_token, Some(GithubTokenSource::Settings));
+            assert_eq!(wago.github_token, None);
+            assert!(matches!(
+                install,
+                SearchInstallState::Error {
+                    github_token: Some(GithubTokenSource::Settings),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                tukui,
+                SearchInstallState::Error {
+                    github_token: None,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn the_install_sheet_says_which_github_token_failed() {
+            use crate::github::GithubTokenSource;
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.github_env_var = Some("GITHUB_TOKEN");
+            app.search_pane.install_state = SearchInstallState::Error {
+                addon_id: Some("https://github.com/owner/addon".to_string()),
+                addon_name: Some("Addon".to_string()),
+                provider: "GitHub",
+                kind: SourceErrorKind::KeyRejected,
+                detail: "HTTP 401".to_string(),
+                clash: None,
+                github_token: Some(GithubTokenSource::Environment("GITHUB_TOKEN")),
+            };
+            // Saved after the failure.
+            app.config_pane.persisted.github_token = Some("ghp_new".to_string());
+            let lines = app
+                .search_state_lines(100)
+                .expect("error lines")
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines[2].trim(),
+                "GitHub didn't accept the token in GITHUB_TOKEN. Replace or unset it.",
+                "{lines:?}"
+            );
+        }
+
+        #[test]
+        fn the_status_line_says_which_github_token_failed() {
+            use crate::github::GithubTokenSource;
+            let rejected = |github_token| CheckFailure {
+                github_token,
+                ..failure(SourceErrorKind::KeyRejected)
+            };
+            let settings = rejected(Some(GithubTokenSource::Settings));
+            let gh_token = rejected(Some(GithubTokenSource::Environment("GH_TOKEN")));
+            let all_failed = dashboard_check_status_message(&[], 8, 0, 0, 8);
+            let message = dashboard_check_status_with_cause(
+                all_failed,
+                &[settings.clone(), settings.clone()],
+            );
+            assert_eq!(
+                message,
+                "Couldn't check 8 addons: GitHub didn't accept your token. Check it in Settings"
+            );
+            // As short as the Wago.io one, so it fits at 80 columns.
+            assert!(message.chars().count() <= 78, "{message}");
+            assert_eq!(
+                check_failure_cause(std::slice::from_ref(&gh_token)),
+                Some("GitHub didn't accept the token in GH_TOKEN".to_string())
+            );
+            assert_eq!(
+                check_failure_cause(&[rejected(Some(GithubTokenSource::Environment(
+                    "GITHUB_TOKEN"
+                )))]),
+                Some("GitHub didn't accept the token in GITHUB_TOKEN".to_string())
+            );
+            // Different tokens: no token to name.
+            assert_eq!(
+                check_failure_cause(&[settings, gh_token]),
+                Some("GitHub turned down LemonUp's request".to_string())
+            );
+        }
+
+        #[test]
         fn check_results_become_steps_with_the_error_kind() {
             let sources = HashMap::from([("Pawn".to_string(), SourceKind::WowInterface)]);
             let result = |status, error_kind| CheckResult {
@@ -22757,6 +23504,7 @@ games = ["forever"]
                         kind: SourceErrorKind::NoConnection,
                         source: SourceKind::WowInterface,
                         detail: "timed out".to_string(),
+                        github_token: None,
                     }),
                 })
             );
@@ -22777,7 +23525,7 @@ games = ["forever"]
         #[test]
         fn details_names_the_cause_of_a_failed_check() {
             let text = |kind, source| {
-                check_failed_sentence(kind, source)
+                check_failed_sentence(kind, source, None)
                     .into_iter()
                     .map(|(part, _)| part)
                     .collect::<String>()
@@ -22795,15 +23543,15 @@ games = ["forever"]
             );
             assert!(
                 text(Some(SourceErrorKind::KeyRejected), SourceKind::GitHub)
-                    .contains("GitHub token")
+                    .starts_with("GitHub turned down LemonUp's request.")
             );
             assert!(
                 text(Some(SourceErrorKind::NotFound), SourceKind::Tukui)
                     .starts_with("TukUI doesn't list this addon anymore.")
             );
             assert!(
-                text(Some(SourceErrorKind::SlowDown), SourceKind::GitHub)
-                    .starts_with("GitHub asked LemonUp to slow down.")
+                text(Some(SourceErrorKind::SlowDown), SourceKind::Tukui)
+                    .starts_with("TukUI asked LemonUp to slow down.")
             );
             let generic =
                 "LemonUp couldn't check GitHub for a newer version. Press c to try again.";
@@ -22813,8 +23561,11 @@ games = ["forever"]
             );
             assert_eq!(text(None, SourceKind::GitHub), generic);
             // A wrong repository fails the same way again, so no key is offered.
-            let wrong =
-                check_failed_sentence(Some(SourceErrorKind::WrongRepository), SourceKind::GitHub);
+            let wrong = check_failed_sentence(
+                Some(SourceErrorKind::WrongRepository),
+                SourceKind::GitHub,
+                None,
+            );
             assert_eq!(
                 wrong,
                 vec![(
@@ -22831,7 +23582,7 @@ games = ["forever"]
                 SourceErrorKind::SlowDown,
                 SourceErrorKind::Other,
             ] {
-                let parts = check_failed_sentence(Some(kind), SourceKind::GitHub);
+                let parts = check_failed_sentence(Some(kind), SourceKind::GitHub, None);
                 assert!(parts.contains(&("c".to_string(), true)), "{kind:?}");
                 let joined = text(Some(kind), SourceKind::GitHub);
                 assert!(!joined.contains('—') && !joined.contains('–'), "{joined}");
@@ -23428,6 +24179,7 @@ games = ["forever"]
                 kind,
                 source,
                 detail: String::new(),
+                github_token: None,
             };
             let names: Vec<String> = (1..=8).map(|n| format!("Addon{n}")).collect();
             let all_failed = dashboard_check_status_message(&names, 8, 0, 0, 8);

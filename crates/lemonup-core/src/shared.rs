@@ -2,8 +2,8 @@
 //!
 //! Each profile (one per game) keeps its own `config.toml` for what belongs to that game: its
 //! AddOns folder, backups of game settings and how many to keep, show libraries and the
-//! welcome card. The Wago.io key, the look (theme, symbols, motion), how checks run and
-//! whether LemonUp looks for a newer LemonUp are the same for every game, so they live once in
+//! welcome card. The Wago.io key, the GitHub token, the look (theme, symbols, motion), how
+//! checks run and whether LemonUp looks for a newer LemonUp are the same for every game, so they live once in
 //! `shared.toml` next to the default profile's config, and they win over the copies in each
 //! profile's config.
 //!
@@ -20,7 +20,8 @@
 //! saved. `shared.toml` also records, per profile, the shared values LemonUp last wrote into
 //! that profile's config. When the config holds other values later, an older LemonUp changed
 //! them there, and they are taken as the newer ones. Removing a game drops its record, and
-//! removing the Wago.io key removes the copies of it LemonUp wrote into every game's config.
+//! removing the Wago.io key or the GitHub token removes the copies of it LemonUp wrote into
+//! every game's config.
 //!
 //! While another game's config can't be read, `shared.toml` isn't created, and a change to a
 //! shared value waits: the save is refused, naming that file.
@@ -99,12 +100,14 @@ impl OtherGamesCheck {
 }
 
 /// The shared values as one profile's `config.toml` holds them. A value the file doesn't
-/// have is `None`, and so is a missing or empty Wago.io key.
+/// have is `None`, and so is a missing or empty Wago.io key or GitHub token.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SharedFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wago_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +131,7 @@ impl SharedFields {
     pub fn parse(raw: &str) -> std::result::Result<Self, toml::de::Error> {
         let mut fields = toml::from_str::<Self>(raw)?;
         fields.wago_api_key = fields.wago_api_key.filter(|key| !key.trim().is_empty());
+        fields.github_token = fields.github_token.filter(|token| !token.trim().is_empty());
         Ok(fields)
     }
 
@@ -135,6 +139,7 @@ impl SharedFields {
     pub fn of(settings: &SharedSettings) -> Self {
         Self {
             wago_api_key: settings.wago_api_key.clone(),
+            github_token: settings.github_token.clone(),
             theme: Some(settings.theme),
             simple_symbols: Some(settings.simple_symbols),
             reduce_motion: Some(settings.reduce_motion),
@@ -154,6 +159,7 @@ impl SharedFields {
             }
         }
         fill(&mut self.wago_api_key, &other.wago_api_key);
+        fill(&mut self.github_token, &other.github_token);
         fill(&mut self.theme, &other.theme);
         fill(&mut self.simple_symbols, &other.simple_symbols);
         fill(&mut self.reduce_motion, &other.reduce_motion);
@@ -179,6 +185,7 @@ impl SharedFields {
         }
         Self {
             wago_api_key: changed(&self.wago_api_key, &written.wago_api_key),
+            github_token: changed(&self.github_token, &written.github_token),
             theme: changed(&self.theme, &written.theme),
             simple_symbols: changed(&self.simple_symbols, &written.simple_symbols),
             reduce_motion: changed(&self.reduce_motion, &written.reduce_motion),
@@ -200,6 +207,9 @@ impl SharedFields {
     fn apply_to(&self, settings: &mut SharedSettings) {
         if let Some(key) = &self.wago_api_key {
             settings.wago_api_key = Some(key.clone());
+        }
+        if let Some(token) = &self.github_token {
+            settings.github_token = Some(token.clone());
         }
         if let Some(theme) = self.theme {
             settings.theme = theme;
@@ -232,7 +242,7 @@ impl SharedFields {
     }
 }
 
-/// Never prints the Wago.io key, only whether there is one.
+/// Never prints the Wago.io key or the GitHub token, only whether there is one.
 impl fmt::Debug for SharedFields {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -240,6 +250,10 @@ impl fmt::Debug for SharedFields {
             .field(
                 "wago_api_key",
                 &self.wago_api_key.as_ref().map(|_| "<hidden>"),
+            )
+            .field(
+                "github_token",
+                &self.github_token.as_ref().map(|_| "<hidden>"),
             )
             .field("theme", &self.theme)
             .field("simple_symbols", &self.simple_symbols)
@@ -259,6 +273,8 @@ impl fmt::Debug for SharedFields {
 pub struct SharedSettings {
     pub schema_version: u32,
     pub wago_api_key: Option<String>,
+    /// Raises GitHub's limit of 60 requests an hour for every GitHub request LemonUp makes.
+    pub github_token: Option<String>,
     pub theme: ThemeMode,
     pub simple_symbols: bool,
     pub reduce_motion: bool,
@@ -292,6 +308,7 @@ impl SharedSettings {
         Self {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             wago_api_key: config.wago_api_key.clone(),
+            github_token: config.github_token.clone(),
             theme: config.theme,
             simple_symbols: config.simple_symbols,
             reduce_motion: config.reduce_motion,
@@ -315,6 +332,9 @@ impl SharedSettings {
         };
         if changed(|seen, config| seen.wago_api_key != config.wago_api_key) {
             self.wago_api_key = config.wago_api_key.clone();
+        }
+        if changed(|seen, config| seen.github_token != config.github_token) {
+            self.github_token = config.github_token.clone();
         }
         if changed(|seen, config| seen.theme != config.theme) {
             self.theme = config.theme;
@@ -346,6 +366,7 @@ impl SharedSettings {
     /// Puts the shared values into a profile's `config`.
     pub fn apply_to(&self, config: &mut AppConfig) {
         config.wago_api_key = self.wago_api_key.clone();
+        config.github_token = self.github_token.clone();
         config.theme = self.theme;
         config.simple_symbols = self.simple_symbols;
         config.reduce_motion = self.reduce_motion;
@@ -363,7 +384,7 @@ impl Default for SharedSettings {
     }
 }
 
-/// Never prints the Wago.io key, only whether there is one.
+/// Never prints the Wago.io key or the GitHub token, only whether there is one.
 impl fmt::Debug for SharedSettings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -372,6 +393,10 @@ impl fmt::Debug for SharedSettings {
             .field(
                 "wago_api_key",
                 &self.wago_api_key.as_ref().map(|_| "<hidden>"),
+            )
+            .field(
+                "github_token",
+                &self.github_token.as_ref().map(|_| "<hidden>"),
             )
             .field("theme", &self.theme)
             .field("simple_symbols", &self.simple_symbols)
@@ -385,6 +410,55 @@ impl fmt::Debug for SharedSettings {
             .field("profile_copies", &self.profile_copies)
             .field("wago_hash_notice_shown", &self.wago_hash_notice_shown)
             .finish()
+    }
+}
+
+/// A secret all games share. Removing it removes the copies LemonUp wrote into every game's
+/// config too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedSecret {
+    WagoApiKey,
+    GithubToken,
+}
+
+impl SharedSecret {
+    pub(crate) const ALL: [Self; 2] = [Self::WagoApiKey, Self::GithubToken];
+
+    /// Its name in the config files.
+    fn name(self) -> &'static str {
+        match self {
+            Self::WagoApiKey => "wago_api_key",
+            Self::GithubToken => "github_token",
+        }
+    }
+
+    /// Its name in log lines.
+    fn label(self) -> &'static str {
+        match self {
+            Self::WagoApiKey => "Wago.io key",
+            Self::GithubToken => "GitHub token",
+        }
+    }
+
+    pub(crate) fn in_settings(self, settings: &SharedSettings) -> Option<&String> {
+        match self {
+            Self::WagoApiKey => settings.wago_api_key.as_ref(),
+            Self::GithubToken => settings.github_token.as_ref(),
+        }
+    }
+
+    fn in_fields(self, fields: &SharedFields) -> Option<&String> {
+        match self {
+            Self::WagoApiKey => fields.wago_api_key.as_ref(),
+            Self::GithubToken => fields.github_token.as_ref(),
+        }
+    }
+
+    fn in_fields_mut(self, fields: &mut SharedFields) -> &mut Option<String> {
+        match self {
+            Self::WagoApiKey => &mut fields.wago_api_key,
+            Self::GithubToken => &mut fields.github_token,
+        }
     }
 }
 
@@ -507,11 +581,21 @@ impl SharedSettingsStore {
     }
 
     /// The shared settings, or `None` when `shared.toml` doesn't exist yet. Never writes.
+    /// An empty or whitespace-only Wago.io key or GitHub token reads as none, as it does in
+    /// a profile's config.
     pub fn read(&self) -> Result<Option<SharedSettings>> {
         if !self.path.try_exists()? {
             return Ok(None);
         }
-        read_toml::<SharedSettings>(&self.path).map(Some)
+        let mut settings = read_toml::<SharedSettings>(&self.path)?;
+        let blank = |value: &String| value.trim().is_empty();
+        settings.wago_api_key = settings.wago_api_key.filter(|key| !blank(key));
+        settings.github_token = settings.github_token.filter(|token| !blank(token));
+        for copy in settings.profile_copies.values_mut() {
+            copy.wago_api_key = copy.wago_api_key.take().filter(|key| !blank(key));
+            copy.github_token = copy.github_token.take().filter(|token| !blank(token));
+        }
+        Ok(Some(settings))
     }
 
     /// The shared settings, creating `shared.toml` first when it doesn't exist and a game has
@@ -707,51 +791,56 @@ impl SharedSettingsStore {
         Ok(self.current_with(Writes::Never)?.settings)
     }
 
-    /// After a save removed the Wago.io key: removes the copy of it from every other game's
-    /// config that still holds the copy LemonUp wrote there, then from the record of that
-    /// copy. A config that holds another key (an older LemonUp changed it) keeps it; its
-    /// record loses the key either way, since that key differs from both. A config that
-    /// can't be read or written keeps its record as it is: a record without the key next to
-    /// a config with it would bring the key back as an older LemonUp's change. Best effort;
-    /// the save is already done.
-    pub(crate) fn clear_key_copies(&self, lock: &SharedLock, saved_by: &str) {
+    /// After a save removed `secret` (the Wago.io key or the GitHub token): removes the copy
+    /// of it from every other game's config that still holds the copy LemonUp wrote there,
+    /// then from the record of that copy. A config that holds another value (an older
+    /// LemonUp changed it) keeps it; its record loses the value either way, since that value
+    /// differs from both. A config that can't be read or written keeps its record as it is: a
+    /// record without the value next to a config with it would bring it back as an older
+    /// LemonUp's change. Best effort; the save is already done.
+    pub(crate) fn clear_key_copies(&self, lock: &SharedLock, saved_by: &str, secret: SharedSecret) {
         let Ok(Some(mut settings)) = self.read() else {
             return;
         };
         let mut cleared = false;
         for (profile, record) in &mut settings.profile_copies {
-            if profile == saved_by || record.wago_api_key.is_none() {
+            if profile == saved_by || secret.in_fields(record).is_none() {
                 continue;
             }
-            match self.clear_key_copy(profile, record) {
+            match self.clear_key_copy(profile, record, secret) {
                 Ok(()) => {
-                    record.wago_api_key = None;
+                    *secret.in_fields_mut(record) = None;
                     cleared = true;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, profile, "kept the Wago.io key in a game's settings");
+                    tracing::warn!(%error, profile, "kept the {} in a game's settings", secret.label());
                 }
             }
         }
         if cleared && let Err(error) = self.write_locked(lock, &settings) {
-            tracing::warn!(%error, "couldn't record the Wago.io key removal for every game");
+            tracing::warn!(%error, "couldn't record the {} removal for every game", secret.label());
         }
     }
 
-    /// Removes the key from `profile`'s config when it holds the copy `record` says LemonUp
+    /// Removes `secret` from `profile`'s config when it holds the copy `record` says LemonUp
     /// wrote there. `Ok` once the config no longer holds that copy.
-    fn clear_key_copy(&self, profile: &str, record: &SharedFields) -> Result<()> {
+    fn clear_key_copy(
+        &self,
+        profile: &str,
+        record: &SharedFields,
+        secret: SharedSecret,
+    ) -> Result<()> {
         let path = self.roots.paths(profile)?.config_file;
         if !path.try_exists()? {
             return Ok(());
         }
         let raw = std::fs::read_to_string(&path)?;
         let in_file = parse_profile_config(&path, &raw)?.1;
-        if in_file.wago_api_key != record.wago_api_key {
+        if secret.in_fields(&in_file) != secret.in_fields(record) {
             return Ok(());
         }
         let mut table = raw.parse::<toml::Table>()?;
-        table.remove("wago_api_key");
+        table.remove(secret.name());
         write_private_file(&path, &toml::to_string_pretty(&table)?)
     }
 
@@ -937,6 +1026,7 @@ mod tests {
     use crate::paths::{DEFAULT_PROFILE, ProfileRoots};
 
     const SECRET: &str = "wago-secret-for-tests";
+    const GITHUB_SECRET: &str = "github-token-for-tests";
 
     fn test_roots(base: &Path) -> ProfileRoots {
         ProfileRoots::new(base.join("config"), base.join("data"), base.join("cache"))
@@ -945,6 +1035,7 @@ mod tests {
     fn every_shared_field_set() -> AppConfig {
         let mut config = AppConfig::new_unconfigured();
         config.wago_api_key = Some(SECRET.to_string());
+        config.github_token = Some(GITHUB_SECRET.to_string());
         config.theme = ThemeMode::Terminal;
         config.simple_symbols = true;
         config.reduce_motion = true;
@@ -1777,6 +1868,113 @@ mod tests {
                 .wago_api_key
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_github_token_is_saved_once_for_every_game_and_never_printed() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, SECRET);
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        let forever = roots.paths("forever").expect("paths");
+
+        let mut retail = loaded(&retail_store);
+        retail.github_token = Some(GITHUB_SECRET.to_string());
+        let saved = retail_store.write_config(&retail).expect("save token");
+        assert!(saved.github_token.as_deref() == Some(GITHUB_SECRET));
+
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let stored = shared.read().expect("read").expect("exists");
+        assert!(stored.github_token.as_deref() == Some(GITHUB_SECRET));
+        let raw = fs::read_to_string(shared.path()).expect("read");
+        assert!(raw.contains("github_token"), "{}", raw.len());
+        // The other game reads it from `shared.toml`, and the Wago.io key is untouched.
+        let other = loaded(&ConfigStore::for_profile(&forever));
+        assert!(other.github_token.as_deref() == Some(GITHUB_SECRET));
+        assert!(other.wago_api_key.as_deref() == Some(SECRET));
+
+        let shown = format!("{stored:?} {:?} {:?}", SharedFields::of(&stored), other);
+        assert!(!shown.contains(GITHUB_SECRET), "the token is printed");
+        assert!(
+            shown.contains("github_token: Some(\"<hidden>\")"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn an_empty_github_token_reads_as_none() {
+        for raw in ["github_token = \"\"\n", "github_token = \"  \\t \"\n"] {
+            let fields = SharedFields::parse(raw).expect("parse");
+            assert!(fields.github_token.is_none(), "{raw}");
+        }
+        let fields = SharedFields::parse("github_token = \"ghp_x\"\n").expect("parse");
+        assert!(fields.github_token.as_deref() == Some("ghp_x"));
+    }
+
+    #[test]
+    fn an_empty_github_token_in_shared_toml_reads_as_none() {
+        let temp = tempdir().expect("tempdir");
+        let store = SharedSettingsStore::for_roots(&test_roots(temp.path()));
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        fs::write(
+            store.path(),
+            "github_token = \"  \"\nwago_api_key = \"\"\n\n[profile_copies.default]\n\
+             github_token = \" \"\n",
+        )
+        .expect("write");
+        let settings = store.read().expect("read").expect("settings");
+        assert!(settings.github_token.is_none(), "{settings:?}");
+        assert!(settings.wago_api_key.is_none(), "{settings:?}");
+        assert!(settings.profile_copies["default"].github_token.is_none());
+    }
+
+    #[test]
+    fn removing_the_github_token_removes_the_copies_lemonup_wrote_for_other_games() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        two_games(&roots, SECRET);
+        let retail_store = ConfigStore::for_profile(&roots.paths(DEFAULT_PROFILE).expect("p"));
+        let forever = roots.paths("forever").expect("paths");
+        let mut retail = loaded(&retail_store);
+        retail.github_token = Some(GITHUB_SECRET.to_string());
+        retail_store.write_config(&retail).expect("save token");
+        // WoW Forever opened and saved once, so its own file holds the copy LemonUp wrote.
+        let forever_store = ConfigStore::for_profile(&forever);
+        let forever_config = loaded(&forever_store);
+        forever_store
+            .write_config(&forever_config)
+            .expect("save forever");
+        assert!(
+            fs::read_to_string(&forever.config_file)
+                .expect("read")
+                .contains(GITHUB_SECRET)
+        );
+
+        let mut retail = loaded(&retail_store);
+        retail.github_token = None;
+        let saved = retail_store.write_config(&retail).expect("remove token");
+        assert!(saved.github_token.is_none());
+        assert!(saved.wago_api_key.as_deref() == Some(SECRET));
+
+        let shared = SharedSettingsStore::for_roots(&roots);
+        let stored = shared.read().expect("read").expect("exists");
+        assert!(stored.github_token.is_none());
+        for profile in [DEFAULT_PROFILE, "forever"] {
+            assert!(
+                stored.profile_copies[profile].github_token.is_none(),
+                "{profile}"
+            );
+        }
+        assert!(
+            !fs::read_to_string(shared.path())
+                .expect("read")
+                .contains(GITHUB_SECRET)
+        );
+        let forever_raw = fs::read_to_string(&forever.config_file).expect("read");
+        assert!(!forever_raw.contains(GITHUB_SECRET), "the copy is gone");
+        // Only the token goes: the Wago.io key copy stays.
+        assert!(forever_raw.contains(SECRET), "the key stays");
+        assert!(loaded(&forever_store).github_token.is_none());
     }
 
     #[test]

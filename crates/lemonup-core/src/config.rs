@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{LemonupError, Result};
 use crate::paths::AppPaths;
 use crate::shared::{
-    OtherGamesCheck, SharedFields, SharedSettings, SharedSettingsStore, Writes,
+    OtherGamesCheck, SharedFields, SharedSecret, SharedSettings, SharedSettingsStore, Writes,
     parse_profile_config,
 };
 
@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub show_libs: bool,
     pub theme: ThemeMode,
     pub wago_api_key: Option<String>,
+    /// Raises GitHub's limit of 60 requests an hour. Shared by all games.
+    pub github_token: Option<String>,
     /// The welcome card on the addon list was hidden with `d`. Configs
     /// written before it existed load as `false`.
     pub hide_first_run_card: bool,
@@ -90,7 +92,7 @@ where
     })
 }
 
-/// Debug output never shows the Wago.io key, so a log line or a failed
+/// Debug output never shows the Wago.io key or the GitHub token, so a log line or a failed
 /// assertion can't leak it.
 impl fmt::Debug for AppConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -109,6 +111,10 @@ impl fmt::Debug for AppConfig {
             .field(
                 "wago_api_key",
                 &self.wago_api_key.as_ref().map(|_| "<hidden>"),
+            )
+            .field(
+                "github_token",
+                &self.github_token.as_ref().map(|_| "<hidden>"),
             )
             .field("hide_first_run_card", &self.hide_first_run_card)
             .field("simple_symbols", &self.simple_symbols)
@@ -136,6 +142,7 @@ impl AppConfig {
             show_libs: false,
             theme: ThemeMode::Dark,
             wago_api_key: None,
+            github_token: None,
             hide_first_run_card: false,
             simple_symbols: false,
             reduce_motion: false,
@@ -324,8 +331,8 @@ impl ConfigStore {
     /// `shared.toml` records LemonUp wrote into it, so the next load takes its values as an
     /// older LemonUp's change and keeps them: the save that never finished is undone.
     ///
-    /// Removing the Wago.io key also removes the copies of it LemonUp wrote into other
-    /// games' configs.
+    /// Removing the Wago.io key or the GitHub token also removes the copies of it LemonUp
+    /// wrote into other games' configs.
     pub fn write_config(&self, config: &AppConfig) -> Result<AppConfig> {
         let Some(link) = &self.shared else {
             let rendered = toml::to_string_pretty(config)?;
@@ -353,8 +360,12 @@ impl ConfigStore {
                     .restore(&lock, current.on_disk.then_some(&current.settings));
                 return Err(error);
             }
-            if current.settings.wago_api_key.is_some() && merged.wago_api_key.is_none() {
-                link.store.clear_key_copies(&lock, &link.profile);
+            for secret in SharedSecret::ALL {
+                if secret.in_settings(&current.settings).is_some()
+                    && secret.in_settings(&merged).is_none()
+                {
+                    link.store.clear_key_copies(&lock, &link.profile, secret);
+                }
             }
         } else if SharedFields::of(&merged) != SharedFields::of(&current.settings) {
             return Err(LemonupError::SharedChangeWaits {
@@ -426,6 +437,20 @@ mod tests {
         assert!(shown.contains("<hidden>"));
         let none = format!("{:?}", AppConfig::new_unconfigured());
         assert!(none.contains("wago_api_key: None"), "{none}");
+    }
+
+    #[test]
+    fn debug_output_hides_the_github_token() {
+        let mut config = AppConfig::new_unconfigured();
+        config.github_token = Some("ghp_super_secret_token".to_string());
+        let shown = format!("{config:?} {config:#?}");
+        assert!(!shown.contains("ghp_super_secret_token"), "{shown}");
+        assert!(
+            shown.contains("github_token: Some(\"<hidden>\")"),
+            "{shown}"
+        );
+        let none = format!("{:?}", AppConfig::new_unconfigured());
+        assert!(none.contains("github_token: None"), "{none}");
     }
 
     use tempfile::tempdir;
