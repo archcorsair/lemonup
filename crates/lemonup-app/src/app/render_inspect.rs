@@ -173,6 +173,17 @@ impl App {
         vec![Line::from(Span::styled("No addon selected", roles.muted))]
     }
 
+    /// The web page Details shows now: its text on screen and the address it opens. `None`
+    /// while Details is closed or the address isn't one to open.
+    pub(super) fn details_web_link(&self) -> Option<(String, String)> {
+        if self.shell_ui.overlay.active != Some(OverlayKind::Inspect) {
+            return None;
+        }
+        let url = self.inspect_resolved_target()?.item.source_url.as_deref()?;
+        let address = super::links::link_address(url)?;
+        Some((web_page_label(url), address))
+    }
+
     fn details_content(&self) -> Option<DetailsContent> {
         let target = self.inspect_resolved_target()?;
         Some(self.details_content_for(target.item))

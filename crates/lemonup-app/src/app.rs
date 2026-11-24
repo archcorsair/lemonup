@@ -7595,7 +7595,8 @@ impl App {
         if !self.runtime.display.hyperlinks {
             return None;
         }
-        let found = links::DrawnLinks::find(buffer);
+        let extra: Vec<(String, String)> = self.details_web_link().into_iter().collect();
+        let found = links::DrawnLinks::find(buffer, &extra);
         (found != *written).then_some(found)
     }
 
@@ -13171,7 +13172,7 @@ mod tests {
             let found = app
                 .changed_links(&buffer, &crate::app::links::DrawnLinks::default())
                 .expect("a link to write");
-            let urls: Vec<_> = found.links().iter().map(|link| link.url).collect();
+            let urls: Vec<_> = found.links().iter().map(|link| link.url.as_str()).collect();
             assert_eq!(
                 urls,
                 vec!["https://lemonup.org/github-token"],
@@ -13186,6 +13187,76 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn details_links_the_addon_web_page_where_the_terminal_has_links() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let url = "https://github.com/SomeAuthor/SecondAddonWithAVeryLongRepositoryName";
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        let index = app
+            .dashboard
+            .items
+            .iter()
+            .position(|item| item.folder == "Second")
+            .expect("Second");
+        app.dashboard.items[index].source_url = Some(url.to_string());
+        let row = app
+            .dashboard
+            .rows
+            .iter()
+            .position(|row| {
+                row.folder == "Second" && row.kind == crate::app::DashboardRowKind::Parent
+            })
+            .expect("addon row");
+        app.dashboard.list_state.select(Some(row));
+        app.runtime.display.hyperlinks = true;
+        let links_at = |app: &mut App, width: u16, height: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal.draw(|frame| app.draw(frame)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            app.changed_links(&buffer, &crate::app::links::DrawnLinks::default())
+                .map(|found| {
+                    found
+                        .links()
+                        .iter()
+                        .map(|link| {
+                            let text: String = (link.x..)
+                                .take_while(|x| {
+                                    *x < width && !buffer[(*x, link.y)].symbol().trim().is_empty()
+                                })
+                                .map(|x| buffer[(x, link.y)].symbol().to_string())
+                                .collect();
+                            (link.url.clone(), text)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        // Closed, the web page isn't on screen.
+        assert!(links_at(&mut app, 160, 48).is_empty());
+
+        app.apply(AppAction::SetInspectOverlay(true));
+        // The sheet at 80x24, the docked panel at 120 (where the address wraps) and wider.
+        for (width, height) in [(80, 24), (120, 36), (160, 48)] {
+            let found = links_at(&mut app, width, height);
+            assert!(!found.is_empty(), "{width}x{height}");
+            assert!(
+                found.iter().all(|(link, _)| link == url),
+                "{width}x{height}: {found:?}"
+            );
+            let shown: String = found.iter().map(|(_, text)| text.as_str()).collect();
+            assert_eq!(
+                shown, "github.com/SomeAuthor/SecondAddonWithAVeryLongRepositoryName",
+                "{width}x{height}"
+            );
+        }
+        assert!(links_at(&mut app, 120, 36).len() > 1, "wraps when docked");
+
+        // An address that isn't a web page isn't written as a link.
+        app.dashboard.items[index].source_url = Some("javascript:alert(1)".to_string());
+        assert!(links_at(&mut app, 160, 48).is_empty());
     }
 
     #[test]
