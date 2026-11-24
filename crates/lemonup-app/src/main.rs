@@ -174,8 +174,16 @@ async fn run() -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     }
 
     // Every GitHub request this run makes sends the token saved in Settings, if any. The TUI
-    // sets it again whenever its settings change.
-    crate::github::use_saved_github_token(output_config(&paths).github_token.as_deref());
+    // sets it again whenever its settings change, and says itself when it can't read them.
+    let saved_token = startup_github_token(&paths, |notice| {
+        if !matches!(command, Commands::Tui) {
+            notice.print(output::Paint::for_stderr(
+                &lemonup_core::AppConfig::default(),
+                runtime.display,
+            ));
+        }
+    });
+    crate::github::use_saved_github_token(saved_token.as_deref());
 
     let outcome = match command {
         Commands::Tui => {
@@ -357,6 +365,37 @@ fn output_config(paths: &AppPaths) -> lemonup_core::AppConfig {
             config
         }
     }
+}
+
+/// The GitHub token saved in Settings, read as [`output_config`] reads the settings. When
+/// they can't be read, `warn` gets the notice to show and the run goes on without one.
+fn startup_github_token(paths: &AppPaths, warn: impl FnOnce(&StartupNotice)) -> Option<String> {
+    match saved_github_token(paths) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(%error, "couldn't read the settings for the saved GitHub token");
+            warn(&StartupNotice {
+                text: "Couldn't read your settings, so GitHub requests go without the token \
+                       saved in Settings."
+                    .to_string(),
+                is_error: true,
+                details: Vec::new(),
+            });
+            None
+        }
+    }
+}
+
+/// The GitHub token saved in Settings, or why the settings can't be read.
+fn saved_github_token(paths: &AppPaths) -> lemonup_core::Result<Option<String>> {
+    let store = ConfigStore::for_profile(paths);
+    if let Ok(ConfigLoad::Loaded(config)) = store.load_without_writing() {
+        return Ok(config.github_token);
+    }
+    // Like `output_config`: a profile config that can't be read still has the shared token.
+    let mut config = lemonup_core::AppConfig::new_unconfigured();
+    store.refresh_shared(&mut config)?;
+    Ok(config.github_token)
 }
 
 /// A field and the change `lemonup toc` makes to it: a new value, or `None` to restore the
@@ -4072,7 +4111,7 @@ mod profile_tests {
     };
     use tempfile::tempdir;
 
-    use super::{command_profile, load_profile_config};
+    use super::{command_profile, load_profile_config, startup_github_token};
     use crate::cli::Commands;
     use crate::output::{Paint, ProfilesReport, Report};
 
@@ -4087,6 +4126,33 @@ mod profile_tests {
         fs::create_dir_all(root.join("Data")).expect("data dir");
         fs::write(root.join(".build.info"), "build").expect("build info");
         dir
+    }
+
+    #[test]
+    fn unreadable_settings_warn_and_send_no_saved_github_token() {
+        let temp = tempdir().expect("tempdir");
+        let roots = test_roots(temp.path());
+        let paths = roots.paths(DEFAULT_PROFILE).expect("paths");
+        let shared = roots.shared_settings_file();
+        fs::create_dir_all(shared.parent().expect("parent")).expect("config dir");
+        let mut notices = Vec::new();
+
+        fs::write(&shared, "github_token = \"ghp_saved\"\n").expect("write");
+        let token = startup_github_token(&paths, |notice| notices.push(notice.clone()));
+        assert!(token.as_deref() == Some("ghp_saved"));
+        assert!(notices.is_empty());
+
+        fs::write(&shared, "github_token = [not toml\n").expect("write");
+        let token = startup_github_token(&paths, |notice| notices.push(notice.clone()));
+        assert!(token.is_none());
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].lines(Paint::PLAIN),
+            [
+                "Couldn't read your settings, so GitHub requests go without the token saved in \
+              Settings."
+            ]
+        );
     }
 
     #[test]

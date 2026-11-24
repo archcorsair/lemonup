@@ -577,6 +577,7 @@ impl App {
                 kind,
                 detail,
                 clash,
+                github_token,
                 ..
             } => {
                 let headline = match addon_name {
@@ -599,12 +600,7 @@ impl App {
                     Line::from(""),
                     Line::from(format!(
                         "  {}",
-                        install_error_advice(
-                            *kind,
-                            provider,
-                            clash.as_ref(),
-                            self.github_token_source()
-                        )
+                        install_error_advice(*kind, provider, clash.as_ref(), *github_token)
                     )),
                     Line::from(""),
                     keys,

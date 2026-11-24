@@ -163,7 +163,7 @@ pub enum OnboardingTaskEvent {
     DeepScanFinished(std::result::Result<Vec<PathBuf>, String>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OnboardingState {
     pub step: OnboardingStep,
     pub phase: OnboardingPhase,
@@ -189,6 +189,27 @@ pub struct OnboardingState {
     pub problem: Option<String>,
     /// The usual install places were checked this time.
     pub checked_usual_places: bool,
+}
+
+/// Debug output never shows the Wago.io key in the key box.
+impl std::fmt::Debug for OnboardingState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OnboardingState")
+            .field("step", &self.step)
+            .field("phase", &self.phase)
+            .field("draft", &self.draft)
+            .field("scan_root", &self.scan_root)
+            .field("folder_box", &self.folder_box)
+            .field("key_box", &"<hidden>")
+            .field("preference", &self.preference)
+            .field("other_game", &self.other_game)
+            .field("set_up_other_game", &self.set_up_other_game)
+            .field("quit_question", &self.quit_question)
+            .field("problem", &self.problem)
+            .field("checked_usual_places", &self.checked_usual_places)
+            .finish()
+    }
 }
 
 impl OnboardingState {
@@ -531,6 +552,15 @@ mod tests {
             panic!("found");
         };
         assert_eq!(found.selected, 2);
+    }
+
+    #[test]
+    fn debug_never_shows_the_key_being_typed() {
+        let mut state = OnboardingState::new();
+        state.key_box = super::TextInput::new("planted-wago-secret");
+        let shown = format!("{state:?}");
+        assert!(!shown.contains("planted-wago-secret"), "{shown}");
+        assert!(shown.contains("key_box: \"<hidden>\""), "{shown}");
     }
 
     #[test]

@@ -238,22 +238,23 @@ impl App {
                 "LemonUp found this addon in your AddOns folder but doesn't know where it came from, so it can't check it for updates.",
                 text,
             )],
-            RowStatus::CheckFailed => check_failed_sentence(
-                self.dashboard
-                    .check_failure(&item.folder)
-                    .map(|failure| failure.kind),
-                item.source,
-                self.github_token_source(),
-            )
-            .into_iter()
-            .map(|(part, is_key)| {
-                if is_key {
-                    key("c")
-                } else {
-                    Span::styled(part, text)
-                }
-            })
-            .collect(),
+            RowStatus::CheckFailed => {
+                let failure = self.dashboard.check_failure(&item.folder);
+                check_failed_sentence(
+                    failure.map(|failure| failure.kind),
+                    item.source,
+                    failure.and_then(|failure| failure.github_token),
+                )
+                .into_iter()
+                .map(|(part, is_key)| {
+                    if is_key {
+                        key("c")
+                    } else {
+                        Span::styled(part, text)
+                    }
+                })
+                .collect()
+            }
             RowStatus::UpdateReady => {
                 let folders = self.update_not_linked_folders(&item.folder);
                 if folders.is_empty() {

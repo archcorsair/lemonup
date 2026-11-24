@@ -581,11 +581,21 @@ impl SharedSettingsStore {
     }
 
     /// The shared settings, or `None` when `shared.toml` doesn't exist yet. Never writes.
+    /// An empty or whitespace-only Wago.io key or GitHub token reads as none, as it does in
+    /// a profile's config.
     pub fn read(&self) -> Result<Option<SharedSettings>> {
         if !self.path.try_exists()? {
             return Ok(None);
         }
-        read_toml::<SharedSettings>(&self.path).map(Some)
+        let mut settings = read_toml::<SharedSettings>(&self.path)?;
+        let blank = |value: &String| value.trim().is_empty();
+        settings.wago_api_key = settings.wago_api_key.filter(|key| !blank(key));
+        settings.github_token = settings.github_token.filter(|token| !blank(token));
+        for copy in settings.profile_copies.values_mut() {
+            copy.wago_api_key = copy.wago_api_key.take().filter(|key| !blank(key));
+            copy.github_token = copy.github_token.take().filter(|token| !blank(token));
+        }
+        Ok(Some(settings))
     }
 
     /// The shared settings, creating `shared.toml` first when it doesn't exist and a game has
@@ -1899,6 +1909,23 @@ mod tests {
         }
         let fields = SharedFields::parse("github_token = \"ghp_x\"\n").expect("parse");
         assert!(fields.github_token.as_deref() == Some("ghp_x"));
+    }
+
+    #[test]
+    fn an_empty_github_token_in_shared_toml_reads_as_none() {
+        let temp = tempdir().expect("tempdir");
+        let store = SharedSettingsStore::for_roots(&test_roots(temp.path()));
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        fs::write(
+            store.path(),
+            "github_token = \"  \"\nwago_api_key = \"\"\n\n[profile_copies.default]\n\
+             github_token = \" \"\n",
+        )
+        .expect("write");
+        let settings = store.read().expect("read").expect("settings");
+        assert!(settings.github_token.is_none(), "{settings:?}");
+        assert!(settings.wago_api_key.is_none(), "{settings:?}");
+        assert!(settings.profile_copies["default"].github_token.is_none());
     }
 
     #[test]

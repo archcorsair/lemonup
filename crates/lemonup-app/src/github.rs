@@ -501,6 +501,14 @@ pub(crate) fn build_github_client() -> Result<Client, String> {
     )
 }
 
+/// Whether `token` can go in the header every GitHub request sends it in, as plain visible
+/// ASCII like every token GitHub makes. A control character fails the client itself; a
+/// character a copy can bring along, such as a smart quote or a zero-width space, would go
+/// out and be turned down. Asks nothing of GitHub.
+pub(crate) fn github_token_can_be_sent(token: &str) -> bool {
+    HeaderValue::from_str(&format!("Bearer {token}")).is_ok_and(|value| value.to_str().is_ok())
+}
+
 fn build_github_client_with_token(token: Option<&str>) -> Result<Client, String> {
     let mut builder = crate::http::client_builder();
 
@@ -600,7 +608,8 @@ fn classify_rejected_token(status: StatusCode, sent: Option<GithubTokenSource>) 
 }
 
 /// Maps a non-success response to an error, with a dedicated message for rate limits. The
-/// token in use is the one the client was built with: both come from the same settings.
+/// token named is the one in use now. That is usually the one the client was built with,
+/// but a token saved in Settings while the request was out makes them differ.
 pub(crate) fn ensure_github_success(response: Response) -> Result<Response, SourceError> {
     let sent = github_token_source();
     if let Some(message) = classify_rejected_token(response.status(), sent) {
@@ -1663,11 +1672,11 @@ fn create_temp_work_dir(prefix: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubRepoResponse, GithubToken, GithubTokenSource, build_github_client_with_token,
-        build_managed_github_record, check_known_repository, classify_rate_limit,
-        classify_rejected_token, commits_match, determine_parent_folder,
+        GithubRepoResponse, GithubToken, GithubTokenSource, build_github_client,
+        build_github_client_with_token, build_managed_github_record, check_known_repository,
+        classify_rate_limit, classify_rejected_token, commits_match, determine_parent_folder,
         discover_extracted_folders, environment_github_token_var, extract_zip_archive,
-        github_token_in_use, github_token_source, github_token_source_of,
+        github_token_can_be_sent, github_token_in_use, github_token_source, github_token_source_of,
         install_downloaded_github_addon, needs_known_repository_check, parse_github_repo_url,
         parse_github_target, resolve_github_token, update_downloaded_github_addon,
         use_saved_github_token,
@@ -1794,6 +1803,64 @@ mod tests {
         assert_ne!(github_token_source(), Some(GithubTokenSource::Settings));
         use_saved_github_token(Some("   "));
         assert_ne!(github_token_source(), Some(GithubTokenSource::Settings));
+    }
+
+    #[tokio::test]
+    async fn the_client_sends_the_saved_token() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .expect("respond");
+            String::from_utf8(request).expect("utf8")
+        });
+
+        // The store is per test thread: the client is built here, on the test's own thread.
+        use_saved_github_token(Some("saved-test-token"));
+        let client = build_github_client();
+        use_saved_github_token(None);
+        let response = client
+            .expect("client")
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("send");
+        assert!(response.status().is_success());
+
+        let request = server.join().expect("server");
+        let authorization: Vec<&str> = request
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.trim())
+            .collect();
+        assert_eq!(authorization, ["Bearer saved-test-token"]);
+    }
+
+    #[test]
+    fn only_a_token_of_plain_visible_characters_can_be_sent() {
+        assert!(github_token_can_be_sent("ghp_AbC123"));
+        assert!(github_token_can_be_sent("github_pat_11AB_cd"));
+        for pasted in [
+            "ghp_\u{201c}abc\u{201d}",
+            "ghp_abc\u{200b}",
+            "ghp_\u{1}abc",
+            "ghp_\u{7f}",
+        ] {
+            assert!(!github_token_can_be_sent(pasted), "{pasted:?}");
+        }
     }
 
     #[test]

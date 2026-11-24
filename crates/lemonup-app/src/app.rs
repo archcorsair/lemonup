@@ -788,6 +788,9 @@ pub(crate) struct CheckFailure {
     pub(crate) kind: SourceErrorKind,
     pub(crate) source: SourceKind,
     pub(crate) detail: String,
+    /// For a GitHub addon, where the GitHub token sent when the check failed came from, so
+    /// a token saved later doesn't change what the failure says.
+    pub(crate) github_token: Option<crate::github::GithubTokenSource>,
 }
 
 /// One step a running check or update reports, besides moving on.
@@ -995,10 +998,27 @@ fn human_duration(secs: u64) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ConfigEditState {
     field: ConfigField,
     value: TextInput,
+}
+
+/// Debug output never shows a Wago.io key or GitHub token being typed.
+impl std::fmt::Debug for ConfigEditState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = formatter.debug_struct("ConfigEditState");
+        out.field("field", &self.field);
+        if matches!(
+            self.field,
+            ConfigField::WagoApiKey | ConfigField::GithubToken
+        ) {
+            out.field("value", &"<hidden>");
+        } else {
+            out.field("value", &self.value);
+        }
+        out.finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1086,6 +1106,15 @@ impl ConfigPaneState {
         // removes the value.
         let mut next = self.clone();
         let trimmed = edit.value.value().trim().to_string();
+        // Never name the token: the box stays open with it, so it can be fixed.
+        if edit.field == ConfigField::GithubToken
+            && !crate::github::github_token_can_be_sent(&trimmed)
+        {
+            return Err(
+                "That token has characters GitHub can't take. Copy it from GitHub again."
+                    .to_string(),
+            );
+        }
         let typed = (!trimmed.is_empty()).then_some(trimmed);
         match edit.field {
             ConfigField::WagoApiKey => next.draft.wago_api_key = typed,
@@ -2470,7 +2499,7 @@ enum SearchFocus {
     Results,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SearchPaneState {
     query: TextInput,
     presentation_mode: SearchPresentationMode,
@@ -2488,6 +2517,26 @@ pub struct SearchPaneState {
     /// The results are only known addons, shown without a Wago.io search
     /// because no Wago.io key is saved.
     known_only: bool,
+}
+
+/// Debug output never shows the Wago.io key in the key box.
+impl std::fmt::Debug for SearchPaneState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SearchPaneState")
+            .field("query", &self.query)
+            .field("presentation_mode", &self.presentation_mode)
+            .field("focus", &self.focus)
+            .field("key_box", &self.key_box.as_ref().map(|_| "<hidden>"))
+            .field("in_progress", &self.in_progress)
+            .field("results", &self.results)
+            .field("selected_result", &self.selected_result)
+            .field("last_query", &self.last_query)
+            .field("install_state", &self.install_state)
+            .field("known_rows", &self.known_rows)
+            .field("known_only", &self.known_only)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2538,6 +2587,9 @@ enum SearchInstallState {
         detail: String,
         /// The folders in the way, for a refused install.
         clash: Option<FolderClash>,
+        /// For GitHub, where the GitHub token sent when it failed came from, so a token
+        /// saved later doesn't change what the failure says.
+        github_token: Option<crate::github::GithubTokenSource>,
     },
 }
 
@@ -2822,6 +2874,7 @@ impl SearchPaneState {
             kind: error.kind,
             detail: error.detail.clone(),
             clash: None,
+            github_token: None,
         };
         next
     }
@@ -3052,6 +3105,9 @@ impl SearchPaneState {
             kind: error.kind,
             detail: error.detail.clone(),
             clash: error.clash.clone(),
+            github_token: (provider == "GitHub")
+                .then(crate::github::github_token_source)
+                .flatten(),
         };
         next
     }
@@ -3502,13 +3558,16 @@ impl App {
             events.set_tick_rate(self.desired_tick_rate());
             let drawn = terminal.draw(|frame| self.draw(frame))?;
             if let Some(links) = self.changed_links(drawn.buffer, &written_links) {
-                links.write(terminal.backend_mut())?;
+                // The old links' cells are written again from this frame, so keep a copy.
+                let buffer = drawn.buffer.clone();
+                links.write(&written_links, &buffer, terminal.backend_mut())?;
                 written_links = links;
             }
 
             let Some(event) = events.next().await else {
                 break;
             };
+            written_links.forget_after(&event);
             self.key_read_at = events.last_read_at();
 
             self.clear_problem_on_key_press(&event);
@@ -5563,10 +5622,11 @@ impl App {
                         )),
                     ],
                 },
-                Err(error) => vec![AppAction::SetStatus(self.dashboard_status_for(
+                // The box stays open with what was typed; the message says what to fix.
+                Err(problem) => vec![AppAction::SetStatus(self.dashboard_status_for(
                     StatusKind::Problem,
                     DetailMode::Config,
-                    &format!("Couldn't save your settings: {error}"),
+                    &problem,
                 ))],
             },
             AppMessage::ConfigCancelEdit => {
@@ -8245,6 +8305,8 @@ impl App {
     }
 
     /// Where the GitHub token the next GitHub request sends comes from, if it sends one.
+    /// Failures keep the one they were sent with, so only tests ask for this.
+    #[cfg(test)]
     pub(super) fn github_token_source(&self) -> Option<crate::github::GithubTokenSource> {
         crate::github::github_token_source_of(
             self.config_pane.persisted.github_token.as_deref(),
@@ -9063,6 +9125,19 @@ fn without_url_queries(text: &str) -> String {
     out
 }
 
+/// A failed check of a `source` addon, with the GitHub token source as it is now for a
+/// GitHub addon.
+fn failure_of_check(kind: SourceErrorKind, source: SourceKind, detail: String) -> CheckFailure {
+    CheckFailure {
+        kind,
+        source,
+        detail,
+        github_token: (source == SourceKind::GitHub)
+            .then(crate::github::github_token_source)
+            .flatten(),
+    }
+}
+
 /// What one live check result means for its row: a version came back, the
 /// check failed, or nothing was asked (no Wago.io key, not linked).
 fn check_step_for_result(
@@ -9072,11 +9147,11 @@ fn check_step_for_result(
     let folder = result.addon_name.clone();
     if let Some(kind) = result.error_kind {
         return Some(DashboardJobStep::Checked {
-            result: Err(CheckFailure {
+            result: Err(failure_of_check(
                 kind,
-                source: sources.get(&folder).copied().unwrap_or(SourceKind::Manual),
-                detail: result.message.clone().unwrap_or_default(),
-            }),
+                sources.get(&folder).copied().unwrap_or(SourceKind::Manual),
+                result.message.clone().unwrap_or_default(),
+            )),
             folder,
         });
     }
@@ -9385,6 +9460,23 @@ fn check_failure_cause(failures: &[CheckFailure]) -> Option<String> {
         (SourceErrorKind::NoConnection, None) => Some("no internet connection?".to_string()),
         (SourceErrorKind::KeyRejected, Some("Wago.io")) => {
             Some("Wago.io didn't accept your key. Check it in Settings".to_string())
+        }
+        // The token sent when they failed, the same for all of them.
+        (SourceErrorKind::KeyRejected, Some("GitHub"))
+            if failures
+                .iter()
+                .all(|failure| failure.github_token == first.github_token) =>
+        {
+            use crate::github::GithubTokenSource;
+            Some(match first.github_token {
+                Some(GithubTokenSource::Settings) => {
+                    "GitHub didn't accept your token. Check it in Settings".to_string()
+                }
+                Some(GithubTokenSource::Environment(name)) => {
+                    format!("GitHub didn't accept the token in {name}")
+                }
+                None => "GitHub turned down LemonUp's request".to_string(),
+            })
         }
         (SourceErrorKind::KeyRejected, Some(name)) => {
             Some(format!("{name} turned down LemonUp's request"))
@@ -13046,6 +13138,84 @@ mod tests {
     }
 
     #[test]
+    fn debug_never_shows_a_key_or_token_being_typed() {
+        for field in [ConfigField::GithubToken, ConfigField::WagoApiKey] {
+            let mut pane = ConfigPaneState::new(AppConfig::default());
+            pane.edit = Some(ConfigEditState {
+                field,
+                value: TextInput::new("planted-secret-value"),
+            });
+            for shown in [
+                format!("{:?}", pane.edit),
+                format!("{pane:?}"),
+                format!("{:?}", AppAction::SetConfigPaneState(pane.clone())),
+            ] {
+                assert!(!shown.contains("planted-secret-value"), "{shown}");
+                assert!(shown.contains("<hidden>"), "{shown}");
+            }
+        }
+        // Other boxes still show what they hold.
+        let other = ConfigEditState {
+            field: ConfigField::CheckInterval,
+            value: TextInput::new("plain-visible-value"),
+        };
+        assert!(format!("{other:?}").contains("plain-visible-value"));
+
+        let search = SearchPaneState {
+            key_box: Some(TextInput::new("planted-wago-secret")),
+            ..SearchPaneState::default()
+        };
+        for shown in [
+            format!("{search:?}"),
+            format!("{:?}", AppAction::SetSearchPaneState(search.clone())),
+        ] {
+            assert!(!shown.contains("planted-wago-secret"), "{shown}");
+            assert!(shown.contains("key_box: Some(\"<hidden>\")"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_github_token_that_cant_be_sent_is_not_saved() {
+        let temp = tempdir().expect("tempdir");
+        let mut app = app_for_tests(ShellMode::Dashboard);
+        app.config_store = ConfigStore::new(temp.path().join("config.toml"));
+        app.config_pane.persisted.github_token = None;
+        app.config_pane.draft.github_token = None;
+        open_overlay(&mut app, DetailMode::Config, OverlayKind::Config);
+        select_config_field(&mut app, ConfigField::GithubToken);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        // A smart quote and a zero-width space, as a copy from a chat or a document brings.
+        type_text(&mut app, "ghp_\u{201c}pasted\u{200b}token");
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+
+        assert!(
+            app.status_line.text.contains(
+                "That token has characters GitHub can't take. Copy it from GitHub again."
+            ),
+            "{}",
+            app.status_line.text
+        );
+        assert!(!app.status_line.text.contains("pasted"));
+        let edit = app.config_pane.edit.as_ref().expect("the box stays open");
+        assert_eq!(edit.field, ConfigField::GithubToken);
+        assert_eq!(edit.value.value(), "ghp_\u{201c}pasted\u{200b}token");
+        assert!(app.config_pane.persisted.github_token.is_none());
+        assert!(!temp.path().join("config.toml").exists());
+
+        // Fixed, it saves.
+        apply_all(&mut app, AppMessage::ConfigCancelEdit);
+        apply_all(&mut app, AppMessage::ConfigToggleSelected);
+        type_text(&mut app, "ghp_pastedtoken");
+        apply_all(&mut app, AppMessage::ConfigCommitEdit);
+        assert!(app.config_pane.edit.is_none());
+        assert_eq!(
+            app.config_pane.persisted.github_token.as_deref(),
+            Some("ghp_pastedtoken")
+        );
+        crate::github::use_saved_github_token(None);
+    }
+
+    #[test]
     fn saving_the_github_token_in_settings_counts_from_the_next_check() {
         use crate::github::{GithubTokenSource, github_token_source};
         let temp = tempdir().expect("tempdir");
@@ -15258,6 +15428,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(
@@ -15277,6 +15448,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(
@@ -15292,6 +15464,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 source: SourceKind::Wago,
                 detail: "offline".to_string(),
+                github_token: None,
             },
         );
         assert_eq!(answer_text(&app, now), "1 addon · 1 couldn't be checked");
@@ -17999,6 +18172,7 @@ games = ["forever"]
                          lists for Known Raid Tools"
                     .to_string(),
                 clash: None,
+                github_token: None,
             };
         }
 
@@ -18331,6 +18505,7 @@ games = ["forever"]
                 kind: SourceErrorKind::NoConnection,
                 detail: "connection refused".to_string(),
                 clash: None,
+                github_token: None,
             };
         }
 
@@ -21905,6 +22080,7 @@ games = ["forever"]
                     kind: SourceErrorKind::Other,
                     detail: refusal,
                     clash: None,
+                    github_token: None,
                 }
             );
             assert_eq!(app.shell_ui.overlay.active, Some(OverlayKind::Search));
@@ -22551,6 +22727,7 @@ games = ["forever"]
                 kind,
                 source: SourceKind::GitHub,
                 detail: "error sending request".to_string(),
+                github_token: None,
             }
         }
 
@@ -23160,6 +23337,153 @@ games = ["forever"]
         }
 
         #[test]
+        fn a_failed_check_keeps_the_github_token_it_was_sent_with() {
+            use crate::github::GithubTokenSource;
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.config_pane.persisted.github_token = None;
+            app.github_env_var = Some("GITHUB_TOKEN");
+            send(
+                &mut app,
+                step(DashboardJobStep::Checked {
+                    folder: "Second".to_string(),
+                    result: Err(CheckFailure {
+                        github_token: Some(GithubTokenSource::Environment("GITHUB_TOKEN")),
+                        ..failure(SourceErrorKind::KeyRejected)
+                    }),
+                }),
+            );
+            app.apply(AppAction::SetDashboardJobUi(None));
+            // A token saved in Settings after it failed: the next request sends that one, but
+            // the failure was with the token in GITHUB_TOKEN.
+            app.config_pane.persisted.github_token = Some("ghp_new".to_string());
+            assert_eq!(app.github_token_source(), Some(GithubTokenSource::Settings));
+            let second = app
+                .dashboard
+                .rows
+                .iter()
+                .position(|row| row.folder == "Second");
+            app.apply(AppAction::SetDashboardSelection(second));
+            apply_all(&mut app, AppMessage::DashboardOpenInspect);
+            let rows = render_rows(&mut app, 160, 48);
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("GitHub didn't accept the token in GITHUB_TOKEN.")),
+                "{rows:#?}"
+            );
+            assert!(
+                !rows.iter().any(|row| row.contains("your GitHub token")),
+                "{rows:#?}"
+            );
+        }
+
+        #[test]
+        fn a_failure_records_the_github_token_sent_at_that_moment() {
+            use crate::github::{GithubTokenSource, use_saved_github_token};
+            use_saved_github_token(Some("saved-test-token"));
+            let github = super::super::failure_of_check(
+                SourceErrorKind::KeyRejected,
+                SourceKind::GitHub,
+                String::new(),
+            );
+            let wago = super::super::failure_of_check(
+                SourceErrorKind::KeyRejected,
+                SourceKind::Wago,
+                String::new(),
+            );
+            let error = SourceError::new(SourceErrorKind::KeyRejected, "HTTP 401");
+            let pane = SearchPaneState::default();
+            let install = pane
+                .fail_install(None, None, "GitHub", &error)
+                .install_state;
+            let tukui = pane.fail_install(None, None, "TukUI", &error).install_state;
+            use_saved_github_token(None);
+
+            assert_eq!(github.github_token, Some(GithubTokenSource::Settings));
+            assert_eq!(wago.github_token, None);
+            assert!(matches!(
+                install,
+                SearchInstallState::Error {
+                    github_token: Some(GithubTokenSource::Settings),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                tukui,
+                SearchInstallState::Error {
+                    github_token: None,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn the_install_sheet_says_which_github_token_failed() {
+            use crate::github::GithubTokenSource;
+            let mut app = app_for_tests(ShellMode::Dashboard);
+            app.apply(AppAction::SetDetailMode(DetailMode::Search));
+            app.github_env_var = Some("GITHUB_TOKEN");
+            app.search_pane.install_state = SearchInstallState::Error {
+                addon_id: Some("https://github.com/owner/addon".to_string()),
+                addon_name: Some("Addon".to_string()),
+                provider: "GitHub",
+                kind: SourceErrorKind::KeyRejected,
+                detail: "HTTP 401".to_string(),
+                clash: None,
+                github_token: Some(GithubTokenSource::Environment("GITHUB_TOKEN")),
+            };
+            // Saved after the failure.
+            app.config_pane.persisted.github_token = Some("ghp_new".to_string());
+            let lines = app
+                .search_state_lines(100)
+                .expect("error lines")
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines[2].trim(),
+                "GitHub didn't accept the token in GITHUB_TOKEN. Replace or unset it.",
+                "{lines:?}"
+            );
+        }
+
+        #[test]
+        fn the_status_line_says_which_github_token_failed() {
+            use crate::github::GithubTokenSource;
+            let rejected = |github_token| CheckFailure {
+                github_token,
+                ..failure(SourceErrorKind::KeyRejected)
+            };
+            let settings = rejected(Some(GithubTokenSource::Settings));
+            let gh_token = rejected(Some(GithubTokenSource::Environment("GH_TOKEN")));
+            let all_failed = dashboard_check_status_message(&[], 8, 0, 0, 8);
+            let message = dashboard_check_status_with_cause(
+                all_failed,
+                &[settings.clone(), settings.clone()],
+            );
+            assert_eq!(
+                message,
+                "Couldn't check 8 addons: GitHub didn't accept your token. Check it in Settings"
+            );
+            // As short as the Wago.io one, so it fits at 80 columns.
+            assert!(message.chars().count() <= 78, "{message}");
+            assert_eq!(
+                check_failure_cause(std::slice::from_ref(&gh_token)),
+                Some("GitHub didn't accept the token in GH_TOKEN".to_string())
+            );
+            assert_eq!(
+                check_failure_cause(&[rejected(Some(GithubTokenSource::Environment(
+                    "GITHUB_TOKEN"
+                )))]),
+                Some("GitHub didn't accept the token in GITHUB_TOKEN".to_string())
+            );
+            // Different tokens: no token to name.
+            assert_eq!(
+                check_failure_cause(&[settings, gh_token]),
+                Some("GitHub turned down LemonUp's request".to_string())
+            );
+        }
+
+        #[test]
         fn check_results_become_steps_with_the_error_kind() {
             let sources = HashMap::from([("Pawn".to_string(), SourceKind::WowInterface)]);
             let result = |status, error_kind| CheckResult {
@@ -23180,6 +23504,7 @@ games = ["forever"]
                         kind: SourceErrorKind::NoConnection,
                         source: SourceKind::WowInterface,
                         detail: "timed out".to_string(),
+                        github_token: None,
                     }),
                 })
             );
@@ -23854,6 +24179,7 @@ games = ["forever"]
                 kind,
                 source,
                 detail: String::new(),
+                github_token: None,
             };
             let names: Vec<String> = (1..=8).map(|n| format!("Addon{n}")).collect();
             let all_failed = dashboard_check_status_message(&names, 8, 0, 0, 8);
