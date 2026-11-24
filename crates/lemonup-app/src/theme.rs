@@ -18,6 +18,8 @@ pub struct DisplayEnv {
     pub utf8: bool,
     /// The terminal is one known to turn OSC 8 links into something to click.
     pub hyperlinks: bool,
+    /// The terminal is one known to draw a progress bar of its own (OSC 9;4).
+    pub progress_bar: bool,
 }
 
 impl DisplayEnv {
@@ -28,6 +30,7 @@ impl DisplayEnv {
         truecolor: true,
         utf8: true,
         hyperlinks: true,
+        progress_bar: true,
     };
 
     pub fn detect() -> Self {
@@ -62,6 +65,7 @@ impl DisplayEnv {
             truecolor,
             utf8,
             hyperlinks: hyperlinks(set),
+            progress_bar: crate::terminal_progress::drawn_by_terminal(set),
         }
     }
 }

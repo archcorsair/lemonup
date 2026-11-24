@@ -14,6 +14,7 @@ const CONFIG_SECTIONS: [(ConfigGroup, &[ConfigField]); 2] = [
             ConfigField::Theme,
             ConfigField::SimpleSymbols,
             ConfigField::ReduceMotion,
+            ConfigField::TerminalProgress,
             ConfigField::AutoCheckEnabled,
             ConfigField::AutoCheckInterval,
             ConfigField::CheckInterval,
@@ -360,6 +361,12 @@ impl App {
                 ConfigField::ReduceMotion => {
                     "a still … in place of the spinner, and no shimmer".to_string()
                 }
+                ConfigField::TerminalProgress if !display.progress_bar => {
+                    "off, because this terminal isn't known to draw one".to_string()
+                }
+                ConfigField::TerminalProgress => {
+                    "shows progress in your terminal's own progress bar".to_string()
+                }
                 ConfigField::ShowLibs => "each addon's folders open in the list".to_string(),
                 ConfigField::ChangeGameFolder => {
                     "opens setup to choose a different game folder".to_string()
@@ -517,6 +524,21 @@ impl App {
                 "Shows a still … in place of the spinner on the line that is working, and \
                  turns off the shimmer.",
             ),
+            ConfigField::TerminalProgress => {
+                let mut text = String::from(
+                    "While LemonUp checks or updates, your terminal shows how far it is in \
+                     its own progress bar, such as in the tab or the taskbar. The bar turns \
+                     yellow when an addon fails. The commands show it too.",
+                );
+                if !display.progress_bar {
+                    text.push_str(
+                        " It is off now: LemonUp knows Ghostty 1.2, iTerm2 3.6.6, Windows \
+                         Terminal, ConEmu, Ptyxis 48 and WezTerm nightly builds to draw one, \
+                         and not inside tmux or screen.",
+                    );
+                }
+                plain(&text)
+            }
             ConfigField::ShowLibs => plain(
                 "When this is on, the addon list opens with every addon's folders shown under \
                  it. ] and [ still show or hide them all while LemonUp runs.",

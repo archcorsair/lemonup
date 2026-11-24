@@ -14,6 +14,7 @@ mod output;
 mod shimmer;
 mod source_error;
 mod source_limits;
+mod terminal_progress;
 mod theme;
 mod transfer;
 mod tui;
@@ -1458,6 +1459,7 @@ async fn run_import_addons<O: std::io::Write, E: std::io::Write>(
                             "Installing {total} {}",
                             if total == 1 { "addon" } else { "addons" }
                         ),
+                        crate::terminal_progress::Bar::Pulse,
                     );
                 },
             )
@@ -1600,7 +1602,12 @@ fn check_progress<'a>(
     move |event| {
         match &event {
             crate::update::CheckEvent::Started { folder } => tally.started(folder),
-            crate::update::CheckEvent::Finished { folder, .. } => tally.finished(folder),
+            crate::update::CheckEvent::Finished { folder, result } => tally.finished(
+                folder,
+                result
+                    .as_ref()
+                    .is_some_and(|result| result.status == lemonup_core::UpdateStatus::Error),
+            ),
         }
         tally.show(status);
     }
@@ -1629,7 +1636,10 @@ fn update_progress<'a>(
     move |event| {
         match &event {
             crate::update::UpdateEvent::Started { folder } => tally.started(folder),
-            crate::update::UpdateEvent::Finished { folder, .. } => tally.finished(folder),
+            crate::update::UpdateEvent::Finished { folder, result } => tally.finished(
+                folder,
+                result.status == crate::update::LiveUpdateStatus::Error,
+            ),
         }
         tally.show(status);
     }
@@ -4556,6 +4566,49 @@ mod addon_dir_binding_tests {
                 [format!("{label} 1 of 3: Plater"), format!("{label} 2 of 3")]
             );
         }
+        // An addon that fails turns the terminal's progress bar yellow.
+        let mut tally = super::update_tally(&rows, &[], true, false);
+        {
+            let quiet = crate::output::Status::none();
+            let mut heard = super::update_progress(&mut tally, &quiet);
+            heard(UpdateEvent::Finished {
+                folder: started("Pawn"),
+                result: LiveUpdateResult {
+                    status: LiveUpdateStatus::Held,
+                    ..result("Pawn")
+                },
+            });
+        }
+        assert_eq!(tally.bar(), crate::terminal_progress::Bar::of(1, 3, false));
+        {
+            let quiet = crate::output::Status::none();
+            let mut heard = super::update_progress(&mut tally, &quiet);
+            heard(UpdateEvent::Finished {
+                folder: started("Plater"),
+                result: LiveUpdateResult {
+                    status: LiveUpdateStatus::Error,
+                    ..result("Plater")
+                },
+            });
+        }
+        assert_eq!(tally.bar(), crate::terminal_progress::Bar::of(2, 3, true));
+        let mut tally = crate::output::Tally::new("Checking", &selected, true);
+        {
+            let quiet = crate::output::Status::none();
+            let mut heard = super::check_progress(&mut tally, &quiet);
+            heard(CheckEvent::Finished {
+                folder: started("Pawn"),
+                result: Some(crate::update::CheckResult {
+                    addon_name: "Pawn".to_string(),
+                    status: lemonup_core::UpdateStatus::Error,
+                    remote_version: None,
+                    message: None,
+                    error_kind: None,
+                }),
+            });
+        }
+        assert_eq!(tally.bar(), crate::terminal_progress::Bar::of(1, 3, true));
+
         // Names that match nothing count nothing: the update itself turns them down.
         let (output, _) = capture_with_status();
         let none = super::update_tally(&rows, &["Nope".to_string()], true, false);

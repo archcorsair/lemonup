@@ -1129,7 +1129,11 @@ fn a_run_without_a_status_line_shows_none() {
     let mut out = output(OutputMode::Human, Paint::PLAIN);
     let status = out.status();
     status.say("Checking 1 of 2");
-    status.show("Checking 2 of 2", "Checking 2 addons");
+    status.show(
+        "Checking 2 of 2",
+        "Checking 2 addons",
+        crate::terminal_progress::Bar::Off,
+    );
     out.warn("careful").expect("warn");
     status.clear();
     out.print(&sample(), None).expect("print");
